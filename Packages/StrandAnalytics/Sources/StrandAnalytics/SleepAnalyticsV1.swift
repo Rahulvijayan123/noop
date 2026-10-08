@@ -1159,6 +1159,35 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
         self.prvDiagnostics = prvDiagnostics
         self.morningResponse = morningResponse
     }
+
+    /// Decoding is strict for the Phase 1 groups and TOLERANT for the optional spec-02
+    /// `morning_response`: a malformed or future-shaped morning group decodes as nil and withholds
+    /// only itself, never the whole document (spec-02 acceptance: "existing successful outputs survive
+    /// another group's failure"). An absent key (older documents) is nil as before.
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        schemaVersion = try c.decode(Int.self, forKey: .schemaVersion)
+        algorithmVersion = try c.decode(String.self, forKey: .algorithmVersion)
+        configVersion = try c.decode(String.self, forKey: .configVersion)
+        scope = try c.decode(String.self, forKey: .scope)
+        timezone = try c.decode(String.self, forKey: .timezone)
+        startAt = try c.decode(String.self, forKey: .startAt)
+        endAt = try c.decode(String.self, forKey: .endAt)
+        start = try c.decode(Int.self, forKey: .start)
+        end = try c.decode(Int.self, forKey: .end)
+        fragments = try c.decode([SleepAnalyticsFragmentInfo].self, forKey: .fragments)
+        fingerprint = try c.decode(String.self, forKey: .fingerprint)
+        stageSourceVersion = try c.decode(String.self, forKey: .stageSourceVersion)
+        nativeEpochResolutionSeconds = try c.decodeIfPresent(Int.self, forKey: .nativeEpochResolutionSeconds)
+        inputRevision = try c.decode(Int64.self, forKey: .inputRevision)
+        continuity = try c.decode(SleepAnalyticsContinuityGroup.self, forKey: .continuity)
+        stageDynamics = try c.decode(SleepAnalyticsStageDynamicsGroup.self, forKey: .stageDynamics)
+        movement = try c.decode(SleepAnalyticsMovementGroup.self, forKey: .movement)
+        thermal = try c.decode(SleepAnalyticsThermalGroup.self, forKey: .thermal)
+        prvDiagnostics = try c.decode(SleepAnalyticsPrvDiagnosticsGroup.self, forKey: .prvDiagnostics)
+        morningResponse = (try? c.decodeIfPresent(SleepAnalyticsMorningResponseGroup.self,
+                                                  forKey: .morningResponse)) ?? nil
+    }
 }
 
 // MARK: - Config (spec sections 4–7: versioned engineering defaults)
@@ -1261,8 +1290,11 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
         parts += [tempPlausibilityMinC, tempPlausibilityMaxC].map { String(format: "%.1f", $0) }
         parts += [prvDiagnosticsEnabled ? "1" : "0"]
         parts += [prvWindowSeconds, prvMinValidPairs].map(String.init)
-        // The spec-02 gates (pNN50 threshold, morning-response windows) join the fingerprint when the
-        // groups that read them compute.
+        // spec-02 morning response (computed since config v2), all read by `morningResponseGroup` and the
+        // thermal span. The pNN50 threshold joins when the PRV group reads it (cardiac workstream).
+        parts += ["morning", String(morningWindowBeforeSeconds), String(morningWindowAfterSeconds),
+                  String(morningMinValidMinutesPerSide), String(morningHrMinuteMinDistinctSeconds),
+                  String(morningMovementMinuteMinAdjacencies)]
         return parts.joined(separator: "|")
     }
 }

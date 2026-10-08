@@ -27,8 +27,8 @@ const cfg = { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon', allo
 function redactedDocument() {
   return {
     schema_version: 1,
-    algorithm_version: 'nara-sleep-analytics-1',
-    config_version: 'v1',
+    algorithm_version: 'nara-sleep-analytics-2',
+    config_version: 'v2',
     scope: 'main_night',
     timezone: 'America/Los_Angeles',
     start_at: '2026-10-04T23:00:00Z',
@@ -52,6 +52,18 @@ function redactedDocument() {
     movement: { quality: { status: 'available' }, movement_percentage: { value: 2.5, unit: '%', status: 'available' } },
     thermal: { quality: { status: 'available' }, night_median_c: { value: 33.2, unit: '°C', status: 'available' } },
     prv_diagnostics: { quality: { status: 'available' }, nightly_sd1_ms: { value: 41.5, unit: 'ms', status: 'available' } },
+    // spec-02 §4.3: the morning response and the post-wake slope ride in the same nested document.
+    morning_response: { quality: { status: 'partial' }, anchor_kind: 'effective_window_end',
+      anchor_ts: 1791363600, anchor_at: '2026-10-05T07:00:00Z', window_before_seconds: 1800,
+      window_after_seconds: 1800, algorithm_version: 'morning-response-1',
+      interpretation: 'response_around_detected_boundary_not_awakening_physiology',
+      heart_rate: { signal: 'heart_rate', unit: 'bpm', minute_rule: 'r', before_valid_minutes: 30,
+        after_valid_minutes: 0, eligible_minutes_each_side: 30,
+        points: [{ offset_min: -1, value: 55, support: 60, valid: true },
+                 { offset_min: 0, value: null, support: 0, valid: false }],
+        before_median: { value: 55, unit: 'bpm', status: 'available' },
+        after_median: { value: null, unit: 'bpm', status: 'unavailable', reason: 'no_samples' },
+        change: { value: null, unit: 'bpm', status: 'unavailable', reason: 'insufficient_coverage' } } },
   };
 }
 
@@ -147,7 +159,9 @@ Deno.test('sleep analytics: route attaches hosted_snapshot with nested document 
   // Legacy algorithm-version reporting is untouched: the outer daily keeps its own
   // version while the document's version stays nested under its own snake_case key.
   assertEquals(hosted.daily.algorithm_version, 'frwhoop-server-1');
-  assertEquals(hosted.daily.sleep_analytics_v1.algorithm_version, 'nara-sleep-analytics-1');
+  assertEquals(hosted.daily.sleep_analytics_v1.algorithm_version, 'nara-sleep-analytics-2');
+  assertEquals(hosted.daily.sleep_analytics_v1.morning_response, doc.morning_response,
+    'the morning response passes through with explicit nulls intact');
   assert(!('algorithmVersion' in hosted.daily.sleep_analytics_v1),
     'the nested document must not leak a camelCase key into daily');
 });

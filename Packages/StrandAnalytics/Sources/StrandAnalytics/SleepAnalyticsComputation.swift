@@ -61,6 +61,6 @@ extension SleepAnalyticsV1 {
                                                    bins: thermalBins),
             prvDiagnostics: SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: config),
             morningResponse: SleepAnalyticsV1.morningResponseGroup(timeline: timeline, input: input,
-                                                                   config: config))
+                                                                   config: config, thermalBins: thermalBins))
     }
 }

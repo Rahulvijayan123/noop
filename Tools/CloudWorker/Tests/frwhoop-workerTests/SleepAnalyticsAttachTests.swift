@@ -431,6 +431,51 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         XCTAssertEqual((fragments[0]["edit_revision"] as? NSNumber)?.int64Value, 6)
     }
 
+    // MARK: - spec-02 thermal repair: the adapter supplies the full peri-sleep window
+
+    /// The adapter must hand the extractor the streams AS LOADED — including the 30 minutes after
+    /// the last fragment end and the hour before onset — or the post-wake slope and the morning
+    /// response can never exist. Then the published payload carries both, and it decodes on the
+    /// app's path (`JSONSerialization` → `SleepAnalyticsDocument`).
+    func testAdapterPassesPeriSleepStreamsAndPayloadCarriesSlopeAndMorningResponse() throws {
+        let start = t0 - t0 % 60
+        let end = start + 60 * 60
+        let result = nightResult(start: start, minutes: 60, labels: Array(repeating: "light", count: 120))
+        let hr = fullHR(start: start - 3_600, end: end + 1_800)
+        // Night 34.00 °C, then a post-wake ramp of −0.02 °C/min (−1.2 °C/h).
+        let temp = (start - 3_600..<end + 1_800).map { ts in
+            SkinTempSample(ts: ts, raw: ts < end ? 3_400 : 3_500 - 2 * ((ts - end) / 60))
+        }
+        let gravity = (start - 3_600..<end + 1_800).map { GravitySample(ts: $0, x: 0, y: 0, z: 1) }
+        let input = try XCTUnwrap(DayScorer.sleepAnalyticsInput(
+            stageSourceVersion: "frwhoop-server-1", result: result, claim: makeClaim(),
+            hr: hr, rr: [], gravity: gravity, skinTemp: temp, skinFamily: .whoop5, edits: [],
+            offWristIntervals: []))
+        XCTAssertEqual(input.hr.count, hr.count, "never clipped to the night")
+        XCTAssertEqual(input.skinTemp.first?.ts, start - 3_600)
+        XCTAssertEqual(input.skinTemp.last?.ts, end + 1_799)
+        XCTAssertEqual(input.gravity.last?.ts, end + 1_799)
+
+        let payload = try XCTUnwrap(DayScorer.sleepAnalyticsPayload(
+            stageSourceVersion: "frwhoop-server-1", result: result, claim: makeClaim(),
+            hr: hr, rr: [], gravity: gravity, skinTemp: temp, skinFamily: .whoop5, edits: [],
+            offWristIntervals: []))
+        let thermal = try XCTUnwrap(payload["thermal"] as? [String: Any])
+        let post = try XCTUnwrap(thermal["post_wake_slope_c_per_hour"] as? [String: Any])
+        let value = try XCTUnwrap(post["value"] as? [String: Any])
+        XCTAssertEqual(value["status"] as? String, "available")
+        XCTAssertEqual((value["value"] as? Double) ?? .nan, -1.2, accuracy: 1e-9)
+        let morning = try XCTUnwrap(payload["morning_response"] as? [String: Any])
+        XCTAssertEqual(morning["anchor_ts"] as? Int, end)
+        XCTAssertEqual(morning["algorithm_version"] as? String, "morning-response-1")
+        XCTAssertTrue(DayScorer.isFiniteJSON(payload))
+
+        let decoded = try JSONDecoder().decode(SleepAnalyticsDocument.self,
+                                               from: JSONSerialization.data(withJSONObject: payload))
+        XCTAssertEqual(decoded.morningResponse?.skinTemperature.afterValidMinutes, 30)
+        XCTAssertEqual(decoded.thermal.postWakeSlopeCPerHour?.value.value ?? .nan, -1.2, accuracy: 1e-9)
+    }
+
     // MARK: - Finite-JSON validation helper
 
     func testIsFiniteJSONAcceptsValidTreesAndRejectsNonFiniteNumbers() {
