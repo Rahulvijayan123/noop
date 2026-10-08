@@ -64,6 +64,27 @@ public enum LBImuDaily {
         return abs(mag - 1.0)
     }
 
+    /// Waking-energy intake. A sample inside a sleep interval is not waking movement and is dropped.
+    /// Each kept sample lands on the accumulator of its own civil day (`dayOf(ts)`), not the tick's.
+    /// Returns the days that changed, oldest first.
+    @discardableResult
+    public static func ingest(_ samples: [WatchdogIMUSample], sleepIntervals: [WatchdogSleepInterval],
+                              into accs: inout [String: LBImuDayAccumulator],
+                              dayOf: (Int) -> String) -> [String] {
+        var byDay: [String: [WatchdogIMUSample]] = [:]
+        for s in samples where !sleepIntervals.contains(where: { $0.contains(s.ts) }) {
+            byDay[dayOf(s.ts), default: []].append(s)
+        }
+        var changed: [String] = []
+        for day in byDay.keys.sorted() {
+            var acc = accs[day] ?? LBImuDayAccumulator(day: day)
+            guard acc.add(byDay[day]!.sorted { $0.ts < $1.ts }) else { continue }
+            accs[day] = acc
+            changed.append(day)
+        }
+        return changed
+    }
+
     /// Mean |dynAccel| (or | |g| − 1 |) over samples newer than `afterTs`.
     public static func dayEnergy(from samples: [WatchdogIMUSample],
                                  afterTs: Int = 0) -> (energy: Double, minutes: Double, maxTs: Int)? {
