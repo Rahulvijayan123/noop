@@ -1,0 +1,321 @@
+# Runtime bounds and scheduling (Spec 01 §5)
+
+Area branch `spec01/runtime-20261007`. This page covers how the inference sidecar bounds its own
+work, how the worker reacts when the sidecar is full, and how candidate metrics are scheduled so
+none of them starves. The shared contract (busy answer, identity) is in [README.md](README.md).
+
+## What changed and why
+
+| Problem at the base | Change |
+|---|---|
+| `server.py` ran each computation on a daemon thread, joined it with a timeout and answered `timeout` while the thread kept computing. Repeated timeouts grew live threads and CPU without bound. `ThreadingHTTPServer` made one thread per connection. | `execution.py`: every computation runs in a warm worker **process** of a lane with a fixed number of processes. An overrun process is terminated, reaped and replaced before its slot is free again. HTTP is served by a fixed pool of handler threads. |
+| A full sidecar had no way to say so. | HTTP 429 `{"status":"error","error":{"code":"busy",...}}` + `Retry-After`. `InferenceClient` maps it to `InferenceClientError.busy`. No caller records it as a result. |
+| Candidate metrics ran in a fixed order inside a per-drain run budget (default 2). A budget skip was only a counter, so with more enabled metrics than the budget the last ones never ran for a day unless the day was re-scored. | Persisted pending queue (`20261008110000_physiology_candidate_pending.sql`): every enabled metric of a scored day is a row at the claim's input revision; each drain runs the oldest due rows first. A budget, deadline or busy skip stays pending with that reason. |
+| `active` mode recorded `active_promotion_deferred` in row diagnostics only. | Requested and effective mode are reported in the selection read, in the stage's mode report and in the heartbeat. |
+
+Redesigns against round 1: none. Round 1's design (process lanes, persisted queue called from
+`CandidateStage.swift`) is kept. Round 2 added the missing SQL, wired the queue into the scoring
+lane and the heartbeat, and fixed three defects found while testing (below).
+
+## Execution model (sidecar)
+
+- Two lanes: `infer` (`POST /v1/infer`) and `sleep_features` (`POST /v1/sleep-features`). A lane
+  owns `workers` processes; one process runs one job at a time. Nothing computes on an HTTP thread.
+- **Warm processes.** A process imports and builds its registry (or the sleep-feature code) once,
+  calls every provider's `readiness()` once (which loads checkpoints), and only then reports `hello`.
+  The parent's readiness and manifest are computed once at startup (`FRWHOOP_INFERENCE_READINESS`,
+  default `worker`: readiness reported by the warm worker).
+- **Admission.** A request takes an idle process, or waits at most `queue_wait_ms` for one
+  (`start_wait_ms` only while a process is still warming up). At most `max_waiting` requests wait per
+  lane. Anything else gets HTTP 429 `busy` at once.
+- **Budget.** The handler waits for the result until the job's budget (`FRWHOOP_REQUEST_TIMEOUT_MS`
+  for `infer`, `FRWHOOP_SLEEP_FEATURES_BUDGET_MS` for sleep features). On overrun the response is the
+  same as before (`withheld` + `timeout`; for sleep features the degraded `status:"timeout"`
+  document). The process gets SIGTERM at once; the lane supervisor waits `kill_grace_ms`, sends
+  SIGKILL if needed, reaps it, starts a replacement, and only then frees the slot. The HTTP handler
+  never waits for the replacement.
+- **Crash.** A process that dies is reaped and respawned with backoff; the request it was running gets
+  a `provider_error` answer (sleep features: the degraded `error` document, `worker_crashed: ...`).
+- **Math threads.** Each process starts with `OMP/OPENBLAS/MKL/NUMEXPR/VECLIB/BLIS/NUMBA/TF_*` thread
+  variables set to `FRWHOOP_INFERENCE_MATH_THREADS` before the interpreter imports anything; torch is
+  capped after warm-up. `pin_model_root(os.environ)` runs first in `main()`, so children inherit it.
+- **HTTP.** A fixed pool of handler threads and a bounded accept backlog; a connection beyond the
+  backlog gets an immediate 429 `busy` (lane `http`) and is closed. `/healthz` is answered by the
+  same pool and never waits for a job.
+
+## Limits and how they were chosen
+
+Host: `frwhoop-worker-2`, 4 vCPU / 8 GB, shared with the Swift worker and its activity Python
+children. Sidecar unit: `CPUQuota=150%`, `CPUWeight=50`, `MemoryHigh=2G`, `MemoryMax=3G`,
+`MemorySwapMax=0`, `TasksMax=64`.
+
+- One process per lane: two concurrent single-threaded jobs fit `CPUQuota=150%` with headroom for
+  the parent and the HTTP threads; a second `infer` process would double the largest resident cost
+  (torch + keras + the sleepecg model) for a lane whose callers (one scoring thread, one sensor
+  thread) are serial anyway.
+- `max_waiting` 2 (`infer`) / 1 (`sleep_features`): the worker's two lanes that call `/v1/infer`
+  (candidate stage, sensor biomarkers) each send one request at a time, and the scoring lane sends
+  one sleep-features request at a time.
+- `queue_wait_ms` 250: short enough that a full sidecar answers `busy` well inside every caller's
+  transport budget (sleep features: 3500 ms around the 3000 ms compute budget).
+- HTTP threads 12 against `TasksMax=64`: the parent's threads + 12 handlers + two process trees with
+  math threads at 1 stay far below it.
+
+Measured memory (method and numbers): see "Measurements" below.
+
+## Environment variables (sidecar)
+
+| Variable | Default | Range | Meaning |
+|---|---|---|---|
+| `FRWHOOP_INFERENCE_MAX_ACTIVE` | 1 | 1–8 | `infer` worker processes (= jobs that can be active) |
+| `FRWHOOP_INFERENCE_MAX_WAITING` | 2 | 0–32 | `infer` requests that may wait for a process |
+| `FRWHOOP_INFERENCE_QUEUE_WAIT_MS` | 250 | 0–5000 | how long one of them waits before `busy` |
+| `FRWHOOP_SLEEP_FEATURES_MAX_ACTIVE` | 1 | 1–8 | sleep-features processes |
+| `FRWHOOP_SLEEP_FEATURES_MAX_WAITING` | 1 | 0–32 | |
+| `FRWHOOP_SLEEP_FEATURES_QUEUE_WAIT_MS` | 250 | 0–5000 | |
+| `FRWHOOP_SLEEP_FEATURES_BUDGET_MS` | `features.BUDGET_MS` (3000) | 100–120000 | sleep-features compute budget |
+| `FRWHOOP_INFERENCE_START_WAIT_MS` | 30000 | 0–120000 | wait allowed while a process is still warming up |
+| `FRWHOOP_INFERENCE_START_TIMEOUT_MS` | 180000 | 1000–600000 | a process with no `hello` by then is killed and restarted |
+| `FRWHOOP_INFERENCE_KILL_GRACE_MS` | 1000 | 50–10000 | SIGTERM to SIGKILL grace |
+| `FRWHOOP_INFERENCE_MATH_THREADS` | 1 | 1–4 | numerical-library threads per process |
+| `FRWHOOP_INFERENCE_HTTP_THREADS` | 12 | 2–64 | HTTP handler threads |
+| `FRWHOOP_INFERENCE_HTTP_BACKLOG` | 16 | 0–256 | accepted connections that may queue for a handler |
+| `FRWHOOP_INFERENCE_HTTP_IDLE_TIMEOUT_S` | 60 | 1–600 | keep-alive / slow-client read timeout |
+| `FRWHOOP_REQUEST_TIMEOUT_MS` | 20000 (unchanged) | | `infer` budget |
+| `FRWHOOP_INFERENCE_READINESS` | `worker` | `worker` \| `parent` | who computes provider readiness |
+
+Out-of-range values are clamped. Unset means the default.
+
+## Environment variables (worker)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `FRWHOOP_INFERENCE_URL` | unset | unset or empty: the candidate lane and sleep-feature enrichment are off; scoring is byte-identical to the pre-lane worker (no client, no extra SQL) |
+| `FRWHOOP_INFERENCE_BUDGET` | 2 | candidate runs (sidecar calls) per scoring drain |
+| `FRWHOOP_CANDIDATE_SCHEDULER` | `persisted` | `memory` forces the in-memory pass even when the migration is applied |
+| `FRWHOOP_CANDIDATE_MAX_ATTEMPTS` | 4 (1–20) | real attempts a pending item gets before it settles withheld `attempts_exhausted:<reason>` |
+| `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET` | 1 (0–4) | read-only day re-assemblies per drain for pending items whose day is not being scored; 0 = items wait until their day is re-scored |
+| `FRWHOOP_CANDIDATE_LEASE_SECONDS` | 300 (60–3600) | pending-item lease |
+
+The drain's wall-clock cap (`CandidateStage.maxDrainSeconds`, 30 s) is unchanged.
+
+## `/healthz` additions
+
+All existing keys are unchanged. Added: `execution` (schema `sidecar-execution/1`):
+
+```
+execution: {
+  schema, limits: {math_threads, http: {threads, backlog, idle_timeout_s}, sleep_features_budget_ms},
+  http: {threads, busy, ...},                     # handler pool state
+  provider_readiness: {source, reported_at_utc},
+  lanes: { infer | sleep_features: {
+    capacity, ready, idle, active, starting, stopping, waiting, max_waiting,
+    queue_wait_ms, start_wait_ms, kill_grace_ms, budget_ms, started, closed,
+    counters: {...}, last_start_error, last_exit,
+    workers: [{index, state, pid, jobs, started_at_utc, ready_at_utc, startup_ms,
+               rss_kb_at_ready, framework_threads}] } }
+}
+```
+
+`active <= capacity` always holds; `waiting <= max_waiting`.
+
+## Busy contract
+
+- Sidecar: HTTP 429, body `{"status":"error","error":{"code":"busy","message":...,"lane":"infer"|"sleep_features"|"http","retry_after_s":N}}`, header `Retry-After: N` (N >= 1).
+- Worker `InferenceClient`: 429 with code `busy` -> `InferenceClientError.busy("retry_after_s=N ...")`,
+  description prefix `inference_busy`, transient, `retryAfterSeconds` parsed from it. Every exhaustive
+  switch handles it. A 429 without code `busy` stays `non200` (`provider_error`).
+- Candidate stage: never recorded. The item stays pending with reason `busy`, due again after
+  `Retry-After`, the attempt is not counted, and the drain makes no further sidecar call.
+  In-memory path: nothing is written and the drain stops calling.
+- Sleep-feature enrichment: the core snapshot is published as before with a
+  `daily.sleep_features` document whose `status` is `busy` and whose blocks are withheld with reason
+  `sidecar_busy`; the next scoring pass of the day replaces it. The phone decodes an unknown
+  document status as `.unknown` (`SleepFeatureDocument.swift`, `SleepMetricStatus`, tolerant
+  decoding), and the withheld blocks render as unavailable, so no phone change is needed.
+- Sensor biomarkers lane: uses the same client; owned by the sensor area.
+
+Compatibility: an old sidecar never answers 429, so a new worker behaves as before. An old worker
+treats a 429 as `non200` and records a withheld `provider_error` candidate (the old behaviour for
+any non-200); it never retries in a loop.
+
+## Persisted candidate scheduling
+
+### Schema (`public.physiology_candidate_pending`)
+
+Primary key `(user_id, device_id, period_day, metric)`. Columns: `input_revision` (the scoring
+input revision; every settle is fenced on it), `provider_id/provider_version/config_version`,
+`requested_mode` (`shadow`|`active`), `state` (`pending`|`done`|`withheld`|`superseded`), `attempts`
+(real attempts only), `last_reason`, `candidate_id`, `pending_since` (fair order), `next_attempt_at`,
+`lease_token/lease_owner/lease_until`, `claimed_at`, `settled_at`. `user_id` cascades from
+`auth.users`. One row per day and metric, so the table grows with days x enabled metrics and needs
+no pruning job. RLS on, no policy; client roles revoked; service role granted.
+
+### RPCs (service role only; `security definer`, `search_path=''`)
+
+| Function | Returns | Notes |
+|---|---|---|
+| `physiology_candidate_pending_enqueue(p_user uuid, p_device text, p_day date, p_input_revision bigint, p_entries jsonb)` | integer (rows inserted or re-armed) | entries `[{metric, provider_id, provider_version, config_version, requested_mode, has_input}]`. Same revision + same selection: no change. Newer revision or changed selection: re-armed (attempts 0, lease dropped). Older than the day's current revision: refused (0). `has_input=false` settles withheld `no_input` at once. Deleted owner / foreign device: 0. Malformed: 22023. |
+| `physiology_candidate_pending_claim(p_owner text, p_lease_seconds integer)` | jsonb item or NULL | oldest due row under a new lease. Rows whose day has a newer revision are superseded (`stale_input_revision`) inside the call, never returned. An expired unsettled lease counts one attempt (`lease_expired`). |
+| `physiology_candidate_pending_settle(p_user, p_device, p_day, p_metric, p_input_revision, p_lease_token, p_outcome, p_reason, p_candidate_id, p_count_attempt, p_retry_after_seconds, p_max_attempts)` | `{"settled":true,"state","attempts","reason"}` or `{"settled":false,"refused":"not_found"\|"stale_input_revision"\|"not_pending"\|"lease_lost"}` | outcomes `done`, `withheld`, `superseded`, `retry`. A refusal changes nothing. `retry` with a counted attempt that reaches `p_max_attempts` settles withheld `attempts_exhausted:<reason>`. |
+| `physiology_candidate_pending_stats()` | `{pending, due, leased, oldest_pending_age_s, by_metric, by_reason, withheld_24h, superseded_24h, at}` | heartbeat |
+| `physiology_candidate_current_revision(p_user, p_device, p_day)` | bigint or NULL | the same three-step lookup `physiology_record_candidate_result` fences on |
+| `physiology_selected_provider(p_user, p_metric)` (replaced, same signature) | jsonb | existing keys unchanged; adds `requested_mode`, `demoted`, `effective_mode`, `mode_reason` |
+
+A client JWT subject is refused (`cross_user_caller`, 22023) by claim and stats, and by the per-user
+functions when it is not the owner, as in the other candidate functions.
+
+### Fairness rule
+
+Claim order is `pending_since`, then day, then the metric order
+(`hrv, sleep_boundary, sleep_stage, respiration`), then owner. `pending_since` is set when a row
+becomes pending and is kept when a newer revision re-arms a row that is still pending. So a metric
+the budget skipped keeps its place while the day is re-scored, and the metrics that just ran go
+behind it. With budget B and k runnable metrics on a day that is re-scored before every drain, every
+metric runs within ceil(k / B) drains (`CandidatePendingSchedulerTests`, the contract's "fair
+order" step). Days that are not re-scored are drained on idle scoring drains
+(`CandidateStage.drainBacklog`, at most once per 15 s unless the last look found work), with their
+inputs re-assembled read-only by `ScoringCandidateAssembler` (DayScorer's own
+`scoreAndBuildPayloads` in a rolled-back REPEATABLE READ transaction, no series, no attestation, no
+sleep-feature call, at most `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET` per drain).
+
+Outcomes per item:
+
+| Outcome | Settlement | Counted attempt |
+|---|---|---|
+| recorded / already present / fenced by the record RPC | `done` | yes |
+| sidecar result withheld or error (deterministic) | `done` (the row is the withheld/error result) | yes |
+| no payload for the metric | `withheld no_input` (at enqueue) | no |
+| demoted `active` | `withheld <gate reason>` | no |
+| payload would not encode | `withheld input_digest_failed` | no |
+| client timeout / refused / not_ready, or sidecar `timeout` | `retry <reason>` with backoff 30 s x 2^n (cap 1 h); the last attempt records a withheld row and settles `withheld attempts_exhausted:<reason>` | yes |
+| store error, write failure, re-assembly failure | `retry <reason>` (backoff) | yes; bounded by the SQL |
+| busy | `retry busy` after `Retry-After` | no |
+| run budget spent | `retry budget` (due at once, keeps its place) | no |
+| drain deadline | `retry deadline` | no |
+| needs a re-assembly this drain cannot afford | `retry awaiting_input_assembly` | no |
+| stale debt (input arrived after the inputs were sealed) | `retry stale_debt` (30 s) | no |
+| owner deleted / device inactive | `superseded owner_not_live` | no |
+| selection switched off | `superseded selection_off` | no |
+| day has a newer revision | `superseded stale_input_revision` | no |
+
+A settle refused for a lost lease or a stale revision changes nothing; the stage counts it in
+`candidate_pending_settle_refused`. The candidate result itself is still written only by
+`physiology_record_candidate_result`, with its own input-revision fence, so stale work cannot
+overwrite a newer revision in either table.
+
+Without the migration (`to_regprocedure('public.physiology_candidate_pending_claim(text,integer)')`
+is NULL; re-probed every 5 minutes, a failed probe is not cached) the stage runs the in-memory pass:
+nothing is persisted, metrics run least-recently-run first, a budget skip is a counter.
+
+## Active mode visibility
+
+`SelectedProvider.requested` (from `requested_mode`, or derived from `source` on a database without
+this migration), `effectiveMode` (`shadow` for every computed mode) and `modeReason`
+(`promotion_approval_required` / `promotion_gate_unavailable` for a demotion,
+`active_promotion_deferred` for an approved `active`). They appear in:
+
+- `physiology_selected_provider` (new keys above);
+- candidate row diagnostics (unchanged: `active_promotion_deferred`);
+- heartbeat `meta.inference.candidate.modes.<metric> = {requested, effective, reason, provider_id}`
+  and `meta.inference.candidate.skipped_demoted`.
+
+Nothing canonical changes: an `active` result is still recorded only as a candidate row, and the
+scoring lane only logs `active hrv substitution deferred`. A validated selection path would need:
+a signed promotion approval checked at publish time (not only at selection), a fenced canonical
+republish of the day through `publish_scoring_snapshot_v2` at the same input revision, provenance
+of the substituted value in the snapshot, and a rollback path. None of that is in this branch.
+
+## Heartbeat additions
+
+Scoring lane counters (only when the candidate lane is on): `candidate_busy`,
+`candidate_skipped_demoted`, `candidate_pending_{enqueued,claimed,done,withheld,superseded,retried,settle_refused}`,
+`candidate_reassembled`, `candidate_reassembly_failures`, and from the queue stats (read at most
+once a minute) `candidate_pending_queue`, `candidate_pending_due`, `candidate_pending_oldest_age_s`.
+`meta.inference.candidate` gains `scheduling` (`persisted` | `in_memory` | `unknown`), `busy`,
+`skipped_demoted`, `pending` (the stats object) and `modes`. With `FRWHOOP_INFERENCE_URL` unset
+`meta.inference` is still JSON null and no counter is added.
+
+## Migration ordering and compatibility
+
+- `20261008110000_physiology_candidate_pending.sql` needs `20261002090000_physiology_candidate_providers.sql`
+  (for `physiology_candidate_activation`) and the scoring tables (`scoring_jobs_v2`,
+  `scoring_algorithms_v2`, `devices`). It is additive and idempotent (re-applied in the contract run).
+  It sorts before `20261008120000_ppg_transport_anchor.sql`, which it does not touch.
+- New worker, old database: the probe is false, the in-memory pass runs (round-1 behaviour plus
+  least-recently-run order).
+- Old worker, new database: the old worker never calls the queue; the extra selection keys are
+  ignored by its parser.
+- Rolling back the worker leaves pending rows that nothing reads; they are harmless and cascade with
+  the owner.
+- New worker x old sidecar: no 429 ever arrives. Old worker x new sidecar: 429 is `non200`, recorded
+  withheld `provider_error` (bounded, no retry loop).
+
+## Read-only runtime checklist
+
+Run on the Droplet; none of these writes anything.
+
+```
+# Sidecar pool state and limits
+curl -s http://127.0.0.1:8787/healthz | jq '.execution | {limits, http, lanes: (.lanes | map_values({capacity, active, waiting, idle, starting, counters, workers: [.workers[] | {pid, state, jobs, rss_kb_at_ready}]}))}'
+# Process tree and memory of the sidecar unit
+systemctl show frwhoop-inference -p MemoryCurrent -p TasksCurrent -p CPUUsageNSec
+ps -o pid,ppid,rss,nlwp,etime,args --ppid "$(systemctl show -p MainPID --value frwhoop-inference)"
+# Pending queue (psql with a read-only role)
+select state, metric, coalesce(last_reason,'new') reason, count(*), min(pending_since)
+  from public.physiology_candidate_pending group by 1,2,3 order by 1,2,3;
+select public.physiology_candidate_pending_stats();
+# Heartbeat counters and modes
+select last_poll_at, meta->'inference'->'candidate' from public.scoring_service_heartbeats where id=1;
+select meta->'lanes' from public.scoring_service_heartbeats where id=1;   -- scoring lane counters
+# Journal lines
+journalctl -u frwhoop-worker --since -1h | grep -E 'candidate (pending|inference)|active hrv substitution deferred'
+journalctl -u frwhoop-inference --since -1h | grep -E 'frwhoop-inference: (infer|sleep_features) worker pid=.* (ready|stopped)|not reaped'
+```
+
+Expected with every metric `off` (the shipped default): `candidate.modes` empty, queue empty,
+`scheduling` `persisted` (or `in_memory` before the migration), pool `active` 0.
+
+## Extension points for Specs 02 and 03
+
+- **New candidate metric.** Add it to `CandidateStage.metrics` (order is only a tie-break), give
+  `DayScorer.CandidateInputs.input(for:)` its payload, and add it to the metric CHECK lists and the
+  `array_position` order in a new migration (`physiology_candidate_pending`, `physiology_candidate_results`,
+  the provider tables). The queue, fairness, fences and heartbeat need no other change. A metric
+  whose payload cannot be built is enqueued with `has_input=false` and shows as withheld `no_input`.
+- **New provider for an existing metric.** Only the selection changes; a changed provider triple at
+  the same revision re-arms the row, so the new provider runs for days already done.
+- **Input assembly.** Pending items for a day that is not being scored get inputs from
+  `ScoringCandidateAssembler`, which calls `DayScorer.scoreAndBuildPayloads(..., candidateLane: true)`.
+  New inputs added to `buildCandidateInputs` are therefore available to re-assembled items too.
+- **Sleep features (Spec 02).** Computation added to `/v1/sleep-features` runs in the
+  `sleep_features` lane's process with the same budget and isolation. Knobs:
+  `FRWHOOP_SLEEP_FEATURES_BUDGET_MS`, `FRWHOOP_SLEEP_FEATURES_MAX_ACTIVE`,
+  `FRWHOOP_SLEEP_FEATURES_MAX_WAITING`, `FRWHOOP_SLEEP_FEATURES_QUEUE_WAIT_MS`. Keep the worker's
+  transport budget (`FRWHOOP_SLEEP_FEATURES_TIMEOUT_MS`, `SleepFeatureEnrichment.swift`) above the
+  compute budget. Heavy new imports belong in the worker process's warm-up, not per request.
+
+## Defects fixed in round 2
+
+1. The SQL the scheduler called did not exist (no migration). Written, with a contract test.
+2. The scheduler was never wired: `ScoringLane` did not create the pending store, never drained the
+   backlog and never passed an assembler, so the persisted path was unreachable and budget-skipped
+   metrics of days that were not re-scored still starved. Wired (`ScoringLane.drain`,
+   `ScoringCandidateAssembler`, `main.swift` candidate block).
+3. A failed presence probe (database briefly unreachable) was cached as "migration absent" for
+   5 minutes, silently switching to in-memory scheduling. Now only a real answer is cached.
+4. A row whose worker died mid-run (expired lease) was re-run without bound. The claim now counts it
+   and the stage settles it withheld `attempts_exhausted:lease_expired` at the bound.
+5. With re-assembly off, an item awaiting assembly was re-claimed on every idle drain; it now waits
+   5 minutes.
+
+## Requests to parent
+
+- `deploy/inference.env.example` / sidecar unit: document the sidecar variables above (defaults need
+  no change). If `FRWHOOP_INFERENCE_MAX_ACTIVE` is ever raised to 2, raise `MemoryHigh` by the
+  measured per-process RSS first.
+- `deploy/worker.env.example`: `FRWHOOP_CANDIDATE_SCHEDULER`, `FRWHOOP_CANDIDATE_MAX_ATTEMPTS`,
+  `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET`, `FRWHOOP_CANDIDATE_LEASE_SECONDS` (all optional).
+- README "Inventory and checklist": link this page's checklist.
+- Apply `20261008110000` before (or with) the worker build that contains this branch; either order is
+  safe.
