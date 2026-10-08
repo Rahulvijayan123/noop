@@ -773,7 +773,10 @@ struct TestCentreView: View {
     /// `HRVReadiness.minNights` valid nights it shows the honest calibrating count, never a fabricated tier.
     /// Twin of the Android `HrvReadinessReadoutTC`.
     @ViewBuilder private var hrvReadinessReadout: some View {
-        let result = HRVReadiness.evaluate(avgHrv: model.repo.days.map { $0.avgHrv })
+        // Calendar-day windows (7 / 60 days, at least 4 valid nights in the last 7), so a break reads as stale
+        // instead of silently spanning a month-old night (run1 D4-15).
+        let result = HRVReadiness.evaluate(avgHrv: model.repo.days.map { $0.avgHrv },
+                                           dayKeys: model.repo.days.map(\.day))
         VStack(alignment: .leading, spacing: 2) {
             if let r = result {
                 let label = hrvTierLabel(r.tier)

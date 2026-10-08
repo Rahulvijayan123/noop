@@ -630,10 +630,14 @@ public struct WatchdogForecastRuntime: Sendable {
         func last(_ xs: [Double?], _ fallback: Double) -> Double {
             xs.reversed().compactMap { $0 }.first ?? fallback
         }
+        // The HRV centre follows the residual's phase (D4-08): overnight usual while asleep, the awake-rest usual
+        // (or its flagged sleep-scaled fallback) while awake — the centre the reconstruction itself used.
+        var phasedPrompt = prompt
+        phasedPrompt.sleepPhase = prompt.sleepPhase || residual.sleepPhase
         let bases = [
             prompt.hr ?? WatchdogPopulationPriors.hr,
             prompt.rhr ?? WatchdogPopulationPriors.rhr,
-            prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv,
+            phasedPrompt.hrvCentre ?? WatchdogPopulationPriors.hrv,
             prompt.temp ?? WatchdogPopulationPriors.temp,
             prompt.resp ?? WatchdogPopulationPriors.resp,
             prompt.spo2 ?? WatchdogPopulationPriors.spo2

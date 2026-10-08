@@ -159,9 +159,14 @@ struct StressView: View {
         // detached task is decorative and the work races the UI for cores anyway. StressDayCurve
         // learned that on this same issue; the continuation in UnescalatedWork is what keeps the
         // priority honest.
+        // The day's sleep / in-bed blocks and stored activity context (D4-05 / D8-12): hours spent asleep are
+        // not scored as calm waking hours, and upright-committed or posture-unresolved hours are flagged rather
+        // than given a posture they were never observed in. Session and interval rows only; empty degrades to
+        // the clock-hour read.
+        let context = await DaytimeStressMode.dayContext(repo: repo, from: from, to: to)
         daytime = await runUnescalated(priority: .userInitiated) {
             DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tz, mode: mode,
-                                  includeTimeline: true)
+                                  includeTimeline: true, context: context)
         }
 
         // ADDITIVE advanced readouts, computed on-demand from the SAME `rr` (no extra fetch, no

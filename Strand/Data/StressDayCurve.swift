@@ -104,10 +104,12 @@ enum StressDayCurve {
             // rather than a behaviour: the hop off the main actor was real, but the scoring then raced
             // the UI for cores at the UI's own quality of service. This runs unprompted on activation
             // and after every Health sync, exactly when the UI is busy, so it must yield.
+            // Sleep / in-bed blocks and stored activity context, as the Stress screen passes (D4-05 / D8-12).
+            let context = await DaytimeStressMode.dayContext(repo: repo, from: from, to: to)
             scored = await runUnescalated {
                 DaytimeStress.analyze(hr: hr, rr: rr, gravity: gravity,
                                       tzOffsetSeconds: tz, mode: mode,
-                                      includeTimeline: true)
+                                      includeTimeline: true, context: context)
             }
         }
         // Too little signal leaves an EMPTY result, which is a real answer about today rather than a

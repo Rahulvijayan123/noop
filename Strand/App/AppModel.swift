@@ -1852,7 +1852,8 @@ final class AppModel: ObservableObject {
         BiofeedbackPrefs.saveStressState(decision.nextState)
         guard decision.shouldNudge else { return }
         if canBuzz { buzz(loops: UInt8(clamping: decision.buzzLoops)) }
-        stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD)
+        stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD,
+                                  stillnessVerified: decision.stillnessVerified)
         // Claim stillness only when the stored context actually showed it (D6-04).
         live.append(log: decision.stillnessVerified
                     ? "Stress check-in , HRV dipped while still"

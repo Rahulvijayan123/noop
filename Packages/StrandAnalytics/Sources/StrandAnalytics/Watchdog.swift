@@ -910,9 +910,13 @@ public enum Watchdog {
                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepRHR]),
                                        persistTicks: persistTicks, hot: hot.contains("RHR"),
                                        hat: lastRHR?.hat)
-        let trustHRV = predictionTrust(energy: eHRV, usual: prompt.hrvAwake ?? prompt.hrv, coverage: trustCoverage,
-                                       usualTrust: layer1UsualTrust(evaluations, matching: prompt.hrvAwake != nil
-                                                                 ? [.awakeRestHRVLn] : [.sleepHRVLn]),
+        // The phase-correct HRV usual (D4-08): the overnight copy on a sleeping tick, the awake-rest copy (or the
+        // flagged sleep-scaled fallback) on an awake one — the same centre UniTS reconstructs against.
+        let hrvPrompt = prompt.phased(window)
+        let hrvUsualFromSleep = hrvPrompt.sleepPhase ? prompt.hrv != nil : prompt.hrvAwake == nil
+        let trustHRV = predictionTrust(energy: eHRV, usual: hrvPrompt.hrvCentre, coverage: trustCoverage,
+                                       usualTrust: layer1UsualTrust(evaluations, matching: hrvUsualFromSleep
+                                                                 ? [.sleepHRVLn] : [.awakeRestHRVLn]),
                                        persistTicks: persistTicks, hot: hot.contains("HRV"),
                                        hat: lastHRV?.hat)
         let tempC = sparseCoverage(window.temp, startUnix: window.startUnix, nowUnix: nowUnix,
@@ -1099,7 +1103,7 @@ public enum Watchdog {
             .init(name: "RHR", observed: lastRHR?.obs, usual: prompt.rhr,
                   reconstructed: lastRHR?.hat, energy: eRHR, unit: "bpm", trustPct: trustRHR,
                   rangeHalf: adapted.rangeHalf(for: .rhr)),
-            .init(name: "HRV", observed: lastHRV?.obs, usual: prompt.hrvAwake ?? prompt.hrv,
+            .init(name: "HRV", observed: lastHRV?.obs, usual: hrvPrompt.hrvCentre,
                   reconstructed: lastHRV?.hat, energy: eHRV, unit: "ms", trustPct: trustHRV,
                   rangeHalf: adapted.rangeHalf(for: .hrv)),
             .init(name: "Temp", observed: lastTemp?.obs ?? last(shown.temp), usual: prompt.temp,
