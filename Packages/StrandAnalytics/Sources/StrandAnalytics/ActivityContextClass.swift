@@ -397,6 +397,29 @@ public enum ActivityClassifier {
             detail: detail?.0, detailConfidence: min(1, max(0, detail?.1 ?? 0)))
     }
 
+    /// The body state a canonical run holds (`ActivityContextRuns.coalesce`): the class with the distinctions only
+    /// the hand pattern makes folded together (desk vs quiet sitting, restless hands on a seated or upright body,
+    /// exercising vs moving, brisk vs ordinary walking). The arm head flips between those every few seconds inside
+    /// one situation, so splitting runs on them would fragment a sitting stretch; the run keeps the arm's average
+    /// and its own class says which wording won. Everything the body did differently (sitting, standing, still and
+    /// unresolved, lying, asleep, walking, running, cycling, off the wrist, no claim) is its own key.
+    public static func runKey(_ k: ActivityClassification) -> String {
+        switch k.activityClass {
+        case .sitting, .sittingDesk: return "seated"
+        case .standing: return "upright"
+        case .fidgeting:
+            switch k.posture {
+            case .seatedLikely: return "seated"
+            case .uprightStationary: return "upright"
+            default: return "stationary"
+            }
+        case .stationary: return "stationary"
+        case .walking, .briskWalking: return "walking"
+        case .vigorousActivity, .lightActivity: return "active"
+        case .lyingDown, .sleeping, .running, .cycling, .offWrist, .unknown: return k.activityClass.rawValue
+        }
+    }
+
     public static func classify(run: ActivityContextRun) -> ActivityClassification {
         classify(posture: run.posture, locomotion: run.locomotion, armBehavior: run.armBehavior,
                  sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence)
