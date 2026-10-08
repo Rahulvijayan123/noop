@@ -64,7 +64,7 @@ ALIASES: dict[str, tuple[str, ...]] = {
     "skin_temp": ("wrist temperature", "wrist temp", "skin temperature", "skin temp"),
     "skin_temp_dev": ("temperature deviation",),
     "hrv_sdnn": ("sdnn",),
-    "heart_rate": ("calm awake heart rate", "calm heart rate", "awake heart rate"),
+    "heart_rate": ("stable awake heart rate", "stable heart rate", "awake heart rate"),
     "steps": ("steps", "step count"),
     "calories": ("calories", "calorie", "kcal", "energy expenditure", "energy burned"),
     # An estimated sleep MEASURE (not "during sleep", which names the state an HRV or heart-rate reading was in).
@@ -134,6 +134,7 @@ _DAY_MONTH = re.compile(rf"\b(\d{{1,2}})(?:st|nd|rd|th)?\s+(?:of\s+)?{_MONTH}(?:
 _ISO_DAY = re.compile(r"\b(\d{4})-(\d{2})-(\d{2})\b")
 _SLASH_DAY = re.compile(r"\b\d{1,2}/\d{1,2}(?:/\d{2,4})?\b")
 _CLOCK = re.compile(r"\b(\d{1,2}):(\d{2})\b(?:\s*([ap])\.?\s*m\b\.?)?", re.I)  # 21:30, or 9:30 p.m.
+_HOUR = re.compile(r"(?<![\d:.])\b(1[0-2]|0?[1-9])\s*([ap])\.?\s*m\b\.?", re.I)  # 6 am, 6 p.m.: on the hour
 _UNIT_RE = "|".join(sorted((re.escape(u) for u in UNITS), key=len, reverse=True))
 _DIRECTIONS = "|".join(UP_WORDS + DOWN_WORDS)
 # A number as people write it: 52, 52.4, 8,123 (thousands separators), 12,345.6.
@@ -147,8 +148,11 @@ _DIRECTION_BEFORE = re.compile(rf"\b({_DIRECTIONS})\s+(?:by\s+)?({_NUM})\s*({_UN
 _PMID_OR_DOI = re.compile(r"\bpmid\s*[:#]?\s*\d+|\b10\.\d{4,9}/\S+", re.I)
 _NEGATION = re.compile(r"\b(no|not|none|nothing|without|never|neither|nor)\b|n['’]t\b", re.I)
 # "because" explains with the person's own data ("likely because you walked 40 minutes that evening"); it must be
-# hedged, since a pattern in the data is an association, not proof.
+# hedged, since a pattern in the data is an association, not proof. An uncertainty sentence may say plainly why a
+# reading is less certain ("less certain because SpO2 is estimated from the wrist"): that is about the data.
 _BECAUSE = re.compile(r"\bbecause\b", re.I)
+_DATA_LIMIT = re.compile(r"\b(estimat\w*|measur\w*|readings?|data|sensors?|signals?|coverage|missing|gaps?|fewer|"
+                         r"worn|wear|recorded|samples?|nights? of|days? of)\b", re.I)
 _HEDGE = re.compile(r"\b(likely|probably|possibly|may|might|can|could|often|typically|usually|tends?|"
                     r"perhaps|partly)\b", re.I)
 _YOU_VERB = {"sleep": re.compile(r"\byou\s+(?:\w+\s+){0,2}(slept|woke|fell asleep)\b", re.I),
@@ -331,6 +335,19 @@ def _clock_key(value: str) -> str:
     return f"{int(hours)}:{minutes}"
 
 
+def _hour_key(match: re.Match) -> str:
+    """6 am -> 6:00, 6 pm -> 18:00, 12 am -> 0:00 (a _HOUR match)."""
+    hour = int(match.group(1)) % 12 + (12 if match.group(2).lower() == "p" else 0)
+    return f"{hour}:00"
+
+
+def _spoken_clocks(text: str) -> set[str]:
+    """The clock times a tool's own wording names ("between 6 am and noon")."""
+    found = {_hour_key(m) for m in _HOUR.finditer(text)}
+    found |= {"12:00"} if re.search(r"\bnoon\b", text, re.I) else set()
+    return found | ({"0:00"} if re.search(r"\bmidnight\b", text, re.I) else set())
+
+
 def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Facts:
     """What the tools said, by unit. Free text (the person's notes, exposure labels, earlier headlines) is not read."""
     f = Facts()
@@ -423,6 +440,9 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
                 f.count(band.get("nights"))
             for slot in state.get("time_of_day") or []:
                 f.add(unit, slot.get("value"))
+                f.clocks |= _spoken_clocks(str(slot.get("when") or ""))
+            support = re.match(r"\s*(\d+)\b", str(state.get("measured_in") or ""))  # "40 windows"
+            f.count(int(support.group(1)) if support else None)
             if state.get("value") is not None and _num(_get(state, "usual", "center")) is not None:
                 f.change(unit, round(state["value"] - state["usual"]["center"], 1))
     for breakdown in _listed(evidence.get("get_state_breakdown")):
@@ -542,7 +562,7 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
 
 
 def _strip_dates(text: str) -> str:
-    for pattern in (_ISO_DAY, _MONTH_DAY, _DAY_MONTH, _CLOCK, _SLASH_DAY):
+    for pattern in (_ISO_DAY, _MONTH_DAY, _DAY_MONTH, _CLOCK, _HOUR, _SLASH_DAY):
         text = pattern.sub(" ", text)
     return text
 
@@ -605,6 +625,9 @@ def _numbers_errors(sentence: str, f: Facts, *, interpretation: bool) -> list[st
         if half and 1 <= hour <= 12:  # the same clock time in 12-hour form
             hour = hour % 12 + (12 if half == "p" else 0)
         if f"{hour}:{match.group(2)}" not in f.clocks:
+            errors.append(f"grounding:the time {match.group(0).strip()} is not in any tool result")
+    for match in _HOUR.finditer(_CLOCK.sub(" ", sentence)):
+        if _hour_key(match) not in f.clocks:
             errors.append(f"grounding:the time {match.group(0).strip()} is not in any tool result")
     for m in _DIRECTION_AFTER.finditer(stripped):
         errors += _direction_errors(m.group(1), m.group(2), m.group(3), f)
@@ -706,7 +729,7 @@ def _call_errors(sentence: str, f: Facts) -> list[str]:
 
 def _signal_errors(sentence: str, f: Facts) -> list[str]:
     """A number said about a named signal is that signal's own: an RMSSD value is not SDNN's, a resting heart rate
-    during sleep is not the calm awake one. Flagged only when the number is another signal's and not this one's."""
+    during sleep is not the stable awake one. Flagged only when the number is another signal's and not this one's."""
     errors = []
     for clause in _CLAUSE.split(sentence):
         named = _named(clause)
@@ -790,7 +813,8 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
             for term, pattern in _RELATIVE:
                 if pattern.search(sentence):
                     errors.append(f"dates:'{term}' is relative; use the absolute date (e.g. Oct 6)")
-            if _BECAUSE.search(sentence) and not _HEDGE.search(sentence):
+            if (_BECAUSE.search(sentence) and not _HEDGE.search(sentence)
+                    and not (key == "uncertainty" and _DATA_LIMIT.search(sentence))):
                 errors.append("claim:'because' must be hedged ('likely because', 'may be because'): a pattern in "
                               "the data is an association, not proof")
             if _SLASH_DAY.search(sentence):

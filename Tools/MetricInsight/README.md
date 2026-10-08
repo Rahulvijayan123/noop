@@ -29,7 +29,7 @@ owner, one metric and one analysis night (no tool accepts a user, device or date
 | `manifest` | — | every source, whether it is connected |
 | `metric_summary` | `server_daily_scores` + context document | latest night, previous night, the person's usual and the app's call for the night (below), the assessment |
 | `metric_series` | `server_daily_scores` | the nightly values, missing nights as null |
-| `state_breakdown` | scores, context documents, hosted snapshots | the metric during sleep, at calm awake rest and around movement, by time of day, each against its own usual; HRV through the night's two days by activity (15-minute slots) |
+| `state_breakdown` | scores, context documents, hosted snapshots | the metric during sleep, at stable awake rest and around movement, by time of day, each against its own usual; HRV through the night's two days by activity (15-minute slots) |
 | `movement_patterns` | `activity_context_runs`, context bouts | movement the day and evening before the night and on the day, minutes by kind, how long before sleep the last one ended |
 | `related_metrics` | scores + context availability | HRV / resting HR / breathing / blood oxygen / skin temperature / sleep against their usual, marked measured or estimated; the Home ring's night vitals for the night ("4 of 5 in range") |
 | `sleep_context`, `workout_context`, `activity_context` | scores, context documents | sleep timing and duration, exertion windows, daily activity |

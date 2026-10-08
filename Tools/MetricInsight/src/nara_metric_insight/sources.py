@@ -21,7 +21,7 @@ SCORE_COLUMNS = sorted({s.column for s in SIGNALS.values() if s.source == "score
 # The app's Baseline night vitals that are server_daily_scores columns (steps come from the day values).
 VITAL_COLUMNS = sorted(c for k, c in layer1.COLUMNS.items() if k != "waking_steps")
 DAY_VALUE_COLUMNS = ("steps", "total_kcal", "energy", "spo2_candidate_pct", "spo2_candidate_samples")
-CALM_HR_SERIES = "heart_rate.stable_awake_5min"
+STABLE_AWAKE_HR_SERIES = "heart_rate.stable_awake_5min"
 STEPS_HISTORY_DAYS = 400   # public.metric_insight_day_values_v1's longest range (the steps usual's replay)
 GAIT_HISTORY_DAYS = 30     # activity_gait_windows_days keeps 30 days
 EXPOSURE_DAYS = 14
@@ -60,7 +60,7 @@ class Sources:
     def scores(self) -> dict[date, dict[str, Any]]:
         """Every day's values for the analysis window plus the baseline lead-in, keyed by day: the server_daily_scores
         row, and where the metric reads them, the hosted day values (steps, energy, the SpO2 estimate) and the
-        calm awake heart rate of the day's context document. One row per day, so every signal reads the same way."""
+        stable awake heart rate of the day's context document. One row per day, so every signal reads the same way."""
         def load() -> dict[date, dict[str, Any]]:
             if self.anchor is None:
                 return {}
@@ -77,7 +77,7 @@ class Sources:
             if "day_values" in needs:
                 _merge(rows, self.day_values(start))
             if "context" in needs:
-                _merge(rows, self.calm_heart_rate(start))
+                _merge(rows, self.stable_awake_heart_rate(start))
             return rows
         return self._get("scores", load)
 
@@ -88,24 +88,33 @@ class Sources:
             return {row["day"]: {k: row[k] for k in DAY_VALUE_COLUMNS} for row in cur.fetchall()}
         return self.db.as_owner(self.user_id, read) if self.anchor else {}
 
-    def calm_heart_rate(self, start: date) -> dict[date, dict[str, Any]]:
-        """Calm awake heart rate (the context layer's `heart_rate.stable_awake_5min` daily value) of each day from
-        `start` to the anchor, from the scoring device's selected document: retrospective first, else live."""
+    def stable_awake_heart_rate(self, start: date) -> dict[date, dict[str, Any]]:
+        """Stable awake heart rate (the context layer's `heart_rate.stable_awake_5min` daily value) of each day from
+        `start` to the anchor, from the scoring device's documents, picked the way the app's chart picks it
+        (KeyMetricValues.contextDaily): a retrospective value before a live one, then the most support (windows,
+        then seconds), then the first regime key; only positive values."""
         device = self.device()
         if device is None:
             return {}
 
         def read(cur):
             cur.execute(
-                "select distinct on (d.day) d.day, internal_value.value from public.physiology_context_days d "
-                "cross join lateral (select (x ->> 'value')::double precision as value "
+                "select distinct on (d.day) d.day, v.value from public.physiology_context_days d "
+                "cross join lateral (select (x ->> 'value')::double precision as value, "
+                "    case when jsonb_typeof(x -> 'support_count') = 'number' then (x ->> 'support_count')::numeric "
+                "         else 0 end as support_count, "
+                "    case when jsonb_typeof(x -> 'support_s') = 'number' then (x ->> 'support_s')::numeric "
+                "         else 0 end as support_s, "
+                "    coalesce(x ->> 'regime_key', '') as regime_key "
                 "  from jsonb_array_elements(case when jsonb_typeof(d.document -> 'daily_values') = 'array' "
                 "                                 then d.document -> 'daily_values' else '[]'::jsonb end) x "
-                "  where x ->> 'series_key' = %s and jsonb_typeof(x -> 'value') = 'number' limit 1) internal_value "
+                "  where x ->> 'series_key' = %s and jsonb_typeof(x -> 'value') = 'number' "
+                "    and (x ->> 'value')::double precision > 0) v "
                 "where d.user_id = %s and d.device_id = %s and d.day between %s and %s and d.superseded_by is null "
-                "order by d.day, (d.mode = 'retrospective') desc",
-                (CALM_HR_SERIES, self.user_id, device, start, self.anchor))
-            return {row["day"]: {"calm_awake_hr_bpm": row["value"]} for row in cur.fetchall()}
+                "order by d.day, (d.mode = 'retrospective') desc, v.support_count desc, v.support_s desc, "
+                "  v.regime_key collate \"C\"",
+                (STABLE_AWAKE_HR_SERIES, self.user_id, device, start, self.anchor))
+            return {row["day"]: {"stable_awake_hr_bpm": row["value"]} for row in cur.fetchall()}
         return self.db.as_owner(self.user_id, read)
 
     def device(self) -> str | None:

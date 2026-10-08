@@ -381,17 +381,19 @@ def _seed_record(e: dict, score: float, coverage: float, rank: int) -> dict:
     }
 
 
-def search_seed(query: str, k: int = 5, *, metric: str | None = None,
+def search_seed(query: str, k: int = 5, *, metric: str | Iterable[str] | None = None,
                 corpus_path: str | os.PathLike | None = None) -> list[dict]:
     """BM25 top-k over the curated corpus; zero-score entries are never returned.
     Each hit carries `score` (BM25) and `coverage` (share of query idf matched).
+    `metric`: a corpus metric tag, or several (an entry with any of them qualifies).
     Local only (nothing leaves the process), so the query is not sanitized here."""
     k = _clamp_k(k)
     entries, index = _seed_index(corpus_path)
     qtok = tokenize(query)
+    tags = {metric} if isinstance(metric, str) else set(metric or ())
     out: list[dict] = []
     for i, score in index.search(qtok, k=len(entries)):
-        if metric and metric not in _as_list(entries[i].get("metric")):
+        if tags and not tags & set(_as_list(entries[i].get("metric"))):
             continue
         out.append(_seed_record(entries[i], score, index.coverage(qtok, i), len(out) + 1))
         if len(out) >= k:

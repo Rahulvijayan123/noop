@@ -26,7 +26,7 @@ GENERIC = frozenset(litsearch.tokenize("resting rest heart rate hrv rmssd person
                                        "level levels"))
 MIN_TOPIC_COVERAGE = 0.5   # share of the topic words' idf the entry matches
 # The explained metrics' own names, which a query names but which rank nothing.
-METRIC_NAMES = (r"\b((calm\s+)?(resting|awake)\s+)?heart\s+rate(\s+variability)?\b|\b(sdnn|rmssd|hrv)\b|"
+METRIC_NAMES = (r"\b((stable\s+)?(resting|awake)\s+)?heart\s+rate(\s+variability)?\b|\b(sdnn|rmssd|hrv)\b|"
                 r"\b(wrist|skin)\s+temperature\b|\b(respiratory|breathing)\s+rate\b|\bblood\s+oxygen\b|"
                 r"\boxygen\s+saturation\b|\bspo2\b|\b(daily\s+)?steps?(\s+count)?\b|\bcalories\b|"
                 r"\benergy\s+expenditure\b")

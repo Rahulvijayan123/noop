@@ -242,8 +242,8 @@ def test_hrv_through_the_day_is_grouped_by_what_the_person_was_doing():
     assert states["sleep"]["median_ms"] == 82 and states["sleep"]["readings"] == 4
     assert states["while_moving"]["median_ms"] == 30 and states["while_moving"]["from_local"] == "18:00"
     assert states["after_movement"]["median_ms"] == 41
-    assert states["calm_awake"]["median_ms"] == 52
-    assert list(states) == ["sleep", "calm_awake", "after_movement", "while_moving"]
+    assert states["still_awake"]["median_ms"] == 52
+    assert list(states) == ["sleep", "still_awake", "after_movement", "while_moving"]
 
 
 def test_movement_patterns_from_activity_runs_and_the_gap_before_sleep():
@@ -318,7 +318,7 @@ def test_steps_use_the_apps_steps_usual_and_the_days_gait():
     assert ev.gait_context([], ANCHOR, zone)["available"] is False
 
 
-def test_calorie_split_and_calm_awake_heart_rate_against_the_context_layer():
+def test_calorie_split_and_stable_awake_heart_rate_against_the_context_layer():
     rows = _days(20, lambda i: {"total_kcal": 2300.0})
     rows[ANCHOR]["energy"] = {"total_kcal": 2650.4, "resting_kcal": 1610, "active_kcal": 1040.4, "workout_kcal": 380,
                               "light_min": 180, "moderate_min": 55, "high_min": 12, "workouts": 1, "gap_min": 30,
@@ -329,15 +329,15 @@ def test_calorie_split_and_calm_awake_heart_rate_against_the_context_layer():
     assert energy["minutes_by_intensity"] == {"light": 180, "moderate": 55, "high": 12}
     assert energy["usual_total_kcal"] == {"median": 2300, "days": 19}
     hr = INSIGHT_METRICS["heart_rate"]
-    rows = _days(20, lambda i: {"calm_awake_hr_bpm": 64.0 + (i % 3)})
-    rows[ANCHOR]["calm_awake_hr_bpm"] = 71.0
+    rows = _days(20, lambda i: {"stable_awake_hr_bpm": 64.0 + (i % 3)})
+    rows[ANCHOR]["stable_awake_hr_bpm"] = 71.0
     reference = {"series_key": "heart_rate.stable_awake_5min", "view": "rolling", "status": "ready",
                  "center": 65.0, "signed_difference": 6.0, "robust_z": 2.9, "support_days": 19}
-    calm = {"comparisons": [reference], "episodes": []}
-    summary = ev.metric_summary(rows, hr, ANCHOR, 90, calm)
+    context = {"comparisons": [reference], "episodes": []}
+    summary = ev.metric_summary(rows, hr, ANCHOR, 90, context)
     assert summary["assessment"]["basis"] == "context_layer" and summary["assessment"]["state"] == "in_range"
     assert summary["baseline"]["usual_value"] == 65 and summary["baseline"]["change_vs_usual"] == 6
-    shifted = dict(calm, episodes=[{"series_key": "heart_rate.stable_awake_5min", "state": "transient_deviation",
+    shifted = dict(context, episodes=[{"series_key": "heart_rate.stable_awake_5min", "state": "transient_deviation",
                                     "direction": 1, "last_day": ANCHOR.isoformat(), "ongoing": True}])
     call = ev.metric_summary(rows, hr, ANCHOR, 90, shifted)["baseline"]["call"]
     assert (call["state"], call["side"], call["app_label"]) == ("off", "above", "Transient deviation from reference")

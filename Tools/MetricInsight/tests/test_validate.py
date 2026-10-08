@@ -332,3 +332,29 @@ def test_new_metrics_wording_and_numbers():
     assert "estimated" in validate.check(unlabelled, evidence, RETRIEVED).codes
     wrong = answer(headline="Estimated steps on Oct 6", observed=["Your estimated steps were 8,124 steps on Oct 6."])
     assert "grounding" in validate.check(wrong, evidence, RETRIEVED).codes
+
+
+def test_times_of_day_said_on_the_hour_and_why_a_reading_is_less_certain():
+    evidence = json.loads(json.dumps(EVIDENCE))
+    evidence["get_metric_summary"] = {"metric": "heart_rate", "units": "bpm", "estimated": False,
+                                      "latest": {"day": "2026-10-06", "value": 71},
+                                      "baseline": {"call": {"state": "transient_deviation", "side": "above"}}}
+    evidence["get_state_breakdown"] = {"metric": "heart_rate", "states": [
+        {"state": "awake_rest", "units": "bpm", "value": 71, "measured_in": "40 windows",
+         "time_of_day": [{"when": "between 6 am and noon", "value": 70},
+                         {"when": "between noon and 6 pm", "value": 74}]}]}
+    said = answer(headline="Stable awake heart rate 71 bpm on Oct 6",
+                  observed=["Your stable awake heart rate was 71 bpm on Oct 6, 74 bpm between noon and 6 pm and "
+                            "70 bpm between 6 am and noon.", "It was measured in 40 still, awake stretches."])
+    result = validate.check(said, evidence, RETRIEVED)
+    assert result.ok, result.errors
+    unstated = answer(headline="Stable awake heart rate 71 bpm on Oct 6",
+                      observed=["Your stable awake heart rate was 74 bpm after 3 pm on Oct 6."])
+    assert any("the time 3 pm" in e for e in validate.check(unstated, evidence, RETRIEVED).errors)
+    # "because" about the data is fine in the uncertainty section; about the person it still needs a hedge.
+    data = answer(uncertainty=["This is less certain because only 7 nights are measured."])
+    assert validate.check(data, EVIDENCE, RETRIEVED).ok, validate.check(data, EVIDENCE, RETRIEVED).errors
+    person = answer(uncertainty=["Your heart rate was lower because you rested."])
+    assert "claim" in validate.check(person, EVIDENCE, RETRIEVED).codes
+    elsewhere = answer(interpretation=["Your resting heart rate was lower because only 7 nights are measured.", SUPPORT])
+    assert "claim" in validate.check(elsewhere, EVIDENCE, RETRIEVED).codes

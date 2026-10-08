@@ -84,7 +84,7 @@ def _snapshot(pg, user: str, device: str, day: date, daily: dict) -> None:
             f" $j${json.dumps({'daily': daily})}$j$::jsonb)")
 
 
-def test_day_values_calm_heart_rate_and_gait_are_the_owners_own(pg, db):
+def test_day_values_stable_awake_heart_rate_and_gait_are_the_owners_own(pg, db):
     pg.psql("truncate public.scoring_jobs_v2, public.scoring_snapshots_v2, public.physiology_context_days,"
             " public.activity_gait_windows_days cascade")
     _devices(pg)
@@ -115,9 +115,11 @@ def test_day_values_calm_heart_rate_and_gait_are_the_owners_own(pg, db):
     with pytest.raises(psycopg.errors.InvalidParameterValue):
         db.as_owner(USER_A, day_values(ANCHOR - timedelta(days=401), ANCHOR))
 
-    # Calm awake heart rate: the retrospective document first, else the live one; another owner's never.
-    def context(user, device, day, mode, value):
-        document = {"daily_values": [{"series_key": "heart_rate.stable_awake_5min", "value": value, "units": "bpm"},
+    # Stable awake heart rate, picked as the app's chart picks it: the retrospective document first, else the live
+    # one; in a document the best-supported value (a zero is no value); another owner's never.
+    def context(user, device, day, mode, value, also=()):
+        document = {"daily_values": [*also, {"series_key": "heart_rate.stable_awake_5min", "value": value,
+                                             "units": "bpm", "support_count": 30, "regime_key": "b"},
                                      {"series_key": "hrv_rmssd.sleep_night", "value": 70}], "status": "available"}
         pg.psql("insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality,"
                 " status, availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint,"
@@ -126,11 +128,15 @@ def test_day_values_calm_heart_rate_and_gait_are_the_owners_own(pg, db):
                 f" 'fixture-input', $j${json.dumps(document)}$j$::jsonb, 100)")
     context(USER_A, DEVICE_A, ANCHOR - timedelta(days=1), "causal_live", 66.0)
     context(USER_A, DEVICE_A, ANCHOR - timedelta(days=1), "retrospective", 64.0)
-    context(USER_A, DEVICE_A, ANCHOR, "causal_live", 63.0)
+    context(USER_A, DEVICE_A, ANCHOR, "causal_live", 63.0, also=(
+        {"series_key": "heart_rate.stable_awake_5min", "value": 0, "support_count": 99, "regime_key": "a"},
+        {"series_key": "heart_rate.stable_awake_5min", "value": 61.0, "support_count": 12, "regime_key": "a"}))
+    context(USER_A, DEVICE_A, ANCHOR - timedelta(days=2), "retrospective", 65.0, also=(
+        {"series_key": "heart_rate.stable_awake_5min", "value": 67.0, "support_count": 30, "regime_key": "a"},))
     context(USER_B, DEVICE_B, ANCHOR, "retrospective", 90.0)
     rows = Sources(db, USER_A, "heart_rate", ANCHOR, ZoneInfo("UTC")).scores()
-    assert {d: r.get("calm_awake_hr_bpm") for d, r in rows.items() if r.get("calm_awake_hr_bpm")} == {
-        ANCHOR - timedelta(days=1): 64.0, ANCHOR: 63.0}
+    assert {d: r.get("stable_awake_hr_bpm") for d, r in rows.items() if r.get("stable_awake_hr_bpm")} == {
+        ANCHOR - timedelta(days=2): 67.0, ANCHOR - timedelta(days=1): 64.0, ANCHOR: 63.0}
     assert rows[ANCHOR]["steps"] == 8123 and rows[ANCHOR]["resting_hr_bpm"] == 49  # steps are related, merged per day
 
     # ElderNet gait rows: the owner's own, per UTC day the newest result.

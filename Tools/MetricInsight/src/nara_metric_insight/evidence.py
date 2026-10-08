@@ -382,7 +382,7 @@ def recent_usual(measured: list[tuple[date, float]], day: date, value: float, si
 
 def _assessment(baseline: dict[str, Any], context: dict[str, Any]) -> dict[str, Any]:
     """Whether the night (or day) is unusual for this person: the app's own call (the Home ring and the Monitor for
-    its Baseline vitals; the Measurement context page's episode state for calm awake heart rate) and, when its
+    its Baseline vitals; the Measurement context page's episode state for stable awake heart rate) and, when its
     reference is ready, the context layer's change detection over the recent weeks. Where the app shows no usual,
     only the comparison with recent periods."""
     call = baseline["call"]
@@ -512,12 +512,12 @@ def sleep_context(scores: dict[date, dict[str, Any]], anchor: date, zone: ZoneIn
 # Where the context layer measures each metric in a defined state (contracts: physiology context series keys).
 STATE_SERIES: dict[str, tuple[tuple[str, str, str], ...]] = {
     "resting_hr": (("sleep", "during sleep", "resting_hr.sleep_night"),
-                   ("awake_rest", "at calm awake rest", "heart_rate.stable_awake_5min"),
+                   ("awake_rest", "at stable awake rest", "heart_rate.stable_awake_5min"),
                    ("with_movement", "the rise in heart rate when you walked", "hr_response.stepping.")),
     "hrv_rmssd": (("sleep", "during sleep", "hrv_rmssd.sleep_night"),
-                  ("awake_rest", "at calm awake rest", "hrv_rmssd.stable_awake_5min")),
-    # Calm awake heart rate is itself the awake-rest series: its states are the time of day and movement.
-    "heart_rate": (("awake_rest", "at calm awake rest", "heart_rate.stable_awake_5min"),
+                  ("awake_rest", "at stable awake rest", "hrv_rmssd.stable_awake_5min")),
+    # Stable awake heart rate is itself the awake-rest series: its states are the time of day and movement.
+    "heart_rate": (("awake_rest", "at stable awake rest", "heart_rate.stable_awake_5min"),
                    ("with_movement", "the rise in heart rate when you walked", "hr_response.stepping.")),
 }
 TIME_BANDS = {"band_00_06": "between midnight and 6 am", "band_06_12": "between 6 am and noon",
@@ -529,11 +529,13 @@ NOT_ON_SERVER = {"hrv_rmssd": {"state": "with_movement", "label": "while moving"
 
 
 def _daily_value(document: dict[str, Any] | None, key: str) -> dict[str, Any] | None:
-    """A context-layer daily value: exact key, or the best-supported one under a prefix ending with '.'."""
+    """A context-layer daily value: exact key, or one under a prefix ending with '.'; of several, the best supported
+    (windows, then seconds), then the first regime key, as the app's chart picks (KeyMetricValues.contextDaily)."""
     values = [v for v in (document or {}).get("daily_values") or [] if isinstance(v, dict)
               and (v.get("series_key") == key or (key.endswith(".") and str(v.get("series_key", "")).startswith(key)
                                                   and ".band_" not in str(v.get("series_key"))))]
-    return max(values, key=lambda v: _num(v.get("support_count")) or 0) if values else None
+    return min(values, key=lambda v: (-(_num(v.get("support_count")) or 0), -(_num(v.get("support_s")) or 0),
+                                      str(v.get("regime_key") or ""))) if values else None
 
 
 def _reference_band(comparisons: list[dict[str, Any]], decimals: int) -> dict[str, Any] | None:
@@ -558,7 +560,7 @@ def _reference_band(comparisons: list[dict[str, Any]], decimals: int) -> dict[st
 def state_breakdown(scores: dict[date, dict[str, Any]], metric: InsightMetric, anchor: date,
                     document: dict[str, Any] | None, snapshots: dict[date, dict[str, Any]] | None = None,
                     zone: ZoneInfo | None = None, history: dict[date, dict[str, Any]] | None = None) -> dict[str, Any]:
-    """The metric in each state the measurements define (sleep, calm awake rest, around movement) and by time of
+    """The metric in each state the measurements define (sleep, stable awake rest, around movement) and by time of
     day, each against its own usual: the app's Baseline for the nightly value, the context layer's personal reference
     for the others. A state the server does not measure is listed as such, never filled in."""
     signal, d = metric.signal, metric.signal.decimals
@@ -648,9 +650,9 @@ def movement_patterns(previous: dict[str, Any] | None, document: dict[str, Any] 
 SLOT_S = 900                       # the snapshot's HRV slots (DayScoring.hrvSlotSeconds)
 MOVING_SHARES = ("walking", "running", "other_movement")
 MOVING_SHARE_MIN = 0.25            # a slot with at least this share of movement counts as "while moving"
-CALM_SHARE_MIN = 0.8               # and one at least this still (and not just after activity) as calm awake
+STILL_SHARE_MIN = 0.8              # and one at least this still (and not just after activity) as awake and still
 AFTER_MOVEMENT_S = 1800            # within 30 minutes of the end of supported activity
-SLOT_STATES = {"sleep": "during sleep", "calm_awake": "while calm and awake", "after_movement": "in the half hour "
+SLOT_STATES = {"sleep": "during sleep", "still_awake": "while awake and still", "after_movement": "in the half hour "
                "after moving", "while_moving": "while moving", "mixed": "mixed activity"}
 
 
@@ -703,8 +705,8 @@ def hrv_slot_states(snapshots: dict[date, dict[str, Any]], zone: ZoneInfo) -> di
                 state = "while_moving"
             elif ctx.get("post_activity") or (recent is not None and recent <= AFTER_MOVEMENT_S):
                 state = "after_movement"
-            elif (_num(shares.get("stationary")) or 0.0) >= CALM_SHARE_MIN:
-                state = "calm_awake"
+            elif (_num(shares.get("stationary")) or 0.0) >= STILL_SHARE_MIN:
+                state = "still_awake"
             else:
                 state = "mixed"
         by_state.setdefault(state, []).append((slot, rmssd))

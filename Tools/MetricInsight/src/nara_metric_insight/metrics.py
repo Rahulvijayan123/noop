@@ -3,7 +3,7 @@ is the contract: one id per metric across the app, the edge function, the databa
 
 * Where a value comes from (`Signal.source`): a `server_daily_scores` column (20260916160000_scoring_service_state.sql),
   a hosted day snapshot value (`public.metric_insight_day_values_v1`: steps, the day's energy, the strap's SpO2
-  estimate), or a context-layer daily value (`calm_awake_hr_bpm` = `heart_rate.stable_awake_5min`).
+  estimate), or a context-layer daily value (`stable_awake_hr_bpm` = `heart_rate.stable_awake_5min`).
 * Context-layer series families: MeasurementContextPage.seriesPrefixes (Strand/Screens/MeasurementContextWording.swift).
 * Whether a signal is measured or estimated: the context document's `availability` entries (reasons such as
   `rsa_only_estimate`, state `unverified`) decide at run time; `estimated` below is the default when a document
@@ -55,7 +55,7 @@ SIGNALS: dict[str, Signal] = {
     # The strap's SpO2 is an unverified estimate (`daily.spo2_candidate_pct`); `spo2_pct` is never filled.
     "spo2": Signal("spo2", "Blood oxygen", "spo2_candidate_pct", "%", 0, True, "spo2_candidate", (70.0, 100.0),
                    flat=1.0, source="day_values"),
-    "heart_rate": Signal("heart_rate", "Calm awake heart rate", "calm_awake_hr_bpm", "bpm", 0, False, "heart_rate",
+    "heart_rate": Signal("heart_rate", "Stable awake heart rate", "stable_awake_hr_bpm", "bpm", 0, False, "heart_rate",
                          (30.0, 200.0), flat=1.0, source="context"),
     # A worn day with no steps is a real 0; a day without step data has no value.
     "steps": Signal("steps", "Steps", "steps", "steps", 0, True, None, (0.0, 200000.0), flat=500.0,
@@ -79,30 +79,32 @@ class InsightMetric:
     # app_baseline (Layer 1, `signal.layer1`) | context_layer (its reference and episodes) | recent (the last
     # measured periods: the app shows no usual for these)
     usual: str
-    # The curated literature corpus' metric tag (literature.CORPUS), when it has entries for this metric.
-    literature: str | None = None
+    # The curated literature corpus' metric tags (literature.CORPUS) whose entries speak about this metric.
+    literature: tuple[str, ...] = ()
 
 
 INSIGHT_METRICS: dict[str, InsightMetric] = {m.key: m for m in (
     InsightMetric("resting_hr", SIGNALS["resting_hr"], "night", ("resting_hr.", "heart_rate."),
                   "resting_hr.sleep_night",
-                  ("hrv_rmssd", "resp_rate", "skin_temp_dev", "sleep_total", "sleep_efficiency"), "app_baseline", "rhr"),
+                  ("hrv_rmssd", "resp_rate", "skin_temp_dev", "sleep_total", "sleep_efficiency"), "app_baseline", ("rhr",)),
     InsightMetric("hrv_rmssd", SIGNALS["hrv_rmssd"], "night", ("hrv_rmssd.",), "hrv_rmssd.sleep_night",
                   ("hrv_sdnn", "resting_hr", "resp_rate", "skin_temp_dev", "sleep_total", "sleep_efficiency"),
-                  "app_baseline", "hrv"),
+                  "app_baseline", ("hrv",)),
     InsightMetric("hrv_sdnn", SIGNALS["hrv_sdnn"], "night", ("hrv_sdnn.",), None,
-                  ("hrv_rmssd", "resting_hr", "resp_rate", "sleep_total", "sleep_efficiency"), "recent", "hrv"),
+                  ("hrv_rmssd", "resting_hr", "resp_rate", "sleep_total", "sleep_efficiency"), "recent", ("hrv",)),
     InsightMetric("skin_temp", SIGNALS["skin_temp"], "night", ("skin_temp.",), "skin_temp.sleep_night",
-                  ("skin_temp_dev", "resting_hr", "hrv_rmssd", "resp_rate", "sleep_total"), "app_baseline"),
+                  ("skin_temp_dev", "resting_hr", "hrv_rmssd", "resp_rate", "sleep_total"), "app_baseline", ("temp",)),
     InsightMetric("resp_rate", SIGNALS["resp_rate"], "night", ("resp_rate.",), "resp_rate.sleep_night",
-                  ("resting_hr", "hrv_rmssd", "skin_temp_dev", "sleep_total", "sleep_efficiency"), "app_baseline"),
+                  ("resting_hr", "hrv_rmssd", "skin_temp_dev", "sleep_total", "sleep_efficiency"), "app_baseline", ("resp",)),
     InsightMetric("spo2", SIGNALS["spo2"], "night", ("spo2.",), None,
-                  ("resp_rate", "resting_hr", "sleep_total", "sleep_efficiency"), "recent"),
+                  ("resp_rate", "resting_hr", "sleep_total", "sleep_efficiency"), "recent", ("spo2",)),
     InsightMetric("heart_rate", SIGNALS["heart_rate"], "day", ("heart_rate.",), "heart_rate.stable_awake_5min",
-                  ("resting_hr", "hrv_rmssd", "steps", "sleep_total"), "context_layer", "rhr"),
+                  ("resting_hr", "hrv_rmssd", "steps", "sleep_total"), "context_layer",
+                  ("hr", "rhr")),  # awake heart rate shares the resting-HR findings (caffeine, alcohol, heat)
     InsightMetric("steps", SIGNALS["steps"], "day", (), None, ("calories", "heart_rate", "sleep_total"),
-                  "app_baseline"),
-    InsightMetric("calories", SIGNALS["calories"], "day", (), None, ("steps", "heart_rate", "sleep_total"), "recent"),
+                  "app_baseline", ("steps",)),
+    InsightMetric("calories", SIGNALS["calories"], "day", (), None, ("steps", "heart_rate", "sleep_total"), "recent",
+                  ("energy",)),
 )}
 
 

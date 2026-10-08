@@ -67,9 +67,12 @@ NOTES = {
     "resp_rate": "Respiratory rate is estimated from heartbeat timing: say estimated whenever you state it.",
     "spo2": "Blood oxygen here is the strap's unverified estimate: say estimated whenever you state it, and never "
             "compare it with clinical or population numbers, only with the person's own recent nights.",
-    "heart_rate": "Calm awake heart rate is the person's heart rate during calm, still, waking five-minute stretches "
-                  "of the day; resting heart rate during sleep is in related_metrics. state_breakdown has it by time "
-                  "of day.",
+    "heart_rate": "Stable awake heart rate is the person's heart rate in still, waking five-minute stretches of the "
+                  "day (the app's stable awake measurement); resting heart rate during sleep is in related_metrics. "
+                  "state_breakdown has it by time of day. When it differs from the usual, look at that day's "
+                  "workouts and walking (workout_context, activity_context, gait_context) and recorded caffeine or "
+                  "alcohol (recent_events). Never call it calm or relaxed: it says nothing about how the person "
+                  "felt.",
     "steps": "Steps are estimated from the strap's step counter: say estimated whenever you state them. gait_context "
              "is ElderNet's estimate of how the person walked that day (walking and brisk minutes, walks, cadence, "
              "walking speed) against the days before: use it to say how the day's walking differed.",
@@ -79,6 +82,14 @@ NOTES = {
 }
 # Literature queries that name a pattern and the metric (the model copies the shape, not the words).
 EXAMPLES = {
+    "hrv_sdnn": ("'sleep loss heart rate variability' after a short night, 'evening exercise heart rate variability' "
+                 "after a late workout, 'heart rate variability night-to-night variability' when nothing stands out"),
+    "skin_temp": ("'menstrual cycle skin temperature', 'bedroom heat skin temperature sleep' on a warm night, "
+                  "'wrist temperature circadian rhythm sleep' about the night's pattern"),
+    "resp_rate": ("'respiratory rate night-to-night variability' when nothing stands out, 'altitude breathing rate' "
+                  "at altitude, 'respiratory rate sleep stages' about the night's sleep"),
+    "heart_rate": ("'caffeine heart rate' after recorded coffee, 'heart rate after exercise' after a workout that "
+                   "day, 'heart rate circadian time of day' about the day's pattern"),
     "steps": ("'daily step count variability' when nothing stands out, 'walking cadence' about how the person "
               "walked, 'exercise day steps' after a workout"),
     "calories": ("'energy expenditure physical activity wearable' after a more active day, 'resting energy "
@@ -86,11 +97,11 @@ EXAMPLES = {
     "spo2": ("'wrist pulse oximetry accuracy' about how far the estimate can be trusted, 'altitude blood oxygen' at "
              "altitude"),
 }
-STATES = """   - in which state: state_breakdown gives the value during sleep, at calm awake rest and around movement, and by
+STATES = """   - in which state: state_breakdown gives the value during sleep, at stable awake rest and around movement, and by
      time of day, each with its own usual value and usual band (the threshold). Compare a state only with its own
      usual, and say which states are higher, lower or as usual; skip states that are not available.
      state_breakdown.through_the_day (HRV) groups the 15-minute readings of the night's two days by what the
-     person was doing (asleep, calm and awake, just after moving, while moving): compare those states with each
+     person was doing (asleep, awake and still, just after moving, while moving): compare those states with each
      other ("lower while you were walking, back up once you settled"), never with the nightly usual;
 """
 
@@ -166,6 +177,8 @@ RETRY_HINTS = {
     "grounding": "Copy numbers, dates and times exactly as the tools give them (21:30, or 9:30 p.m.).",
     "usual": "Say within or outside your usual range only as metric_summary.assessment.state says (and each "
              "vital's state in related_metrics.night_vitals).",
+    "shape": "Keep each sentence short (one point, under 280 characters) and each list to 1-3 sentences.",
+    "concise": "Say less: the whole explanation must fit in 1200 characters; drop the least important sentence.",
 }
 
 

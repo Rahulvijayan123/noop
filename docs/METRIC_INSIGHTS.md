@@ -15,7 +15,7 @@ app's own data and work without the explanation; the explanation is fetched with
 | `skin_temp` | Wrist temperature | night | `DailyMetric.skinTempC` (absolute) | `skin_temp_c`, with `skin_temp_dev_c` as context | Layer 1 `sleep_temp` | measured (skin, not core) |
 | `resp_rate` | Respiratory rate | night | `DailyMetric.respRateBpm` | `resp_rate_bpm` | Layer 1 `sleep_resp` | estimated (from heartbeat timing) |
 | `spo2` | Blood oxygen | night | `spo2Pct`, else the strap's candidate | snapshot `daily.spo2_candidate_pct` | recent nights | estimated, unverified |
-| `heart_rate` | Calm awake heart rate | day | context history daily value `heart_rate.stable_awake_5min` | the context document's daily value of that series | the context layer's personal reference | measured |
+| `heart_rate` | Stable awake heart rate | day | context history daily value `heart_rate.stable_awake_5min` | the context document's daily value of that series | the context layer's personal reference | measured |
 | `steps` | Steps | day | the Steps page's own source (`resolvedSteps`) | snapshot `daily.steps`, ElderNet gait detail | Layer 1 `waking_steps` | estimated (step counter) |
 | `calories` | Calories | day | `energy_kcal` (imported) else `DailyMetric.activeKcalEst` (a whole-day total) | snapshot `daily.energy` | recent days | estimated |
 

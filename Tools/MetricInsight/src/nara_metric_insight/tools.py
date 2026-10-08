@@ -214,13 +214,13 @@ class JobTools:
 
 
 TOOLS: dict[str, Tool] = {tool.name: tool for tool in (
-    Tool("get_metric_series", "This metric's values per night (or per day for calm awake heart rate, steps and "
+    Tool("get_metric_series", "This metric's values per night (or per day for stable awake heart rate, steps and "
          "calories), oldest first, null where it was not measured.",
          _object({"days": {"type": "integer", "minimum": 7, "maximum": WINDOW_DAYS}}), JobTools.metric_series),
     Tool("get_metric_summary", "Latest value, previous night, the person's usual and the app's call for the night "
          "(in range or off usual, exactly as the Home ring and the Monitor show it), last 7 nights, and the context "
          "layer's comparison and change episode.", _object(), JobTools.metric_summary),
-    Tool("get_state_breakdown", "This metric in each measured state (during sleep, at calm awake rest, around "
+    Tool("get_state_breakdown", "This metric in each measured state (during sleep, at stable awake rest, around "
          "movement) and by time of day, each against its own usual value and usual band (the threshold).",
          _object(), JobTools.state_breakdown),
     Tool("get_movement_patterns", "Movement bouts the evening before the night and on the day (local times, "
