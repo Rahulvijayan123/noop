@@ -59,12 +59,13 @@ classification: it is withheld with a machine-readable reason.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import numpy as np
 
-from ._common import (artifact_root, is_flat, iter_windows, min_max01,
-                      score_vector, sha256_file, verify_file_sha256)
+from ._common import (artifact_root, cached_sha256, is_flat, iter_windows, min_max01,
+                      score_vector, verify_file_sha256)
 
 UPSTREAM_REPO = "https://github.com/chengstark/SiamAF"
 PINNED_COMMIT = "c05be9e37d2013d0817aafc5b2e72b2f7649e95e"
@@ -77,6 +78,8 @@ ARTIFACT_RELPATH = f"siamaf/{PINNED_COMMIT[:10]}/{ARTIFACT_NAME}"
 
 SEGMENT_SECONDS = 30.0
 INPUT_SAMPLES = 2400
+#: The rate the network is fed after resampling a 30 s window to 2400 samples.
+INPUT_RATE_HZ = INPUT_SAMPLES / SEGMENT_SECONDS
 #: Classification logits: index 0 = non-AF, index 1 = AF (model card + dataset.py).
 RHYTHM_CLASSES = ["non_af", "af"]
 PROVIDER_REVISION = "siamaf/1.0.0"
@@ -111,7 +114,7 @@ class SiamAFAdapter:
         if not self.artifact_present:
             return False, "artifact_unavailable"
         try:
-            actual = sha256_file(self.checkpoint_path)
+            actual = cached_sha256(self.checkpoint_path)
         except OSError as exc:
             return False, f"artifact_unavailable: {exc}"
         if actual.lower() != self.expected_sha256.lower():
@@ -192,11 +195,13 @@ class SiamAFAdapter:
             _, _, class_pred = model(x, x)
         return class_pred.detach().cpu().numpy().astype(np.float64).reshape(-1)
 
-    def infer(self, ppg: dict[str, Any]) -> dict[str, Any]:
-        """Run the shadow inference over the PPG payload.
+    def infer(self, ppg: dict[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+        """Run the shadow inference over the PPG payload's runs.
 
         Returns ``{"status", "reason", "windows", "rhythm"}`` where ``rhythm``
-        is a score-vector measurement (None when no window ran).
+        is a score-vector measurement (None when no window ran). ``deadline``
+        (``time.monotonic()``) bounds the inference loop; past it nothing
+        partial is returned.
         """
         native = float(ppg["native_rate_hz"])
         window_samples = int(round(SEGMENT_SECONDS * native))
@@ -216,17 +221,22 @@ class SiamAFAdapter:
                         "windows": 0, "rhythm": None}
         rows: list[list[float]] = []
         for x in prepared:
+            if deadline is not None and time.monotonic() > deadline:
+                return {"status": "error", "reason": "timeout", "windows": 0, "rhythm": None}
             logits = self._classify(x)
             rows.append([float(v) for v in logits])
         n = len(rows)
         method = (f"{PROVIDER_REVISION} shadow inference, source PPG resampling "
-                  f"(scipy.signal.resample to {INPUT_SAMPLES} + min-max)")
+                  f"(scipy.signal.resample {native:g}->{INPUT_RATE_HZ:g} Hz, {INPUT_SAMPLES} "
+                  f"samples per {SEGMENT_SECONDS:g} s, + min-max)")
         rhythm = score_vector(
             key="siamaf_rhythm_scores", scores=rows, classes=RHYTHM_CLASSES,
             count=n, method=method, native_rate_hz=native,
             segment_seconds=SEGMENT_SECONDS, samples_per_segment=INPUT_SAMPLES,
             preprocessing_status="verified_from_source", publishable=False,
             domain="ppg_waveform", domain_status="native_rate_mismatch",
+            model_input_rate_hz=INPUT_RATE_HZ,
+            windows=[{"run": w["run"], "start_unix": w["start_unix"]} for w in windows],
             extra={"source_native_rate_hz": SOURCE_NATIVE_RATE_HZ})
         return {"status": "ok", "reason": None, "windows": n, "rhythm": rhythm}
 
@@ -234,6 +244,6 @@ class SiamAFAdapter:
 __all__ = [
     "SiamAFAdapter", "UPSTREAM_REPO", "PINNED_COMMIT", "ARTIFACT_NAME",
     "ARTIFACT_SIZE", "ARTIFACT_SHA256", "ARTIFACT_RELPATH", "LICENSE",
-    "SEGMENT_SECONDS", "INPUT_SAMPLES", "RHYTHM_CLASSES", "PROVIDER_REVISION",
-    "SOURCE_NATIVE_RATE_HZ",
+    "SEGMENT_SECONDS", "INPUT_SAMPLES", "INPUT_RATE_HZ", "RHYTHM_CLASSES",
+    "PROVIDER_REVISION", "SOURCE_NATIVE_RATE_HZ",
 ]

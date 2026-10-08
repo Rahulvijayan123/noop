@@ -2,14 +2,16 @@
 
 This module is pure plumbing: artifact-root resolution, env-flag gating,
 sha256 verification, PPG payload parsing and windowing. It imports only the
-standard library and numpy/scipy, so importing the ``rhythm`` package can
-never pull in keras or torch (the heavy optional runtimes are imported lazily
-inside the adapter constructors).
+standard library, numpy and the run model in ``..ppg`` (numpy only), so
+importing the ``rhythm`` package can never pull in keras or torch (the heavy
+optional runtimes are imported lazily inside the adapter constructors).
 """
 
 from __future__ import annotations
 
+import functools
 import hashlib
+import math
 import os
 from typing import Any, Iterator
 
@@ -25,9 +27,9 @@ LOCAL_STAGING_ROOT = "/tmp/frwhoop-sensor-biomarkers/models"
 #: Exactly "1" enables a worker flag (mirrors FRWHOOP_ACTIVITY_ENABLED).
 _ENABLED_VALUE = "1"
 
-#: PPG payload contract (CONTRACTS.md section 4): absolute reconstructed ADC
-#: counts, 24 Hz native, per-second records with a stable optical config.
-DEFAULT_NATIVE_RATE_HZ = 24
+#: Clock gates a rhythm request can be held to (``parse_ppg_payload``).
+CLOCK_GATE_LEGACY = "legacy_config_stable"
+CLOCK_GATE_PACKET_TIMING = "packet_timing_verified"
 
 
 def artifact_root() -> str:
@@ -56,6 +58,21 @@ def sha256_file(path: str, chunk: int = 1 << 20) -> str:
     return digest.hexdigest()
 
 
+@functools.lru_cache(maxsize=16)
+def _sha256_by_stat(path: str, size: int, mtime_ns: int) -> str:
+    return sha256_file(path)
+
+
+def cached_sha256(path: str) -> str:
+    """sha256 of ``path``, re-hashed only when its size or mtime changes.
+
+    For readiness reporting only; the bytes a model is loaded from are always
+    hashed again at load time (``verify_file_sha256``).
+    """
+    stat = os.stat(path)
+    return _sha256_by_stat(os.path.realpath(path), stat.st_size, stat.st_mtime_ns)
+
+
 def verify_file_sha256(path: str, expected: str) -> str:
     """Return the sha256 of ``path``, raising ValueError on mismatch."""
     actual = sha256_file(path)
@@ -66,26 +83,36 @@ def verify_file_sha256(path: str, expected: str) -> str:
 
 
 def parse_ppg_payload(payload: Any) -> dict[str, Any]:
-    """Normalise the CONTRACTS ``input.ppg`` object.
+    """Normalise the CONTRACTS ``input.ppg`` object into runs.
 
-    Returns ``{"native_rate_hz": float, "units": str, "segments": [{
-    "start_unix": int, "duration_s": float, "samples": np.ndarray[float32],
-    "config": dict}]}``. Raises ``ValueError`` with a stable code-style message
-    on a malformed payload (the provider maps this to a diagnostics detail).
+    Segments are validated and grouped by the same run model as the
+    descriptive PPG families (``ppg.build_ppg_runs``), so a model window is
+    drawn from one run at a time and never spans a gap, a configuration change
+    or a run boundary. The native rate must be stated by the request; it is
+    never assumed.
+
+    Clock gate: a request whose segments carry ``clock`` (the run-aware
+    transport) is held per run to ``clock.packet_timing_verified``; an older
+    request without ``clock`` keeps its request-wide gate, every segment
+    declaring ``config.stable: true``. Unverified-clock input can never become
+    a rhythm classification.
+
+    Returns ``{"native_rate_hz", "units", "segments", "runs", "clock_gate",
+    "clock_verified", "run_counts"}`` where ``clock_verified`` says whether any
+    run passed the gate. Raises ``ValueError`` (with a code-style message) on a
+    malformed payload.
     """
+    empty = {"units": "adc_counts", "segments": [], "runs": [], "clock_gate": None,
+             "clock_verified": False, "run_counts": {}}
     if payload is None:
-        return {"native_rate_hz": float(DEFAULT_NATIVE_RATE_HZ), "units": "adc_counts",
-                "segments": []}
+        return {"native_rate_hz": None, **empty}
     if not isinstance(payload, dict):
         raise ValueError("input.ppg must be an object")
     native = payload.get("native_rate_hz")
-    if native is None:
-        native = DEFAULT_NATIVE_RATE_HZ
-    try:
-        native = float(native)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("input.ppg.native_rate_hz must be a number") from exc
-    if not (1.0 <= native <= 1000.0):
+    if isinstance(native, bool) or not isinstance(native, (int, float)):
+        raise ValueError("input.ppg.native_rate_hz is required and must be a number")
+    native = float(native)
+    if not (math.isfinite(native) and 1.0 <= native <= 1000.0):
         raise ValueError("input.ppg.native_rate_hz out of range")
     units = str(payload.get("units") or "adc_counts")
     raw_segments = payload.get("segments")
@@ -93,36 +120,37 @@ def parse_ppg_payload(payload: Any) -> dict[str, Any]:
         raw_segments = []
     if not isinstance(raw_segments, list):
         raise ValueError("input.ppg.segments must be a list")
-    segments: list[dict[str, Any]] = []
-    for i, seg in enumerate(raw_segments):
-        if not isinstance(seg, dict):
-            raise ValueError(f"input.ppg.segments[{i}] must be an object")
-        samples = seg.get("samples")
-        if samples is None:
-            raise ValueError(f"input.ppg.segments[{i}].samples is required")
-        arr = np.asarray(samples, dtype=np.float64)
-        if arr.ndim != 1 or arr.size == 0:
-            raise ValueError(f"input.ppg.segments[{i}].samples must be a non-empty 1-D list")
-        if not np.isfinite(arr).all():
-            raise ValueError(f"input.ppg.segments[{i}].samples contains non-finite values")
-        segments.append({
-            "start_unix": int(seg.get("start_unix") or 0),
-            "duration_s": float(seg.get("duration_s") or (arr.size / native)),
-            "samples": arr.astype(np.float32),
-            "config": seg.get("config") or {},
-        })
-    # Clock verification: the rhythm adapters only accept segments whose sample
-    # clock/optical config is verified (CONTRACTS.md ``config: {"stable": true}``).
-    # Fail-closed: any segment without an explicit ``stable: true`` marks the
-    # clock unverified, so unverified-clock input can never become a rhythm
-    # classification (test requirement: flat/missing/short/mixed-channel/
-    # unverified-clock inputs cannot become normal classifications).
-    clock_verified = all(
-        isinstance(seg.get("config") or {}, dict)
-        and (seg.get("config") or {}).get("stable") is True
-        for seg in segments)
-    return {"native_rate_hz": native, "units": units, "segments": segments,
-            "clock_verified": clock_verified}
+    if not raw_segments:
+        return {**empty, "native_rate_hz": native, "units": units}
+
+    from ..ppg import _validate_segments, build_ppg_runs
+
+    segments = _validate_segments(raw_segments, native)
+    runs, run_counts = build_ppg_runs(segments)
+    if any(seg["clock"] is not None for seg in segments):
+        gate = CLOCK_GATE_PACKET_TIMING
+        verified = {run.key: run.clock_verified is True for run in runs}
+    else:
+        gate = CLOCK_GATE_LEGACY
+        all_stable = all(seg["config"].get("stable") is True for seg in segments)
+        verified = {run.key: all_stable for run in runs}
+    return {
+        "native_rate_hz": native,
+        "units": units,
+        "segments": [{"start_unix": seg["start"], "duration_s": seg["duration"],
+                      "samples": seg["samples"].astype(np.float32), "config": seg["config"]}
+                     for seg in segments],
+        "runs": [{"key": run.key, "run_id": run.run_id, "start_unix": run.start,
+                  "duration_s": run.duration, "segments": len(run.segment_indices),
+                  "configuration": run.configuration,
+                  "configuration_unidentified": run.configuration_unidentified,
+                  "clock_verified": verified[run.key],
+                  "samples": run.samples.astype(np.float32)}
+                 for run in runs],
+        "clock_gate": gate,
+        "clock_verified": any(verified.values()),
+        "run_counts": run_counts,
+    }
 
 
 def iter_windows(
@@ -131,14 +159,14 @@ def iter_windows(
     window_seconds: float,
     window_samples: int,
 ) -> Iterator[dict[str, Any]]:
-    """Yield non-overlapping analysis windows from the PPG segments.
+    """Yield non-overlapping analysis windows, one run at a time.
 
     A window is ``window_samples`` native samples (``window_seconds`` at the
-    native rate). Only full windows are yielded (no zero padding, no splicing
-    across segments); the yield includes ``start_unix`` so results stay
-    time-ordered. ``window_samples`` is derived from the native rate by the
-    caller, so a mismatched rate produces the caller's explicit error, never a
-    silent re-interpretation.
+    native rate). Only full windows inside one clock-verified run are yielded
+    (no zero padding, no splicing across runs); each yield names its run and
+    start time so results stay time-ordered and traceable. ``window_samples``
+    is derived from the native rate by the caller, so a mismatched rate
+    produces the caller's explicit error, never a silent re-interpretation.
     """
     native = float(ppg["native_rate_hz"])
     native_per_window = int(round(window_seconds * native))
@@ -146,12 +174,14 @@ def iter_windows(
         raise ValueError(
             f"unsupported_native_rate: {window_seconds:g}s at {native:g} Hz "
             f"is {native_per_window} samples, expected {window_samples}")
-    for seg in ppg["segments"]:
-        samples = seg["samples"]
-        start = int(seg["start_unix"])
+    for run in ppg["runs"]:
+        if not run["clock_verified"]:
+            continue
+        samples = run["samples"]
         for offset in range(0, samples.size - window_samples + 1, window_samples):
             yield {
-                "start_unix": start + int(round(offset / native)),
+                "run": run["key"],
+                "start_unix": run["start_unix"] + offset / native,
                 "window_samples": window_samples,
                 "native_rate_hz": native,
                 "samples": samples[offset:offset + window_samples],
@@ -189,13 +219,17 @@ def score_vector(*, key: str, scores: list[list[float]], classes: list[str],
                  segment_seconds: float, samples_per_segment: int,
                  preprocessing_status: str, publishable: bool,
                  domain: str, domain_status: str, unit: str = "model_score",
+                 model_input_rate_hz: float | None = None,
+                 windows: list[dict[str, Any]] | None = None,
                  extra: dict[str, Any] | None = None) -> dict[str, Any]:
     """One ordered model score vector measurement for the rhythm_shadow stage.
 
     ``scores`` is an ordered list of per-window score vectors (window order =
     time order); ``classes`` labels the index of each vector. Every vector
-    carries its preprocessing/domain status and is never publishable unless
-    the caller proves otherwise (both adapters keep ``publishable=False``).
+    carries its preprocessing/domain status, the native rate the samples came
+    in at and the rate the model was fed after resampling, and is never
+    publishable unless the caller proves otherwise (both adapters keep
+    ``publishable=False``). ``windows`` gives each score row's run and start.
     """
     entry: dict[str, Any] = {
         "key": key,
@@ -210,9 +244,14 @@ def score_vector(*, key: str, scores: list[list[float]], classes: list[str],
         "domain": domain,
         "domain_status": domain_status,
     }
+    if model_input_rate_hz is not None:
+        entry["model_input_rate_hz"] = float(model_input_rate_hz)
     if count > 0:
         entry["scores"] = [list(map(float, row)) for row in scores]
         entry["classes"] = list(classes)
+        if windows is not None:
+            entry["window_runs"] = [str(w["run"]) for w in windows]
+            entry["window_starts_unix"] = [float(w["start_unix"]) for w in windows]
     if extra:
         entry.update(extra)
     return entry
@@ -220,6 +259,7 @@ def score_vector(*, key: str, scores: list[list[float]], classes: list[str],
 
 __all__ = [
     "DEFAULT_ARTIFACT_ROOT", "LOCAL_STAGING_ROOT", "artifact_root", "flag_enabled",
-    "sha256_file", "verify_file_sha256", "parse_ppg_payload", "iter_windows",
-    "is_flat", "min_max01", "score_vector",
+    "sha256_file", "cached_sha256", "verify_file_sha256", "parse_ppg_payload",
+    "iter_windows", "is_flat", "min_max01", "score_vector",
+    "CLOCK_GATE_LEGACY", "CLOCK_GATE_PACKET_TIMING",
 ]
