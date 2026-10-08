@@ -229,6 +229,9 @@ enum ContextInputs {
         var historyValues: [PC.DailyValue] = []
         var historyBouts: [PC.ExertionBout] = []
         var frozen: [PC.FrozenReference] = []
+        /// The user's other devices' daily values (same mode, causal cutoff), for the predecessor-regime fallback
+        /// after a strap change (D4-09). One entry per other device, its values in day order.
+        var predecessors: [PC.PredecessorRegimeHistory] = []
         /// Optional inputs that could not be read (`activity_epochs_unavailable`, ...), sorted.
         var unavailable: [String] = []
         /// Stored rows that did not decode into the contract types (skipped, counted).
@@ -260,6 +263,7 @@ enum ContextInputs {
             }
             l.exposures.sort { ($0.eventId, $0.revision) < ($1.eventId, $1.revision) }
             l.otherSnapshots.sort { ($0.day, $0.resultRevision) < ($1.day, $1.resultRevision) }
+            l.predecessors.sort { $0.deviceScope < $1.deviceScope }
             return l
         }
 
@@ -268,6 +272,7 @@ enum ContextInputs {
                 + bandSleep.count + workouts.count + epochs.count + intervals.count + transitions.count
                 + placements.count
                 + exposures.count + historyValues.count + historyBouts.count + frozen.count
+                + predecessors.reduce(0) { $0 + $1.dailyValues.count }
                 + otherSnapshots.count + (snapshot == nil ? 0 : 1)
         }
     }
@@ -424,6 +429,16 @@ enum ContextInputs {
                 return v
             }
         } ?? []
+        // Predecessor regimes (D4-09): the other devices' parent daily values over the predecessor horizon. The
+        // successor's own hardware family comes from its device row, read in the same snapshot.
+        if let from = shiftDay(job.day, by: -predecessorHorizonDays) {
+            let successorFamily = hardwareFamily(out.device)
+            out.predecessors = try optional("predecessor_daily_values_unavailable") {
+                let rows = try db.query(predecessorDailyValuesSQL,
+                                        [job.userId, job.deviceId, mode, from, w.previousDay, historyCutoff])
+                return predecessorHistories(rows, successorFamily: successorFamily, skipped: &skipped)
+            } ?? []
+        }
         if !historyCutoff.isEmpty {
             // Telemetry only: a failure leaves the count at 0 and marks no input unavailable.
             let n = try? db.isolatingFailures {
@@ -895,7 +910,7 @@ enum ContextInputs {
                                                                                    anchorRaw: anchor)),
                                           availableAt: $0.availableAt)
         }
-        let regime = deviceRegime(loaded.device)
+        let regime = deviceRegime(loaded.device, intervals: loaded.intervals)
         let identity = PC.DayIdentity(deviceScope: job.deviceId, day: job.day, timezoneId: w.timezoneId,
                                       dayWindow: w.dayWindow)
 
@@ -952,7 +967,8 @@ enum ContextInputs {
             dailyValues: loaded.historyValues.sorted { ($0.day, $0.seriesKey, $0.regimeKey) < ($1.day, $1.seriesKey, $1.regimeKey) },
             bouts: loaded.historyBouts.sorted { ($0.interval, $0.id) < ($1.interval, $1.id) },
             frozenReferences: loaded.frozen.sorted { ($0.seriesKey, $0.regimeKey, $0.version, $0.id) < ($1.seriesKey, $1.regimeKey, $1.version, $1.id) },
-            priorSleep: priorSleep)
+            priorSleep: priorSleep,
+            predecessors: loaded.predecessors)
         return Assembled(input: input, history: history, causalExcluded: excluded, rowCount: loaded.rowCount,
                          measurementCount: measurements.count)
     }
@@ -971,12 +987,85 @@ enum ContextInputs {
     ///    "WHOOP 5B…" name the same strap). The device id is already the history scope, so leaving the family out
     ///    pools nothing across devices. (The skin-temperature conversion still reads the current family, exactly as
     ///    the scorer does.)
-    static func deviceRegime(_ device: DeviceRow?) -> PC.DeviceRegimeInput {
-        PC.DeviceRegimeInput(
-            vendor: (device?.sourceKind ?? "").lowercased().contains("oura") ? "oura" : "whoop",
-            deviceFamily: nil, sourceKind: device?.sourceKind, firmware: nil, decoderVersion: nil,
+    ///  - `decoder_version` IS stamped (D4-09): it is not a device attribute but the version of the activity
+    ///    documents the day actually read (`intervals`), fixed by what was published for that day. One version, or
+    ///    the sorted versions joined by `+` when the day's documents came from several; nil without any. It is not
+    ///    part of the regime key, so it never splits a reference by itself.
+    ///  - The hardware family the predecessor-regime fallback needs is resolved per device row in
+    ///    `predecessorHistories` and carried on the predecessor entries only, never on the day's own regime.
+    static func deviceRegime(_ device: DeviceRow?, intervals: [PC.ActivityIntervalInput] = []) -> PC.DeviceRegimeInput {
+        let decoders = Set(intervals.compactMap(\.decoderVersion)).sorted()
+        return PC.DeviceRegimeInput(
+            vendor: vendor(device?.sourceKind),
+            deviceFamily: nil, sourceKind: device?.sourceKind, firmware: nil,
+            decoderVersion: decoders.isEmpty ? nil : decoders.joined(separator: "+"),
             scoringAlgorithmVersion: scoringAlgorithmVersion,
             seriesAlgorithmVersion: IntradaySeries.algorithmVersion)
+    }
+
+    static func vendor(_ sourceKind: String?) -> String {
+        (sourceKind ?? "").lowercased().contains("oura") ? "oura" : "whoop"
+    }
+
+    // MARK: - Predecessor regimes (D4-09)
+
+    /// Days before the scored day the predecessor read reaches: the rolling window plus the oldest a
+    /// predecessor's newest value may be (`ReferenceConfig.predecessorMaxAgeDays`).
+    static let predecessorHorizonDays = PC.ReferenceConfig().rollingWindowDays + PC.ReferenceConfig().predecessorMaxAgeDays
+
+    /// The canonical hardware family of a device row, positively identified or nil. Only a label that names the
+    /// family counts ("WHOOP 4.0" / "4.0" -> whoop4; "5.0", "MG", "5B" -> whoop5); a bare "WHOOP" (written for
+    /// both) or an empty label is unknown, and an unknown family never borrows (the fallback abstains). A
+    /// non-WHOOP source is its vendor's own family.
+    static func hardwareFamily(_ device: DeviceRow?) -> String? {
+        guard let device else { return nil }
+        if vendor(device.sourceKind) == "oura" { return "oura_ring" }
+        guard let raw = device.family?.uppercased(), !raw.isEmpty else { return nil }
+        let label = raw.replacingOccurrences(of: " ", with: "")
+        if label == "4.0" || label.contains("WHOOP4") { return "whoop4" }
+        if label.contains("5.0") || label.contains("WHOOP5") || label.contains("MG") { return "whoop5" }
+        return nil
+    }
+
+    /// The user's OTHER devices' parent daily values (strata are the device's own and are not read) of the same
+    /// mode, `[$4, $5]`, with each device's row. `$6` is the causal cutoff as in `historyDailyValues` (a causal
+    /// job never reads a value published after its decision).
+    static let predecessorDailyValuesSQL = """
+        select v.device_id::text as device_id, v.payload::text as value,
+               coalesce(d.device_family, '') as family, coalesce(d.firmware, '') as firmware,
+               coalesce(d.source_kind, '') as source_kind
+          from public.physiology_context_daily_values v
+          join public.devices d on d.id = v.device_id and d.user_id = v.user_id
+         where v.user_id = $1::uuid and v.device_id <> $2::uuid and v.mode = $3::text
+           and v.day >= $4::date and v.day <= $5::date
+           and position('.band_' in v.series_key) = 0 and position('.posture_' in v.series_key) = 0
+           and position('.ctx_' in v.series_key) = 0
+           and (nullif($6, '') is null or exists (
+                 select 1 from public.physiology_context_days pd
+                  where pd.context_revision = v.context_revision
+                    and pd.published_at <= to_timestamp(nullif($6, '')::bigint)))
+         order by v.device_id, v.day, v.series_key collate "C", v.regime_key collate "C"
+        """
+
+    /// Group predecessor rows per device. Firmware is passed only as the row holds it today and is not used to
+    /// split (no effective-dated firmware source exists): the references note it as unknown.
+    static func predecessorHistories(_ rows: [[String: String]], successorFamily: String?,
+                                     skipped: inout Int) -> [PC.PredecessorRegimeHistory] {
+        var byDevice: [String: PC.PredecessorRegimeHistory] = [:]
+        for r in rows {
+            guard let id = nonEmpty(r["device_id"]) else { skipped += 1; continue }
+            guard let v: PC.DailyValue = decodeStored(r["value"]) else { skipped += 1; continue }
+            if byDevice[id] == nil {
+                let row = DeviceRow(family: nonEmpty(r["family"]), firmware: nonEmpty(r["firmware"]),
+                                    sourceKind: nonEmpty(r["source_kind"]))
+                byDevice[id] = PC.PredecessorRegimeHistory(
+                    deviceScope: id, vendor: vendor(row.sourceKind), sourceKind: row.sourceKind,
+                    hardwareFamily: hardwareFamily(row), successorHardwareFamily: successorFamily,
+                    firmware: nil, dailyValues: [])
+            }
+            byDevice[id]!.dailyValues.append(v)
+        }
+        return byDevice.keys.sorted().map { byDevice[$0]! }
     }
 
     /// The sessions the day's input carries: every session of the newest D−1, D and D+1 snapshots, each with the
@@ -1126,6 +1215,9 @@ enum ContextInputs {
             PC.InputRevision(input: "history_daily_values", revision: String(l.historyValues.count)),
             PC.InputRevision(input: "history_bouts", revision: String(l.historyBouts.count)),
             PC.InputRevision(input: "frozen_references", revision: String(l.frozen.count)),
+            PC.InputRevision(input: "predecessor_daily_values", revision: l.predecessors.map {
+                "\($0.deviceScope):\($0.dailyValues.count):\($0.hardwareFamily ?? "unknown")"
+            }.joined(separator: ",")),
         ]
         for name in l.unavailable { out.append(PC.InputRevision(input: name, revision: "unavailable")) }
         return out.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) }
