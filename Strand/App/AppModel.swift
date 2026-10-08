@@ -984,6 +984,7 @@ final class AppModel: ObservableObject {
                 await DemoLabBookSeeder.seedIfRequested(into: store, deviceId: self.repo.deviceId)
                 await DemoWatchdogSeeder.seedIfRequested(into: store, deviceId: self.deviceId)
                 await DemoWorkoutSeeder.seedIfRequested(into: store)
+                await DemoMetricSeeder.seedIfRequested(into: store)
                 // Give the demo a plausible strap battery so the Today header badge renders (the live
                 // battery is runtime-only and nil without a connected strap).
                 self.live.batteryPct = 68

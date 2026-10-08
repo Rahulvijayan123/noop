@@ -539,7 +539,9 @@ struct MeasurementContextDetailView: View {
     private func sectionCard(_ section: ContextDetailSection) -> some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text(section.title).strandOverline()
+                Text(section.title)
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 ForEach(section.rows) { row in rowView(row) }
                 if let footnote = section.footnote {
                     Text(footnote)
@@ -592,7 +594,7 @@ struct MeasurementContextDetailView: View {
                             .foregroundStyle(StrandPalette.textPrimary)
                         Spacer(minLength: NoopMetrics.space2)
                         Image(systemName: "chevron.right")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(StrandFont.icon(.inline))
                             .foregroundStyle(StrandPalette.textTertiary)
                             .accessibilityHidden(true)
                     }
@@ -616,7 +618,7 @@ struct MeasurementContextDetailView: View {
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer(minLength: NoopMetrics.space2)
                     Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }

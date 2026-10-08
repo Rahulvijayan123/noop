@@ -15,26 +15,31 @@ final class StepsDetailDensityIntegrationTests: XCTestCase {
         ("2026-12-31", 0),
     ]
 
+    /// Every steps page draws bars of its calendar buckets. The global line/bar chart preference no longer
+    /// reaches the detail page at all: each metric's chart comes from `MetricPresentation`.
     func testEveryStepsDetailSourceForcesBarsDespiteLinePreference() throws {
         let stepMetrics = [
             try XCTUnwrap(MetricCatalog.metric(key: "steps", source: "my-whoop")),
             try XCTUnwrap(MetricCatalog.metric(key: "steps", source: "apple-health")),
             try XCTUnwrap(MetricCatalog.metric(key: "steps", source: "xiaomi-band")),
             try XCTUnwrap(MetricCatalog.metric(key: "steps_est", source: "my-whoop")),
+            try XCTUnwrap(MetricCatalog.metric(key: "steps", source: MetricCatalog.combinedStepsSource)),
         ]
 
         for metric in stepMetrics {
-            XCTAssertTrue(MetricDetailSteps.showsBars(metricKey: metric.key,
-                                                      preferredStyleRaw: TrendChartStyle.line.rawValue),
-                          metric.id)
+            XCTAssertTrue(MetricDetailSteps.isMetric(metric.key), metric.id)
+            XCTAssertEqual(MetricPresentation.of(metric).chart, .totals(.mean), metric.id)
         }
     }
 
-    func testOtherMetricsKeepTheGlobalChartPreference() {
-        XCTAssertFalse(MetricDetailSteps.showsBars(metricKey: "hrv",
-                                                   preferredStyleRaw: TrendChartStyle.line.rawValue))
-        XCTAssertTrue(MetricDetailSteps.showsBars(metricKey: "hrv",
-                                                  preferredStyleRaw: TrendChartStyle.bar.rawValue))
+    /// Updated with the detail-page rebuild: other metrics no longer follow the global line/bar preference
+    /// (TrendChartStyle), which drew 0-100 scores and nightly vitals in the same generic chart. Each gets
+    /// the chart its data needs, whatever that preference says.
+    func testOtherMetricsUseTheirOwnChartWhateverTheGlobalPreference() throws {
+        let hrv = try XCTUnwrap(MetricCatalog.metric(key: "hrv", source: "my-whoop"))
+        let charge = try XCTUnwrap(MetricCatalog.metric(key: "recovery", source: "my-whoop"))
+        XCTAssertEqual(MetricPresentation.of(hrv).chart, .line(minSpan: 20))
+        XCTAssertEqual(MetricPresentation.of(charge).chart, .scoreBars(.charge))
     }
 
     func testOneReadingAndOneAggregatedBucketRemainBars() throws {

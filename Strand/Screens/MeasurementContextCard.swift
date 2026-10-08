@@ -147,9 +147,12 @@ extension PhysiologyContextDay: Identifiable {
     public var id: String { "\(deviceId)|\(day)|\(metric ?? "all")|\(contextRevision.map(String.init) ?? "-")" }
 }
 
-// MARK: - Card
+// MARK: - Row
 
-struct MeasurementContextCard: View {
+/// The measurement context of the page's latest day as one row of the detail page's context card: the
+/// state phrase ("Stable, awake") under the title, opening the full context sheet (support, eligibility,
+/// coverage, reference, episodes, history). Renders nothing in local-only mode.
+struct MeasurementContextRow: View {
     let metric: PhysiologyContext.MetricKind
     /// The page's selected local day (`yyyy-MM-dd`).
     let day: String
@@ -163,21 +166,38 @@ struct MeasurementContextCard: View {
     private var key: PhysiologyContextStore.Key { .init(day: day, metric: metric) }
 
     var body: some View {
-        // Local-only mode: nothing at all, not even a placeholder.
         if CloudPushSettings.isEnabled, CloudPushSettings.isConfigured {
-            content
-                .task(id: "\(day)|\(metric.rawValue)|\(store.epoch)") { await run() }
-                .sheet(item: $detailDay) { shown in
-                    MeasurementContextDetailView(day: shown, metric: metric, isStale: detailIsStale)
-                        .presentationDetents([.medium, .large])
-                        .presentationDragIndicator(.visible)
+            let state = rowState
+            Button {
+                #if os(iOS)
+                StrandHaptic.selection.play()
+                #endif
+                if let shown = state.day {
+                    detailIsStale = state.stale
+                    detailDay = shown
+                } else if state.retries {
+                    Task { await store.load(key) }
                 }
+            } label: {
+                NoopListRow(icon: "waveform.path.ecg.rectangle", iconColor: StrandPalette.textSecondary,
+                            title: "\(MeasurementContextCopy.title)", subtitle: state.subtitle,
+                            showsChevron: state.day != nil)
+                    .redacted(reason: state.loading ? .placeholder : [])
+            }
+            .buttonStyle(.plain)
+            .disabled(state.day == nil && !state.retries)
+            .accessibilityHint(state.day != nil ? Text("Shows how this measurement was taken") : Text(""))
+            .task(id: "\(day)|\(metric.rawValue)|\(store.epoch)") { await run() }
+            .sheet(item: $detailDay) { shown in
+                MeasurementContextDetailView(day: shown, metric: metric, isStale: detailIsStale)
+                    .presentationDetents([.medium, .large])
+                    .presentationDragIndicator(.visible)
+            }
         }
     }
 
-    /// Load, then re-read pending or updating context on a bounded backoff (`PhysiologyContextStore.pollDelaysS`,
-    /// about 15 minutes) while the card is on screen; `.task` cancels it when the card disappears. When the
-    /// schedule runs out and the context is still not current, the card says to check back later.
+    /// Load, then re-read pending or updating context on a bounded backoff (`PhysiologyContextStore.pollDelaysS`)
+    /// while the row is on screen; `.task` cancels it when the row disappears.
     private func run() async {
         checkBackLater = false
         await store.load(key)
@@ -190,151 +210,36 @@ struct MeasurementContextCard: View {
         if !Task.isCancelled, store.state(for: key)?.wantsPolling == true { checkBackLater = true }
     }
 
-    @ViewBuilder
-    private var content: some View {
+    private struct RowState {
+        var subtitle: String
+        var day: PhysiologyContextDay?
+        var stale = false
+        var loading = false
+        var retries = false
+    }
+
+    private var rowState: RowState {
         switch store.state(for: key) {
         case nil, .loading?:
-            shell(badges: []) {
-                HStack(spacing: NoopMetrics.space2) {
-                    ProgressView().controlSize(.small)
-                    message(MeasurementContextCopy.loading)
-                }
-            }
+            return RowState(subtitle: MeasurementContextCopy.loading, loading: true)
         case .unavailable(let reason)?:
-            if let text = MeasurementContextCopy.unavailable(reason) {
-                shell(badges: []) {
-                    message(text)
-                    if reason == .noData || reason == .processingFailed { actions(day: nil, stale: false) }
-                }
-            }
+            return RowState(subtitle: MeasurementContextCopy.unavailable(reason) ?? String(localized: "Unavailable"))
         case .pending(let shown, let reason)?:
-            shell(badges: []) {
-                message(MeasurementContextCopy.pending(reason, checkBackLater: checkBackLater))
-                if let shown { actions(day: shown, stale: true) }
-            }
+            return RowState(subtitle: MeasurementContextCopy.pending(reason, checkBackLater: checkBackLater),
+                            day: shown, stale: true)
         case .stale(let shown)?:
-            summaryCard(MeasurementContextSummary.stale(checkBackLater: checkBackLater), day: shown, stale: true)
+            return RowState(subtitle: MeasurementContextSummary.stale(checkBackLater: checkBackLater).statePhrase,
+                            day: shown, stale: true)
         case .available(let shown)?:
-            summaryCard(MeasurementContextSummary.build(day: shown, metric: metric), day: shown, stale: false)
+            return RowState(subtitle: MeasurementContextSummary.build(day: shown, metric: metric).statePhrase,
+                            day: shown)
         case .failed(let cached, _)?:
             if let cached {
                 let stale = PhysiologyContextStore.classify(cached) == .stale(cached)
-                summaryCard(stale ? MeasurementContextSummary.stale() : MeasurementContextSummary.build(day: cached, metric: metric),
-                            day: cached, stale: stale, extraNote: MeasurementContextCopy.refreshFailedNote)
-            } else {
-                shell(badges: []) {
-                    message(MeasurementContextCopy.failed)
-                    Button {
-                        Task { await store.load(key) }
-                    } label: {
-                        Label("Try again", systemImage: "arrow.clockwise")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.accent)
-                    }
-                    .buttonStyle(.plain)
-                }
+                let summary = stale ? MeasurementContextSummary.stale() : MeasurementContextSummary.build(day: cached, metric: metric)
+                return RowState(subtitle: summary.statePhrase, day: cached, stale: stale)
             }
-        }
-    }
-
-    private func summaryCard(_ summary: MeasurementContextSummary, day shown: PhysiologyContextDay, stale: Bool,
-                             extraNote: String? = nil) -> some View {
-        shell(badges: summary.badges) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                Text(summary.statePhrase)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                if let support = summary.supportText {
-                    Text(support)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-            }
-            if let eligibility = summary.eligibilityText { line(eligibility) }
-            if let coverage = summary.coverageText { line(coverage, tertiary: true) }
-            if let reference = summary.referenceText {
-                Text(reference)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            if let episode = summary.episodeText {
-                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                    line(episode)
-                    if !summary.episodeBadges.isEmpty { badgeRow(summary.episodeBadges) }
-                }
-            }
-            if let note = summary.note { line(note, tertiary: true) }
-            if let extraNote { line(extraNote, tertiary: true) }
-            actions(day: shown, stale: stale)
-        }
-    }
-
-    /// "Details" (the sheet) and "History" (pushed onto the page's navigation stack).
-    private func actions(day shown: PhysiologyContextDay?, stale: Bool) -> some View {
-        HStack(spacing: NoopMetrics.space4) {
-            if let shown {
-                Button {
-                    #if os(iOS)
-                    StrandHaptic.selection.play()
-                    #endif
-                    detailIsStale = stale
-                    detailDay = shown
-                } label: {
-                    Label("Details", systemImage: "info.circle")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .buttonStyle(LiquidPressStyle())
-                .accessibilityHint(Text("Shows how this measurement was taken"))
-            }
-            NavigationLink {
-                PhysiologyContextHistoryView(metric: metric, endingAt: day,
-                                             timezoneId: shown?.document?.timezoneId)
-            } label: {
-                Label("History", systemImage: "clock.arrow.circlepath")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.accent)
-            }
-            .buttonStyle(LiquidPressStyle())
-            Spacer(minLength: 0)
-        }
-        .padding(.top, NoopMetrics.space1)
-    }
-
-    private func shell<Content: View>(badges: [ContextBadge], @ViewBuilder _ inner: @escaping () -> Content) -> some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                HStack(alignment: .center, spacing: NoopMetrics.space2) {
-                    Text(MeasurementContextCopy.title).strandOverline()
-                    Spacer(minLength: NoopMetrics.space2)
-                    badgeRow(badges)
-                }
-                inner()
-            }
-        }
-    }
-
-    private func message(_ text: String) -> some View {
-        Text(text)
-            .font(StrandFont.subhead)
-            .foregroundStyle(StrandPalette.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func line(_ text: String, tertiary: Bool = false) -> some View {
-        Text(text)
-            .font(StrandFont.footnote)
-            .foregroundStyle(tertiary ? StrandPalette.textTertiary : StrandPalette.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    @ViewBuilder
-    private func badgeRow(_ badges: [ContextBadge]) -> some View {
-        if !badges.isEmpty {
-            HStack(spacing: NoopMetrics.space1) {
-                ForEach(badges, id: \.self) { ContextBadgeView(badge: $0) }
-            }
+            return RowState(subtitle: MeasurementContextCopy.failed, retries: true)
         }
     }
 }

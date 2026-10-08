@@ -363,6 +363,19 @@ enum UnitFormatter {
         scale == .whoop ? "21" : "100"
     }
 
+    // MARK: Duration (stored minutes)
+
+    /// A duration in MINUTES as "6 h 42 m", "42 m" under an hour, "7 h 0 m" on the hour. The sign is the
+    /// caller's (deltas prefix their own); a non-finite value is "—". Display-only, for the metric detail
+    /// pages' asleep / stage / need / zone minutes.
+    static func durationFromMinutes(_ minutes: Double) -> String {
+        guard minutes.isFinite else { return "—" }
+        let total = Int(abs(minutes).rounded())
+        let hours = total / 60
+        let rest = total % 60
+        return hours == 0 ? "\(rest) m" : "\(hours) h \(rest) m"
+    }
+
     // MARK: Helpers
 
     private static func oneDecimal(_ v: Double) -> String { String(format: "%.1f", v) }
