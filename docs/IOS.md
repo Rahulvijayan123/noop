@@ -106,12 +106,18 @@ time or all at once. The header's pencil button starts a new chat, which gets a 
 answer. The suggestions on an empty chat and the follow-ups under each answer are written for this person and this
 conversation, with the phone's own suggestions as the fallback. A question from the Today launcher, Siri's "Ask
 Coach" or `--coach-prompt` always goes into a new chat; Siri's is dropped when Coach is switched off or when it
-was asked more than ten minutes before the app opened. An older server without `features.threads` keeps the
-single-chat screen: no sidebar, no New chat, no titles, and a fresh conversation on every launch.
+was asked more than ten minutes before the app opened (judged by the question's own time, and asked at once when
+the app is already open). An older server without `features.threads`, or one with the rollback switch
+`COACH_THREADS_DISABLED` set, keeps the single-chat screen: no sidebar, no New chat, no titles, and a fresh
+conversation on every launch. Signing out removes the account's cached chats and memories from the phone, along
+with any turns not yet sent; the account keeps its saved chats.
 
 Debug builds open the chat directly with `--demo-screen coach`. Other launch arguments:
 
-- `--coach-prompt "<question>"` asks that question on launch, in a new chat.
+- `--coach-prompt "<question>"` asks that question on launch, in a new chat (read with `--demo-screen coach`).
+- `--coach-thread <uuid>` opens that chat once the chat list has loaded, the way tapping it in the sidebar does
+  (it needs a thread-aware server). Given with `--coach-prompt`, the question is asked in that chat instead of
+  a new one.
 - `--coach-focus` opens the keyboard.
 - `--coach-sidebar` starts with the chat drawer open, and shows the sidebar even without a thread-aware server.
 - `--coach-demo-threads` fills the sidebar with a few made-up chats and a folder. It does nothing when an account is
@@ -122,6 +128,13 @@ For example, to capture the drawer on a simulator with no backend:
 
 ```bash
 xcrun simctl launch <udid> com.noopapp.noop --demo-seed --demo-screen coach --coach-sidebar --coach-demo-threads
+```
+
+Or, against the local dev server below, to reopen a chat and ask a follow-up in it:
+
+```bash
+xcrun simctl launch <udid> com.noopapp.noop --demo-seed --demo-screen coach \
+  --coach-thread <thread-uuid> --coach-prompt "And what about hills?"
 ```
 
 Debug builds can also point the chat at a local `coach` function instead of the account's. Set
