@@ -45,22 +45,21 @@ struct SmartAlarmView: View {
     var body: some View {
         // #766: retitled to "Alarms" because it now holds BOTH the strap's silent wake-alarm and the
         // evening wind-down reminder, so naming it "Wind-Down" undersold it. One surface, clearly labelled.
-        ScreenScaffold(title: "Alarms",
-                       subtitle: "Your strap wake-alarm and the evening wind-down reminder, in one place.") {
+        ScreenScaffold(title: "Alarms") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 windowHero
-                strapAlarmCard
                 strapRejectedCard   // #34: only shows when the strap keeps refusing the alarm
-                AlarmDiagnosticsCard()
-                honestyCard
+                strapAlarmCard
                 windDownCard
+                honestyCard
+                AboutDisclosure("Diagnostics") { AlarmDiagnosticsCard() }
             }
         }
         .alert(String(localized: "Notifications are off"), isPresented: $showNotifDeniedAlert) {
             Button(String(localized: "Open Settings")) { Self.openNotificationSettings() }
             Button(String(localized: "Not now"), role: .cancel) {}
         } message: {
-            Text("Turn on notifications for NOOP in Settings to get your wind-down reminder.")
+            Text("Turn on notifications for Nara in Settings to get your wind-down reminder.")
         }
     }
 
@@ -78,29 +77,23 @@ struct SmartAlarmView: View {
         #endif
     }
 
-    // A small Rest-tinted hero — the wind-down readout as a clean time pairing (wind-down → wake)
-    // over a scenic Rest backdrop, so a glance gives the night's shape. It's about winding down to
-    // sleep, so it reads in the Rest world (indigo) rather than the brand-green chrome below.
+    // The night's shape at a glance: the wind-down time and the usual wake time it is derived from, then
+    // how long until the strap alarm actually buzzes. A plain card on the canvas like every other.
     private var windowHero: some View {
-        ZStack {
-            ScenicHeroBackground(domain: .rest)
-                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Tonight").strandOverline()
-                HStack(alignment: .firstTextBaseline, spacing: 14) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: 0) {
+                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space4) {
                     heroTime(label: "Wind down",
-                             time: windDownOn ? timeLabel(WindDownNudge.nudgeMinuteOfDay()) : "—",
-                             tint: StrandPalette.restColor)
+                             time: windDownOn ? timeLabel(WindDownNudge.nudgeMinuteOfDay()) : "—")
                     Image(systemName: "arrow.right")
-                        .font(.system(size: 13, weight: .semibold))
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                     // "Wake" was the wind-down INPUT wearing the name of the thing that wakes you, in the
                     // largest type on the screen, above both cards. It is the first figure a reader sees
                     // and it is not their alarm. Named for what it is instead.
                     heroTime(label: "Usual wake",
-                             time: timeLabel(wakeMinutes),
-                             tint: StrandPalette.restBright)
+                             time: timeLabel(wakeMinutes))
                     // The alarm is deliberately NOT a third figure on this arrow. The arrow is an
                     // arithmetic pair (the nudge is derived from the usual wake time) and the alarm is
                     // not part of that derivation, so chaining it would claim the nudge is timed for the
@@ -109,22 +102,20 @@ struct SmartAlarmView: View {
                     Spacer(minLength: 0)
                 }
                 // How long until it actually goes off. "10:00" does not say whether that is nine hours
-                // away or thirty-three, which is the thing you want at a glance. It lives HERE rather
-                // than beside the picker in the card below: that spot is six rows into the second card,
-                // under a four-line paragraph, so you only meet it once you are already editing the
-                // alarm. The hero is where the eye lands. Exactly one countdown on the screen, because
-                // two live ones start the next "which of these is the real one" question, which is the
-                // question this whole screen exists to stop.
+                // away or thirty-three, which is the thing you want at a glance. It lives HERE, where the
+                // eye lands, rather than beside the picker in the card below. Exactly one countdown on
+                // the screen, because two live ones start the next "which of these is the real one"
+                // question, which is the question this whole screen exists to stop.
                 //
                 // Re-rendered once a minute rather than computed at view build, since a countdown frozen
                 // at whatever it read when the screen opened is worse than none. The TimelineView wraps
                 // ONLY this line, so the 60s tick cannot re-render the rest of the screen.
                 TimelineView(.periodic(from: .now, by: 60)) { tick in
                     if let countdown = strapAlarmCountdown(from: tick.date) {
-                        VStack(alignment: .leading, spacing: 2) {
+                        VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
                             Text(countdown)
-                                .font(StrandFont.number(22))
-                                .foregroundStyle(StrandPalette.accent)
+                                .font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
                                 .fixedSize(horizontal: false, vertical: true)
                             // The absolute companion, the way a phone's clock app pairs them: the
                             // countdown is the glance, the stamp is what you check when it matters. It
@@ -137,26 +128,20 @@ struct SmartAlarmView: View {
                             }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.top, NoopMetrics.space4)
                     }
                 }
-                Text(windDownOn
-                     ? "A calm nudge \(WindDownNudge.sleepNeedMinutes / 60)h \(WindDownNudge.leadMinutes)m before your usual wake time."
-                     : "Turn on the wind-down reminder below to land at your usual wake time rested.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
-            .padding(20)
         }
         .accessibilityElement(children: .combine)
     }
 
-    private func heroTime(label: LocalizedStringKey, time: String, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(label).strandOverline()
+    private func heroTime(label: LocalizedStringKey, time: String) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+            Text(label).strandLabel()
             Text(time)
                 .font(StrandFont.number(28))
-                .foregroundStyle(tint)
+                .foregroundStyle(StrandPalette.textPrimary)
         }
     }
 
@@ -166,44 +151,20 @@ struct SmartAlarmView: View {
     // reset via the official app clears it; the phone Clock alarm covers the gap meanwhile.
     @ViewBuilder private var strapRejectedCard: some View {
         if behavior.smartAlarmEnabled && alarmRejectStreak >= 2 {
-            StrandCard(padding: 20) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Your strap isn't accepting the alarm")
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("The strap keeps reporting a different time than NOOP sends, so its firmware alarm won't fire at your wake time — usually a strap whose clock or alarm has reset. Reset the strap in the official WHOOP app (or fully charge it and reconnect), and keep your phone's Clock alarm as your wake until it takes.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
+            InlineNotice(String(localized: "The strap keeps reporting a different time than Nara sends, so its alarm won't fire at your wake time. Reset the strap in the official WHOOP app (or fully charge it and reconnect), and keep your phone's Clock alarm as your wake until it takes."),
+                         title: String(localized: "Your strap isn't accepting the alarm"), tone: .warning)
         }
     }
 
-    // The up-front, honest note about the difference between the strap's silent buzz (above) and a loud
-    // phone wake. The strap alarm is real, but it's a gentle wrist buzz, not a sound, so we say plainly
-    // to keep a backup, and that the louder smart wake lives on Android.
+    // The honest notes about the difference between the strap's silent buzz and a loud phone wake, and
+    // how the strap alarm is armed. They used to sit as paragraphs between the controls; they live in one
+    // collapsed card at the bottom now.
     private var honestyCard: some View {
-        StrandCard(padding: 20) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "bell.slash")
-                    .foregroundStyle(StrandPalette.statusWarning)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("The strap alarm is a silent buzz, not a sound")
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("The wake-alarm above buzzes your wrist from the strap's own firmware. It can't sound a loud alarm. We also schedule a backup notification at your wake time, but a sideloaded app can't sound a guaranteed wake on this device (that needs a critical-alert permission this build doesn't have), so Focus or silent mode can still mute it. Keep your phone's built-in Clock alarm as your real backup. NOOP's phone-based smart wake (light-sleep detection) is available on the Android app.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
+        AboutDisclosure("About strap alarms") {
+            AboutParagraphs([
+                String(localized: "The strap alarm is a silent buzz from the strap's own firmware, not a sound. Nara also schedules a backup notification at your wake time, but a sideloaded app can't sound a guaranteed wake on this device (that needs a critical-alert permission this build doesn't have), so Focus or silent mode can still mute it. Keep your phone's built-in Clock alarm as your real backup. Nara's phone-based smart wake (light-sleep detection) is available on the Android app."),
+                String(localized: "The alarm is armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or Nara is closed. It sends the same alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0."),
+            ])
         }
     }
 
@@ -213,18 +174,16 @@ struct SmartAlarmView: View {
     // even if the phone is asleep or NOOP is closed. Lifted verbatim (behaviour intact) out of
     // AutomationsView.alarmCard so users stop conflating it with the wind-down reminder below.
     private var strapAlarmCard: some View {
-        StrandCard(padding: 20, tint: behavior.smartAlarmEnabled ? StrandPalette.accent : nil) {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Morning").strandOverline()
-                    HStack(spacing: 10) {
-                        Image(systemName: "alarm.fill")
-                            .foregroundStyle(StrandPalette.accent)
-                            .accessibilityHidden(true)
-                        Text("Strap wake-alarm")
-                            .font(StrandFont.title2)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                    }
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
+                HStack(spacing: NoopMetrics.space2) {
+                    Image(systemName: "alarm")
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.restColor)
+                        .accessibilityHidden(true)
+                    Text("Strap wake-alarm")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
 
                 HStack(alignment: .center, spacing: 16) {
@@ -232,7 +191,7 @@ struct SmartAlarmView: View {
                         Text("Wake me with a strap buzz")
                             .font(StrandFont.body)
                             .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Arms the strap to buzz at your wake time, even if NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
+                        Text("Buzzes your strap at the time below. Keep a phone alarm as backup.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -245,7 +204,7 @@ struct SmartAlarmView: View {
                 .frame(minHeight: 42)
 
                 if behavior.smartAlarmEnabled {
-                    Divider().overlay(StrandPalette.hairline)
+                    NoopListDivider(leadingInset: 0)
                     HStack {
                         Text("Wake at").font(StrandFont.body).foregroundStyle(StrandPalette.textPrimary)
                         Spacer()
@@ -269,7 +228,7 @@ struct SmartAlarmView: View {
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .fixedSize(horizontal: false, vertical: true)
                     }
-                    Divider().overlay(StrandPalette.hairline)
+                    NoopListDivider(leadingInset: 0)
                     alarmWeekdayPicker
                     // #864: a WHOOP 5/MG only arms its firmware alarm when Protocol probes is on (see
                     // BLEManager.armStrapAlarm, which logs "not armed" and returns otherwise). Without this
@@ -287,32 +246,7 @@ struct SmartAlarmView: View {
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .frame(maxWidth: .infinity, alignment: .leading)
-                    } else {
-                        Text("Armed on the strap itself, so it can buzz at your wake time even if your phone is asleep or NOOP is closed. Sends the exact alarm command the official app sends, confirmed buzzing on a real WHOOP 4.0 (community wire capture + on-device test, #535). Keep a backup alarm for anything you truly can't miss.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        // #1706: ask the strap what it actually has stored. The readback was otherwise
-                        // only reachable by ARMING, so anyone whose alarm is off could not produce the
-                        // frame that explains a wrong reported time.
-                        //
-                        // Shown unconditionally, where the Android twin hides it until bonded. That is a
-                        // deliberate platform difference, not drift: the Android card already observes
-                        // LiveState, so gating there is free, while this view does not — and pulling
-                        // `live` in would re-render the whole alarm screen on every 1 Hz HR tick, which
-                        // this codebase keeps parent views clear of on purpose. `getStrapAlarm` no-ops
-                        // and logs when nothing is connected, so the worst case is one ignored write.
-                        Divider().overlay(StrandPalette.hairline)
-                        Button {
-                            model.ble.getStrapAlarm()
-                        } label: {
-                            Text("Check what the strap has stored")
-                        }
-                        .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-                        Text("The answer from the strap appears in your strap log and debug export, with the raw bytes it replied with.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
             }
@@ -323,19 +257,16 @@ struct SmartAlarmView: View {
     }
 
     private var windDownCard: some View {
-        // Rest-tinted when armed so the active state reads in the sleep world; neutral when off.
-        StrandCard(padding: 20, tint: windDownOn ? StrandPalette.restColor : nil) {
-            VStack(alignment: .leading, spacing: 16) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Evening").strandOverline()
-                    HStack(spacing: 10) {
-                        Image(systemName: "moon.zzz.fill")
-                            .foregroundStyle(StrandPalette.restColor)
-                            .accessibilityHidden(true)
-                        Text("Wind-down nudge")
-                            .font(StrandFont.title2)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                    }
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
+                HStack(spacing: NoopMetrics.space2) {
+                    Image(systemName: "moon.zzz")
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.restColor)
+                        .accessibilityHidden(true)
+                    Text("Wind-down nudge")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
 
                 HStack(alignment: .center, spacing: 16) {
@@ -366,7 +297,7 @@ struct SmartAlarmView: View {
                 .frame(minHeight: 42)
 
                 if windDownOn {
-                    Divider().overlay(StrandPalette.hairline)
+                    NoopListDivider(leadingInset: 0)
                     HStack {
                         VStack(alignment: .leading, spacing: 2) {
                             // Was "Wake time", the same words the strap alarm's own picker uses one card
@@ -402,7 +333,7 @@ struct SmartAlarmView: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
-                    Divider().overlay(StrandPalette.hairline)
+                    NoopListDivider(leadingInset: 0)
                     perDaySection
                 }
             }
@@ -612,9 +543,9 @@ struct SmartAlarmView: View {
                     model.applySmartAlarm()
                 } label: {
                     Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .padding(6)
+                        .font(StrandFont.icon(.inline))
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
@@ -790,63 +721,75 @@ private struct AlarmDiagnosticsCard: View {
     @State private var testAlarmPending = false
 
     var body: some View {
-        StrandCard(padding: 20) {
-            VStack(alignment: .leading, spacing: 12) {
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Diagnostics").strandOverline()
-                    Text("Alarm log")
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
+        // Drawn inside the Alarms screen's collapsed "Diagnostics" disclosure, so it is built (and starts
+        // reading the log) only once someone opens it.
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            diagnosticsBlock(title: "State", lines: stateLines, emptyText: "No alarm state yet.")
+            NoopListDivider(leadingInset: 0)
+            diagnosticsBlock(title: "Recent alarm log",
+                             lines: logLines,
+                             emptyText: "Nothing logged yet. Turn the alarm on, or tap Re-send, with the strap connected.")
 
-                diagnosticsBlock(title: "State", lines: stateLines, emptyText: "No alarm state yet.")
-                Divider().overlay(StrandPalette.hairline)
-                diagnosticsBlock(title: "Recent alarm log",
-                                 lines: logLines,
-                                 emptyText: "Nothing logged yet. Turn the alarm on, or tap Re-send, with the strap connected.")
+            Button {
+                model.applySmartAlarm()
+                refresh()
+            } label: {
+                Text("Re-send alarm to strap")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+            .disabled(!behavior.smartAlarmEnabled)
 
-                Button {
+            Button {
+                model.ble.buzzStrapOnce()
+            } label: {
+                Text("Test buzz now")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+
+            Button {
+                testAlarmPending = true
+                model.ble.armStrapAlarm(at: Date().addingTimeInterval(75))
+                refresh()
+                Task { @MainActor in
+                    try? await Task.sleep(nanoseconds: 180 * 1_000_000_000)
                     model.applySmartAlarm()
+                    testAlarmPending = false
                     refresh()
-                } label: {
-                    Text("Re-send alarm to strap")
                 }
-                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-                .disabled(!behavior.smartAlarmEnabled)
+            } label: {
+                Text(testAlarmPending ? "Test alarm armed for 75 seconds from tap" : "Test the strap alarm in 75 seconds")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+            .disabled(testAlarmPending)
 
+            Button {
+                model.stopHaptics()
+            } label: {
+                Text("Stop buzzing")
+            }
+            .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
+
+            Text("Test buzz only shows the strap can vibrate. The alarm test arms the strap's own alarm for 75 seconds from now, the same path as your wake alarm, then puts your real wake time back about 3 minutes later. Keep the app open until then. Double-tap the strap to dismiss a buzzing alarm.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
+
+            // #1706: ask the strap what it actually has stored. The readback was otherwise only
+            // reachable by ARMING, so anyone whose alarm is off could not produce the frame that
+            // explains a wrong reported time. `getStrapAlarm` no-ops and logs when nothing is
+            // connected. Not offered on a 5/MG, whose experimental command has no readback here.
+            if !model.whoop5Detected {
+                NoopListDivider(leadingInset: 0)
                 Button {
-                    model.ble.buzzStrapOnce()
+                    model.ble.getStrapAlarm()
                 } label: {
-                    Text("Test buzz now")
+                    Text("Check what the strap has stored")
                 }
                 .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-
-                Button {
-                    testAlarmPending = true
-                    model.ble.armStrapAlarm(at: Date().addingTimeInterval(75))
-                    refresh()
-                    Task { @MainActor in
-                        try? await Task.sleep(nanoseconds: 180 * 1_000_000_000)
-                        model.applySmartAlarm()
-                        testAlarmPending = false
-                        refresh()
-                    }
-                } label: {
-                    Text(testAlarmPending ? "Test alarm armed for 75 seconds from tap" : "Test the strap alarm in 75 seconds")
-                }
-                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-                .disabled(testAlarmPending)
-
-                Button {
-                    model.stopHaptics()
-                } label: {
-                    Text("Stop buzzing")
-                }
-                .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
-
-                Text("Test buzz only shows the strap can vibrate. The alarm test arms the strap's own alarm for 75 seconds from now, the same path as your wake alarm, then puts your real wake time back about 3 minutes later. Keep the app open until then. Double-tap the strap to dismiss a buzzing alarm.")
+                Text("The answer from the strap appears in your strap log and debug export, with the raw bytes it replied with.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
@@ -867,7 +810,7 @@ private struct AlarmDiagnosticsCard: View {
             } else {
                 ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
                     Text(line)
-                        .font(.system(size: 11, design: .monospaced))
+                        .font(StrandFont.mono(11))
                         .foregroundStyle(StrandPalette.textSecondary)
                         .frame(maxWidth: .infinity, alignment: .leading)
                         .fixedSize(horizontal: false, vertical: true)

@@ -16,7 +16,8 @@ enum DemoLaunch {
     static var initialTab: Int? { intArg("--demo-tab") }
 
     /// `--demo-push <route>`: one first-hop page pushed onto the launch tab, named as in `TabRoute`
-    /// (`sleep`, `heartRateDay`, `metric:hrv`, `metric:resting_hr:my-whoop`, ...).
+    /// (`sleep`, `heartRateDay`, `metric:hrv`, `metric:resting_hr:my-whoop`, `sleepNight:2026-10-07`,
+    /// `sleepNight:latest`, ...).
     static var initialRoute: TabRoute? {
         guard let raw = stringArg("--demo-push") else { return nil }
         let parts = raw.split(separator: ":", maxSplits: 2).map(String.init)
@@ -30,6 +31,7 @@ enum DemoLaunch {
         case "dataSources": return .dataSources
         case "stress": return .stress
         case "sleep": return .sleep
+        case "sleepNight": return .sleepNight(wakeDay: parts.count > 1 ? parts[1] : "latest")
         case "health": return .health
         case "hydration": return .hydration
         case "coupled": return .coupled

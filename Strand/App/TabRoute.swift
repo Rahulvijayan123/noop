@@ -35,6 +35,9 @@ enum TabRoute: Hashable {
     case dataSources
     case stress
     case sleep
+    /// One night on the Sleep tab, by its local wake day ("2026-10-07", or "latest"), never by carousel
+    /// index: the index shifts whenever a newer night lands.
+    case sleepNight(wakeDay: String)
     case health
     case hydration
     case coupled
@@ -84,6 +87,7 @@ extension View {
             case .dataSources: DataSourcesView()
             case .stress: StressView()
             case .sleep: SleepView()
+            case .sleepNight(let wakeDay): SleepNightDetailView(wakeDay: wakeDay)
             case .health: HealthView()
             case .hydration: HydrationView()
             case .coupled: CoupledView()

@@ -90,9 +90,9 @@ struct SleepFeatureCards: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sleep details", overline: "Server enrichment")
+            SectionHeader("Sleep details")
 
-            NoopCard(padding: 0, tint: StrandPalette.restColor) {
+            NoopCard(padding: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     headline
                         .padding(.horizontal, NoopMetrics.cardPadding)
@@ -106,6 +106,9 @@ struct SleepFeatureCards: View {
                 }
             }
         }
+        // The night page stacks this above its About card with no gap of its own (the host renders nothing
+        // until a document loads), so the section brings the page's section gap with it.
+        .padding(.bottom, NoopMetrics.sectionGap)
     }
 
     private var hairline: some View {
@@ -138,7 +141,7 @@ struct SleepFeatureCards: View {
         VStack(alignment: .leading, spacing: 4) {
             HStack(alignment: .firstTextBaseline, spacing: 2) {
                 Text(value)
-                    .font(StrandFont.number(24, weight: .medium))
+                    .font(StrandFont.number(20))
                     .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.7)
@@ -146,7 +149,7 @@ struct SleepFeatureCards: View {
                     Text(unit).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
                 }
             }
-            Text(label).strandOverline().lineLimit(1).minimumScaleFactor(0.8)
+            Text(label).strandLabel().lineLimit(1).minimumScaleFactor(0.8)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -170,10 +173,10 @@ struct SleepFeatureCards: View {
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: info.icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(info.tint)
-                        .frame(width: 30, height: 30)
-                        .background(info.tint.opacity(0.14), in: Circle())
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .frame(width: 28)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(info.title)
                             .font(StrandFont.subhead.weight(.semibold))
@@ -187,7 +190,7 @@ struct SleepFeatureCards: View {
                     Spacer(minLength: 8)
                     if info.hasDetail {
                         Image(systemName: "chevron.down")
-                            .font(.system(size: 11, weight: .semibold))
+                            .font(StrandFont.icon(.inline))
                             .foregroundStyle(StrandPalette.textTertiary)
                             .rotationEffect(.degrees(isOpen ? 180 : 0))
                     }
@@ -202,7 +205,7 @@ struct SleepFeatureCards: View {
 
             if isOpen && info.hasDetail {
                 detail(for: chapter)
-                    .padding(.leading, NoopMetrics.cardPadding + 42)
+                    .padding(.leading, NoopListDivider.iconRowInset)
                     .padding(.trailing, NoopMetrics.cardPadding)
                     .padding(.bottom, 14)
                     .transition(.opacity)
@@ -370,7 +373,7 @@ struct SleepFeatureCards: View {
     }
 
     private func stageHeader(_ text: String) -> some View {
-        Text(text).strandOverline().frame(width: 52, alignment: .trailing)
+        Text(text).strandLabel().frame(width: 52, alignment: .trailing)
     }
 
     private func stageRow(_ label: String, _ values: [String]) -> some View {
