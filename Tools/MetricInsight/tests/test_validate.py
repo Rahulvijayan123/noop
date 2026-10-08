@@ -358,3 +358,47 @@ def test_times_of_day_said_on_the_hour_and_why_a_reading_is_less_certain():
     assert "claim" in validate.check(person, EVIDENCE, RETRIEVED).codes
     elsewhere = answer(interpretation=["Your resting heart rate was lower because only 7 nights are measured.", SUPPORT])
     assert "claim" in validate.check(elsewhere, EVIDENCE, RETRIEVED).codes
+
+
+def test_a_citation_topic_is_a_word_of_its_own_not_the_metrics_name():
+    evidence = json.loads(json.dumps(EVIDENCE))
+    evidence["get_metric_summary"] = {"metric": "steps", "units": "steps", "estimated": True,
+                                      "latest": {"day": "2026-10-06", "value": 8123},
+                                      "baseline": {"call": {"state": "in_range"}}}
+    norms = {"lit:steps-norms": {"id": "lit:steps-norms", "topic": "normal_range", "peer_reviewed": True,
+                                 "finding": "healthy adults typically take between 4,000 and 18,000 steps per day"},
+             "lit:cadence": {"id": "lit:cadence", "topic": "physical_activity", "peer_reviewed": True,
+                             "finding": "100 steps/min is about moderate intensity"},
+             "lit:age": {"id": "lit:age", "topic": "age", "peer_reviewed": True, "finding": "walking slows with age"}}
+    base = dict(headline="Estimated steps 8,123 on Oct 6",
+                observed=["Your estimated steps were 8,123 steps on Oct 6, within your usual range."])
+    # Literature numbers with thousands separators can be quoted where the finding is discussed.
+    quoted = answer(**base, interpretation=["Adults typically take between 4,000 and 18,000 steps a day."],
+                    citations=["lit:steps-norms"])
+    assert validate.check(quoted, evidence, norms).ok, validate.check(quoted, evidence, norms).errors
+    # "steps" is the metric's own name, not a sign of physical activity; walking is.
+    named = answer(**base, interpretation=["Your steps can rise on busier days."], citations=["lit:cadence"])
+    assert any("is about physical_activity" in e for e in validate.check(named, evidence, norms).errors)
+    walked = answer(**base, interpretation=["Your estimated walking was likely longer on Oct 6."],
+                    citations=["lit:cadence"])
+    assert validate.check(walked, evidence, norms).ok, validate.check(walked, evidence, norms).errors
+    # "average" is not "age".
+    average = answer(**base, interpretation=["Your estimated steps were close to your recent average."],
+                     citations=["lit:age"])
+    assert any("is about age" in e for e in validate.check(average, evidence, norms).errors)
+
+
+def test_every_metric_has_curated_findings_its_example_searches_reach():
+    from nara_metric_insight import litsearch
+    from nara_metric_insight.literature import CORPUS
+    from nara_metric_insight.metrics import INSIGHT_METRICS
+    from nara_metric_insight.prompts import EXAMPLES
+    entries = litsearch.load_corpus(CORPUS)
+    for key, metric in INSIGHT_METRICS.items():
+        tagged = [e for e in entries if set(metric.literature) & set(e["metric"])]
+        assert len(tagged) >= 4, key
+    literature = Literature()
+    for key, text in EXAMPLES.items():
+        for query in re.findall(r"'([^']+)'", text):
+            found = literature.search(query, key)
+            assert found and all(r["source"] == "seed" for r in found), (key, query)

@@ -105,6 +105,16 @@ is never a measurement, number words and clock times count); "estimated" whereve
 stated; citations only from this job's retrieval, each backing an interpretation of something present. One retry
 with the reasons, then the job fails (backoff, dead letter at 3). The app re-checks wording before rendering.
 
+## Literature
+
+The curated corpus (`src/nara_metric_insight/data/literature_seed.json`: peer-reviewed findings tagged by metric,
+`metrics.InsightMetric.literature`) is searched first; PubMed / Europe PMC only when it has nothing. It is built by
+`scripts/build_literature_seed.py` from hand-written claims, each checked against PubMed at build time: the PMID's
+first author and year (esummary), every support phrase and every number of the claim in the abstract (efetch), and a
+journal article that is neither a preprint nor retracted. The raw esummary responses and the manifest go to
+`build/literature/` (not committed). To add a finding, add a spec and run the script (network); an entry that fails
+a check is dropped and listed.
+
 ## Changing the analysis
 
 Cached analyses are keyed by their inputs, not by this code. When the prompt, the tools, the evidence or the
@@ -121,7 +131,7 @@ environment: `db_url` (a direct Postgres URL; the role must be able to `SET ROLE
 
 ```
 uv sync
-uv run pytest                       # unit, plumbing, Layer 1 parity, PostgreSQL and end-to-end tests (67)
+uv run pytest                       # unit, plumbing, Layer 1 and gait parity, PostgreSQL and end-to-end tests (91)
 NARA_TEST_PRIME_BIN=... NARA_TEST_KERNEL_PYTHON=... uv run pytest -m prime   # end to end with Prime Agent
 ```
 

@@ -25,7 +25,9 @@ TASK_MARKER = "Reply with ONLY this JSON object"
 RETRY_MARKER = "did not pass the checks"
 LOAD_CODE = bootstrap() + """
 import json, os, urllib.request
-lit = await mcp.call_tool('nara', 'search_literature', {'query': 'resting heart rate day to day variability'})
+query = {'steps': 'daily steps day to day variability'}.get(metric_summary.get('metric'),
+                                                          'resting heart rate day to day variability')
+lit = await mcp.call_tool('nara', 'search_literature', {'query': query})
 summary, quality = metric_summary, data_quality
 probe = {}
 try:
@@ -52,6 +54,7 @@ except FileNotFoundError:
     probe['harness_ids_on_disk'] = []
 probe['placeholders'] = [chat_history.get('available'), health_records.get('available')]
 print('EVIDENCE=' + json.dumps({'summary': summary, 'quality': quality,
+                                'walking': {k: gait_context.get(k) for k in ('available', 'walking_min', 'walks')},
                                 'lit': [r['id'] for r in (lit.get('results') or [])], 'probe': probe}, default=str))
 """
 
@@ -77,8 +80,32 @@ def _short(day: str) -> str:
     return f"{value:%b} {value.day}"
 
 
+def steps_answer(evidence: dict[str, Any]) -> str:
+    """A day metric: the latest complete day's estimated steps, the app's call, and the day's ElderNet walking."""
+    summary, walking = evidence.get("summary") or {}, evidence.get("walking") or {}
+    latest = summary.get("latest") or {}
+    day = _short(latest["day"])
+    observed = [f"Your estimated steps were {latest['value']:,} steps on {day}."]
+    call = (summary.get("baseline") or {}).get("call") or {}
+    if call.get("state") in ("in_range", "off"):
+        where = "within" if call["state"] == "in_range" else call["side"]
+        observed.append(f"That is {where} your usual range of {call['low']:,}-{call['high']:,} steps.")
+    if walking.get("available") and walking.get("walking_min"):
+        observed.append(f"ElderNet estimated {walking['walking_min']} minutes of walking on {day}.")
+    return json.dumps({
+        "headline": f"Estimated steps {latest['value']:,} on {day}",
+        "observed": observed,
+        "interpretation": ["Day-to-day differences in steps are common and can follow changes in routine."],
+        "uncertainty": ["Steps are estimated from the strap's motion, so a day's count can differ from other "
+                        "trackers."],
+        "citations": (evidence.get("lit") or [])[:1],
+    })
+
+
 def answer(evidence: dict[str, Any], *, bad: bool = False) -> str:
     summary, quality = evidence.get("summary") or {}, evidence.get("quality") or {}
+    if summary.get("metric") == "steps" and not bad:
+        return steps_answer(evidence)
     latest = summary.get("latest") or {}
     observed = [f"Your resting heart rate was {latest.get('value')} bpm on {_short(latest['day'])}."]
     previous = summary.get("previous")

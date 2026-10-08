@@ -93,8 +93,8 @@ TOPIC_WORDS: dict[str, tuple[str, ...]] = {
     "training_load": ("training", "exercise", "workout", "exertion", "load", "cycling", "cycled", "ride", "running",
                       "ran", "walk", "bout", "session"),
     "detraining": ("training", "exercise", "fitness"), "aerobic_fitness": ("fitness", "training", "exercise"),
-    "heat": ("heat", "hot", "warm", "temperature"), "altitude": ("altitude", "elevation"),
-    "hydration": ("hydration", "fluid", "water"), "menstrual_cycle": ("cycle", "menstrual", "period"),
+    "heat": ("heat", "hot", "warm", "humid", "bedroom", "weather"), "altitude": ("altitude", "elevation"),
+    "hydration": ("hydration", "fluid", "water"), "menstrual_cycle": ("menstrual", "menstruation", "luteal", "ovulat"),
     "seasonality": ("season", "winter", "summer"), "age": ("age",),
     "normal_range": ("usual", "range", "normal", "typical", "vary", "variation", "differ"),
     "day_to_day_variability": ("night-to-night", "day-to-day", "vary", "variation", "common", "usual"),
@@ -556,8 +556,8 @@ def facts(evidence: dict[str, Any], retrieved: dict[str, dict[str, Any]]) -> Fac
     _all_days({k: v for k, v in evidence.items()
                if k not in ("get_user_context", "get_previous_insight", "get_recent_events")}, f.days)
     for record in retrieved.values():
-        for match in re.finditer(r"(?<![\w.])\d+(?:\.\d+)?", _strip_dates(str(record.get("finding") or ""))):
-            f.literature.add(float(match.group(0)))
+        for match in re.finditer(rf"(?<![\w.,])(?:{_NUM})", _strip_dates(str(record.get("finding") or ""))):
+            f.literature.add(float(match.group(0).replace(",", "")))
     return f
 
 
@@ -842,14 +842,18 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     if unknown:
         errors.append(f"citations:{', '.join(unknown[:3])} were not returned by search_literature in this session")
     # A citation supports an interpretation of something present: an interpretation sentence that names its
-    # topic without negating it ("no alcohol was recorded" is not a reason to cite alcohol research).
+    # topic without negating it ("no alcohol was recorded" is not a reason to cite alcohol research). A topic word
+    # counts at the start of a word ("walked" for walk, not "average" for age), and the explained metric's own name
+    # is not a topic (every steps explanation says "steps", every wrist temperature one "temperature").
     supported = " ".join(clause for s in sections["interpretation"] for clause in _CLAUSE.split(s)
                          if not _NEGATION.search(clause)).lower()
+    for name in sorted(ALIASES.get(str(f.metric), ()), key=len, reverse=True):
+        supported = re.sub(rf"\b{re.escape(name)}\b", " ", supported)
     for cited in (c for c in citations if c in retrieved):
         words = TOPIC_WORDS.get(str(retrieved[cited].get("topic")))
         if not words:
             errors.append(f"citations:{cited} has no verified topic and cannot be cited")
-        elif not any(word in supported for word in words):
+        elif not any(re.search(rf"\b{re.escape(word)}", supported) for word in words):
             errors.append(f"citations:{cited} is about {retrieved[cited].get('topic')}, which no interpretation "
                           "sentence says is present for this person")
     answer = {"headline": headline, **sections, "citations": list(dict.fromkeys(citations))}

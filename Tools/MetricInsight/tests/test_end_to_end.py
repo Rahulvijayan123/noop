@@ -12,8 +12,9 @@ import shutil
 import subprocess
 import sys
 import tempfile
-from datetime import date, timedelta
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
 import pytest
 
@@ -171,3 +172,53 @@ def test_an_answer_that_never_validates_fails_the_job(pg, stub, worker):
     state = job(pg)
     assert state["consecutive_failures"] == 1 and state["last_error"].startswith("validation:")
     assert request(pg, USER_A)["insight"] is None  # nothing unvalidated ever reaches the app
+
+
+def test_a_day_metric_steps_with_its_eldernet_walking_end_to_end(pg, stub, worker):
+    """Steps: the latest complete local day (never today), the hosted day values, Layer 1's steps call and the
+    day's ElderNet walking, through the same sandboxed Prime run."""
+    pg.psql("truncate public.scoring_jobs_v2, public.scoring_snapshots_v2, public.activity_gait_windows_days cascade")
+    pg.psql(f"insert into public.devices(id, user_id, source_kind, external_device_id) values ('{DEVICE_A}',"
+            f" '{USER_A}', 'noop_push', 'whoop-A') on conflict do nothing")
+    zone = ZoneInfo(pg.psql(f"select internal.physiology_context_zone('{USER_A}')").strip())
+    today = datetime.now(zone).date()
+    yesterday = today - timedelta(days=1)
+    rows = []
+    for k in range(30, -1, -1):  # through today, which is still running and is never the analysed day
+        day = today - timedelta(days=k)
+        steps = 9100 + 300 * (k % 4)
+        rows.append(f"('{USER_A}', '{day}', 'frwhoop-server-1', '{DEVICE_A}', {50 + k % 3}, 70, 14.0, 0.9, 430)")
+        pg.psql("insert into public.scoring_jobs_v2(user_id, device_id, day, algorithm_version, input_revision,"
+                f" completed_revision) values ('{USER_A}', '{DEVICE_A}', '{day}', 'frwhoop-server-1', 1, 1)")
+        daily = {"steps": steps, "activeKcalEst": 2300, "energy": {"total_kcal": 2300, "resting_kcal": 1600}}
+        pg.psql("insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,"
+                f" computed_at, payload) values ('{USER_A}', '{DEVICE_A}', '{day}', 'frwhoop-server-1', 1, now(),"
+                f" $j${json.dumps({'daily': daily})}$j$::jsonb)")
+    pg.psql("insert into public.server_daily_scores(user_id, day, algorithm_version, source_device_id, resting_hr_bpm,"
+            " hrv_rmssd_ms, resp_rate_bpm, sleep_efficiency, sleep_total_min) values " + ", ".join(rows))
+    # ElderNet: a 30-minute walk at 08:00 local yesterday, 116 steps/min.
+    walk = int(datetime.combine(yesterday, time(8), zone).timestamp())
+    n = 30 * 60 // 5
+    windows = {"format": "gait-windows-1", "n": n, "w": 10, "h": 5, "s0": walk, "ds": [0] + [5] * (n - 1),
+               "gp": [950] * n, "g": [1] * n, "pf": [0] * n, "sp": [140] * n, "cad": [116] * n, "st": [145] * n,
+               "rg": [80] * n, "stp": [193] * n}
+    utc_day = datetime.fromtimestamp(walk, ZoneInfo("UTC")).date()  # the row the windows are stored under
+    pg.psql("insert into public.activity_gait_windows_days(user_id, device_id, day, model_version, mode,"
+            " algorithm_version, model_id, weights, weights_digest, upstream_commit, preprocessing_version,"
+            " gait_schema, job_fingerprint, input_revision, window_s, hop_s, gait_threshold, n_windows, n_gait,"
+            " n_prefiltered, n_dropped, summary, windows, result_revision, computed_at) values"
+            f" ('{USER_A}', '{DEVICE_A}', '{utc_day}', 'eldernet-437a38b', 'shadow', 'gait-1', 'eldernet', '{{}}',"
+            f" '{'a' * 64}', '437a38bc', 'pre-1', 'gait-quality-1', '{'b' * 64}', 1, 10, 5, 0.5, 17280, {n},"
+            f" 9000, 0, '{{}}', $w${json.dumps(windows)}$w$::jsonb, 1, now())")
+
+    first = json.loads(pg.psql(f"select public.metric_insight_request_v1('{USER_A}', 'steps')"))
+    assert first["status"] == "pending"
+    assert worker.once() == "published"
+    insight = json.loads(pg.psql(f"select public.metric_insight_request_v1('{USER_A}', 'steps')"))["insight"]
+    assert insight["kind"] == "explained" and insight["period"] == "day"
+    assert insight["data_through"] == yesterday.isoformat()
+    value = 9100 + 300 * (1 % 4)
+    assert insight["headline"] == f"Estimated steps {value:,} on {yesterday:%b} {yesterday.day}"
+    assert f"ElderNet estimated 30 minutes of walking on {yesterday:%b} {yesterday.day}." in insight["observed"]
+    stored = json.loads(pg.psql(f"select evidence from public.metric_insights where id = {insight['id']}"))
+    assert "get_gait_context" in stored["tool_calls"] and stored["validator"] == {"attempts": 1, "rejected": []}

@@ -90,10 +90,11 @@ EXAMPLES = {
                   "at altitude, 'respiratory rate sleep stages' about the night's sleep"),
     "heart_rate": ("'caffeine heart rate' after recorded coffee, 'heart rate after exercise' after a workout that "
                    "day, 'heart rate circadian time of day' about the day's pattern"),
-    "steps": ("'daily step count variability' when nothing stands out, 'walking cadence' about how the person "
-              "walked, 'exercise day steps' after a workout"),
-    "calories": ("'energy expenditure physical activity wearable' after a more active day, 'resting energy "
-                 "expenditure' about resting energy"),
+    "steps": ("'daily step count variability' when nothing stands out, 'brisk walking cadence' about how the person "
+              "walked, 'daily steps normal range' about how many steps are typical"),
+    "calories": ("'energy expenditure physical activity wearable' after a more active day, 'resting metabolism' "
+                 "about resting energy, 'calorie estimate accuracy wearable' about how far the estimate can be "
+                 "trusted"),
     "spo2": ("'wrist pulse oximetry accuracy' about how far the estimate can be trusted, 'altitude blood oxygen' at "
              "altitude"),
 }
