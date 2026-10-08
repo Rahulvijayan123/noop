@@ -78,8 +78,9 @@ struct MonitorSnapshot: Hashable, Codable {
     var quality: MonitoringQuality
 }
 
-// MARK: - Sample data (replace with the backend snapshot)
+// MARK: - Sample data (DEBUG only: fabricated episodes and baselines must not ship)
 
+#if DEBUG
 extension MonitorSnapshot {
     static var sample: MonitorSnapshot {
         func series(_ base: Double, _ amp: Double, _ seed: Double) -> [Double] {
@@ -133,6 +134,7 @@ extension MonitorSnapshot {
             quality: MonitoringQuality(coverage: 0.96, validWear: 0.98, status: .good))
     }
 }
+#endif
 
 // MARK: - Watchdog page
 
@@ -171,7 +173,7 @@ struct LegacyMonitorWatchdogEpisodeRow: View {
 
 /// Every watchdog episode, newest first, with the totals across them.
 struct LegacyMonitorWatchdogView: View {
-    var snapshot: MonitorSnapshot = .sample
+    var snapshot: MonitorSnapshot
 
     private var episodes: [LegacyMonitorWatchdogEpisode] { snapshot.episodes.sorted { $0.start > $1.start } }
 
