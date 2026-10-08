@@ -27,6 +27,14 @@ import WhoopProtocol
 //      is not physiological recovery), the cutoff (`cutoff_reached`). A reading whose window reaches the truncation
 //      is censored, never estimated. Time-to-return is the first observed offset within tolerance of the pre-bout
 //      reference, only when every earlier offset was observed.
+//   5. Respiratory return (spec-02, `pc-resp-recovery-1`, `RespiratoryRecoveryConfig`). The RSA rate estimator
+//      withholds itself during movement, so nothing is read during the bout. Reference: the median of qualifying
+//      estimates in the pre-bout window (never across the previous bout's respiratory follow-up). Follow-up starts
+//      when HR-independent evidence shows a still run (motion subsided) and is truncated at the next bout, renewed
+//      movement, a recorded break or the cutoff. Return = the first estimate within tolerance that is confirmed by
+//      the next independent estimate. Already within tolerance at the first observation → `returned_by` (an upper
+//      bound; the earlier recovery was not observed). No reference, an uncertain end boundary or no estimate →
+//      `unknown`, never a duration.
 //
 // Free-living post-effort HR decline is not clinical heart-rate recovery (no standardized peak, posture or
 // cool-down): it is a within-person descriptive quantity. Speed, grade, external load and ambient conditions are
@@ -106,10 +114,38 @@ extension PhysiologyContext {
         /// Mirrors `JoinConfig.finalAfterDayEndS`: a retrospective bout is final only once its day is this long over.
         public var finalAfterDayEndS = 30 * 3600
 
+        /// Post-exertion respiratory return (spec-02). Encoded with the rest of the policy, so every parameter
+        /// enters `Policy.fingerprint`.
+        public var respiratoryRecovery = RespiratoryRecoveryConfig()
+
         public init() {}
 
         /// Last second (inclusive) a recovery reading may use, relative to the bout end.
         var followUpHorizonS: Int { (recoveryOffsetsS.max() ?? 0) + offsetToleranceS }
+    }
+
+    /// Parameters of the post-exertion respiratory return (`pc-resp-recovery-1`). Engineering defaults, not
+    /// physiological cutoffs; see docs/spec-02/notes/respiratory.md.
+    public struct RespiratoryRecoveryConfig: Codable, Equatable, Sendable {
+        /// Pre-bout reference window `[start - preWindowS, start)`.
+        public var preWindowS = 900
+        /// Non-overlapping qualifying estimates the reference needs.
+        public var preMinIndependentEstimates = 2
+        /// An estimate qualifies when HR-independent evidence shows no movement over its support and stationary
+        /// labels cover at least this share of it.
+        public var stationaryShareMin = 0.9
+        /// Longest estimate support read (s): window estimates only, never a nightly / session value.
+        public var maxEstimateWindowS = 600
+        /// Respiratory follow-up horizon after the bout end (s).
+        public var followUpS = 1200
+        /// Movement has subsided at the start of the first contiguous still run of at least this length.
+        public var subsideStillS = 60
+        /// An estimate within this many breaths/min of the reference (either side) counts as returned.
+        public var toleranceBpm = 2.0
+        /// The confirming estimate must start at or after the returned estimate's support end and at most this
+        /// many seconds later, with no out-of-tolerance estimate between them.
+        public var sustainMaxGapS = 60
+        public init() {}
     }
 
     public enum BoutStatus: String, Codable, CaseIterable, Sendable {
@@ -267,7 +303,8 @@ extension PhysiologyContext {
 
     /// One respiratory-rate estimate inside a bout's attributable follow-up.
     public struct RespiratoryRecoveryObservation: Codable, Equatable, Sendable {
-        /// Offset of the estimate's support start from the bout end (s).
+        /// Offset of the estimate's support END from the bout end (s): when the estimate was complete. Every
+        /// `*OffsetS` of `RespiratoryRecovery` uses the same convention.
         public var offsetS: Int
         public var bpm: Double
         /// `bpm - reference` (signed); nil without a reference.
@@ -310,6 +347,10 @@ extension PhysiologyContext {
         public var observations: [RespiratoryRecoveryObservation]
         public var censoring: [ReasonCode]
         public var reasons: [ReasonCode]
+        /// Non-overlapping estimates behind the reference (`referenceSamples` counts every estimate used).
+        public var referenceIndependentEstimates: Int? = nil
+        /// Breaths/min.
+        public var units: String? = nil
         public init(method: String, state: String, referenceBpm: Double?, referenceWindow: Interval?,
                     referenceSamples: Int, toleranceBpm: Double, motionSubsidedAt: Int?,
                     firstObservationOffsetS: Int?, lastAboveOffsetS: Int?, returnedAtOffsetS: Int?,
@@ -535,6 +576,20 @@ extension PhysiologyContext {
         public static let gradeUnavailable: ReasonCode = "grade_unavailable"
         public static let externalLoadUnavailable: ReasonCode = "external_load_unavailable"
         public static let ambientUnavailable: ReasonCode = "ambient_unavailable"
+        // Respiratory return (spec-02, docs/spec-02/CONTRACT.md §6)
+        /// No valid pre-bout respiratory reference (too few qualifying still estimates): no result.
+        public static let respiratoryReferenceUnavailable: ReasonCode = "respiratory_reference_unavailable"
+        /// Movement subsided and qualifying respiratory estimates resumed after the bout.
+        public static let respiratoryObservationsResumed: ReasonCode = "respiratory_observations_resumed"
+        /// The first estimate after the bout was already within tolerance: returned at or before it (upper bound).
+        public static let respiratoryReturnedByFirstObservation: ReasonCode = "respiratory_returned_by_first_observation"
+        /// Estimates were observed, but no confirmed return happened before the follow-up ended (right-censored).
+        public static let respiratoryNotReturnedInFollowUp: ReasonCode = "respiratory_not_returned_in_follow_up"
+        /// No qualifying estimate after movement subsided (or movement never subsided) in the follow-up.
+        public static let respiratoryFollowUpUnobserved: ReasonCode = "respiratory_follow_up_unobserved"
+        /// The last estimates were within tolerance, but the follow-up ended before an independent estimate could
+        /// confirm a sustained return: unknown, not "returned" and not "not returned".
+        public static let respiratoryReturnUnconfirmed: ReasonCode = "respiratory_return_unconfirmed"
         // Trailing windows
         public static let coverageUnknownForPartOfWindow: ReasonCode = "coverage_unknown_for_part_of_window"
         public static let observedProratedPartialDay: ReasonCode = "observed_prorated_partial_day"
@@ -552,7 +607,9 @@ extension PhysiologyContext {
             postEffortDeclineNotClinicalHrr, cadenceUnavailable, insufficientCadenceMinutes, stepCounterUnclassed,
             uncalibratedStepCounter, wristCadenceNotGaitSpeed, speedUnavailable, gradeUnavailable,
             externalLoadUnavailable, ambientUnavailable, coverageUnknownForPartOfWindow,
-            observedProratedPartialDay, noMotionObservedInWindow,
+            observedProratedPartialDay, noMotionObservedInWindow, respiratoryReferenceUnavailable,
+            respiratoryObservationsResumed, respiratoryReturnedByFirstObservation, respiratoryNotReturnedInFollowUp,
+            respiratoryFollowUpUnobserved, respiratoryReturnUnconfirmed,
         ]
 
         /// Workload inputs this layer never measures; recorded on every match key.
@@ -570,6 +627,10 @@ extension PhysiologyContext {
         public static let precedingRecentMovement = "recent_movement"
         public static let precedingRecentBout = "recent_bout"
         public static let precedingUnknown = "unknown"
+        public static let respiratoryReturned = "returned"
+        public static let respiratoryReturnedBy = "returned_by"
+        public static let respiratoryNotReturned = "not_returned"
+        public static let respiratoryUnknown = "unknown"
         public static let sourceLoggedWorkout = "logged_workout"
         public static let responseSeriesPrefix = "hr_response"
 
@@ -604,11 +665,12 @@ extension PhysiologyContext {
             let groups = boutGroups(evidence: evidence, workouts: workouts, breaks: breaks, cutoff: cutoff,
                                     config: config)
             let detected = workouts.filter { !config.loggedWorkoutSources.contains($0.source) && $0.interval.isValid }
+            let estimates = respiratoryEstimates(respiration, config: config.respiratoryRecovery)
             var out: [ExertionBout] = []
             for i in groups.indices where identity.dayWindow.contains(groups[i].interval.start) {
                 out.append(measure(i, groups: groups, identity: identity, evidence: evidence, heart: heart,
                                    steps: steps, breaks: breaks, detectedWorkouts: detected, mode: mode,
-                                   cutoff: cutoff, config: config))
+                                   cutoff: cutoff, config: config, respiration: estimates))
             }
             return out
         }
@@ -842,7 +904,7 @@ extension PhysiologyContext {
         static func measure(_ i: Int, groups: [BoutGroup], identity: DayIdentity, evidence: BoutEvidence,
                             heart: HeartSeries, steps: [StepSample], breaks: [Interval],
                             detectedWorkouts: [WorkoutInput], mode: ProcessingMode, cutoff: Int,
-                            config: ExertionConfig) -> ExertionBout {
+                            config: ExertionConfig, respiration: [RespiratoryEstimate] = []) -> ExertionBout {
             let g = groups[i]
             let iv = g.interval
             var reasons: [ReasonCode] = []
@@ -903,9 +965,19 @@ extension PhysiologyContext {
                 status = .ongoing
                 statusReason = boutOngoing
             } else {
-                let r = boutRecovery(i, groups: groups, evidence: evidence, heart: heart, breaks: breaks,
+                var r = boutRecovery(i, groups: groups, evidence: evidence, heart: heart, breaks: breaks,
                                      endHr: response.endHrBpm, reference: pre.hrReferenceBpm, cutoff: cutoff,
                                      config: config)
+                let resp = respiratoryRecovery(i, groups: groups, evidence: evidence, breaks: breaks,
+                                               estimates: respiration, cutoff: cutoff, config: config)
+                r.respiratoryRecovery = resp
+                if !resp.observations.isEmpty {
+                    r.respiratory = BoutChannel(channel: MetricKind.respiratoryRate.rawValue, state: .supported,
+                                                reasons: [respiratoryObservationsResumed])
+                } else {
+                    r.respiratory = BoutChannel(channel: MetricKind.respiratoryRate.rawValue, state: .unavailable,
+                                                reasons: resp.reasons)
+                }
                 recovery = r
                 let allObserved = r.observations.allSatisfy { $0.state == .observed }
                 status = r.censoring.isEmpty && allObserved ? .complete : .censored
@@ -1174,6 +1246,183 @@ extension PhysiologyContext {
                 reasons: Array(Set(reasons)).sorted())
         }
 
+        // MARK: - Respiratory return (spec-02)
+
+        /// One window respiratory-rate estimate read by the respiratory return.
+        struct RespiratoryEstimate: Equatable {
+            var support: Interval
+            var bpm: Double
+        }
+
+        /// Window estimates (never nightly / session values), one per support (the lowest method id, then the
+        /// lowest value, wins a duplicate), sorted by support.
+        static func respiratoryEstimates(_ ms: [MeasurementInput],
+                                         config: RespiratoryRecoveryConfig) -> [RespiratoryEstimate] {
+            let candidates = ms.filter {
+                $0.metric == .respiratoryRate && !$0.method.id.hasPrefix("snapshot.") && $0.support.isValid
+                    && $0.support.duration <= config.maxEstimateWindowS && ($0.value?.isFinite ?? false)
+            }.sorted { ($0.support, $0.method.id, $0.value!) < ($1.support, $1.method.id, $1.value!) }
+            var out: [RespiratoryEstimate] = []
+            for m in candidates where out.last?.support != m.support {
+                out.append(RespiratoryEstimate(support: m.support, bpm: m.value!))
+            }
+            return out
+        }
+
+        /// Estimates whose whole support shows HR-independent stillness (no movement, stationary share at least
+        /// `stationaryShareMin`).
+        static func isStill(_ e: RespiratoryEstimate, evidence: BoutEvidence, config: RespiratoryRecoveryConfig) -> Bool {
+            evidence.movementSeconds(in: e.support) == 0
+                && evidence.stationarySeconds(in: e.support) >= config.stationaryShareMin * Double(e.support.duration)
+        }
+
+        /// Non-overlapping estimates, counted greedily in support order.
+        static func independentCount(_ es: [RespiratoryEstimate]) -> Int {
+            var n = 0, lastEnd = Int.min
+            for e in es where e.support.start >= lastEnd { n += 1; lastEnd = e.support.end }
+            return n
+        }
+
+        static func respiratoryRecovery(_ i: Int, groups: [BoutGroup], evidence: BoutEvidence, breaks: [Interval],
+                                        estimates: [RespiratoryEstimate], cutoff: Int,
+                                        config: ExertionConfig) -> RespiratoryRecovery {
+            let rc = config.respiratoryRecovery
+            let start = groups[i].interval.start, end = groups[i].interval.end
+            let horizon = end + rc.followUpS
+            var result = RespiratoryRecovery(
+                method: config.respiratoryRecoveryVersion, state: respiratoryUnknown, referenceBpm: nil,
+                referenceWindow: nil, referenceSamples: 0, toleranceBpm: rc.toleranceBpm, motionSubsidedAt: nil,
+                firstObservationOffsetS: nil, lastAboveOffsetS: nil, returnedAtOffsetS: nil, returnedByOffsetS: nil,
+                followUp: Interval(end, horizon), observations: [], censoring: [], reasons: [])
+            result.units = "breaths_per_min"
+
+            // Reference: still estimates wholly inside the pre-bout window, never inside the previous bout's own
+            // respiratory follow-up.
+            var refStart = start - rc.preWindowS
+            if i > 0 { refStart = max(refStart, groups[i - 1].interval.end + rc.followUpS) }
+            let refWindow = Interval(refStart, start)
+            let refEstimates = refWindow.isValid ? estimates.filter {
+                $0.support.start >= refWindow.start && $0.support.end <= refWindow.end
+                    && isStill($0, evidence: evidence, config: rc)
+            } : []
+            let independent = independentCount(refEstimates)
+            result.referenceWindow = refWindow.isValid ? refWindow : nil
+            result.referenceSamples = refEstimates.count
+            result.referenceIndependentEstimates = independent
+            guard independent >= max(1, rc.preMinIndependentEstimates),
+                  let reference = RobustStats.median(refEstimates.map(\.bpm)) else {
+                result.reasons = [respiratoryReferenceUnavailable]
+                return result
+            }
+            result.referenceBpm = reference
+
+            // The end boundary must be observed: an evidence gap right after the bout leaves "end" uncertain.
+            let probe = Interval(end, min(end + config.maxPauseS, cutoff))
+            if !probe.isValid || probe.duration - evidence.coveredSeconds(in: probe) > config.maxUncoveredInPauseS {
+                result.reasons = [endedAtEvidenceGap, respiratoryFollowUpUnobserved]
+                return result
+            }
+
+            // Censoring of the respiratory follow-up: next bout, recorded break, cutoff; renewed movement once
+            // motion subsided is added below. Ties resolve in this order.
+            var events: [(at: Int, rank: Int, reason: ReasonCode)] = []
+            if i + 1 < groups.count, groups[i + 1].interval.start < horizon {
+                events.append((groups[i + 1].interval.start, 2, censorNextBout))
+            }
+            for b in breaks where b.start < horizon && breakEnd(b) > end {
+                events.append((max(b.start, end), 0, censorDisconnect))
+            }
+            if cutoff < horizon { events.append((max(end, cutoff), 4, censorCutoffReached)) }
+            let firstLimit = events.map(\.at).min() ?? horizon
+
+            guard let subsided = evidence.firstStillness(from: end, before: firstLimit, minS: rc.subsideStillS) else {
+                let covered = evidence.coveredSeconds(in: Interval(end, firstLimit))
+                if let t = evidence.firstMovement(from: end, through: firstLimit, minS: config.followUpMovementMinS,
+                                                  includeOther: config.followUpOtherMovementCounts),
+                   covered * 2 >= max(1, firstLimit - end) {
+                    events.append((t, 3, censorContinuedMovement))
+                } else {
+                    result.reasons.append(followUpMotionUnobserved)
+                }
+                events.sort { ($0.at, $0.rank) < ($1.at, $1.rank) }
+                for e in events where !result.censoring.contains(e.reason) { result.censoring.append(e.reason) }
+                result.followUp = Interval(end, events.first?.at ?? horizon)
+                result.reasons = ([respiratoryFollowUpUnobserved] + result.reasons)
+                return result
+            }
+            result.motionSubsidedAt = subsided
+            // Renewed movement strictly before the first other censoring event (a next bout is its own reason).
+            if let t = evidence.firstMovement(from: subsided, through: firstLimit - 1,
+                                              minS: config.followUpMovementMinS,
+                                              includeOther: config.followUpOtherMovementCounts), t > subsided {
+                events.append((t, 3, censorContinuedMovement))
+            }
+            events.sort { ($0.at, $0.rank) < ($1.at, $1.rank) }
+            for e in events where !result.censoring.contains(e.reason) { result.censoring.append(e.reason) }
+            let truncation = events.first?.at ?? horizon
+            result.followUp = Interval(end, truncation)
+
+            let follow = estimates.filter {
+                $0.support.start >= subsided && $0.support.end <= truncation && isStill($0, evidence: evidence, config: rc)
+            }
+            guard !follow.isEmpty else {
+                result.reasons = [respiratoryFollowUpUnobserved]
+                return result
+            }
+            result.observations = follow.map {
+                RespiratoryRecoveryObservation(offsetS: $0.support.end - end, bpm: $0.bpm,
+                                               aboveReferenceBpm: $0.bpm - reference)
+            }
+            result.firstObservationOffsetS = follow[0].support.end - end
+            let within = follow.map { abs($0.bpm - reference) <= rc.toleranceBpm }
+
+            // First confirmed return: within tolerance, and the next independent estimate (starting at or after
+            // its support end, at most `sustainMaxGapS` later) is within tolerance with nothing out of tolerance
+            // in between.
+            var lastAbove: Int?
+            var returnedAt: Int?
+            var unconfirmed = false
+            var k = 0
+            while k < follow.count {
+                guard within[k] else { lastAbove = k; k += 1; continue }
+                guard let j = follow.indices.first(where: { $0 > k && follow[$0].support.start >= follow[k].support.end })
+                else {
+                    // Within tolerance, but the follow-up ended before an independent estimate could confirm it.
+                    unconfirmed = !follow[(k + 1)...].contains { abs($0.bpm - reference) > rc.toleranceBpm }
+                    break
+                }
+                let between = (k + 1)..<j
+                if let bad = between.first(where: { !within[$0] }) {
+                    lastAbove = bad; k = bad + 1; continue
+                }
+                if within[j], follow[j].support.start - follow[k].support.end <= rc.sustainMaxGapS {
+                    returnedAt = k
+                    break
+                }
+                if !within[j] { lastAbove = j; k = j + 1 } else { k += 1 }
+            }
+            var reasons: [ReasonCode] = [respiratoryObservationsResumed]
+            if let r = returnedAt {
+                if let a = lastAbove {
+                    result.state = respiratoryReturned
+                    result.lastAboveOffsetS = follow[a].support.end - end
+                    result.returnedAtOffsetS = follow[r].support.end - end
+                } else {
+                    result.state = respiratoryReturnedBy
+                    result.returnedByOffsetS = follow[r].support.end - end
+                    reasons.append(respiratoryReturnedByFirstObservation)
+                }
+            } else if unconfirmed {
+                result.state = respiratoryUnknown
+                reasons.append(respiratoryReturnUnconfirmed)
+            } else {
+                result.state = respiratoryNotReturned
+                reasons.append(respiratoryNotReturnedInFollowUp)
+            }
+            result.reasons = reasons
+            return result
+        }
+
         /// Steps per locomotion minute from the wrap-aware counter (`StepsCounter.stepsInWindow`, the same
         /// per-minute slicing as the energy model); the increment ending at a minute's first sample comes from the
         /// sample just before it only when that sample is close and no break lies between.
@@ -1408,6 +1657,48 @@ extension PhysiologyContext {
             overlapping(w).reduce(0) { acc, s in
                 isLocomotion(s) ? acc + Double(s.interval.overlapSeconds(with: w)) * (1 - s.unknownFraction) : acc
             }
+        }
+
+        /// Seconds of `w` with a stationary label, weighted by the label's non-abstained share.
+        func stationarySeconds(in w: Interval) -> Double {
+            overlapping(w).reduce(0) { acc, s in
+                isStationary(s) ? acc + Double(s.interval.overlapSeconds(with: w)) * (1 - s.unknownFraction) : acc
+            }
+        }
+
+        /// Seconds of `w` with a movement label (locomotion or other movement).
+        func movementSeconds(in w: Interval) -> Double {
+            overlapping(w).reduce(0) { acc, s in
+                isMovement(s) ? acc + Double(s.interval.overlapSeconds(with: w)) * (1 - s.unknownFraction) : acc
+            }
+        }
+
+        /// Start of the first contiguous run of stationary spans of at least `minS` seconds that starts in
+        /// `[from, before)` (a run already under way at `from` counts from `from`), with no gap inside it.
+        func firstStillness(from: Int, before: Int, minS: Int) -> Int? {
+            var runStart: Int?
+            var runEnd = 0
+            var i = firstIndex(endingAfter: from)
+            while i < spans.count {
+                let s = spans[i]
+                let lo = max(s.interval.start, from)
+                if isStationary(s) {
+                    if let rs = runStart, runEnd == lo {
+                        runEnd = s.interval.end
+                        if runEnd - rs >= minS { return rs }
+                    } else {
+                        if lo >= before { return nil }
+                        runStart = lo
+                        runEnd = s.interval.end
+                        if runEnd - lo >= minS { return lo }
+                    }
+                } else {
+                    runStart = nil
+                    if s.interval.start >= before { return nil }
+                }
+                i += 1
+            }
+            return nil
         }
 
         /// Covered seconds per source over `w` and the source that holds most of them (HART on ties).
