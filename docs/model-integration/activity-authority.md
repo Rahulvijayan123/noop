@@ -330,7 +330,11 @@ of the worker itself, with at most 2 + 1 + 1 OS threads of numerical work (previ
 | worker `xcrun swift test --filter "ActivityElderNetStageTests\|ActivityInertiaStageTests\|ActivityLocalCacheTests"` | 58 tests, 0 failures |
 | worker `xcrun swift test --filter ActivityAuthorityReplayTests` | 7 tests, 0 failures |
 | worker `FRWHOOP_TEST_DB_URL=<throwaway full-chain cluster> xcrun swift test --filter "Activity.*DatabaseTests"` | 36 tests, 0 failures, 0 skipped |
-| worker full `xcrun swift test` | see "Requests to parent" / final report (timing-sensitive tests and host load) |
+| worker full `xcrun swift test` (no `FRWHOOP_TEST_DB_URL`) | 696 tests, 67 skipped (the database suites), 0 failures |
+
+An earlier filtered run under host load average ~800 failed four timing-sensitive tests (ElderNet NaN/internal,
+Inertia time budget, two `ActivityPythonServiceTests` timeout/restart cases: a 5 s ping timed out); none touches
+the code changed here, and all passed in the full run above.
 | `Tools/ActivityContext/.venv/bin/python -m pytest tests -q` | 639 passed, 44 skipped, 3 failed (the three `test_inertia_golden.py` checks, an `ood_score` drift in the 4th decimal; they fail identically at the round-1 base, `logs/pytest-base-full.log`) |
 | `deno test … tests/activity_windows_route_test.ts tests/gait_windows_route_test.ts` (+ auth, ground-truth, enrolled-scores, physiology-context route tests) | 72 passed, 0 failed |
 | `EDGE_TEST_ARTIFACTS=<scratch> deno test … tests/activity_authority_sql_test.ts` (full migration chain; runs the activity context, encoder windows, gait windows, motion heads and release-authority contracts, re-applies the migration, reads the routes through PostgREST) | 1 test, 7 steps, 0 failed |
