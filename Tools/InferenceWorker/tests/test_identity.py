@@ -174,6 +174,12 @@ def test_a_provider_may_report_what_it_loaded(staged_revision):
     assert providers["test.broken.v1"]["loaded"]["error"].startswith("RuntimeError")
     assert "loaded" not in providers["production.runs.v1"]
 
+    # What the warm worker reported it loaded wins over this process's copy.
+    app.worker_loaded_identity = {"test.loaded.v1": {"checkpoint_sha256": "cd" * 32}}
+    providers = identity.runtime_identity(app)["providers"]
+    assert providers["test.loaded.v1"]["loaded"] == {"checkpoint_sha256": "cd" * 32}
+    assert providers["test.loaded.v1"]["loaded_source"] == "worker"
+
 
 def test_healthz_and_providers_carry_the_identity(staged_revision, live_server):
     root, revision_id = staged_revision
@@ -186,3 +192,77 @@ def test_healthz_and_providers_carry_the_identity(staged_revision, live_server):
         assert block["model_revision"]["revision_id"] == revision_id
         assert block["source"]["sha256"] and block["manifest"]["sha256"]
         assert {"code_revision", "release", "artifacts", "providers"} <= set(block)
+
+
+class _SleepStub(HrvProductionProvider):
+    """Gated by the real manifest's sleepecg entry, as the real sleep provider is. Module-level
+    so the registry pickles into the infer worker."""
+
+    provider_id = "sleepecg.wrn-gru-mesa.v1"
+
+    def __init__(self, checkpoint: str):
+        super().__init__()
+        self.checkpoint = checkpoint
+
+    def loaded_identity(self):
+        with open(self.checkpoint, "rb") as handle:
+            return {"checkpoint_sha256": hashlib.sha256(handle.read()).hexdigest()}
+
+
+def test_healthz_reports_code_lock_manifest_loaded_digests_and_readiness_together(
+        staged_revision, live_server, tmp_path, monkeypatch):
+    """Spec 01 §1: one ``/healthz`` answer, through the real HTTP server, ties together the code
+    revision, the lock digest, the manifest digest, the digests of the checkpoints in use and
+    provider readiness, each measured by the process rather than taken from a claim."""
+    root, revision_id = staged_revision
+    entry = next(e for e in json.loads(REAL_MANIFEST.read_text())["entries"]
+                 if e["id"] == "sleepecg_wrn_gru_mesa")
+    checkpoint = root / next(a["path"] for a in entry["artifacts"]
+                             if a["name"] == "wrn-gru-mesa.zip")
+    assert checkpoint.is_file()
+
+    probe_app = _app(str(root / "manifest.json"), str(root))
+    measured = identity.runtime_identity(probe_app)
+    stamp_path = tmp_path / "RELEASE.json"
+    stamp_path.write_text(json.dumps({
+        "schema": "nara-release-stamp/1", "release_id": "d" * 40, "git_commit": "d" * 40,
+        "git_tree": "e" * 40, "dirty": False,
+        "uv_lock_sha256": measured["uv_lock_sha256"],
+        "manifest_sha256": measured["manifest"]["sha256"],
+        "files": {"sha256": "c" * 64},
+        "trees": {identity.SOURCE_TREE_KEY: measured["source"]["sha256"]},
+    }))
+    monkeypatch.setenv("FRWHOOP_RELEASE_STAMP", str(stamp_path))
+    monkeypatch.setenv("FRWHOOP_SOURCE_REVISION", "0" * 40)
+
+    server = live_server(registry=ProviderRegistry([HrvProductionProvider(),
+                                                    _SleepStub(str(checkpoint))]),
+                         manifest_path=str(root / "manifest.json"), model_root=str(root))
+    status, body = server.get("/healthz")
+    assert status == 200
+    block = body["identity"]
+
+    # Code revision: from the stamp, confirmed by the measured source and lock, not the claim.
+    assert block["claimed_source_revision"] == "0" * 40
+    assert block["code_revision"] == {"commit": "d" * 40, "dirty": False,
+                                      "source_matches_release": True,
+                                      "uv_lock_matches_release": True}
+    assert block["uv_lock_sha256"] == hashlib.sha256(
+        (REPO_PACKAGE_ROOT / "uv.lock").read_bytes()).hexdigest()
+    # Manifest: the bytes this process verified against, matching the release and the revision.
+    assert block["manifest"]["sha256"] == hashlib.sha256(
+        (root / "manifest.json").read_bytes()).hexdigest()
+    assert block["manifest"]["matches_release"] is True
+    assert block["manifest"]["matches_revision"] is True
+    assert block["model_revision"]["revision_id"] == revision_id
+    # Checkpoints: verified at startup and reported by the provider that loaded them.
+    sleep_artifacts = {a["name"]: a for a in block["artifacts"]
+                       if a["entry_id"] == "sleepecg_wrn_gru_mesa"}
+    assert sleep_artifacts and all(a["status"] == "verified" and len(a["sha256"]) == 64
+                                   for a in sleep_artifacts.values())
+    loaded = block["providers"]["sleepecg.wrn-gru-mesa.v1"]
+    assert loaded["ready"] is True and loaded["reason"] is None
+    assert loaded["loaded"]["checkpoint_sha256"] == sleep_artifacts["wrn-gru-mesa.zip"]["sha256"]
+    # Readiness: the same answer as the route's own provider map.
+    assert {pid: p["ready"] for pid, p in block["providers"].items()} == {
+        pid: p["ready"] for pid, p in body["providers"].items()}
