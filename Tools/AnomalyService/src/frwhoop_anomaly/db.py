@@ -46,7 +46,7 @@ class Database:
   def rpc(self, fn: str, *args: Any, timeout_ms: int = 30000) -> list[dict]:
     c = self.conn()
     placeholders = ", ".join(["%s"] * len(args))
-    adapted = [Jsonb(a) if isinstance(a, (dict, list)) else a for a in args]
+    adapted = [Jsonb(a) if isinstance(a, dict) else a for a in args]     # payloads are objects; lists are arrays
     with c.transaction():
       with c.cursor() as cur:
         cur.execute(f"set local statement_timeout = {int(timeout_ms)}")
