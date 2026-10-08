@@ -2570,11 +2570,13 @@ private struct SleepFreshnessNote: View {
         let calculationQueued = live.lastSyncedAt.map {
             (0..<5).contains(now.timeIntervalSince1970 - $0)
         } ?? false
+        // Cloud mode: the strap has handed the night over, but it is still uploading or the server has not
+        // rescored the day yet. That is minutes, not a verdict, so it reads as calculating too.
         let status = resolveSleepFreshness(
             hasCurrentNight: current,
             morningReady: calendar.component(.hour, from: now) >= 6,
             syncing: live.backfilling,
-            calculating: intelligence.computing || calculationQueued,
+            calculating: intelligence.computing || calculationQueued || live.cloudCatchUpPending,
             syncedSinceDayStart: (live.lastSyncedAt ?? 0) >= start.timeIntervalSince1970,
             syncFailed: live.lastSyncError != nil
         )
@@ -2583,7 +2585,9 @@ private struct SleepFreshnessNote: View {
             SyncingHistoryNote(chunks: live.syncChunksThisSession)
         case .calculating:
             DataPendingNote(title: "Calculating last night's sleep…",
-                            message: "Your strap history is in. Nara is detecting and staging the night now.",
+                            message: live.cloudCatchUpPending
+                                ? "Your strap history is in and uploading. Nara is staging the night now."
+                                : "Your strap history is in. Nara is detecting and staging the night now.",
                             symbol: "waveform.path.ecg")
         case .syncFailed:
             DataPendingNote(title: "Last night's sleep hasn't synced",

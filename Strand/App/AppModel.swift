@@ -1421,7 +1421,56 @@ final class AppModel: ObservableObject {
     static let backgroundMaterializationSeconds: TimeInterval = 5 * 60
     private var lastBackgroundMaterializationAt = Date.distantPast
 
+    /// Cloud mode: after a catch-up offload the night reaches the server minutes after the strap handed it over.
+    /// The upload drains first, then the worker rescores the day (its claim cooldown is 45 s and a pass about
+    /// 10 s), and only then can the phone read the night. This covers that span with `cloudCatchUpPending`, so
+    /// the Sleep tab says "calculating" rather than "wasn't detected", and reads the server as soon as the upload
+    /// has drained instead of waiting for the half-minute loop. A minute-cadence offload is not a catch-up.
+    private var cloudCatchUpTask: Task<Void, Never>?
+    /// Chunks (about a minute of strap history each) that make an offload a catch-up worth watching.
+    static let cloudCatchUpMinChunks = 10
+    static let cloudCatchUpPollSeconds: UInt64 = 2
+    /// Bound on the whole watch, so an upload that cannot drain (no network) does not hold "calculating" forever.
+    static let cloudCatchUpMaxSeconds: TimeInterval = 15 * 60
+    /// Server reads after the drain, as gaps in seconds: right away for a day that was already scored, then
+    /// after the worker's cooldown and a pass, then once more for a pass that queued behind another.
+    static let cloudCatchUpReadGaps: [UInt64] = [5, 55, 45]
+
+    /// The upload has caught up when what is left is at most live data in flight: under one seal's worth of
+    /// unsealed records and no more files waiting than the in-flight budget.
+    nonisolated static func cloudBacklogDrained(_ stats: CloudJournalStats) -> Bool {
+        stats.pendingRecords < 1_000
+            && stats.sealedBatches + stats.uploadedBatches <= CloudTransportCoordinator.Policy().maxInFlight
+    }
+
+    private func watchCloudCatchUp(chunks: Int) {
+        guard cloudScoringIsAuthoritative, cloudCatchUpTask == nil else { return }
+        cloudCatchUpTask = Task { [weak self] in
+            // A deep offload can end in a short last slice, so an upload still behind counts as a catch-up too.
+            let behind = chunks >= Self.cloudCatchUpMinChunks
+                ? true : !Self.cloudBacklogDrained(await CloudPushRuntime.shared.stats())
+            guard behind else {
+                self?.cloudCatchUpTask = nil
+                return
+            }
+            self?.live.cloudCatchUpPending = true
+            let started = Date()
+            while !Task.isCancelled, Date().timeIntervalSince(started) < Self.cloudCatchUpMaxSeconds {
+                if Self.cloudBacklogDrained(await CloudPushRuntime.shared.stats()) { break }
+                try? await Task.sleep(nanoseconds: Self.cloudCatchUpPollSeconds * 1_000_000_000)
+            }
+            for gap in Self.cloudCatchUpReadGaps {
+                try? await Task.sleep(nanoseconds: gap * 1_000_000_000)
+                guard !Task.isCancelled, let self else { break }
+                if Platform.appIsOnScreen { await self.syncHostedResults() }
+            }
+            self?.live.cloudCatchUpPending = false
+            self?.cloudCatchUpTask = nil
+        }
+    }
+
     private func refreshAfterCompletedBackfill() async {
+        watchCloudCatchUp(chunks: live.syncChunksThisSession)
         // In cloud mode an offload writes only the stream tables, and nothing `refresh` reads comes from them: the
         // day's numbers arrive through `syncHostedResults`, which refreshes when it writes one. A 120-day refresh
         // here only swapped the cached history between 120 and 4,000 days with the full refreshes around it, and
