@@ -341,4 +341,129 @@ final class DayScoringAdapterTests: XCTestCase {
         let normal = LocalDayWindows(timeZone: ny).window(ofDayKey: "2026-06-15")!
         XCTAssertEqual(normal.nextStart.timeIntervalSince(normal.start), 24 * 3_600)
     }
+
+    // MARK: - Published activity epochs (audit D5-01 / D6-V02)
+
+    func testPublishedEpochsKeepOneEpochPerSlotAndNameEveryLineage() {
+        func row(_ day: String, _ s: Int, _ fp: String, _ rev: Int, _ m: String) -> [String: String] {
+            ["day": day, "start_ts": String(s), "end_ts": String(s + 30), "motion_label": m,
+             "posture": "unknown", "exercise_session": "unknown", "sleep_state": "unknown",
+             "exertion_context": "unknown", "wear_state": "unknown", "confidence": "0.8",
+             "observed_s": "30", "valid_s": "30", "model_version": "hart-\(rev)",
+             "preprocessing_version": "p", "ontology_version": "v1", "fingerprint": fp,
+             "result_revision": String(rev)]
+        }
+        let rows = [row("2026-10-06", 100, "b", 20, "walking"),
+                    row("2026-10-06", 100, "b", 20, "running"),   // a repeated slot is dropped
+                    row("2026-10-06", 130, "b", 20, "walking"),
+                    row("2026-10-07", 160, "c", 30, "stationary")]
+        let out = DayScorer.publishedEpochs(fromRows: rows, dayStart: 0)
+        XCTAssertEqual(out.epochs.map(\.startTs), [100, 130, 160])
+        XCTAssertEqual(out.epochs.first?.motion, .walking, "the first (newest) row of a slot wins")
+        XCTAssertEqual(out.lineages, [
+            .init(day: "2026-10-06", fingerprint: "b", resultRevision: 20, epochs: 2, modelVersion: "hart-20"),
+            .init(day: "2026-10-07", fingerprint: "c", resultRevision: 30, epochs: 1, modelVersion: "hart-30"),
+        ])
+        XCTAssertEqual(out.maxEnd, 190)
+    }
+
+    func testPublishedEpochsSQLResolvesTheNewestPublishPerUtcDay() {
+        let sql = DayScorer.publishedEpochsSQL
+        XCTAssertTrue(sql.contains("generate_series"), "every UTC day the local window overlaps")
+        XCTAssertTrue(sql.contains("max(x.result_revision)"))
+        XCTAssertTrue(sql.contains("e.day = cur.day and e.result_revision = cur.result_revision"))
+        XCTAssertFalse(sql.contains("limit 1"), "one revision for the whole window dropped a UTC day")
+    }
+
+    // MARK: - Nightly baselines hold absent days (audit D4-03 / D4-12)
+
+    func testBaselineDayKeysCoverEveryCalendarDayBeforeTheClaim() throws {
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-03-10"))
+        XCTAssertEqual(keys.count, 120)
+        XCTAssertEqual(keys.last, "2026-03-09")
+        XCTAssertEqual(keys.first, "2025-11-10")
+        XCTAssertEqual(Set(keys).count, 120)
+        XCTAssertNil(DayScorer.baselineDayKeys(before: "2026-02-30"))
+    }
+
+    func testBaselineFoldGoesStaleAfterALongAbsence() throws {
+        // 40 nights of history, then nothing for 40 days before the claimed night.
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-06-01"))
+        let rows: [[String: String]] = keys.prefix(80).suffix(40).enumerated().map { i, d in
+            ["d": d, "hrv": String(50 + i % 5), "rhr": "55", "resp": "14.5", "st": "33.4"]
+        }
+        let padded = try DayScorer.foldBaselines(rows: rows, before: "2026-06-01")
+        XCTAssertEqual(padded.hrv?.status, .stale, "40 nights without a reading is not a trusted baseline")
+        XCTAssertEqual(padded.restingHR?.status, .stale)
+        XCTAssertEqual(padded.hrv?.nightsSinceUpdate, 40)
+        XCTAssertEqual(padded.hrv?.nValid, 40)
+        // The old fold (rows only) saw 40 consecutive nights and called it trusted.
+        let unpadded = Baselines.foldHistory(rows.map { Double($0["hrv"]!) }, cfg: Baselines.metricCfg["hrv"]!)
+        XCTAssertEqual(unpadded.status, .trusted)
+        XCTAssertEqual(unpadded.baseline, try XCTUnwrap(padded.hrv).baseline, accuracy: 1e-9,
+                       "skip-and-hold leaves the centre where the last night put it")
+    }
+
+    /// The day back from a 40-night absence still publishes a recovery (the phone scores it too), but with
+    /// `.building` confidence instead of `.solid`, and its provenance names the held baselines.
+    func testTheDayBackFromALongAbsenceScoresOnTheHeldBaselineAndSaysSo() throws {
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-06-01"))
+        let rows: [[String: String]] = keys.prefix(80).suffix(40).enumerated().map { i, d in
+            ["d": d, "hrv": String(50 + i % 5), "rhr": "55", "resp": "14.5", "st": "33.4"]
+        }
+        let folded = try DayScorer.foldBaselines(rows: rows, before: "2026-06-01")
+        let stale = try XCTUnwrap(folded.hrv)
+        XCTAssertEqual(stale.status, .stale)
+        XCTAssertFalse(stale.usable, "scoring straight off the fold would withhold the recovery")
+        XCTAssertNil(RecoveryScorer.recovery(hrv: 52, rhr: 55, resp: 14.5, hrvBaseline: RecoveryScorer.DriverBaseline(stale),
+                                             rhrBaseline: nil, respBaseline: nil, sleepPerf: 0.85,
+                                             hrvBaselineUsable: stale.usable))
+
+        let (scoring, held) = DayScorer.scoringBaselines(folded)
+        let hrv = try XCTUnwrap(scoring.hrv)
+        XCTAssertEqual(hrv.status, .provisional)
+        XCTAssertEqual(hrv.baseline, stale.baseline, "the centre is held, not re-estimated")
+        XCTAssertEqual(hrv.spread, stale.spread)
+        XCTAssertEqual(hrv.nightsSinceUpdate, 40)
+        XCTAssertEqual(held, ["hrv": 40, "resting_hr": 40, "resp": 40, "skin_temp": 40])
+        let recovery = RecoveryScorer.recovery(hrv: 52, rhr: 55, resp: 14.5, hrvBaseline: RecoveryScorer.DriverBaseline(hrv),
+                                               rhrBaseline: nil, respBaseline: nil, sleepPerf: 0.85,
+                                               hrvBaselineUsable: hrv.usable)
+        XCTAssertNotNil(recovery, "the day back is scored")
+        XCTAssertEqual(ScoreConfidence.charge(recovery: recovery, hrvBaseline: scoring.hrv), .building,
+                       "with a downgraded confidence")
+
+        var daily: [String: Any] = ["provenance": ["scope": "hrv_sleep"]]
+        DayScorer.recordHeldBaselines(held, in: &daily)
+        let provenance = try XCTUnwrap(daily["provenance"] as? [String: Any])
+        XCTAssertEqual(provenance["scope"] as? String, "hrv_sleep", "existing provenance is kept")
+        XCTAssertEqual(provenance["baseline_fallback"] as? String, "held_stale")
+        XCTAssertEqual(provenance["baseline_nights_since_update"] as? [String: Int], held)
+
+        // An unbroken history holds nothing and publishes exactly what it did.
+        let fresh = try DayScorer.foldBaselines(rows: keys.suffix(30).map {
+            ["d": $0, "hrv": "50", "rhr": "55", "resp": "14.5", "st": "33.4"]
+        }, before: "2026-06-01")
+        let unchanged = DayScorer.scoringBaselines(fresh)
+        XCTAssertTrue(unchanged.held.isEmpty)
+        XCTAssertEqual(unchanged.baselines.hrv, fresh.hrv)
+        var plain: [String: Any] = ["provenance": ["scope": "hrv_sleep"]]
+        DayScorer.recordHeldBaselines(unchanged.held, in: &plain)
+        XCTAssertNil((plain["provenance"] as? [String: Any])?["baseline_fallback"])
+    }
+
+    func testBaselineFoldOfAnUnbrokenHistoryIsUnchanged() throws {
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: "2026-06-01"))
+        let rows: [[String: String]] = keys.suffix(30).enumerated().map { i, d in
+            ["d": d, "hrv": String(48 + i % 7), "rhr": String(54 + i % 3), "resp": "14.5", "st": "33.4"]
+        }
+        let padded = try DayScorer.foldBaselines(rows: rows, before: "2026-06-01")
+        let cfg = Baselines.metricCfg["hrv"]!
+        let plain = Baselines.foldHistory(rows.map { Double($0["hrv"]!) }, cfg: cfg)
+        XCTAssertEqual(padded.hrv?.status, .trusted)
+        XCTAssertEqual(try XCTUnwrap(padded.hrv).baseline, plain.baseline, accuracy: 1e-9,
+                       "leading empty days before the first night change nothing")
+        XCTAssertEqual(try XCTUnwrap(padded.hrv).spread, plain.spread, accuracy: 1e-9)
+        XCTAssertEqual(padded.hrv?.nValid, plain.nValid)
+    }
 }

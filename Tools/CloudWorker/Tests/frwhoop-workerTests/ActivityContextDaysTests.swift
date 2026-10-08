@@ -137,7 +137,7 @@ final class ActivityContextDaysTests: XCTestCase {
 
         let input = ActivityContextDays.trackInput(
             windows: ActivityContextDays.windowsWithCompatibleFeatures(good), streams: .init(), sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v1",
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v1",
             gaitWindows: ActivityContextDays.compatibleGaitWindows(good))
         XCTAssertEqual(input.encoderWindows.first?.fineProbs, w.fine)
         XCTAssertEqual(input.gaitWindows, gait)
@@ -162,7 +162,7 @@ final class ActivityContextDaysTests: XCTestCase {
             let ws = baselineFlags.map { window(baseline: $0) }
             return ActivityContextDays.trackInput(
                 windows: ws, streams: .init(), sleep: [], exercise: [],
-                dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v1").encoderId
+                dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v1").encoderId
         }
         XCTAssertEqual(id([true, true]), "baseline")
         XCTAssertEqual(id([false, false]), "hart")
@@ -179,7 +179,7 @@ final class ActivityContextDaysTests: XCTestCase {
             windows: sim.windows, streams: sim.streams,
             sleep: [(start: dayStart + 100, end: dayStart + 200)],
             exercise: [(start: dayStart + 300, end: dayStart + 400, sport: "cycling")],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
         XCTAssertEqual(input.dayStart, dayStart)
         XCTAssertEqual(input.dayEnd, dayEnd)
         XCTAssertEqual(input.sleep.map { [$0.start, $0.end] }, [[dayStart + 100, dayStart + 200]])
@@ -205,7 +205,7 @@ final class ActivityContextDaysTests: XCTestCase {
         let withSport = ActivityContextDays.trackInput(
             windows: [], streams: sim.streams, sleep: [],
             exercise: [(start: dayStart + 10, end: dayStart + 90, sport: "Cycling")],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "streams-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "streams-activity-1")
         XCTAssertEqual(withSport.workouts.map(\.sport), ["Cycling"],
                        "the row's sport must not be discarded on its way to the decoder")
         XCTAssertEqual(WorkoutKind(sport: try XCTUnwrap(withSport.workouts.first).sport), .cycling,
@@ -214,7 +214,7 @@ final class ActivityContextDaysTests: XCTestCase {
         let noSport = ActivityContextDays.trackInput(
             windows: [], streams: sim.streams, sleep: [],
             exercise: [(start: dayStart + 10, end: dayStart + 90, sport: "")],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "streams-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "streams-activity-1")
         XCTAssertEqual(noSport.workouts.map(\.sport), [""],
                        "a row with no sport stays empty, not a guessed name")
         XCTAssertEqual(WorkoutKind(sport: try XCTUnwrap(noSport.workouts.first).sport), .unspecified)
@@ -234,7 +234,7 @@ final class ActivityContextDaysTests: XCTestCase {
         streams.events = events
         let input = ActivityContextDays.trackInput(
             windows: [], streams: streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v1")
         XCTAssertEqual(input.offWrist.map { [$0.start, $0.end] },
                        [[dayStart - 600, dayStart + 100], [dayStart + 5_000, dayStart + 5_900]],
                        "the span that closed before the day is not this day's, the one that crossed midnight is")
@@ -251,7 +251,7 @@ final class ActivityContextDaysTests: XCTestCase {
             if let events { s.events = events }
             return ActivityContextDays.trackInput(
                 windows: [], streams: s, sleep: [], exercise: [],
-                dayStart: dayStart, dayEnd: dayEnd, horizon: horizon, encoderVersion: "v")
+                dayStart: dayStart, dayEnd: dayEnd, horizon: horizon, sleepKnownOutsideSessions: false, encoderVersion: "v")
                 .offWrist.map { [$0.start, $0.end] }
         }
         XCTAssertEqual(spans(horizon: dayStart + 43_000), [[dayStart + 40_000, dayStart + 43_000]])
@@ -263,7 +263,7 @@ final class ActivityContextDaysTests: XCTestCase {
 
         let input = ActivityContextDays.trackInput(
             windows: [], streams: streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, horizon: dayStart + 40_600, encoderVersion: "v")
+            dayStart: dayStart, dayEnd: dayEnd, horizon: dayStart + 40_600, sleepKnownOutsideSessions: false, encoderVersion: "v")
         let built = try build(input)
         let doc = try XCTUnwrap(try object(built.payloadText)["document"] as? [String: Any])
         XCTAssertEqual(doc["day_end"] as? Int, dayEnd, "the document is still the whole UTC day")
@@ -276,7 +276,7 @@ final class ActivityContextDaysTests: XCTestCase {
         streams.events = [WhoopEvent(ts: dayEnd - 1_800, kind: "WRIST_OFF(10)", payload: [:])]
         let input = ActivityContextDays.trackInput(
             windows: [], streams: streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v1")
         XCTAssertEqual(input.offWrist.map { [$0.start, $0.end] }, [[dayEnd - 1_800, dayEnd]])
     }
 
@@ -292,7 +292,7 @@ final class ActivityContextDaysTests: XCTestCase {
 
         let input = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
         let built = try build(input)
         let payload = try object(built.payloadText)
 
@@ -342,7 +342,7 @@ final class ActivityContextDaysTests: XCTestCase {
         sim.walk(120)
         let input = ActivityContextDays.trackInput(
             windows: [], streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
         let doc = try XCTUnwrap(try object(try build(input).payloadText)["document"] as? [String: Any])
         let latest = try XCTUnwrap(doc["latest"] as? [String: Any])
         let evidence = try XCTUnwrap(latest["evidence"] as? [String: Any])
@@ -357,12 +357,12 @@ final class ActivityContextDaysTests: XCTestCase {
         sim.walk(120)
         let withFeatures = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v")
         var stripped = sim.windows
         for i in stripped.indices { stripped[i].features = [:] }
         let without = ActivityContextDays.trackInput(
             windows: stripped, streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v")
         XCTAssertEqual(withFeatures.imuWindows.count, sim.windows.count)
         XCTAssertTrue(without.imuWindows.isEmpty)
         XCTAssertEqual(without.encoderWindows.count, sim.windows.count, "the encoder windows are unaffected")
@@ -373,7 +373,7 @@ final class ActivityContextDaysTests: XCTestCase {
         sim.still(90); sim.walk(60)
         let input = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
         let a = try build(input, generatedAt: 1_789_500_000)
         let b = try build(input, generatedAt: 1_789_500_000)
         XCTAssertEqual(a.payloadText, b.payloadText)
@@ -401,7 +401,7 @@ final class ActivityContextDaysTests: XCTestCase {
             XCTAssertEqual(sim.ts, dayEnd, scenario.name)
             let input = ActivityContextDays.trackInput(
                 windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-                dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+                dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
 
             let track = ActivityContextTrackBuilder.build(input)
             let unclipped = ActivityContextDayDocument(track: track, input: input, generatedAt: 0, includeSnapshot: false)
@@ -437,7 +437,7 @@ final class ActivityContextDaysTests: XCTestCase {
         }
         let input = ActivityContextDays.trackInput(
             windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "hart-activity-1")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "hart-activity-1")
         let built = try build(input)
         XCTAssertEqual(built.observedSeconds, 6 * 3_600)
         XCTAssertGreaterThan(built.runs, 100, "the transitions must show up as separate runs")
@@ -449,7 +449,7 @@ final class ActivityContextDaysTests: XCTestCase {
     func testADayWithNoDataIsStillAValidDocument() throws {
         let input = ActivityContextDays.trackInput(
             windows: [], streams: .init(), sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "v")
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "v")
         let built = try build(input)
         XCTAssertEqual(built.runs, 0)
         XCTAssertEqual(built.events, 0)
@@ -477,5 +477,219 @@ final class ActivityContextDaysTests: XCTestCase {
         XCTAssertLessThanOrEqual(reason.count, 240)
 
         XCTAssertEqual(ActivityContextDays.safeReason(WorkerError.malformed("boom")).isEmpty, false)
+    }
+
+    // MARK: - Sleep outside logged nights (audit D1-02)
+
+    func testAStoredDayCountsAsAwakeOnlyOnceItHasSettled() {
+        let settle = ActivityContextDays.streamsSleepSettleSeconds
+        XCTAssertFalse(ActivityContextDays.sleepKnown(now: dayEnd - 1, dayEnd: dayEnd), "the day is still running")
+        XCTAssertFalse(ActivityContextDays.sleepKnown(now: dayEnd + settle - 1, dayEnd: dayEnd),
+                       "the night across midnight may not be logged yet")
+        XCTAssertTrue(ActivityContextDays.sleepKnown(now: dayEnd + settle, dayEnd: dayEnd))
+    }
+}
+
+// MARK: - Lookback, decoder reference and versions (audits D2-11, D1-01 / D5-12, D5-03)
+
+final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
+
+    private let dayStart = 1_789_430_400          // 2026-09-15 00:00:00 UTC
+    private var dayEnd: Int { dayStart + 86_400 }
+
+    private func input(_ sim: DaySim, from lo: Int, to hi: Int) -> ActivityContextTrackInput {
+        let (inside, _) = ActivityContextDays.split(sim.streams, at: lo)
+        var streams = inside
+        streams.hr = streams.hr.filter { $0.ts < hi }
+        streams.gravity = streams.gravity.filter { $0.ts < hi }
+        streams.steps = streams.steps.filter { $0.ts < hi }
+        return ActivityContextDays.trackInput(
+            windows: sim.windows, streams: streams, sleep: [], exercise: [], dayStart: lo, dayEnd: hi,
+            sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1")
+    }
+
+    private func distance(_ a: ActivityContextState, _ b: ActivityContextState) -> Double {
+        PostureClass.allCases.reduce(0) { $0 + abs(a.posture[$1] - b.posture[$1]) }
+            + LocomotionClass.allCases.reduce(0) { $0 + abs(a.locomotion[$1] - b.locomotion[$1]) }
+    }
+
+    /// Forty minutes of desk sitting across midnight: decoded per day with a cold start, the first minutes of the
+    /// day fall back to the prior; with the half-hour lookback they continue the belief the evening built, as an
+    /// unsplit decode of the same seconds does.
+    func testTheLookbackCarriesTheBeliefAcrossMidnight() throws {
+        var sim = DaySim(start: dayStart - ActivityContextDays.lookbackSeconds)
+        sim.still(ActivityContextDays.lookbackSeconds + 600)
+        let day = input(sim, from: dayStart, to: dayEnd)
+        let (_, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+        let lookback = try XCTUnwrap(ActivityContextDays.lookbackInput(
+            windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
+            sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1"))
+        XCTAssertEqual(lookback.dayStart, dayStart - ActivityContextDays.lookbackSeconds)
+        XCTAssertEqual(lookback.dayEnd, dayStart)
+
+        let unsplit = ActivityContextTrackBuilder.build(input(sim, from: dayStart - 1_800, to: dayEnd))
+        let cold = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd).track
+        let warm = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd, lookback: lookback).track
+
+        let reference = Dictionary(uniqueKeysWithValues: unsplit.states.filter { $0.ts >= dayStart }.map { ($0.ts, $0) })
+        let early = { (t: ActivityContextTrack) in t.states.filter { $0.ts < self.dayStart + 120 } }
+        XCTAssertFalse(early(warm).isEmpty)
+        let warmGap = early(warm).compactMap { s in reference[s.ts].map { distance(s, $0) } }.max() ?? 1
+        let coldGap = early(cold).compactMap { s in reference[s.ts].map { distance(s, $0) } }.max() ?? 0
+        XCTAssertLessThan(warmGap, 0.05, "the warmed decode continues the unsplit belief")
+        XCTAssertGreaterThan(coldGap, warmGap, "a cold start at midnight restarts from the prior")
+        XCTAssertEqual(early(warm).first?.displayContext, reference[early(warm).first!.ts]?.displayContext)
+    }
+
+    func testTheLookbackNeverReachesTheDocument() throws {
+        var sim = DaySim(start: dayStart - 900)
+        sim.still(900)
+        sim.walk(120)
+        sim.still(300)
+        let day = input(sim, from: dayStart, to: dayEnd)
+        let (_, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+        let lookback = ActivityContextDays.lookbackInput(
+            windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
+            sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1")
+        let cold = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd).document
+        let warm = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd, lookback: lookback).document
+        XCTAssertEqual(warm.dayStart, dayStart)
+        XCTAssertGreaterThanOrEqual(warm.runs.first?.start ?? 0, dayStart)
+        XCTAssertTrue(warm.events.allSatisfy { $0.ts >= dayStart })
+        XCTAssertEqual(warm.observedSeconds, cold.observedSeconds, "only the day's own seconds are counted")
+        XCTAssertEqual(warm.observedSeconds, 420)
+        // Nothing before the day: no lookback input, and the decode is exactly the cold one.
+        XCTAssertNil(ActivityContextDays.lookbackInput(
+            windows: [], streams: ActivityContextDays.Streams(), sleep: [], inBed: [], exercise: [],
+            dayStart: dayStart, sleepKnownOutsideSessions: true, encoderVersion: "x"))
+    }
+
+    /// Walking that stops seconds before midnight leaves a fresh walk_stop in the lookback's snapshot; the
+    /// resumed day may re-emit it with its pre-midnight stamp, which publish_activity_context_day rejects
+    /// (`invalid_activity_day_event`). Every published event must fall inside the day.
+    func testALookbackEventBeforeMidnightNeverReachesTheDocument() throws {
+        var leakedIntoTheTrack = 0
+        for endsBefore in stride(from: 1, through: 40, by: 3) {
+            var sim = DaySim(start: dayStart - 1_200)
+            sim.still(600)
+            sim.walk(600 - endsBefore)
+            sim.still(endsBefore + 600)
+            let day = input(sim, from: dayStart, to: dayEnd)
+            let (_, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+            let lookback = ActivityContextDays.lookbackInput(
+                windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
+                sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1")
+            let built = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd, lookback: lookback)
+            if built.track.events.contains(where: { $0.ts < dayStart }) { leakedIntoTheTrack += 1 }
+            XCTAssertTrue(built.document.events.allSatisfy { $0.ts >= dayStart && $0.ts < dayEnd },
+                          "walking ending \(endsBefore) s before midnight")
+            let payload = try ActivityContextDays.build(
+                input: day, day: "2026-09-15", modelVersion: "m", preprocessingVersion: "p",
+                generatedAt: dayEnd, lookback: lookback).payloadText
+            let document = try JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any]
+            let events = (document?["document"] as? [String: Any])?["events"] as? [[String: Any]] ?? []
+            XCTAssertTrue(events.allSatisfy { (($0["ts"] as? Int) ?? Int.min) >= dayStart })
+        }
+        XCTAssertGreaterThan(leakedIntoTheTrack, 0, "the scenario must exercise a pre-midnight event")
+    }
+
+    func testStreamsLoadedWithTheLookbackSplitAtTheDayStart() {
+        var sim = DaySim(start: dayStart - 10)
+        sim.still(20)
+        let (day, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+        XCTAssertEqual(day.hr.map(\.ts).min(), dayStart)
+        XCTAssertEqual(before.hr.count, 10)
+        XCTAssertEqual(day.gravity.count + before.gravity.count, 20)
+        XCTAssertEqual(day.steps.count + before.steps.count, 20)
+    }
+
+    // MARK: Decoder reference
+
+    func testTheReferenceIsTheMedianOfPriorNightsAndTheTanakaMaximum() {
+        let reference = ActivityContextDays.DecoderReference(restingNights: [52, 47, 49, 48, 50], ageYears: 40)
+        XCTAssertEqual(reference.restingHeartRate, 49)
+        XCTAssertEqual(reference.maxHeartRate, 180)
+        let config = reference.config
+        XCTAssertEqual(config.restingHeartRate, 48, "quantised to 3 bpm, as on the phone")
+        XCTAssertEqual(config.maxHeartRate, 180)
+        let p = reference.provenance(gaitWindows: 3)
+        XCTAssertEqual(p.tag, "srv-cfg-1:r48m180")
+        XCTAssertEqual(p.restingHeartRateSource, "server_daily_scores")
+        XCTAssertEqual(p.restingHeartRateNights, 5)
+        XCTAssertEqual(p.maxHeartRateSource, "tanaka_age")
+        XCTAssertEqual(p.gaitWindows, 3)
+    }
+
+    func testAMissingOrImplausibleReferenceKeepsTheDefaultsAndSaysSo() {
+        let none = ActivityContextDays.DecoderReference()
+        XCTAssertEqual(none.config, ActivityDecoderConfig())
+        let p = none.provenance()
+        XCTAssertEqual(p.tag, "srv-cfg-1:r60m190")
+        XCTAssertEqual(p.restingHeartRateSource, "default")
+        XCTAssertEqual(p.maxHeartRateSource, "default")
+        // Two nights are too thin to call typical; an implausible value is never trusted.
+        XCTAssertEqual(ActivityContextDays.DecoderReference(restingNights: [50, 51]).provenance().restingHeartRateSource,
+                       "default")
+        XCTAssertEqual(ActivityContextDays.DecoderReference(restingNights: [20, 21, 22]).provenance().restingHeartRateSource,
+                       "default")
+    }
+
+    func testAgeOnTheDay() {
+        XCTAssertEqual(ActivityContextDays.ageYears(dateOfBirth: "1986-09-16", on: "2026-09-15"), 39)
+        XCTAssertEqual(ActivityContextDays.ageYears(dateOfBirth: "1986-09-15", on: "2026-09-15"), 40)
+        XCTAssertNil(ActivityContextDays.ageYears(dateOfBirth: "garbage", on: "2026-09-15"))
+        XCTAssertNil(ActivityContextDays.ageYears(dateOfBirth: "2027-01-01", on: "2026-09-15"))
+    }
+
+    /// The stored stream day decodes with the wearer's reference and records it beside the shared document.
+    func testTheStreamDayDecodesWithTheReferenceAndRecordsIt() throws {
+        var sim = DaySim(start: dayStart + 3_600)
+        sim.still(300)
+        sim.walk(300)
+        let reference = ActivityContextDays.DecoderReference(restingNights: [45, 46, 44, 45], ageYears: 30)
+        let built = try XCTUnwrap(try ActivityContextDays.buildStreamDay(
+            day: "2026-09-15", dayBounds: (dayStart, dayEnd), streams: sim.streams, sleep: [], exercise: [],
+            now: dayEnd + 86_400, reference: reference))
+        let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(built.payloadText.utf8)) as? [String: Any])
+        let document = try XCTUnwrap(payload["document"] as? [String: Any])
+        let config = try XCTUnwrap(document["decoder_config"] as? [String: Any])
+        XCTAssertEqual(config["tag"] as? String, "srv-cfg-1:r45m185")
+        XCTAssertEqual(built.decoderConfigTag, "srv-cfg-1:r45m185")
+        XCTAssertEqual(config["resting_hr_source"] as? String, "server_daily_scores")
+        XCTAssertEqual(config["max_hr_source"] as? String, "tanaka_age")
+        // The shared document still decodes, extra key and all.
+        let data = try JSONSerialization.data(withJSONObject: document)
+        let decoded = try JSONDecoder().decode(ActivityContextDayDocument.self, from: data)
+        XCTAssertTrue(decoded.isCurrent)
+        let plain = try XCTUnwrap(try ActivityContextDays.buildStreamDay(
+            day: "2026-09-15", dayBounds: (dayStart, dayEnd), streams: sim.streams, sleep: [], exercise: [],
+            now: dayEnd + 86_400))
+        let plainDoc = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(plain.payloadText.utf8))
+            as? [String: Any])?["document"] as? [String: Any])
+        XCTAssertEqual((plainDoc["decoder_config"] as? [String: Any])?["tag"] as? String, "srv-cfg-1:r60m190")
+    }
+
+    // MARK: Versions
+
+    func testTheLaneVersionsNameWhatThisBuildRuns() throws {
+        let streams = ActivityContextDays.lanesVersions()
+        XCTAssertEqual(streams["decoder"], ActivityContextVersions.decoder)
+        XCTAssertEqual(streams["ontology"], ActivityContextVersions.ontology)
+        XCTAssertEqual(streams["feature_schema"], ActivityContextVersions.featureSchema)
+        XCTAssertNil(streams["model"])
+        XCTAssertEqual(streams["ordinal"], String(ActivityContextDays.versionsOrdinal))
+        let tag = try XCTUnwrap(streams["tag"])
+        XCTAssertFalse(tag.contains("ordinal"), "the ordinal orders builds; it is not part of the fingerprinted tag")
+        XCTAssertTrue(tag.hasPrefix("d=\(ActivityContextVersions.decoder);o=\(ActivityContextVersions.ontology);"))
+        XCTAssertTrue(tag.contains(";c=\(ActivityContextDays.decoderConfigRecipe);"))
+        XCTAssertTrue(tag.contains(";l=\(ActivityContextDays.lookbackSeconds)"))
+
+        let hart = ActivityContextDays.lanesVersions(model: "hart wisdm/v0", preprocessing: "pre-1")
+        XCTAssertEqual(hart["model"], "hart wisdm/v0", "the raw value is registered verbatim")
+        XCTAssertTrue(try XCTUnwrap(hart["tag"]).hasSuffix(";m=hart_wisdm_v0;p=pre-1"),
+                      "the tag keeps to the registry's alphabet")
+        XCTAssertNotEqual(hart["tag"], streams["tag"])
+        let json = try ActivityContextDays.versionsJSON(hart)
+        XCTAssertTrue(json.hasPrefix("{\"decoder\":"), "sorted keys: \(json)")
     }
 }

@@ -130,7 +130,7 @@ final class ActivityElderNetStageTests: XCTestCase {
         let v1 = try ActivityLane.dayStampedJSONText(doc: &doc, day: day)
         let input = ActivityContextDays.trackInput(
             windows: inferred.windows, streams: daySim().streams, sleep: [], exercise: [],
-            dayStart: dayStart, dayEnd: dayEnd, encoderVersion: inferred.versions.model)
+            dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: inferred.versions.model)
         let v2 = try ActivityContextDays.build(input: input, day: day, modelVersion: inferred.versions.model,
                                                preprocessingVersion: inferred.versions.preprocessing,
                                                generatedAt: 1_789_500_000).payloadText
@@ -145,7 +145,7 @@ final class ActivityElderNetStageTests: XCTestCase {
     private func contextInput() -> ActivityContextTrackInput {
         let sim = daySim()
         return ActivityContextDays.trackInput(windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-                                              dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "stub-model")
+                                              dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: "stub-model")
     }
 
     private func payloadObject(_ text: String?) throws -> [String: Any] {
