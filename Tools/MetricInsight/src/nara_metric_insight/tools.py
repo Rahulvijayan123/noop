@@ -8,6 +8,7 @@ here plus its loader in sources.py — the agent, the prompt contract and the va
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any, Callable
@@ -20,6 +21,29 @@ from .sources import Sources
 
 
 MAX_SEARCHES = 3
+
+# A day metric (stable awake heart rate, steps, calories) is counted in days: its own results reach the model in day
+# words ("measured_days", "the 7 days before"), so an explanation never speaks of nights for it. Validation reads
+# the results as computed (`JobTools.received`).
+PERIOD_TOOLS = frozenset({"get_metric_series", "get_metric_summary", "get_data_quality", "get_state_breakdown",
+                          "get_context_manifest", "get_evidence_digest"})
+DAY_KEYS = {"nights": "days", "night": "day", "measured_nights": "measured_days", "missing_nights": "missing_days",
+            "tracked_nights": "tracked_days", "longest_gap_nights": "longest_gap_days", "last_7_nights": "last_7_days",
+            "support_nights": "support_days", "duration_nights": "duration_days", "analysis_night": "analysis_day"}
+DAY_TEXT_KEYS = frozenset({"note", "rules", "method"})   # the tools' own wording, never a person's
+_NIGHT = re.compile(r"\bnight(s|ly)?\b")
+
+
+def in_days(value: Any, key: str | None = None) -> Any:
+    """`value` with the night words of its keys (DAY_KEYS) and of its notes and methods as day words."""
+    if isinstance(value, dict):
+        return {(DAY_KEYS[k] if k in DAY_KEYS and DAY_KEYS[k] not in value else k): in_days(v, k)
+                for k, v in value.items()}
+    if isinstance(value, list):
+        return [in_days(v, key) for v in value]
+    if isinstance(value, str) and key in DAY_TEXT_KEYS:
+        return _NIGHT.sub(lambda m: {None: "day", "s": "days", "ly": "daily"}[m.group(1)], value)
+    return value
 
 
 class ToolError(ValueError):
@@ -51,7 +75,7 @@ class JobTools:
         self.sources = sources
         self.literature = literature
         self.calls: list[str] = []
-        self.received: list[tuple[str, dict[str, Any]]] = []  # every result the model got, as it got it
+        self.received: list[tuple[str, dict[str, Any]]] = []  # every result the model got, as computed
         self.retrieved: dict[str, dict[str, Any]] = {}
         self.searches = 0
 
@@ -66,7 +90,7 @@ class JobTools:
         result = tool.handler(self, args)
         self.calls.append(name)
         self.received.append((name, result))
-        return result
+        return in_days(result) if self.metric.period == "day" and name in PERIOD_TOOLS else result
 
     def evidence(self) -> dict[str, Any]:
         """Every data tool with its default arguments (the payload's related signals and basis). Not logged."""

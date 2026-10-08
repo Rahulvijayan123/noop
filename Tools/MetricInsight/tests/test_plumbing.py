@@ -361,3 +361,18 @@ def test_the_macos_sandbox_is_never_chosen_implicitly():
     with pytest.raises(sandbox.SandboxUnavailable, match="development only"):
         sandbox.resolve_mode("auto")
     assert sandbox.resolve_mode("macos") == "macos"
+
+
+def test_a_day_metric_reaches_the_model_in_days_and_is_validated_as_computed():
+    tools = JobTools(user_id="11111111-1111-4111-8111-111111111111", metric="steps", anchor=ANCHOR,
+                     timezone_id="UTC", sources=FakeSources(), literature=Literature())
+    tools.sources._scores = {d: dict(r, steps=8000 + d.day) for d, r in tools.sources._scores.items()}
+    quality = tools.call("get_data_quality", {})
+    assert quality["measured_days"] == 10 and "measured_nights" not in quality
+    assert "night" not in quality["note"] and "days since the first measurement" in quality["note"]
+    series = tools.call("get_metric_series", {"days": 7})
+    assert [d["day"] for d in series["days"]][-1] == ANCHOR.isoformat() and series["measured_days"] == 7
+    # the validator reads what was computed, in its own keys (validation_evidence adds `received` to the defaults)
+    assert dict(tools.received)["get_data_quality"]["measured_nights"] == 10
+    night_metric = job_tools()
+    assert "measured_nights" in night_metric.call("get_data_quality", {})
