@@ -227,8 +227,8 @@ private struct StrapConnectionPage: View, Equatable {
 ///
 /// `possibleDetails` is every line this row can show; the row is as tall as the tallest, so the line changing
 /// (a reason appearing, a hint turning into "Buzz sent") does not move the rows below it. `busy` is nil for a
-/// row that never shows a spinner, and otherwise keeps the spinner's width whether or not it is spinning, so
-/// the text wraps the same either way.
+/// row that never shows a spinner; every row keeps the spinner's width either way, so the text wraps the same
+/// on every row.
 struct StrapActionRow: View {
     let symbol: String
     let title: String
@@ -257,12 +257,12 @@ struct StrapActionRow: View {
                                  color: isEnabled ? StrandPalette.textTertiary : StrandPalette.textSecondary)
                 }
                 Spacer(minLength: NoopMetrics.space2)
-                if let busy {
-                    ZStack {
-                        if busy { ProgressView().controlSize(.small).tint(StrandPalette.accent) }
-                    }
-                    .frame(width: 20, height: 20)
+                // The spinner's slot is kept on every row, spinning or not and whether or not the row can
+                // spin, so the text wraps at the same width on every row of the page.
+                ZStack {
+                    if busy == true { ProgressView().controlSize(.small).tint(StrandPalette.accent) }
                 }
+                .frame(width: 20, height: 20)
             }
             .padding(.horizontal, NoopMetrics.space4)
             .padding(.vertical, NoopMetrics.space3)
