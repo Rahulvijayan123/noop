@@ -61,8 +61,10 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// Unix seconds, exclusive.
     public var end: Int
     public var activityClass: ActivityClass
-    /// Belief that the wearer was in this class — the SUBCLASS posterior mass (act-class-2),
-    /// not the family mass; `ActivityClassification.familyConfidence` carries the family.
+    /// Belief that the wearer was in this class — the SUBCLASS posterior mass (since act-class-2; currently
+    /// act-class-4), not the family mass; `ActivityClassification.familyConfidence` carries the family. A sitting,
+    /// standing or restless interval (an in-vehicle one aside) stays at or below the wrist-only cap (0.75, hsmm-1.9): runs keep no
+    /// per-second learned agreement (`ActivityClassifier.classify(run:)`).
     public var confidence: Double
     public var runnerUp: ActivityClass?
     public var runnerUpConfidence: Double

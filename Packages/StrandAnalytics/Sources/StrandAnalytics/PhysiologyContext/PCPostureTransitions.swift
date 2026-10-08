@@ -73,10 +73,13 @@ extension PhysiologyContext {
         /// Share of the support one qualifying posture must cover (the rest: another posture, a claim below tau,
         /// in bed, movement or nothing decoded).
         public var contextMinShare = 0.9
-        /// Oldest decoder whose posture head reads no heart rate: from hsmm-1.8 heart rate has one level across bed
-        /// rest, seated and upright and separates stationary from exertion only (posture comes from posture
-        /// evidence). Older decoders' posture claims leaned on heart rate and never key a stratum.
-        public var contextMinDecoderVersion = "hsmm-1.8"
+        /// Oldest decoder whose stored posture claims are heart-rate free AND capped by learned agreement:
+        /// hsmm-1.9. hsmm-1.8 had one stationary heart-rate level, but (a) its lie-down transition still read a
+        /// lower rate (0.15 against 0.20), so heart rate leaned an ambiguous shift toward lying, and (b) any
+        /// learned source that merely SPOKE (the transition expert's steady "none") lifted the sit / stand cap to
+        /// 1.0, so its stored runs carry sitting / standing at 0.8-0.9 with no learned agreement. Those claims
+        /// pass tau without the evidence tau stands for, so they never key a stratum (review r5).
+        public var contextMinDecoderVersion = "hsmm-1.9"
         public init() {}
 
         enum CodingKeys: String, CodingKey {
@@ -171,7 +174,8 @@ extension PhysiologyContext {
         public static let contextNoPostureClaim: ReasonCode = "context_no_posture_claim"
         /// The posture claims are below tau (`contextMinConfidence`).
         public static let contextBelowConfidenceFloor: ReasonCode = "context_confidence_below_floor"
-        /// The claims come from a decoder whose posture head read heart rate (older than `contextMinDecoderVersion`).
+        /// The claims come from a decoder older than `contextMinDecoderVersion` (posture read heart rate, or the
+        /// sit / stand cap was lifted by a learned source that only spoke).
         public static let contextDecoderReadsHeartRate: ReasonCode = "context_decoder_posture_reads_heart_rate"
         /// Seconds inside the heart-rate confirmed in-bed window are not context evidence.
         public static let contextInBedNotUsed: ReasonCode = "context_in_bed_window_not_used"
@@ -179,12 +183,17 @@ extension PhysiologyContext {
         public static let contextMixed: ReasonCode = "context_postures_mixed"
         /// The decoder's posture and the forearm's gravity disagree (lying vs upright).
         public static let contextConflictsWithGravity: ReasonCode = "context_conflicts_with_forearm_gravity"
+        /// Seconds the decoder placed in a vehicle (`ActivityIntervalInput.locomotion == vehicleLocomotion`): a
+        /// passenger is seated, but a ride is not seated rest, so they never key a context stratum.
+        public static let contextInVehicleNotUsed: ReasonCode = "context_in_vehicle_not_used"
+        /// The `ActivityIntervalInput.locomotion` value the worker sets for a ride.
+        public static let vehicleLocomotion = "vehicle_motion"
 
         public static let reasonCodes: [ReasonCode] = [
             likelihoodNotConfirmed, sittingStandingNotSeparated, inBedFromSleepDetector, insufficientGravity,
             ambiguous, partlyInBed, inBedNotUsedForHeartRateTarget, heartRateDependentStratumNotUsed,
             contextNoPostureClaim, contextBelowConfidenceFloor, contextDecoderReadsHeartRate, contextInBedNotUsed,
-            contextMixed, contextConflictsWithGravity,
+            contextMixed, contextConflictsWithGravity, sittingStandingNotSeparatedByWrist, contextInVehicleNotUsed,
         ]
 
         /// The context stratum a decoder class names (nil: not a posture claim).
@@ -227,7 +236,8 @@ extension PhysiologyContext {
         /// `contextMinShare` of the support, and the forearm's gravity reading (`posture.stratum`) must not say
         /// the opposite (recumbent vs upright).
         public static func withContext(_ posture: PostureContext, over support: Interval, decoder: ResolvedTrack,
-                                       inBed: ResolvedTrack, config: PostureConfig) -> PostureContext {
+                                       inBed: ResolvedTrack, config: PostureConfig,
+                                       vehicle: [Interval] = []) -> PostureContext {
             var out = posture
             var reasons: [ReasonCode] = []
             func finish(_ s: ContextStratum, basis: [String] = [], confidence: Double? = nil) -> PostureContext {
@@ -247,9 +257,11 @@ extension PhysiologyContext {
                 let piece = span.interval.intersection(support)
                 guard let piece, piece.duration > 0 else { continue }
                 let inBedS = bed.reduce(0) { $0 + $1.overlapSeconds(with: piece) }
-                let usable = piece.duration - inBedS
+                let rideS = min(piece.duration - inBedS, vehicle.reduce(0) { $0 + $1.overlapSeconds(with: piece) })
+                let usable = piece.duration - inBedS - rideS
                 claimed += piece.duration
                 if inBedS > 0 { reasons.append(contextInBedNotUsed) }
+                if rideS > 0 { reasons.append(contextInVehicleNotUsed) }
                 guard usable > 0 else { continue }
                 guard atLeast(decoderVersion(of: span.provenance), config.contextMinDecoderVersion) else {
                     reasons.append(contextDecoderReadsHeartRate); continue

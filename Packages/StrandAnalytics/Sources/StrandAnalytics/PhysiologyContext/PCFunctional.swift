@@ -204,7 +204,7 @@ extension PhysiologyContext {
             locomotionUnobservableWithoutStepCounter, insufficientMotionObservedTimeForRates,
             insufficientMotionCoverage,
             ExertionBouts.cadenceUnavailable, ExertionBouts.wristCadenceNotGaitSpeed,
-            ExertionBouts.uncalibratedStepCounter,
+            ExertionBouts.uncalibratedStepCounter, FeatureRegistry.noValidatedDefinition,
         ]
 
         // MARK: Series keys

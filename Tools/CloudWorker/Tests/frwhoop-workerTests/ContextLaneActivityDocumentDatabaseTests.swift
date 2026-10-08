@@ -141,9 +141,9 @@ final class ContextLaneActivityDocumentDatabaseTests: XCTestCase {
         let params = [day, day, current]
         XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
                         .map(\.activityClass), ["sitting"])
-        // Numeric, not lexical: hsmm-1.10 is after hsmm-1.9.
+        // Numeric, not lexical: hsmm-1.10 is after hsmm-1.8 (neither is the current hsmm-1.9).
         try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.10' where user_id = '\(o.user)' and algorithm_version = 'hart-activity-1'")
-        try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.9' where user_id = '\(o.user)' and algorithm_version = 'streams-activity-1'")
+        try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.8' where user_id = '\(o.user)' and algorithm_version = 'streams-activity-1'")
         XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
                         .map(\.activityClass), ["standing"])
         // An unparseable decoder version ranks last among non-current ones.
@@ -171,5 +171,27 @@ final class ContextLaneActivityDocumentDatabaseTests: XCTestCase {
         try db.exec("update public.activity_context_days set decoder_version = 'hsmm-1.1', document = jsonb_set(document, '{runs,0,in_bed}', 'true') where user_id = '\(o.user)'")
         XCTAssertEqual(try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun)
                         .first?.inBed, true)
+    }
+
+    /// A ride reaches the physiology context as `locomotion == "vehicle_motion"` (review r5): from the run's
+    /// `activity_detail` in_vehicle, or a locomotion head that is mostly vehicle on a document without the detail;
+    /// an ordinary sitting run carries none.
+    func testARunInAVehicleIsMarkedSoItNeverKeysASeatedStratum() throws {
+        let o = try owner()
+        let current = ActivityContextVersions.decoder
+        try publishDocument(o, algorithm: "streams-activity-1", decoder: current, dataThrough: dayStart + 70_000,
+                            revision: 30, computedAt: dayStart + 70_100, runClass: "sitting",
+                            eventKind: "sit_to_stand_like", inBed: false)
+        let params = [day, day, current]
+        func locomotion() throws -> String? {
+            try read(ContextSQL.activityRuns, o, params + [""]).compactMap(ContextInputs.parseRun).first?.locomotion
+        }
+        XCTAssertNil(try locomotion(), "a sitting run is not a ride")
+        try db.exec("update public.activity_context_days set document = jsonb_set(document, '{runs,0,activity_detail}', '\"in_vehicle\"') where user_id = '\(o.user)'")
+        XCTAssertEqual(try locomotion(), PhysiologyContext.PostureEvidence.vehicleLocomotion)
+        try db.exec("update public.activity_context_days set document = jsonb_set(document #- '{runs,0,activity_detail}', '{runs,0,locomotion}', '{\"vehicle_motion\": 0.62, \"stationary\": 0.38}') where user_id = '\(o.user)'")
+        XCTAssertEqual(try locomotion(), PhysiologyContext.PostureEvidence.vehicleLocomotion)
+        try db.exec("update public.activity_context_days set document = jsonb_set(document, '{runs,0,locomotion}', '{\"vehicle_motion\": 0.3, \"stationary\": 0.7}') where user_id = '\(o.user)'")
+        XCTAssertNil(try locomotion())
     }
 }

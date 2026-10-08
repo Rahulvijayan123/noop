@@ -79,6 +79,9 @@ extension PhysiologyContext {
             let intervalInputs = input.activityIntervals.filter {
                 !$0.isRetrospective && (!causal || $0.interval.start < cutoff)
             }
+            // Rides (a decoder run in a vehicle): a passenger is seated, but heart rate in a moving vehicle is not
+            // seated rest, so these seconds never key a context stratum (review r5).
+            let vehicle = intervalInputs.filter { $0.locomotion == PostureEvidence.vehicleLocomotion }.map(\.interval)
             let decoder = IntervalAlgebra.resolve(IntervalAlgebra.records(fromIntervals: intervalInputs),
                                                   source: .decoderIntervals, heartRateDependent: true,
                                                   availableBy: causal ? cutoff : nil)
@@ -144,7 +147,7 @@ extension PhysiologyContext {
                 // The context stratum (seated / lying awake / standing still) from confident, heart-rate free decoder
                 // posture claims that the forearm's gravity does not contradict (D4-09).
                 let posture = PostureEvidence.withContext(recumbency, over: m.support, decoder: decoder, inBed: inBed,
-                                                          config: policy.eligibility.posture)
+                                                          config: policy.eligibility.posture, vehicle: vehicle)
                 let wear = WearSignal.summary(over: m.support, track: wearSignal)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
                                                       observations: observations, config: policy.sleep,

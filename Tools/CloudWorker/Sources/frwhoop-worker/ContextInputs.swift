@@ -527,7 +527,10 @@ enum ContextInputs {
         // `true` / `false`. On an older document it sends "", which is nil (the document did not say).
         let inBed: Bool? = nonEmpty(r["in_bed"]).map { $0 == "true" }
         return PC.ActivityIntervalInput(interval: PC.Interval(s, e), activityClass: nonEmpty(r["class"]) ?? "unknown",
-                                        confidence: confidence, sleep: nonEmpty(r["sleep"]),
+                                        confidence: confidence,
+                                        // "vehicle_motion" for a ride (the run's `activity_detail` is in_vehicle, or
+                                        // its locomotion head is mostly vehicle): never a seated-rest context.
+                                        locomotion: nonEmpty(r["locomotion"]), sleep: nonEmpty(r["sleep"]),
                                         wear: nonEmpty(r["wear"]), revision: revision,
                                         availableAt: Int(r["at"] ?? ""), inBed: inBed,
                                         decoderVersion: nonEmpty(r["decoder_version"]),

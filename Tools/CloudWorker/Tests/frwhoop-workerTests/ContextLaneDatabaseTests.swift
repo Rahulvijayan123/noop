@@ -756,6 +756,140 @@ final class ContextLaneDatabaseTests: XCTestCase {
               + "rows=\(expected) " + timings.joined(separator: " "))
     }
 
+    // MARK: - Predecessor regime (D4-09), run against Postgres
+
+    /// The predecessor read after a strap change: the owner's OTHER devices' parent daily values of the same mode
+    /// over D-84 ... D-1, never the scored device's own, never another owner's, never a stratum, never the scored
+    /// day or later; a causal job only what was published by its cutoff. The family of each side comes from its
+    /// device row, and the loaded history reaches the reference engine, which borrows from the compatible
+    /// predecessor only.
+    func testPredecessorDailyValuesAreReadAcrossAStrapChangeUnderTheCausalCutoff() throws {
+        let o = try makeOwner(family: "WHOOP 4.0")                     // B: the new strap being scored
+        let old = UUID().uuidString.lowercased()                         // A: same family, the predecessor
+        let other = UUID().uuidString.lowercased()                       // C: a WHOOP 5.0 the owner also had
+        let bare = UUID().uuidString.lowercased()                        // E: a bare "WHOOP" label (unknown)
+        try addDevice(user: o.user, device: old, family: "WHOOP 4.0")
+        try addDevice(user: o.user, device: other, family: "WHOOP 5.0 / MG")
+        try addDevice(user: o.user, device: bare, family: "WHOOP")
+        let stranger = try makeOwner(family: "WHOOP 4.0")               // another owner's same-family strap
+        let now = Int(Date().timeIntervalSince1970)
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        let parent = "heart_rate.stable_awake_5min"
+
+        func publish(_ device: String, user: String, day: String, mode: String, at: Int) throws -> String {
+            try XCTUnwrap(try db.query("""
+                insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality,
+                  status, availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint,
+                  input_fingerprint, document, document_bytes, published_at)
+                values ($1::uuid, $2::uuid, $3::date, $4, 1, 'final', 'available', $5::bigint, $5::bigint,
+                        'pc-contract-1', 1, 'pred-test', 'pred-test', '{}'::jsonb, 2, to_timestamp($5::bigint))
+                returning context_revision::text as rev
+                """, [user, device, day, mode, String(at)]).first?["rev"])
+        }
+        func put(_ device: String, user: String, mode: PC.ProcessingMode, offset: Int, series: String,
+                 value: Double, revision: String) throws {
+            let key = ContextInputs.shiftDay(day, by: offset)!
+            let v = PC.DailyValue(day: key, seriesKey: series, regimeKey: "r1", metric: .heartRate, value: value,
+                                  units: "bpm", supportCount: 4, supportUnit: "window", supportS: 1_200, mode: mode,
+                                  finality: .final)
+            _ = try db.query("""
+                insert into public.physiology_context_daily_values(user_id, device_id, mode, day, series_key,
+                  regime_key, metric, value, units, support_count, support_unit, support_s, finality,
+                  context_revision, payload)
+                values ($1::uuid, $2::uuid, $3, $4::date, $5, 'r1', 'heart_rate', $6::float8, 'bpm', 4, 'window',
+                        1200, 'final', $7::bigint, $8::jsonb)
+                """, [user, device, mode.rawValue, key, series, String(value), revision,
+                      String(decoding: try PC.encoder().encode(v), as: UTF8.self)])
+        }
+
+        let horizon = ContextInputs.predecessorHorizonDays
+        for mode in [PC.ProcessingMode.retrospective, .causalLive] {
+            let early = try publish(old, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                    mode: mode.rawValue, at: now - 3 * 86_400)
+            let late = try publish(old, user: o.user, day: ContextInputs.shiftDay(day, by: -41)!,
+                                   mode: mode.rawValue, at: now - 600)
+            // A: D-(horizon+1) (outside), D-horizon ... D-3 every few days, D-2 published late, D and D+1 (never).
+            for offset in [-(horizon + 1), -horizon, -30, -20, -12, -10, -9, -8, -7, -6, -5, -4, -3, 0, 1] {
+                try put(old, user: o.user, mode: mode, offset: offset, series: parent, value: 60, revision: early)
+            }
+            try put(old, user: o.user, mode: mode, offset: -2, series: parent, value: 60, revision: late)
+            for stratum in [".band_06_12", ".posture_recumbent_likely", ".ctx_seated"] {
+                try put(old, user: o.user, mode: mode, offset: -5, series: parent + stratum, value: 61,
+                        revision: early)
+            }
+            try put(old, user: o.user, mode: mode, offset: -5, series: PC.ContextReferences.opticalValidShareSeries,
+                    value: 0.8, revision: early)
+            let c = try publish(other, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(other, user: o.user, mode: mode, offset: -6, series: parent, value: 70, revision: c)
+            let e = try publish(bare, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(bare, user: o.user, mode: mode, offset: -6, series: parent, value: 71, revision: e)
+            let own = try publish(o.device, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                  mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(o.device, user: o.user, mode: mode, offset: -1, series: parent, value: 64, revision: own)
+            let s = try publish(stranger.device, user: stranger.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(stranger.device, user: stranger.user, mode: mode, offset: -4, series: parent, value: 99,
+                    revision: s)
+        }
+
+        let lowest = ContextInputs.shiftDay(day, by: -horizon)!
+        for (mode, claimedAt, expectLate) in [(PC.ProcessingMode.retrospective, now - 1_800, true),
+                                              (.causalLive, now - 1_800, false),
+                                              (.causalLive, now - 4 * 86_400, false)] {
+            let label = "\(mode.rawValue)@\(claimedAt)"
+            let job = contextJob(o, mode: mode, claimedAt: claimedAt)
+            let loaded = try ContextInputs.load(db: db, job: job, windows: windows)
+            XCTAssertFalse(loaded.unavailable.contains("predecessor_daily_values_unavailable"), label)
+            if claimedAt == now - 4 * 86_400 {
+                XCTAssertTrue(loaded.predecessors.isEmpty, "\(label): nothing was published by the cutoff")
+                continue
+            }
+            XCTAssertEqual(loaded.predecessors.map(\.deviceScope), [old, other, bare].sorted(), label)
+            XCTAssertFalse(loaded.predecessors.contains { $0.deviceScope == o.device || $0.deviceScope == stranger.device })
+            for p in loaded.predecessors {
+                XCTAssertEqual(p.successorHardwareFamily, "whoop4", label)
+                XCTAssertTrue(p.dailyValues.allSatisfy { $0.mode == mode }, label)
+                XCTAssertTrue(p.dailyValues.allSatisfy { $0.day >= lowest && $0.day < day }, label)
+                XCTAssertFalse(p.dailyValues.contains { PC.ContextReferences.isStratum($0.seriesKey) }, label)
+                XCTAssertFalse(p.dailyValues.contains { $0.value == 99 }, "another owner's strap is never read")
+            }
+            let a = try XCTUnwrap(loaded.predecessors.first { $0.deviceScope == old })
+            XCTAssertEqual(a.hardwareFamily, "whoop4")
+            XCTAssertEqual(loaded.predecessors.first { $0.deviceScope == other }?.hardwareFamily, "whoop5")
+            XCTAssertNil(loaded.predecessors.first { $0.deviceScope == bare }?.hardwareFamily)
+            let aParentDays = a.dailyValues.filter { $0.seriesKey == parent }.map(\.day)
+            XCTAssertEqual(aParentDays.first, lowest, "\(label): the horizon's first day is read, the one before is not")
+            XCTAssertEqual(aParentDays.contains(ContextInputs.shiftDay(day, by: -2)!), expectLate,
+                           "\(label): a value published after the causal cutoff is not read")
+            XCTAssertEqual(aParentDays.count, expectLate ? 13 : 12, label)  // D-84, D-30, D-20, D-12, D-10 ... D-3 (+ D-2)
+            XCTAssertTrue(a.dailyValues.contains { $0.seriesKey == PC.ContextReferences.opticalValidShareSeries })
+            // The device's own value stays in its own history, never in a predecessor.
+            XCTAssertEqual(loaded.historyValues.map(\.value), [64], label)
+
+            // Through assembly to the reference engine: today's value borrows the same-family predecessor's
+            // history (provisional, named), never the 5.0's or the unknown-family strap's.
+            let assembled = ContextInputs.assemble(loaded, job: job, windows: windows)
+            XCTAssertEqual(assembled.history.predecessors.map(\.deviceScope), [old, other, bare].sorted())
+            XCTAssertTrue(assembled.input.inputRevisions.contains {
+                $0.input == "predecessor_daily_values" && $0.revision.contains("\(old):\(a.dailyValues.count):whoop4")
+            })
+            let today = PC.DailyValue(day: day, seriesKey: parent, regimeKey: "r1", metric: .heartRate, value: 66,
+                                      units: "bpm", supportCount: 4, supportUnit: "window", supportS: 1_200,
+                                      mode: mode, finality: .final)
+            let compared = PC.ContextReferences.compare(
+                [today], history: assembled.history.dailyValues, frozen: [], day: day, policyFingerprint: "x",
+                config: PC.ReferenceConfig(),
+                lineage: .init(device: assembled.input.regime, predecessors: assembled.history.predecessors))
+            let rolling = try XCTUnwrap(compared.comparisons.first { $0.view == .rolling }, label)
+            XCTAssertEqual(rolling.predecessorScope, old, "\(label): \(rolling.reasons)")
+            XCTAssertEqual(rolling.status, .provisional, label)
+            XCTAssertEqual(rolling.center ?? 0, 60 + (64 - 60) * 1 / 8.0, accuracy: 1.0, label)
+            XCTAssertTrue(rolling.reasons.contains(PC.ContextReferences.predecessorRegime), label)
+        }
+    }
+
     static func planNodes(_ json: String) -> [[String: Any]] {
         guard let top = (try? JSONSerialization.jsonObject(with: Data(json.utf8))) as? [[String: Any]] else { return [] }
         var out: [[String: Any]] = []
