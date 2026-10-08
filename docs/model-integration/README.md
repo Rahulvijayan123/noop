@@ -210,4 +210,52 @@ No droplet session was used for this branch: none of the above has been run agai
 
 ## Verification record
 
-See the final section of this page, written at integration.
+Integration commit `80ab2dc6b` (all five areas, three rounds, the independent review's fixes). Run by the parent on
+2026-10-08 on a shared macOS host (load average often 300-900 from other sessions) and in the colima VM `nara-sh`
+(arm64 Linux, Swift 6.0.3). Logs: `_build-scratch/spec01/parent/` (outside git). Area docs record their own focused
+runs.
+
+| Check | Result |
+| --- | --- |
+| Worker `xcrun swift test` (Xcode 26.3 toolchain) | 725 tests, 71 skipped (DB suites), 0 failures |
+| Worker `xcrun swift test` with `FRWHOOP_TEST_DB_URL` on a throwaway full-chain cluster | 725 tests, 4 skipped, 1 failure: `ContextLaneDatabaseTests.testTheLaneIdlesWhenTheTablesAreMissing`, which derives a second database URL by splitting the URL path and cannot with a Unix-socket `host=` URL (harness limitation, not Spec 01 code). The other ContextLane DB tests pass only with session user `postgres`, which the intake admission check (`20260922130000`) requires. |
+| Linux release from the packaged tarball (`deploy/package-release.sh` at `80ab2dc6b`, 1,555 files, all four local packages) through `release-host.sh install / build / switch / status` | build exit 0; `swift build -c release` and `swift test` 725 tests, 71 skipped, 0 failures; `sha256sum` of the binary = `--print-identity` = `508ac13881e4…ff0d`, `matches_release: true`; release tree sealed `dr-xr-xr-x` (arm64; the droplet's x86_64 digest differs) |
+| Packaged sidecar deploy tests on Linux (pinned uv, read-only release tree, unprivileged user) | 66 passed, 1 deselected (needs git history, which a release does not carry) |
+| Sidecar `uv run --frozen pytest -q -o addopts=""` (macOS) | 605 passed, 44 skipped, 0 failed |
+| StrandAnalytics `xcrun swift test --skip LongitudinalBaselineTests` | 3,503 tests, 7 skipped, 0 failures |
+| NoopPush `xcrun swift test` | 203 tests, 0 failures |
+| ActivityContext `pytest` | 639 passed, 45 skipped, 3 failed: `tests/inertia/test_inertia_golden.py` (3), which fail identically on the base `dab2124f3` code with the same environment |
+| Deno: activity routes and full-chain activity SQL, gait/activity window routes, physiology candidates, PPG anchor transport + integration (local Postgres), registry, objects | 50 passed (38 steps), 0 failed |
+| Full migration chain on one fresh cluster; the three Spec 01 migrations re-applied; `activity_release_authority_contract.sql` and `physiology_candidate_pending_contract.sql` before and after | all steps pass (idempotent) |
+| iOS compile (`NOOPiOS`, generic/platform=iOS, unsigned) | BUILD SUCCEEDED |
+| macOS StrandTests (`-only-testing:StrandTests`, `test-without-building`; the first attempt's test host was killed at launch while other sessions ran their own app tests) | 3,228 tests, 13 skipped, 11 assertion failures in 3 cases, all pre-existing: `IntradayWordingAndCoachTests.testMinuteBucketsAreDescribedAsMinuteBuckets` (known time-zone failure) and `ActivityCalibrationSessionTests.{testBeginWithAnEmptyProtocolEndsCleanly, testStepsChainBackToBackAndEveryActivityEndsWithDone}` (reproduced with the base files) |
+
+Acceptance evidence against the spec:
+
+- **Provisioning fixture** enumerates the real manifest schema (11 entries, 18 nested artifacts), verifies required
+  bundled/extracted SleepECG artifacts, withholds optional ones per provider, keeps the previous revision on failure,
+  and probes as the service user (`test_provisioning.py`; [provisioning.md](provisioning.md)).
+- **Shadow cannot affect production**: worker replay (`ActivityAuthorityReplayTests`: published bytes identical with
+  experts off / shadow / candidate; all off = HART alone; disabling an expert reproduces its ablation), phone replay
+  (`ActivityPhoneAuthorityTests`), DB release clamp (`activity_release_authority_contract.sql`), and old phones get no
+  decoder evidence (route tests).
+- **PPG chain**: one byte golden shared by NoopPush, the receiver (Deno) and the worker; the phone source uploads the
+  golden's exact bytes; anchorless data stays `missing_ppg_anchor`; gaps/config changes split runs
+  ([ppg-transport.md](ppg-transport.md)).
+- **Families** reach their real adapters through `sensor.biomarkers.v1` over HTTP with the worker's golden envelope;
+  one failed family keeps the others ([sensor-families.md](sensor-families.md)).
+- **Runtime bounds**: real-process tests show repeated timeouts never grow processes or threads, slots free only after
+  reap, quarantine stops one overrunning provider from starving the rest; scheduler starvation tests with budget 1-2;
+  stale revisions and lost leases refused in SQL ([runtime-bounds.md](runtime-bounds.md)).
+- **Inventory and checklist**: above. **Droplet: not accessed**; nothing in the checklist has been run live, and no
+  deployment is claimed.
+
+Independent review: a separate reviewer agent read `dab2124f3..HEAD` across all components (no edits) and reported 3
+high, 6 medium and 8 low findings; every one was fixed in round 3 except the residual below. Doc nits were applied.
+
+Not resolved in code (by design or out of reach):
+
+- An installed phone keeps gait days it stored before the server change in its own store and decode until the app
+  updates; the server can no longer send it decoder evidence, but cannot reach what is already on the device.
+- Pre-existing failures outside Spec 01: the three inertia golden tests above; `ActivityCalibrationSessionTests` (2)
+  and the known time-zone StrandTests failures, which reproduce on the base.
