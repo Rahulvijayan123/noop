@@ -46,8 +46,11 @@ struct LiveWorkoutView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 header
-                clock
-                heartRate
+                // The clock and the heart rate read as one glance, so they sit closer than two sections.
+                VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                    clock
+                    heartRate
+                }
                 // A leaf that snapshots the samples itself (see the PERF note above).
                 LiveWorkoutCharts(model: model).equatable()
                 statsGrid
