@@ -158,4 +158,57 @@ final class ChargeBreakdownWiringTests: XCTestCase {
         XCTAssertNotNil(whole); XCTAssertNotNil(fromEpoch)
         XCTAssertNotEqual(whole?.baselineText, fromEpoch?.baselineText)
     }
+
+    // MARK: Engine-first (D4-02 / D4-V02 review)
+
+    private func computed(_ d: String, recovery: Double?, drivers: [ChargeDriver],
+                          confidence: ScoreConfidence) -> IntelligenceEngine.Computed {
+        IntelligenceEngine.Computed(day: d, recovery: recovery, strain: nil, sleepMin: nil, hrv: 60, rhr: 52,
+                                    confidence: confidence, drivers: drivers)
+    }
+
+    private let engineDriver = ChargeDriver(label: "Heart rate variability", deltaPoints: 7, valueText: "60 ms",
+                                            baselineText: "53 ms baseline", verdict: "engine row")
+
+    /// When the engine scored the very number the row shows, the sheet renders the engine's own era- and
+    /// method-scoped drivers and tier verbatim, never a re-derivation from merged `repo.days`.
+    func testEngineScoredNightIsRenderedVerbatim() {
+        let past = (1...10).map { day(String(format: "2026-01-%02d", $0), hrv: 50 + Double($0 % 3)) }
+        let row = day("2026-01-20", hrv: 62, rhr: 51, recovery: 64)
+        let engine = [computed("2026-01-20", recovery: 64, drivers: [engineDriver], confidence: .building)]
+        let out = ChargeBreakdownWiring.breakdown(days: past + [row], row: row, sleepPerfPercent: 85, engine: engine)
+        XCTAssertEqual(out?.drivers, [engineDriver])
+        XCTAssertEqual(out?.confidence, .building)
+        XCTAssertEqual(ChargeBreakdownWiring.chargeConfidence(days: past + [row], row: row, hrvBaselineEpoch: 0,
+                                                              engine: engine), .building)
+    }
+
+    /// A different Charge on the row (a vendor import won the merge) is NOT explained by the engine's NOOP
+    /// drivers: the causal fallback runs instead.
+    func testEngineNightWithADifferentScoreFallsBackToTheCausalFold() {
+        let past = (1...10).map { day(String(format: "2026-01-%02d", $0), hrv: 50 + Double($0 % 3)) }
+        let row = day("2026-01-20", hrv: 62, rhr: 51, recovery: 71)
+        let engine = [computed("2026-01-20", recovery: 64, drivers: [engineDriver], confidence: .solid)]
+        let out = ChargeBreakdownWiring.breakdown(days: past + [row], row: row, sleepPerfPercent: 85, engine: engine)
+        XCTAssertNotNil(out)
+        XCTAssertNotEqual(out?.drivers, [engineDriver])
+        XCTAssertEqual(out?.drivers, ChargeBreakdownWiring.breakdown(days: past + [row], row: row,
+                                                                      sleepPerfPercent: 85)?.drivers)
+    }
+
+    /// D4-V02 on Today's watch chip: a past day scored on a thin (provisional) baseline keeps its "building"
+    /// tier after weeks of later nights arrive. The old end-of-history fold re-stamped it "solid".
+    func testPastDayConfidenceIsCausalAndStableUnderAppend() {
+        let past = (1...6).map { day(String(format: "2026-01-%02d", $0), hrv: 50 + Double($0 % 3)) }
+        let row = day("2026-01-07", hrv: 55, rhr: 52, recovery: 60)
+        let later = (8...31).map { day(String(format: "2026-01-%02d", $0), hrv: 50 + Double($0 % 3)) }
+        let before = ChargeBreakdownWiring.chargeConfidence(days: past + [row], row: row, hrvBaselineEpoch: 0)
+        let after = ChargeBreakdownWiring.chargeConfidence(days: past + [row] + later, row: row, hrvBaselineEpoch: 0)
+        XCTAssertEqual(before, .building)
+        XCTAssertEqual(after, before, "later nights must not re-stamp a past day's tier")
+        let oldWholeHistory = ScoreConfidence.charge(
+            recovery: row.recovery,
+            hrvBaseline: Baselines.foldHistory((past + [row] + later).map(\.avgHrv), cfg: Baselines.hrvCfg))
+        XCTAssertEqual(oldWholeHistory, .solid, "the defect: the end-of-history fold reads solid")
+    }
 }
