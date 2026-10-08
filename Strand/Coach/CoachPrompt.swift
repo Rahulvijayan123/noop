@@ -84,11 +84,13 @@ enum CoachPrompt {
 
     /// The single-thread prompt: the first eight memories as given. Its output is fixed; an old server, which has no
     /// context routes, keeps getting exactly this.
-    static func system(memories: [CoachMemory], imageContext: String, userAge: Int?, now: Date = Date()) -> String {
+    static func system(memories: [CoachMemory], imageContext: String, screenContext: String = "", userAge: Int?,
+                       now: Date = Date()) -> String {
         var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint, dateContext(now: now)]
         if !memories.isEmpty {
             parts.append(rememberedBlock(lines: memories.prefix(8).map { "• [\($0.topic)] \($0.content)" }))
         }
+        if !screenContext.isEmpty { parts.append(screenBlock(screenContext)) }
         if !imageContext.isEmpty { parts.append(imageBlock(imageContext)) }
         return parts.joined(separator: "\n\n")
     }
@@ -96,9 +98,11 @@ enum CoachPrompt {
     /// The context-aware prompt (`docs/COACH_MEMORY.md` §7.4): the same fixed prefix, then the ranked memories, the
     /// summary of a long thread's older turns, and the context library manifest, which names what exists and which
     /// tool inspects it without loading any of it.
-    static func system(context: CoachTurnContext, imageContext: String, userAge: Int?, now: Date = Date()) -> String {
+    static func system(context: CoachTurnContext, imageContext: String, screenContext: String = "", userAge: Int?,
+                       now: Date = Date()) -> String {
         var parts = [persona, CoachSafety.systemPromptBlock(userAge: userAge), answerDirective, toolHint, dateContext(now: now)]
         parts += CoachContextPrompt.blocks(context, userAge: userAge)
+        if !screenContext.isEmpty { parts.append(screenBlock(screenContext)) }
         if !imageContext.isEmpty { parts.append(imageBlock(imageContext)) }
         return parts.joined(separator: "\n\n")
     }
@@ -108,6 +112,16 @@ enum CoachPrompt {
         REMEMBERED CONTEXT (from previous sessions):
         \(lines.joined(separator: "\n"))
         Use this context to personalise your responses. Don't recite it back — just apply it naturally.
+        """
+    }
+
+    /// The screen the chat was opened from ("Ask Sana" on a metric page, `CoachHandoff`): what it showed, as data.
+    static func screenBlock(_ screenContext: String) -> String {
+        """
+        SCREEN CONTEXT: The user opened this chat from a screen in the app. What that screen showed them:
+        \(screenContext)
+        Ground your answer in it and in their data, and use your tools for anything it doesn't cover. It describes \
+        measurements, not a diagnosis: never present a reading outside their usual range as one.
         """
     }
 

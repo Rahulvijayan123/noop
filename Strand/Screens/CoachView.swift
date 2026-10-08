@@ -176,6 +176,14 @@ struct CoachView: View {
             guard coach.isConfigured else { return }
             await coach.send(prompt)
         }
+        // "Ask Sana" from another screen (a metric page). This coach builds its own context from the wearable data on
+        // every send and keeps no cloud memory, so only the question is taken, by the same rules as a pending prompt.
+        .task(id: coach.pendingHandoff) {
+            guard let handoff = coach.pendingHandoff, !handoff.prompt.isEmpty else { return }
+            coach.pendingHandoff = nil
+            guard coach.isConfigured else { return }
+            await coach.send(handoff.prompt)
+        }
         // K15: persist the composer draft so it survives an app relaunch.
         .onChangeCompat(of: draft) { newValue in
             UserDefaults.standard.set(newValue, forKey: Self.draftKey)

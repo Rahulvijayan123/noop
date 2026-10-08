@@ -59,6 +59,8 @@ struct CoachChatMessage: Identifiable, Equatable {
     var blocked = false
     /// What the vision model saw in this question's photo (at most 1,200 characters).
     var imageContext: String?
+    /// What the screen this question was asked from showed (`CoachHandoff`, at most 2,400 characters).
+    var screenContext: String?
 
     init(id: UUID = UUID(), role: Role, content: String, isStreaming: Bool = false, imageData: Data? = nil) {
         self.id = id
@@ -85,13 +87,15 @@ struct CoachChatMessage: Identifiable, Equatable {
         followUps = meta?.followUps
         blocked = meta?.blocked ?? false
         imageContext = meta?.imageContext
+        screenContext = meta?.screenContext
         createdAt = CoachDates.parse(row.createdAt) ?? Date(timeIntervalSince1970: 0)
     }
 
     /// Everything known about the message, so a re-save never blanks a field an earlier save carried.
     var meta: CoachMessageMeta {
         CoachMessageMeta(toolNames: toolNames.isEmpty ? nil : toolNames, viz: viz, hadImage: hadImage ? true : nil,
-                         followUps: followUps, blocked: blocked ? true : nil, imageContext: imageContext)
+                         followUps: followUps, blocked: blocked ? true : nil, imageContext: imageContext,
+                         screenContext: screenContext)
     }
 
     func stored(threadId: String, threadTitle: String? = nil) -> CoachStoredMessage {
@@ -111,6 +115,7 @@ struct CoachChatMessage: Identifiable, Equatable {
         out.followUps = server.followUps ?? followUps
         out.blocked = blocked || server.blocked
         out.imageContext = server.imageContext ?? imageContext
+        out.screenContext = server.screenContext ?? screenContext
         out.createdAt = server.createdAt
         return out
     }
@@ -222,6 +227,9 @@ final class CoachChatViewModel: ObservableObject {
         let question: String
         let image: Data?
         let isFirstTurn: Bool
+        /// The screen the chat was opened from (`CoachHandoff`): this question's own, else the latest earlier one
+        /// in the thread, so a follow-up keeps it.
+        let screenContext: String?
     }
 
     private var turn: Turn?
@@ -243,7 +251,8 @@ final class CoachChatViewModel: ObservableObject {
     private var launchThread: CoachThread?
     private var deletedThreads = Set<String>()
     private var manifestCache: [String: CoachContextManifest] = [:]
-    private var queuedPrompts: [String] = []
+    /// Outside questions waiting for the reply in progress. A plain prompt carries no screen context and no memory.
+    private var queuedPrompts: [CoachHandoff] = []
     /// First answers whose title the server could not make yet (the thread was not saved): asked from
     /// `threads/:id/title` once the thread's rows are saved.
     private var pendingTitles: [String: (question: String, answer: String)] = [:]
@@ -566,7 +575,12 @@ final class CoachChatViewModel: ObservableObject {
 
     /// Returns false when nothing was sent (empty, or a reply is already streaming) so the composer keeps its text.
     @discardableResult
-    func send(_ raw: String) -> Bool {
+    func send(_ raw: String) -> Bool { send(raw, handoff: nil) }
+
+    /// `handoff` is the screen a question from outside the chat was asked from: its context rides on the question's
+    /// meta (and so on every later turn of the chat), and its memory is saved once the question is actually sent.
+    @discardableResult
+    private func send(_ raw: String, handoff: CoachHandoff?) -> Bool {
         // A credential that arrived while the chat was open is adopted before anything is kept.
         attachOwner()
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -596,6 +610,8 @@ final class CoachChatViewModel: ObservableObject {
         var user = CoachChatMessage(role: .user, content: clean.isEmpty ? "What do you see in this image?" : clean, imageData: image)
         user.createdAt = nextStamp()
         user.blocked = refusal != nil
+        // A refused question carries nothing from the screen, and saves no memory.
+        if refusal == nil, let context = handoff?.screenContext, !context.isEmpty { user.screenContext = context }
         messages.append(user)
         threadStore.currentThreadId = key
         threadStore.touch(id: key, title: fallbackTitle, titleSource: fallbackTitle == nil ? nil : "fallback",
@@ -617,7 +633,8 @@ final class CoachChatViewModel: ObservableObject {
         reply.createdAt = nextStamp()
         messages.append(reply)
         begin(Turn(assistantId: reply.id, userId: user.id, threadId: key, question: user.content, image: image,
-                   isFirstTurn: isNewThread))
+                   isFirstTurn: isNewThread, screenContext: screenContext(before: reply.id)))
+        if let memory = handoff?.memory { saveHandoffMemory(memory, threadId: key) }
         return true
     }
 
@@ -633,7 +650,8 @@ final class CoachChatViewModel: ObservableObject {
         messages.append(reply)
         errorMessage = nil
         begin(Turn(assistantId: reply.id, userId: user.id, threadId: threadKey, question: user.content, image: lastImage,
-                   isFirstTurn: !messages.contains { $0.role == .assistant && $0.id != reply.id && !$0.didStall }))
+                   isFirstTurn: !messages.contains { $0.role == .assistant && $0.id != reply.id && !$0.didStall },
+                   screenContext: screenContext(before: reply.id)))
     }
 
     /// A question from outside the chat (the Today launcher, Siri, `--coach-prompt`) goes into a new chat. While a
@@ -648,10 +666,27 @@ final class CoachChatViewModel: ObservableObject {
         if askInDebugThread(text) { return true }
         #endif
         launchThread = nil
+        let plain = CoachHandoff(prompt: text, screenContext: "", memory: nil)
         if isGenerating {
-            queuedPrompts.append(text)
+            queuedPrompts.append(plain)
         } else {
-            sendInNewChat(text)
+            sendInNewChat(plain)
+        }
+        return true
+    }
+
+    /// A question asked from another screen ("Ask Sana" on a metric page): like `queuePrompt`, a new chat after any
+    /// reply in progress, with the screen's context on the question and its memory saved once it is sent. False
+    /// when it can't be taken yet (empty, or before `attach`), so the caller keeps its pending handoff.
+    @discardableResult
+    func queueHandoff(_ handoff: CoachHandoff) -> Bool {
+        guard !handoff.prompt.isEmpty, repo != nil else { return false }
+        attachOwner()
+        launchThread = nil
+        if isGenerating {
+            queuedPrompts.append(handoff)
+        } else {
+            sendInNewChat(handoff)
         }
         return true
     }
@@ -686,10 +721,32 @@ final class CoachChatViewModel: ObservableObject {
     }
 
     /// An outside question never carries the composer's state (a photo attached and not sent, say).
-    private func sendInNewChat(_ text: String) {
+    private func sendInNewChat(_ handoff: CoachHandoff) {
         if !messages.isEmpty || threadOnServer { startNewChat() } else { clearThreadUI() }
         userTouched = true
-        send(text)
+        send(handoff.prompt, handoff: handoff)
+    }
+
+    /// The screen context the next answer reads: the latest one on a question of the open thread before `id`.
+    private func screenContext(before id: UUID) -> String? {
+        messages.prefix { $0.id != id }
+            .last { $0.role == .user && !$0.blocked && !($0.screenContext ?? "").isEmpty }?
+            .screenContext
+    }
+
+    /// Saves what the person asked about from a screen. Fire and forget: the server confirms a memory it already
+    /// holds instead of adding it twice, and a failure costs nothing but the note. Dropped when the account
+    /// changes before it is sent.
+    private func saveHandoffMemory(_ content: String, threadId: String) {
+        let owner = ownerId
+        let thread = features.threads ? threadId : nil
+        Task { [weak self] in
+            guard let self, self.ownerId == owner, owner != nil else { return }
+            guard (try? await self.api.saveMemory(content: content, topic: "health", importance: 3, threadId: thread)) != nil,
+                  self.ownerId == owner else { return }
+            self.memoriesStale = true
+            await self.refreshMemories()
+        }
     }
 
     private func drainQueuedPrompt() {
@@ -759,11 +816,13 @@ final class CoachChatViewModel: ObservableObject {
             let context = CoachTurnContext(manifest: manifest, memories: memories, coverage: coverage(repo),
                                            messageCount: count, isFirstTurn: turn.isFirstTurn,
                                            currentThreadId: turn.threadId, refs: refs)
-            system = CoachPrompt.system(context: context, imageContext: imageContext, userAge: userAge)
+            system = CoachPrompt.system(context: context, imageContext: imageContext,
+                                        screenContext: turn.screenContext ?? "", userAge: userAge)
         } else {
             if memoriesStale { await refreshMemories() }
             guard !Task.isCancelled else { return }
-            system = CoachPrompt.system(memories: memories, imageContext: imageContext, userAge: userAge)
+            system = CoachPrompt.system(memories: memories, imageContext: imageContext,
+                                        screenContext: turn.screenContext ?? "", userAge: userAge)
         }
         var wire = [CoachWireMessage(role: "system", content: system)]
         wire += history(before: id)
