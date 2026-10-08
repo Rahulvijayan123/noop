@@ -27,6 +27,13 @@ MAX_TEMP_SAMPLES = 60_000
 MAX_RR_BEATS = 120_000
 MAX_BREATH_INTERVALS = 20_000
 MAX_HISTORY_DAYS = 31
+#: Per history day: the published snapshot's sleep entries (main night + naps + edits).
+MAX_HISTORY_NIGHTS_PER_DAY = 8
+#: rhythm_history (spec-02, docs/spec-02/CONTRACT.md 5.1): a bounded longer lookback of hourly bins.
+MAX_RHYTHM_DAYS = 35
+MAX_RHYTHM_BINS_PER_DAY = 26
+RHYTHM_HISTORY_SCHEMA = "rhythm-history-1"
+RHYTHM_BIN_SECONDS = 3600
 #: Body cap for POST /v1/sleep-features. The shared 8 MiB cap of /v1/infer is below what the
 #: sample caps above admit (60k HR + 60k temp + 120k RR + 20k breaths + 31 history days is
 #: ~19 MB of JSON, and an ordinary 10 h night with its history already passes 8 MiB).
@@ -135,9 +142,58 @@ class HistoryMinuteIn:
 
 
 @dataclass(frozen=True)
+class HistoryNightIn:
+    """One published sleep entry of a history day (spec-02 5.1); None = the snapshot had no value."""
+    start: int
+    end: int
+    is_nap: bool
+    asleep_min: float | None
+    awake_min: float | None
+    efficiency: float | None
+
+
+@dataclass(frozen=True)
 class HistoryDayIn:
     day: str  # YYYY-MM-DD (local day of the history's timezone)
     minutes: tuple[HistoryMinuteIn, ...]
+    #: spec-02: the day's published sleep entries (empty when the worker did not send them).
+    nights: tuple[HistoryNightIn, ...] = ()
+    #: spec-02: the IANA zone of that day's claim (None when not sent).
+    timezone: str | None = None
+
+
+@dataclass(frozen=True)
+class RhythmBinIn:
+    """One UTC-hour bin. A signal the hour did not support is None, never 0."""
+    start: int
+    skin_temp_c: float | None
+    skin_temp_valid_minutes: int
+    hr_mean_bpm: float | None
+    hr_valid_minutes: int
+    movement_s_per_min: float | None
+    movement_valid_minutes: int
+
+
+@dataclass(frozen=True)
+class RhythmDayIn:
+    day: str
+    timezone: str
+    revision: int | None
+    day_start: int
+    day_end: int
+    bins: tuple[RhythmBinIn, ...]
+
+
+@dataclass(frozen=True)
+class RhythmHistoryIn:
+    """The bounded multi-day rhythm history (spec-02 5.1), aggregated near the source."""
+    schema: str
+    device_family: str
+    conversion_identity: str
+    bin_seconds: int
+    rules: Mapping[str, Any]
+    revision_digest: str | None
+    days: tuple[RhythmDayIn, ...]
 
 
 @dataclass(frozen=True)
@@ -169,6 +225,8 @@ class SleepFeaturesRequest:
     breath_runs: tuple[BreathRunIn, ...]
     history_days: tuple[HistoryDayIn, ...]
     capabilities: Mapping[str, Any]
+    #: spec-02: multi-day hourly rhythm history (None when not requested).
+    rhythm_history: RhythmHistoryIn | None = None
 
     def main_night(self) -> NightIn | None:
         for n in self.nights:
@@ -232,13 +290,14 @@ def parse_request(body: Any) -> SleepFeaturesRequest:
     beats = _parse_beats(body.get("rr_beats"))
     breaths, breath_runs = _parse_breaths(body.get("resp_breaths"))
     history = _parse_history(body.get("history"))
+    rhythm_history = _parse_rhythm_history(body.get("rhythm_history"))
     capabilities = body.get("capabilities") or {}
     _require(isinstance(capabilities, Mapping), "invalid_capabilities",
              "capabilities must be an object")
     return SleepFeaturesRequest(
         context=context, nights=nights, hr=hr, temp=temp, beats=beats,
         breaths=breaths, breath_runs=breath_runs, history_days=history,
-        capabilities=dict(capabilities),
+        capabilities=dict(capabilities), rhythm_history=rhythm_history,
     )
 
 
@@ -405,8 +464,121 @@ def _parse_history(raw: Any) -> tuple[HistoryDayIn, ...]:
             minutes.append(HistoryMinuteIn(ts=int(m["ts"]), state=int(m["state"]),
                                            valid=bool(m["valid"])))
         minutes.sort(key=lambda m: m.ts)
-        out.append(HistoryDayIn(day=day, minutes=tuple(minutes)))
+        nights = _parse_history_nights(d.get("nights"), where)
+        tz = d.get("timezone")
+        _require(tz is None or (isinstance(tz, str) and tz), "invalid_history",
+                 f"{where}.timezone must be a non-empty string or absent")
+        out.append(HistoryDayIn(day=day, minutes=tuple(minutes), nights=nights, timezone=tz))
     return tuple(out)
+
+
+def _optional_number(value: Any, lo: float, hi: float, where: str) -> float | None:
+    if value is None:
+        return None
+    return _finite_number(value, lo, hi, where)
+
+
+def _parse_history_nights(raw: Any, where: str) -> tuple[HistoryNightIn, ...]:
+    if raw is None:
+        return ()
+    _require(isinstance(raw, list) and len(raw) <= MAX_HISTORY_NIGHTS_PER_DAY, "invalid_history",
+             f"{where}.nights must be a list of at most {MAX_HISTORY_NIGHTS_PER_DAY} entries")
+    out: list[HistoryNightIn] = []
+    for k, n in enumerate(raw):
+        nwhere = f"{where}.nights[{k}]"
+        _require(isinstance(n, Mapping), "invalid_history", f"{nwhere} must be an object")
+        _require(isinstance(n.get("start"), int) and isinstance(n.get("end"), int)
+                 and not isinstance(n.get("start"), bool) and not isinstance(n.get("end"), bool)
+                 and n["end"] > n["start"], "invalid_history",
+                 f"{nwhere} must carry start < end unix seconds")
+        _require(isinstance(n.get("is_nap", False), bool), "invalid_history",
+                 f"{nwhere}.is_nap must be a boolean")
+        out.append(HistoryNightIn(
+            start=int(n["start"]), end=int(n["end"]), is_nap=bool(n.get("is_nap", False)),
+            asleep_min=_optional_number(n.get("asleep_min"), 0.0, 1440.0, f"{nwhere}.asleep_min"),
+            awake_min=_optional_number(n.get("awake_min"), 0.0, 1440.0, f"{nwhere}.awake_min"),
+            efficiency=_optional_number(n.get("efficiency"), 0.0, 100.0, f"{nwhere}.efficiency")))
+    out.sort(key=lambda n: (n.start, n.end))
+    return tuple(out)
+
+
+def _parse_rhythm_history(raw: Any) -> RhythmHistoryIn | None:
+    """Validate the spec-02 ``rhythm_history`` object (docs/spec-02/CONTRACT.md 5.1)."""
+    if raw is None:
+        return None
+    where = "rhythm_history"
+    _require(isinstance(raw, Mapping), "invalid_rhythm_history", f"{where} must be an object")
+    _require(raw.get("schema") == RHYTHM_HISTORY_SCHEMA, "invalid_rhythm_history",
+             f"{where}.schema must be {RHYTHM_HISTORY_SCHEMA!r}")
+    _require(raw.get("bin_seconds") == RHYTHM_BIN_SECONDS, "invalid_rhythm_history",
+             f"{where}.bin_seconds must be {RHYTHM_BIN_SECONDS}")
+    for key in ("device_family", "conversion_identity"):
+        _require(isinstance(raw.get(key), str) and raw.get(key), "invalid_rhythm_history",
+                 f"{where}.{key} must be a non-empty string")
+    rules = raw.get("rules") or {}
+    _require(isinstance(rules, Mapping), "invalid_rhythm_history", f"{where}.rules must be an object")
+    digest = raw.get("revision_digest")
+    _require(digest is None or isinstance(digest, str), "invalid_rhythm_history",
+             f"{where}.revision_digest must be a string or absent")
+    days_raw = raw.get("days") or []
+    _require(isinstance(days_raw, list) and len(days_raw) <= MAX_RHYTHM_DAYS, "invalid_rhythm_history",
+             f"{where}.days must be a list of at most {MAX_RHYTHM_DAYS} entries")
+    import re as _re
+    days: list[RhythmDayIn] = []
+    for i, d in enumerate(days_raw):
+        dwhere = f"{where}.days[{i}]"
+        _require(isinstance(d, Mapping), "invalid_rhythm_history", f"{dwhere} must be an object")
+        day = d.get("day")
+        _require(isinstance(day, str) and _re.fullmatch(r"\d{4}-\d{2}-\d{2}", day or ""),
+                 "invalid_rhythm_history", f"{dwhere}.day must be YYYY-MM-DD")
+        tz = d.get("timezone")
+        _require(isinstance(tz, str) and tz, "invalid_rhythm_history", f"{dwhere}.timezone must be a string")
+        rev = d.get("revision")
+        _require(rev is None or (isinstance(rev, int) and not isinstance(rev, bool)),
+                 "invalid_rhythm_history", f"{dwhere}.revision must be an integer or null")
+        ds, de = d.get("day_start_utc"), d.get("day_end_utc")
+        _require(isinstance(ds, int) and isinstance(de, int) and not isinstance(ds, bool)
+                 and not isinstance(de, bool) and 0 < de - ds <= 26 * 3600,
+                 "invalid_rhythm_history", f"{dwhere} needs day_start_utc < day_end_utc (<= 26 h)")
+        bins_raw = d.get("bins") or []
+        _require(isinstance(bins_raw, list) and len(bins_raw) <= MAX_RHYTHM_BINS_PER_DAY,
+                 "invalid_rhythm_history", f"{dwhere}.bins must be a list of at most {MAX_RHYTHM_BINS_PER_DAY}")
+        bins: list[RhythmBinIn] = []
+        seen: set[int] = set()
+        for j, b in enumerate(bins_raw):
+            bwhere = f"{dwhere}.bins[{j}]"
+            _require(isinstance(b, Mapping), "invalid_rhythm_history", f"{bwhere} must be an object")
+            start = b.get("start")
+            _require(isinstance(start, int) and not isinstance(start, bool)
+                     and start % RHYTHM_BIN_SECONDS == 0 and start not in seen,
+                     "invalid_rhythm_history", f"{bwhere}.start must be a unique UTC hour start")
+            _require(ds - RHYTHM_BIN_SECONDS < start < de, "invalid_rhythm_history",
+                     f"{bwhere} lies outside its day")
+            seen.add(start)
+
+            def minutes(key: str) -> int:
+                v = b.get(key, 0)
+                _require(isinstance(v, int) and not isinstance(v, bool) and 0 <= v <= 60,
+                         "invalid_rhythm_history", f"{bwhere}.{key} must be an integer in [0, 60]")
+                return int(v)
+
+            bins.append(RhythmBinIn(
+                start=int(start),
+                skin_temp_c=_optional_number(b.get("skin_temp_c"), *TEMP_C_RANGE, f"{bwhere}.skin_temp_c"),
+                skin_temp_valid_minutes=minutes("skin_temp_valid_minutes"),
+                hr_mean_bpm=_optional_number(b.get("hr_mean_bpm"), *HR_BPM_RANGE, f"{bwhere}.hr_mean_bpm"),
+                hr_valid_minutes=minutes("hr_valid_minutes"),
+                movement_s_per_min=_optional_number(b.get("movement_s_per_min"), 0.0, 60.0,
+                                                    f"{bwhere}.movement_s_per_min"),
+                movement_valid_minutes=minutes("movement_valid_minutes")))
+        bins.sort(key=lambda b: b.start)
+        days.append(RhythmDayIn(day=day, timezone=tz, revision=None if rev is None else int(rev),
+                                day_start=int(ds), day_end=int(de), bins=tuple(bins)))
+    days.sort(key=lambda d: d.day_start)
+    return RhythmHistoryIn(schema=RHYTHM_HISTORY_SCHEMA, device_family=raw["device_family"],
+                           conversion_identity=raw["conversion_identity"],
+                           bin_seconds=RHYTHM_BIN_SECONDS, rules=dict(rules), revision_digest=digest,
+                           days=tuple(days))
 
 
 # ---------------------------------------------------------------------------

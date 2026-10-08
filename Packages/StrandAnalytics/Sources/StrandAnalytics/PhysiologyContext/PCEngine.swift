@@ -87,9 +87,17 @@ extension PhysiologyContext {
             if episodes.isEmpty { statusReasons.append(sleepUnavailable) }
             let events = Exposures.current(input.exposures, mode: mode, cutoff: input.availabilityCutoff)
 
+            // Respiratory-rate estimates for the post-bout respiratory return (spec-02), filtered by the same causal
+            // rule the envelopes use below: a live document never reads an estimate past its cutoff.
+            let respiration = input.measurements.filter { m in
+                guard m.metric == .respiratoryRate else { return false }
+                guard causal else { return true }
+                return m.support.end <= cutoff && (m.availableAt.map { $0 <= cutoff } ?? true)
+            }
             let bouts = ExertionBouts.detect(identity: identity, hart: hart, strap: strap, workouts: input.workouts,
                                              observations: observations, mode: mode,
-                                             cutoff: input.availabilityCutoff, config: policy.exertion)
+                                             cutoff: input.availabilityCutoff, config: policy.exertion,
+                                             respiration: respiration)
             let allBouts = (history.value.bouts + bouts).sorted { $0.interval < $1.interval }
             let coverage = motionCoverage(history: history.value.dailyValues, today: strap, hart: hart,
                                           identity: identity)
@@ -234,16 +242,23 @@ extension PhysiologyContext {
                                                    history: history.value, cutoff: cutoff, finality: finality),
                 inputRevisions: input.inputRevisions.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) })
 
-            return DayDocument(header: header, status: status, statusReasons: statusReasons.sorted(),
-                               inputReport: inputReport, availability: availability, regimes: regimes,
-                               envelopes: envelopes, sleep: sleep, bouts: bouts,
-                               exertion: ExertionBouts.windows(endingAt: min(identity.dayWindow.end, cutoff),
-                                                               bouts: allBouts, coverage: coverage,
-                                                               config: policy.exertion),
-                               exposures: exposureSummary, dailyValues: dailyValues,
-                               comparisons: compared.comparisons, newFrozenReferences: compared.newFrozen,
-                               episodes: episodesOut, multiSignal: multiSignal, functional: functional,
-                               features: features, dependence: dependence, selection: selection)
+            var document = DayDocument(header: header, status: status, statusReasons: statusReasons.sorted(),
+                                       inputReport: inputReport, availability: availability, regimes: regimes,
+                                       envelopes: envelopes, sleep: sleep, bouts: bouts,
+                                       exertion: ExertionBouts.windows(endingAt: min(identity.dayWindow.end, cutoff),
+                                                                       bouts: allBouts, coverage: coverage,
+                                                                       config: policy.exertion),
+                                       exposures: exposureSummary, dailyValues: dailyValues,
+                                       comparisons: compared.comparisons, newFrozenReferences: compared.newFrozen,
+                                       episodes: episodesOut, multiSignal: multiSignal, functional: functional,
+                                       features: features, dependence: dependence, selection: selection)
+            // Sustained high / low pulse episodes over qualified inactive HR (spec-02). Heart-rate independent
+            // qualification: the HART / strap tracks, never the HR-reading decoder track.
+            document.pulseEpisodes = PulseEpisodes.summarize(identity: identity, observations: observations,
+                                                             hart: hart, strap: strap, episodes: episodes,
+                                                             bouts: bouts, mode: mode,
+                                                             cutoff: input.availabilityCutoff, config: policy.pulse)
+            return document
         }
 
         // MARK: - Steps

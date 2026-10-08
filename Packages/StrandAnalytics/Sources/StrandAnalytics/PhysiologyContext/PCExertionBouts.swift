@@ -36,6 +36,9 @@ extension PhysiologyContext {
 
     public struct ExertionConfig: Codable, Equatable, Sendable {
         public var version = "pc-exertion-1"
+        /// Version of the post-exertion respiratory return (spec-02). Kept apart from `version`, which keys the
+        /// device regime of the HR exertion products: bumping it would split `hr_response.*` / `hr_recovery_*`.
+        public var respiratoryRecoveryVersion = "pc-resp-recovery-1"
         /// Trailing exertion-summary windows in hours (candidate 24/48/72 h summaries).
         public var windowsH: [Int] = [24, 48, 72]
 
@@ -245,6 +248,9 @@ extension PhysiologyContext {
         public var hrv: BoutChannel
         public var respiratory: BoutChannel
         public var reasons: [ReasonCode]
+        /// Respiratory-rate return toward the pre-bout reference once movement subsides and estimates resume
+        /// (spec-02). nil when not evaluated and in older documents.
+        public var respiratoryRecovery: RespiratoryRecovery? = nil
         public init(followUp: Interval, anchorHrBpm: Double?, referenceBpm: Double?,
                     observations: [RecoveryObservation], truncatedAt: Int?, censoring: [ReasonCode],
                     timeToReturnS: Int?, hrv: BoutChannel, respiratory: BoutChannel, reasons: [ReasonCode]) {
@@ -256,6 +262,66 @@ extension PhysiologyContext {
 
         public func observation(at offsetS: Int) -> RecoveryObservation? {
             observations.first { $0.offsetS == offsetS }
+        }
+    }
+
+    /// One respiratory-rate estimate inside a bout's attributable follow-up.
+    public struct RespiratoryRecoveryObservation: Codable, Equatable, Sendable {
+        /// Offset of the estimate's support start from the bout end (s).
+        public var offsetS: Int
+        public var bpm: Double
+        /// `bpm - reference` (signed); nil without a reference.
+        public var aboveReferenceBpm: Double?
+        public init(offsetS: Int, bpm: Double, aboveReferenceBpm: Double?) {
+            self.offsetS = offsetS; self.bpm = bpm; self.aboveReferenceBpm = aboveReferenceBpm
+        }
+    }
+
+    /// Post-exertion respiratory-rate return toward the pre-bout reference (spec-02, docs/spec-02/CONTRACT.md §6).
+    ///
+    /// The rate estimator (RSA from R-R, quiet-wrist minutes only) withholds itself during movement, so nothing is
+    /// read until movement subsides and estimates resume: exercise respiration is never invented. When the first
+    /// estimate after the bout is already near the reference the return happened at or before it
+    /// (`returnedByOffsetS`, an upper bound), never "at" it; an absent early recovery period is unknown.
+    public struct RespiratoryRecovery: Codable, Equatable, Sendable {
+        /// `pc-resp-recovery-1`.
+        public var method: String
+        /// `returned` (an above-tolerance estimate preceded the first within-tolerance one), `returned_by` (the
+        /// first estimate is already within tolerance: upper bound only), `not_returned` (estimates observed to the
+        /// end of the attributable follow-up, none within tolerance) or `unknown` (no reference or no estimate).
+        public var state: String
+        public var referenceBpm: Double?
+        public var referenceWindow: Interval?
+        public var referenceSamples: Int
+        public var toleranceBpm: Double
+        /// When HR-independent movement subsided after the bout (unix s), when observed.
+        public var motionSubsidedAt: Int?
+        /// First estimate inside the attributable follow-up, relative to the bout end (s).
+        public var firstObservationOffsetS: Int?
+        /// Interval-censored return for `returned`: the last above-tolerance offset and the first within-tolerance
+        /// offset (s).
+        public var lastAboveOffsetS: Int?
+        public var returnedAtOffsetS: Int?
+        /// Upper bound for `returned_by` (s).
+        public var returnedByOffsetS: Int?
+        /// `[end, end + horizon)`, truncated by the bout's own censoring (next bout, movement, disconnect, cutoff).
+        public var followUp: Interval
+        /// Estimates read (bounded by the follow-up).
+        public var observations: [RespiratoryRecoveryObservation]
+        public var censoring: [ReasonCode]
+        public var reasons: [ReasonCode]
+        public init(method: String, state: String, referenceBpm: Double?, referenceWindow: Interval?,
+                    referenceSamples: Int, toleranceBpm: Double, motionSubsidedAt: Int?,
+                    firstObservationOffsetS: Int?, lastAboveOffsetS: Int?, returnedAtOffsetS: Int?,
+                    returnedByOffsetS: Int?, followUp: Interval, observations: [RespiratoryRecoveryObservation],
+                    censoring: [ReasonCode], reasons: [ReasonCode]) {
+            self.method = method; self.state = state; self.referenceBpm = referenceBpm
+            self.referenceWindow = referenceWindow; self.referenceSamples = referenceSamples
+            self.toleranceBpm = toleranceBpm; self.motionSubsidedAt = motionSubsidedAt
+            self.firstObservationOffsetS = firstObservationOffsetS; self.lastAboveOffsetS = lastAboveOffsetS
+            self.returnedAtOffsetS = returnedAtOffsetS; self.returnedByOffsetS = returnedByOffsetS
+            self.followUp = followUp; self.observations = observations; self.censoring = censoring
+            self.reasons = reasons
         }
     }
 
@@ -521,9 +587,12 @@ extension PhysiologyContext {
 
         /// Detect bouts over the day window from heart-rate independent evidence, with response and recovery
         /// measured from the observations available at `cutoff`.
+        /// - Parameter respiration: the day's respiratory-rate measurements (already causal-filtered by the engine),
+        ///   read only for the post-bout respiratory return (spec-02); detection never reads them.
         public static func detect(identity: DayIdentity, hart: ResolvedTrack, strap: ResolvedTrack,
                                   workouts: [WorkoutInput], observations: SanitizedObservations,
-                                  mode: ProcessingMode, cutoff: Int, config: ExertionConfig) -> [ExertionBout] {
+                                  mode: ProcessingMode, cutoff: Int, config: ExertionConfig,
+                                  respiration: [MeasurementInput] = []) -> [ExertionBout] {
             let evidence = BoutEvidence(hart: hart, strap: strap, maxUnknown: config.maxUnknownFraction)
             let breaks = observations.breaks.sorted()
             let heart = HeartSeries(observations.heartRate, minBpm: config.hrMinBpm, maxBpm: config.hrMaxBpm)

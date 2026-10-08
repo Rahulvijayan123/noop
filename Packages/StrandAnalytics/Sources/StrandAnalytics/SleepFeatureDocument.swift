@@ -103,6 +103,11 @@ public struct SleepFeatureDocument: Codable, Equatable, Sendable {
     /// Sidecar wall-clock budget usage in milliseconds (filled by the route; absent in old or
     /// degraded responses).
     public let durationMs: Double?
+    /// Descriptive next-night differences after short or fragmented nights (spec-02 §5.5). nil when
+    /// absent (older sidecars, or no history in the request).
+    public let rebound: SleepRebound?
+    /// Rest-activity rhythm (IS/IV/L5/M10/RA) from one declared movement signal (spec-02 §5.4).
+    public let restActivityRhythm: SleepRestActivityRhythm?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -115,6 +120,8 @@ public struct SleepFeatureDocument: Codable, Equatable, Sendable {
         dependencies = c.tolerant(SleepFeatureDependencies.self, forKey: .dependencies)
         capabilities = c.tolerant(SleepFeatureCapabilities.self, forKey: .capabilities)
         durationMs = c.tolerant(Double.self, forKey: .durationMs)
+        rebound = c.tolerant(SleepRebound.self, forKey: .rebound)
+        restActivityRhythm = c.tolerant(SleepRestActivityRhythm.self, forKey: .restActivityRhythm)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -127,6 +134,8 @@ public struct SleepFeatureDocument: Codable, Equatable, Sendable {
         case dependencies = "dependencies"
         case capabilities = "capabilities"
         case durationMs = "duration_ms"
+        case rebound = "rebound"
+        case restActivityRhythm = "rest_activity_rhythm"
     }
 
     /// The non-nap night whose bed window overlaps `[startTs, endTs)`. With a window given and no
@@ -181,6 +190,8 @@ public struct SleepFeatureNight: Codable, Equatable, Sendable {
     public let respiratoryVariability: SleepRespiratoryVariability?
     public let metricStatus: SleepMetricStatusBlock?
     public let coverage: SleepCoverage?
+    /// Secondary optical PRV research statistics (sample entropy, DFA α1; spec-02 §5.3).
+    public let prvNonlinear: SleepPrvNonlinear?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -199,6 +210,7 @@ public struct SleepFeatureNight: Codable, Equatable, Sendable {
         respiratoryVariability = c.tolerant(SleepRespiratoryVariability.self, forKey: .respiratoryVariability)
         metricStatus = c.tolerant(SleepMetricStatusBlock.self, forKey: .metricStatus)
         coverage = c.tolerant(SleepCoverage.self, forKey: .coverage)
+        prvNonlinear = c.tolerant(SleepPrvNonlinear.self, forKey: .prvNonlinear)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -217,6 +229,7 @@ public struct SleepFeatureNight: Codable, Equatable, Sendable {
         case respiratoryVariability = "respiratory_variability"
         case metricStatus = "metric_status"
         case coverage = "coverage"
+        case prvNonlinear = "prv_nonlinear"
     }
 
     /// Bed-window start as unix seconds (nil when `start_utc` is absent or unparsable).
@@ -719,6 +732,17 @@ public struct SleepObservedRhythm: Codable, Equatable, Sendable {
     public let dailyAmplitudeC: Double?
     public let phaseStabilityH: Double?
     public let notes: [String]?
+    // spec-02 §5.4 additions (absent from older sidecars).
+    public let methodVersion: String?
+    public let historyRevisionDigest: String?
+    public let qualifyingDays: Int?
+    public let daysEvaluated: Int?
+    public let coverage: SleepRhythmCoverage?
+    public let uncertainty: SleepRhythmUncertainty?
+    public let phaseStatus: SleepMetricGate?
+    public let ivDefinition: String?
+    public let phaseRelations: SleepPhaseRelations?
+    public let phaseDrift: SleepPhaseDrift?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -733,6 +757,16 @@ public struct SleepObservedRhythm: Codable, Equatable, Sendable {
         dailyAmplitudeC = c.tolerant(Double.self, forKey: .dailyAmplitudeC)
         phaseStabilityH = c.tolerant(Double.self, forKey: .phaseStabilityH)
         notes = c.tolerant([String].self, forKey: .notes)
+        methodVersion = c.tolerant(String.self, forKey: .methodVersion)
+        historyRevisionDigest = c.tolerant(String.self, forKey: .historyRevisionDigest)
+        qualifyingDays = c.tolerant(Int.self, forKey: .qualifyingDays)
+        daysEvaluated = c.tolerant(Int.self, forKey: .daysEvaluated)
+        coverage = c.tolerant(SleepRhythmCoverage.self, forKey: .coverage)
+        uncertainty = c.tolerant(SleepRhythmUncertainty.self, forKey: .uncertainty)
+        phaseStatus = c.tolerant(SleepMetricGate.self, forKey: .phaseStatus)
+        ivDefinition = c.tolerant(String.self, forKey: .ivDefinition)
+        phaseRelations = c.tolerant(SleepPhaseRelations.self, forKey: .phaseRelations)
+        phaseDrift = c.tolerant(SleepPhaseDrift.self, forKey: .phaseDrift)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -741,6 +775,12 @@ public struct SleepObservedRhythm: Codable, Equatable, Sendable {
         case fitQuality = "fit_quality", isValue = "is", iv = "iv"
         case dailyAmplitudeC = "daily_amplitude_c", phaseStabilityH = "phase_stability_h"
         case notes = "notes"
+        case methodVersion = "method_version"
+        case historyRevisionDigest = "history_revision_digest"
+        case qualifyingDays = "qualifying_days", daysEvaluated = "days_evaluated"
+        case coverage = "coverage", uncertainty = "uncertainty"
+        case phaseStatus = "phase_status", ivDefinition = "iv_definition"
+        case phaseRelations = "phase_relations", phaseDrift = "phase_drift"
     }
 }
 
@@ -764,6 +804,11 @@ public struct SleepRespiratoryVariability: Codable, Equatable, Sendable {
     public let quality: SleepRespQuality?
     public let stageConditioned: [String: SleepStageRespiratory]
     public let outlierFractionVsPersonal: SleepOutlierFraction?
+    // spec-02 §5.2 additions (absent from older sidecars).
+    public let methodVersion: String?
+    public let supportedRange: SleepRespSupportedRange?
+    public let intervalDistribution: SleepRespIntervalDistribution?
+    public let stableModulation: SleepRespStableModulation?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -782,6 +827,10 @@ public struct SleepRespiratoryVariability: Codable, Equatable, Sendable {
         quality = c.tolerant(SleepRespQuality.self, forKey: .quality)
         stageConditioned = c.tolerant([String: SleepStageRespiratory].self, forKey: .stageConditioned) ?? [:]
         outlierFractionVsPersonal = c.tolerant(SleepOutlierFraction.self, forKey: .outlierFractionVsPersonal)
+        methodVersion = c.tolerant(String.self, forKey: .methodVersion)
+        supportedRange = c.tolerant(SleepRespSupportedRange.self, forKey: .supportedRange)
+        intervalDistribution = c.tolerant(SleepRespIntervalDistribution.self, forKey: .intervalDistribution)
+        stableModulation = c.tolerant(SleepRespStableModulation.self, forKey: .stableModulation)
     }
 
     enum CodingKeys: String, CodingKey {
@@ -794,6 +843,8 @@ public struct SleepRespiratoryVariability: Codable, Equatable, Sendable {
         case rmssdIntervalS = "rmssd_interval_s", validRunMin = "valid_run_min"
         case quality = "quality", stageConditioned = "stage_conditioned"
         case outlierFractionVsPersonal = "outlier_fraction_vs_personal"
+        case methodVersion = "method_version", supportedRange = "supported_range"
+        case intervalDistribution = "interval_distribution", stableModulation = "stable_modulation"
     }
 
     public func conditioned(for stage: String) -> SleepStageRespiratory? { stageConditioned[stage] }
@@ -827,16 +878,27 @@ public struct SleepStageRespiratory: Codable, Equatable, Sendable {
     public let rateBpm: Double?
     public let cvInterval: Double?
     public let windows: Int?
+    // spec-02 §5.2 additions: the same statistics the night carries, per stage.
+    public let sdIntervalS: Double?
+    public let rmssdIntervalS: Double?
+    public let medianIntervalS: Double?
+    public let iqrIntervalS: Double?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         rateBpm = c.tolerant(Double.self, forKey: .rateBpm)
         cvInterval = c.tolerant(Double.self, forKey: .cvInterval)
         windows = c.tolerant(Int.self, forKey: .windows)
+        sdIntervalS = c.tolerant(Double.self, forKey: .sdIntervalS)
+        rmssdIntervalS = c.tolerant(Double.self, forKey: .rmssdIntervalS)
+        medianIntervalS = c.tolerant(Double.self, forKey: .medianIntervalS)
+        iqrIntervalS = c.tolerant(Double.self, forKey: .iqrIntervalS)
     }
 
     enum CodingKeys: String, CodingKey {
         case rateBpm = "rate_bpm", cvInterval = "cv_interval", windows = "windows"
+        case sdIntervalS = "sd_interval_s", rmssdIntervalS = "rmssd_interval_s"
+        case medianIntervalS = "median_interval_s", iqrIntervalS = "iqr_interval_s"
     }
 }
 
@@ -1241,5 +1303,490 @@ public struct SleepEcgShadowReport: Codable, Equatable, Sendable {
         case v2Distribution = "v2_distribution", sleepecgDistribution = "sleepecg_distribution"
         case disagreementNearOnsetOffsetPct = "disagreement_near_onset_offset_pct"
         case weightsRevision = "weights_revision"
+    }
+}
+
+// MARK: - spec-02 additions (docs/spec-02/CONTRACT.md §5)
+
+/// A median / IQR pair over equal-sized units (windows, segments, nights).
+public struct SleepMedianIqr: Codable, Equatable, Sendable {
+    public let median: Double?
+    public let iqr: Double?
+    /// Units behind the summary (segments, pairs, nights — the producing block says which).
+    public let segments: Int?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        median = c.tolerant(Double.self, forKey: .median)
+        iqr = c.tolerant(Double.self, forKey: .iqr)
+        segments = c.tolerant(Int.self, forKey: .segments)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case median = "median", iqr = "iqr", segments = "segments"
+    }
+}
+
+/// `respiratory_variability.supported_range`: what the RSA breath detector can see at all. Rates
+/// outside it are not measured, so no tachypnea / bradypnea / pause claim is ever made from it.
+public struct SleepRespSupportedRange: Codable, Equatable, Sendable {
+    public let detectorBandBpm: [Double]
+    public let minPeakSpacingS: Double?
+    public let displayRateRangeBpm: [Double]
+    public let source: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        detectorBandBpm = c.tolerant([Double].self, forKey: .detectorBandBpm) ?? []
+        minPeakSpacingS = c.tolerant(Double.self, forKey: .minPeakSpacingS)
+        displayRateRangeBpm = c.tolerant([Double].self, forKey: .displayRateRangeBpm) ?? []
+        source = c.tolerant(String.self, forKey: .source)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case detectorBandBpm = "detector_band_bpm", minPeakSpacingS = "min_peak_spacing_s"
+        case displayRateRangeBpm = "display_rate_range_bpm", source = "source"
+    }
+}
+
+/// `respiratory_variability.interval_distribution`: quantiles of real consecutive breath intervals
+/// inside usable runs (seconds). Gaps never create a long breath.
+public struct SleepRespIntervalDistribution: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let nIntervals: Int?
+    public let medianS: Double?
+    public let iqrS: Double?
+    public let p05S: Double?
+    public let p10S: Double?
+    public let p25S: Double?
+    public let p75S: Double?
+    public let p90S: Double?
+    public let p95S: Double?
+    public let source: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        nIntervals = c.tolerant(Int.self, forKey: .nIntervals)
+        medianS = c.tolerant(Double.self, forKey: .medianS)
+        iqrS = c.tolerant(Double.self, forKey: .iqrS)
+        p05S = c.tolerant(Double.self, forKey: .p05S)
+        p10S = c.tolerant(Double.self, forKey: .p10S)
+        p25S = c.tolerant(Double.self, forKey: .p25S)
+        p75S = c.tolerant(Double.self, forKey: .p75S)
+        p90S = c.tolerant(Double.self, forKey: .p90S)
+        p95S = c.tolerant(Double.self, forKey: .p95S)
+        source = c.tolerant(String.self, forKey: .source)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", nIntervals = "n_intervals"
+        case medianS = "median_s", iqrS = "iqr_s", p05S = "p05_s", p10S = "p10_s", p25S = "p25_s"
+        case p75S = "p75_s", p90S = "p90_s", p95S = "p95_s", source = "source"
+    }
+}
+
+/// `respiratory_variability.stable_modulation`: minutes whose RSA breathing estimate met a
+/// versioned stability definition, with every component shown. Unknown time is never stable, and
+/// this is not a breathing-health score.
+public struct SleepRespStableModulation: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let definitionVersion: String?
+    public let criteria: [String: Double]?
+    public let stableMinutes: Double?
+    public let evaluatedMinutes: Double?
+    public let unknownMinutes: Double?
+    public let stableFractionOfEvaluated: Double?
+    public let stableFractionOfNight: Double?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        definitionVersion = c.tolerant(String.self, forKey: .definitionVersion)
+        criteria = c.tolerant([String: Double].self, forKey: .criteria)
+        stableMinutes = c.tolerant(Double.self, forKey: .stableMinutes)
+        evaluatedMinutes = c.tolerant(Double.self, forKey: .evaluatedMinutes)
+        unknownMinutes = c.tolerant(Double.self, forKey: .unknownMinutes)
+        stableFractionOfEvaluated = c.tolerant(Double.self, forKey: .stableFractionOfEvaluated)
+        stableFractionOfNight = c.tolerant(Double.self, forKey: .stableFractionOfNight)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", definitionVersion = "definition_version"
+        case criteria = "criteria", stableMinutes = "stable_minutes"
+        case evaluatedMinutes = "evaluated_minutes", unknownMinutes = "unknown_minutes"
+        case stableFractionOfEvaluated = "stable_fraction_of_evaluated"
+        case stableFractionOfNight = "stable_fraction_of_night"
+    }
+}
+
+/// Fixed parameters of the nonlinear PRV statistics (`prv_nonlinear.config`).
+public struct SleepPrvNonlinearConfig: Codable, Equatable, Sendable {
+    public let segmentBeats: Int?
+    public let sampenDimension: Int?
+    public let sampenToleranceSd: Double?
+    public let dfaScales: [Int]
+    public let minSegments: Int?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        segmentBeats = c.tolerant(Int.self, forKey: .segmentBeats)
+        sampenDimension = c.tolerant(Int.self, forKey: .sampenDimension)
+        sampenToleranceSd = c.tolerant(Double.self, forKey: .sampenToleranceSd)
+        dfaScales = c.tolerant([Int].self, forKey: .dfaScales) ?? []
+        minSegments = c.tolerant(Int.self, forKey: .minSegments)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case segmentBeats = "segment_beats", sampenDimension = "sampen_dimension"
+        case sampenToleranceSd = "sampen_tolerance_sd", dfaScales = "dfa_scales"
+        case minSegments = "min_segments"
+    }
+}
+
+/// `nights[].prv_nonlinear`: secondary optical-PRV research statistics on equal-length
+/// gap-free segments. Not an autonomic-disease or exercise-threshold measure.
+public struct SleepPrvNonlinear: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let methodVersion: String?
+    public let neurokit2: String?
+    public let source: String?
+    public let secondary: Bool?
+    public let config: SleepPrvNonlinearConfig?
+    public let segmentsUsed: Int?
+    public let segmentsRejected: Int?
+    public let sampleEntropy: SleepMedianIqr?
+    public let dfaAlpha1: SleepMedianIqr?
+    public let notes: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        methodVersion = c.tolerant(String.self, forKey: .methodVersion)
+        neurokit2 = c.tolerant(String.self, forKey: .neurokit2)
+        source = c.tolerant(String.self, forKey: .source)
+        secondary = c.tolerant(Bool.self, forKey: .secondary)
+        config = c.tolerant(SleepPrvNonlinearConfig.self, forKey: .config)
+        segmentsUsed = c.tolerant(Int.self, forKey: .segmentsUsed)
+        segmentsRejected = c.tolerant(Int.self, forKey: .segmentsRejected)
+        sampleEntropy = c.tolerant(SleepMedianIqr.self, forKey: .sampleEntropy)
+        dfaAlpha1 = c.tolerant(SleepMedianIqr.self, forKey: .dfaAlpha1)
+        notes = c.tolerant(String.self, forKey: .notes)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", methodVersion = "method_version"
+        case neurokit2 = "neurokit2", source = "source", secondary = "secondary", config = "config"
+        case segmentsUsed = "segments_used", segmentsRejected = "segments_rejected"
+        case sampleEntropy = "sample_entropy", dfaAlpha1 = "dfa_alpha1", notes = "notes"
+    }
+}
+
+/// Day/night support of the multi-day skin-temperature rhythm (a night-only trace never fits a
+/// full-day rhythm).
+public struct SleepRhythmCoverage: Codable, Equatable, Sendable {
+    public let dayHoursSupported: Int?
+    public let nightHoursSupported: Int?
+    public let quadrantsObserved: [Bool]
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        dayHoursSupported = c.tolerant(Int.self, forKey: .dayHoursSupported)
+        nightHoursSupported = c.tolerant(Int.self, forKey: .nightHoursSupported)
+        quadrantsObserved = c.tolerant([Bool].self, forKey: .quadrantsObserved) ?? []
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case dayHoursSupported = "day_hours_supported", nightHoursSupported = "night_hours_supported"
+        case quadrantsObserved = "quadrants_observed"
+    }
+}
+
+/// Uncertainty of the rhythm fit.
+public struct SleepRhythmUncertainty: Codable, Equatable, Sendable {
+    public let acrophaseSeH: Double?
+    public let amplitudeSeC: Double?
+    public let method: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        acrophaseSeH = c.tolerant(Double.self, forKey: .acrophaseSeH)
+        amplitudeSeC = c.tolerant(Double.self, forKey: .amplitudeSeC)
+        method = c.tolerant(String.self, forKey: .method)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case acrophaseSeH = "acrophase_se_h", amplitudeSeC = "amplitude_se_c", method = "method"
+    }
+}
+
+/// One circular timing difference `a − b` (hours, in [−12, 12)) between two independently
+/// supported phases, with both components.
+public struct SleepPhaseRelation: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let aLabel: String?
+    public let aH: Double?
+    public let bLabel: String?
+    public let bH: Double?
+    public let differenceH: Double?
+    public let supportDays: Int?
+    public let method: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        aLabel = c.tolerant(String.self, forKey: .aLabel)
+        aH = c.tolerant(Double.self, forKey: .aH)
+        bLabel = c.tolerant(String.self, forKey: .bLabel)
+        bH = c.tolerant(Double.self, forKey: .bH)
+        differenceH = c.tolerant(Double.self, forKey: .differenceH)
+        supportDays = c.tolerant(Int.self, forKey: .supportDays)
+        method = c.tolerant(String.self, forKey: .method)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", aLabel = "a_label", aH = "a_h"
+        case bLabel = "b_label", bH = "b_h", differenceH = "difference_h"
+        case supportDays = "support_days", method = "method"
+    }
+}
+
+/// `observed_skin_temp_rhythm.phase_relations`.
+public struct SleepPhaseRelations: Codable, Equatable, Sendable {
+    public let hrMinusTemp: SleepPhaseRelation?
+    public let sleepMidpointMinusTemp: SleepPhaseRelation?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        hrMinusTemp = c.tolerant(SleepPhaseRelation.self, forKey: .hrMinusTemp)
+        sleepMidpointMinusTemp = c.tolerant(SleepPhaseRelation.self, forKey: .sleepMidpointMinusTemp)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case hrMinusTemp = "hr_minus_temp", sleepMidpointMinusTemp = "sleep_midpoint_minus_temp"
+    }
+}
+
+/// One day's own temperature acrophase (UTC and local clock).
+public struct SleepDailyPhase: Codable, Equatable, Sendable {
+    public let day: String?
+    public let acrophaseUtcH: Double?
+    public let acrophaseLocalH: Double?
+    public let utcOffsetH: Double?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        day = c.tolerant(String.self, forKey: .day)
+        acrophaseUtcH = c.tolerant(Double.self, forKey: .acrophaseUtcH)
+        acrophaseLocalH = c.tolerant(Double.self, forKey: .acrophaseLocalH)
+        utcOffsetH = c.tolerant(Double.self, forKey: .utcOffsetH)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case day = "day", acrophaseUtcH = "acrophase_utc_h", acrophaseLocalH = "acrophase_local_h"
+        case utcOffsetH = "utc_offset_h"
+    }
+}
+
+/// A clock relabeling inside the history (time-zone change or DST): never physiological drift.
+public struct SleepClockChange: Codable, Equatable, Sendable {
+    public let day: String?
+    public let fromOffsetH: Double?
+    public let toOffsetH: Double?
+    /// `timezone` | `dst`.
+    public let kind: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        day = c.tolerant(String.self, forKey: .day)
+        fromOffsetH = c.tolerant(Double.self, forKey: .fromOffsetH)
+        toOffsetH = c.tolerant(Double.self, forKey: .toOffsetH)
+        kind = c.tolerant(String.self, forKey: .kind)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case day = "day", fromOffsetH = "from_offset_h", toOffsetH = "to_offset_h", kind = "kind"
+    }
+}
+
+/// Observed re-alignment after a clock change (retrospective; never a jet-lag forecast).
+public struct SleepObservedRealignment: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let clockShiftH: Double?
+    public let utcPhaseChangeH: Double?
+    public let daysSinceChange: Int?
+    public let fractionRealigned: Double?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        clockShiftH = c.tolerant(Double.self, forKey: .clockShiftH)
+        utcPhaseChangeH = c.tolerant(Double.self, forKey: .utcPhaseChangeH)
+        daysSinceChange = c.tolerant(Int.self, forKey: .daysSinceChange)
+        fractionRealigned = c.tolerant(Double.self, forKey: .fractionRealigned)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", clockShiftH = "clock_shift_h"
+        case utcPhaseChangeH = "utc_phase_change_h", daysSinceChange = "days_since_change"
+        case fractionRealigned = "fraction_realigned"
+    }
+}
+
+/// `observed_skin_temp_rhythm.phase_drift`: retrospective drift of daily acrophases on elapsed UTC
+/// time, with clock changes reported separately.
+public struct SleepPhaseDrift: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let method: String?
+    public let utcDriftHPerDay: Double?
+    public let daysUsed: Int?
+    public let dailyPhases: [SleepDailyPhase]
+    public let clockChanges: [SleepClockChange]
+    public let observedRealignment: SleepObservedRealignment?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        method = c.tolerant(String.self, forKey: .method)
+        utcDriftHPerDay = c.tolerant(Double.self, forKey: .utcDriftHPerDay)
+        daysUsed = c.tolerant(Int.self, forKey: .daysUsed)
+        dailyPhases = c.tolerantArray(SleepDailyPhase.self, forKey: .dailyPhases)
+        clockChanges = c.tolerantArray(SleepClockChange.self, forKey: .clockChanges)
+        observedRealignment = c.tolerant(SleepObservedRealignment.self, forKey: .observedRealignment)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", method = "method"
+        case utcDriftHPerDay = "utc_drift_h_per_day", daysUsed = "days_used"
+        case dailyPhases = "daily_phases", clockChanges = "clock_changes"
+        case observedRealignment = "observed_realignment"
+    }
+}
+
+/// `rest_activity_rhythm`: pyActigraphy-compatible IS/IV/L5/M10/RA on one declared movement signal.
+public struct SleepRestActivityRhythm: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let methodVersion: String?
+    public let signal: String?
+    public let epochSeconds: Int?
+    public let isValue: Double?
+    public let iv: Double?
+    public let ivDefinition: String?
+    public let l5: Double?
+    public let m10: Double?
+    public let l5StartH: Double?
+    public let m10StartH: Double?
+    public let ra: Double?
+    public let daysUsed: Int?
+    public let gate: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        methodVersion = c.tolerant(String.self, forKey: .methodVersion)
+        signal = c.tolerant(String.self, forKey: .signal)
+        epochSeconds = c.tolerant(Int.self, forKey: .epochSeconds)
+        isValue = c.tolerant(Double.self, forKey: .isValue)
+        iv = c.tolerant(Double.self, forKey: .iv)
+        ivDefinition = c.tolerant(String.self, forKey: .ivDefinition)
+        l5 = c.tolerant(Double.self, forKey: .l5)
+        m10 = c.tolerant(Double.self, forKey: .m10)
+        l5StartH = c.tolerant(Double.self, forKey: .l5StartH)
+        m10StartH = c.tolerant(Double.self, forKey: .m10StartH)
+        ra = c.tolerant(Double.self, forKey: .ra)
+        daysUsed = c.tolerant(Int.self, forKey: .daysUsed)
+        gate = c.tolerant(String.self, forKey: .gate)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", methodVersion = "method_version"
+        case signal = "signal", epochSeconds = "epoch_seconds", isValue = "is", iv = "iv"
+        case ivDefinition = "iv_definition", l5 = "l5", m10 = "m10", l5StartH = "l5_start_h"
+        case m10StartH = "m10_start_h", ra = "ra", daysUsed = "days_used", gate = "gate"
+    }
+}
+
+/// One rebound comparison set (`rebound.after_short` / `rebound.after_fragmented`).
+public struct SleepReboundSet: Codable, Equatable, Sendable {
+    public let pairs: Int?
+    public let nextNightAsleepDiffMin: SleepMedianIqr?
+    public let nextNightAwakeDiffMin: SleepMedianIqr?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        pairs = c.tolerant(Int.self, forKey: .pairs)
+        nextNightAsleepDiffMin = c.tolerant(SleepMedianIqr.self, forKey: .nextNightAsleepDiffMin)
+        nextNightAwakeDiffMin = c.tolerant(SleepMedianIqr.self, forKey: .nextNightAwakeDiffMin)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case pairs = "pairs", nextNightAsleepDiffMin = "next_night_asleep_diff_min"
+        case nextNightAwakeDiffMin = "next_night_awake_diff_min"
+    }
+}
+
+/// The personal reference the rebound sets compare against.
+public struct SleepReboundReference: Codable, Equatable, Sendable {
+    public let medianAsleepMin: Double?
+    public let medianAwakeMin: Double?
+    public let nights: Int?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        medianAsleepMin = c.tolerant(Double.self, forKey: .medianAsleepMin)
+        medianAwakeMin = c.tolerant(Double.self, forKey: .medianAwakeMin)
+        nights = c.tolerant(Int.self, forKey: .nights)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case medianAsleepMin = "median_asleep_min", medianAwakeMin = "median_awake_min", nights = "nights"
+    }
+}
+
+/// `rebound`: descriptive next-night differences after short or fragmented nights. No causal or
+/// predictive claim.
+public struct SleepRebound: Codable, Equatable, Sendable {
+    public let status: SleepMetricStatus
+    public let reasons: [String]
+    public let definitionVersion: String?
+    public let historyRevisionDigest: String?
+    public let personalReference: SleepReboundReference?
+    public let rules: [String: Double]?
+    public let afterShort: SleepReboundSet?
+    public let afterFragmented: SleepReboundSet?
+    public let notes: String?
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
+        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        definitionVersion = c.tolerant(String.self, forKey: .definitionVersion)
+        historyRevisionDigest = c.tolerant(String.self, forKey: .historyRevisionDigest)
+        personalReference = c.tolerant(SleepReboundReference.self, forKey: .personalReference)
+        rules = c.tolerant([String: Double].self, forKey: .rules)
+        afterShort = c.tolerant(SleepReboundSet.self, forKey: .afterShort)
+        afterFragmented = c.tolerant(SleepReboundSet.self, forKey: .afterFragmented)
+        notes = c.tolerant(String.self, forKey: .notes)
+    }
+
+    enum CodingKeys: String, CodingKey {
+        case status = "status", reasons = "reasons", definitionVersion = "definition_version"
+        case historyRevisionDigest = "history_revision_digest"
+        case personalReference = "personal_reference", rules = "rules"
+        case afterShort = "after_short", afterFragmented = "after_fragmented", notes = "notes"
     }
 }

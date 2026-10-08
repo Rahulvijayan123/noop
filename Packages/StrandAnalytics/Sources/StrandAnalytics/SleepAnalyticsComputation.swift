@@ -8,6 +8,7 @@ import Foundation
 // Group computers (each in its own file, each owning its spec section):
 //   * SleepAnalyticsContinuity + SleepAnalyticsStageDynamics (spec section 5)
 //   * SleepAnalyticsMovement / SleepAnalyticsThermal / SleepAnalyticsPrv (spec sections 6-7)
+//   * SleepAnalyticsMorning (spec-02: curves around the estimated wake boundary)
 // All of them consume the ONE normalized timeline (SleepAnalyticsNormalization.swift) built
 // from the adapter-assembled input; the document records the fingerprint, lineage and
 // freshness the app's staleness guard checks.
@@ -54,6 +55,8 @@ extension SleepAnalyticsV1 {
             stageDynamics: SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline, input: input, config: config),
             movement: SleepAnalyticsV1.movementGroup(timeline: timeline, input: input, config: config),
             thermal: SleepAnalyticsV1.thermalGroup(timeline: timeline, input: input, config: config),
-            prvDiagnostics: SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: config))
+            prvDiagnostics: SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: config),
+            morningResponse: SleepAnalyticsV1.morningResponseGroup(timeline: timeline, input: input,
+                                                                   config: config))
     }
 }

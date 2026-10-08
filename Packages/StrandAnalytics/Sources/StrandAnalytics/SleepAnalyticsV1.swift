@@ -710,6 +710,14 @@ public struct SleepAnalyticsMovementGroup: Codable, Equatable, Sendable {
     public let sourceResolution: String
     /// Algorithm/config fingerprint of the movement computation.
     public let algorithmVersion: String
+    /// Stage-associated movement (spec-02 §4, docs/spec-02/CONTRACT.md §4.4): each classified
+    /// one-second adjacency joined to the normalized timeline's label at that second, one entry per
+    /// label (wake, light, deep, rem, unknown). Unknown stays unknown. nil while the feature is not computed
+    /// (it is then omitted from the document).
+    public var stageMovement: [SleepAnalyticsStageMovement]? = nil
+    /// Disclosure carried with `stageMovement`: the stager itself reads wrist movement, so a
+    /// stage-movement association is partly built in (`stages_may_depend_on_motion`).
+    public var stageMovementNote: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case quality
@@ -726,6 +734,47 @@ public struct SleepAnalyticsMovementGroup: Codable, Equatable, Sendable {
         case thresholdG = "threshold_g"
         case sourceResolution = "source_resolution"
         case algorithmVersion = "algorithm_version"
+        case stageMovement = "stage_movement"
+        case stageMovementNote = "stage_movement_note"
+    }
+}
+
+/// Movement inside one normalized stage label (spec-02 §4.4). Seconds are classified one-second
+/// gravity adjacencies whose second carries this label; `unknown` collects adjacencies in
+/// unsupported/uncovered time. A descriptive association with an estimated stage, never a
+/// limb-movement, REM-behaviour or arousal measure.
+public struct SleepAnalyticsStageMovement: Codable, Equatable, Sendable {
+    public let label: SleepAnalyticsLabel
+    /// Classified (eligible) adjacency seconds inside this label (s).
+    public let eligibleSeconds: SleepAnalyticsMetric
+    /// Moving adjacency seconds inside this label (s).
+    public let movementSeconds: SleepAnalyticsMetric
+    /// 100 × moving / eligible (%); unavailable with zero eligible seconds.
+    public let movementPercentage: SleepAnalyticsMetric
+    /// Movement bouts whose first moving second falls inside this label (count).
+    public let movementBoutStarts: SleepAnalyticsCount
+    /// `movementBoutStarts` per eligible hour of this label (per h); partial below the primary
+    /// exposure floor (`primaryRateMinObservedSeconds`).
+    public let movementBoutsPerEligibleHour: SleepAnalyticsMetric
+
+    public init(label: SleepAnalyticsLabel, eligibleSeconds: SleepAnalyticsMetric,
+                movementSeconds: SleepAnalyticsMetric, movementPercentage: SleepAnalyticsMetric,
+                movementBoutStarts: SleepAnalyticsCount, movementBoutsPerEligibleHour: SleepAnalyticsMetric) {
+        self.label = label
+        self.eligibleSeconds = eligibleSeconds
+        self.movementSeconds = movementSeconds
+        self.movementPercentage = movementPercentage
+        self.movementBoutStarts = movementBoutStarts
+        self.movementBoutsPerEligibleHour = movementBoutsPerEligibleHour
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case label
+        case eligibleSeconds = "eligible_seconds"
+        case movementSeconds = "movement_seconds"
+        case movementPercentage = "movement_percentage"
+        case movementBoutStarts = "movement_bout_starts"
+        case movementBoutsPerEligibleHour = "movement_bouts_per_eligible_hour"
     }
 }
 
@@ -807,6 +856,11 @@ public struct SleepAnalyticsPrvWindow: Codable, Equatable, Sendable {
     public let pairs: Int
     /// Supported interval-duration coverage fraction inside the window.
     public let coverage: Double
+    /// pNN50 over the SAME true adjacent pairs (%): `HRVAnalyzer.pnn50GapAware` with the original
+    /// adjacency mask (spec-02 §4.1). nil while not computed (the key is then omitted).
+    public var pnn50Pct: Double? = nil
+    /// Pairs with |ΔNN| > 50 ms in this window (the pNN50 numerator; the denominator is `pairs`).
+    public var nn50Count: Int? = nil
 
     private enum CodingKeys: String, CodingKey {
         case start
@@ -814,6 +868,8 @@ public struct SleepAnalyticsPrvWindow: Codable, Equatable, Sendable {
         case sd2Ms = "sd2_ms"
         case pairs
         case coverage
+        case pnn50Pct = "pnn50_pct"
+        case nn50Count = "nn50_count"
     }
 }
 
@@ -843,6 +899,16 @@ public struct SleepAnalyticsPrvDiagnosticsGroup: Codable, Equatable, Sendable {
     public let source: String
     /// Per-window results (compact; bounded by the night's window count).
     public let windows: [SleepAnalyticsPrvWindow]
+    /// Nightly pNN50 (%): 100 × Σ NN50 / Σ pairs pooled over the eligible windows — a pooled
+    /// proportion with its denominator, never a mean of window percentages (spec-02 §4.1). Optical
+    /// pulse intervals: PRV, not ECG pNN50. nil while not computed (the key is then omitted).
+    public var nightlyPnn50Pct: SleepAnalyticsMetric? = nil
+    /// The pNN50 denominator: true adjacent cleaned pairs inside eligible windows (count).
+    public var pnn50PairCount: SleepAnalyticsCount? = nil
+    /// The pNN50 numerator: of those pairs, |ΔNN| > 50 ms (count).
+    public var nn50Count: SleepAnalyticsCount? = nil
+    /// How pNN50 was computed (`pnn50GapAware_original_adjacency_v1`).
+    public var pnn50Method: String? = nil
 
     private enum CodingKeys: String, CodingKey {
         case quality
@@ -856,6 +922,125 @@ public struct SleepAnalyticsPrvDiagnosticsGroup: Codable, Equatable, Sendable {
         case timingMethod = "timing_method"
         case source
         case windows
+        case nightlyPnn50Pct = "nightly_pnn50_pct"
+        case pnn50PairCount = "pnn50_pair_count"
+        case nn50Count = "nn50_count"
+        case pnn50Method = "pnn50_method"
+    }
+}
+
+// MARK: - Morning response group (spec-02 §4, docs/spec-02/CONTRACT.md §4.3)
+
+/// One minute of a morning-response curve. `offsetMinutes` is the minute's start relative to the
+/// anchor (−30 … +29). `value` is the minute statistic (HR median bpm, accepted temperature-bin
+/// median °C, or moving seconds for movement); nil when the minute is not valid — never
+/// interpolated, never zero-filled.
+public struct SleepAnalyticsCurvePoint: Codable, Equatable, Sendable {
+    public let offsetMinutes: Int
+    public let value: Double?
+    /// Supporting seconds inside the minute (distinct HR seconds, distinct accepted temperature
+    /// seconds, or eligible one-second gravity adjacencies).
+    public let support: Int
+    public let valid: Bool
+
+    public init(offsetMinutes: Int, value: Double?, support: Int, valid: Bool) {
+        self.offsetMinutes = offsetMinutes
+        self.value = value.flatMap { $0.isFinite ? $0 : nil }
+        self.support = support
+        self.valid = valid && self.value != nil
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case offsetMinutes = "offset_min"
+        case value, support, valid
+    }
+}
+
+/// One signal's minute curve around the anchor with its OWN coverage (heart rate, skin
+/// temperature and movement are never pooled into one coverage number).
+public struct SleepAnalyticsSignalWindow: Codable, Equatable, Sendable {
+    /// `heart_rate` | `skin_temperature` | `movement`.
+    public let signal: String
+    /// `bpm` | `°C` | `s/min`.
+    public let unit: String
+    /// How a minute qualifies (e.g. `hr_min_30_distinct_seconds`).
+    public let minuteRule: String
+    public let points: [SleepAnalyticsCurvePoint]
+    public let beforeValidMinutes: Int
+    public let afterValidMinutes: Int
+    /// Eligible minutes on each side (30 at v2).
+    public let eligibleMinutesEachSide: Int
+    /// Median of the valid minute values before / after the anchor.
+    public let beforeMedian: SleepAnalyticsMetric
+    public let afterMedian: SleepAnalyticsMetric
+    /// `afterMedian − beforeMedian`; both sides need the configured minimum valid minutes.
+    public let change: SleepAnalyticsMetric
+
+    public init(signal: String, unit: String, minuteRule: String, points: [SleepAnalyticsCurvePoint],
+                beforeValidMinutes: Int, afterValidMinutes: Int, eligibleMinutesEachSide: Int,
+                beforeMedian: SleepAnalyticsMetric, afterMedian: SleepAnalyticsMetric,
+                change: SleepAnalyticsMetric) {
+        self.signal = signal; self.unit = unit; self.minuteRule = minuteRule; self.points = points
+        self.beforeValidMinutes = beforeValidMinutes; self.afterValidMinutes = afterValidMinutes
+        self.eligibleMinutesEachSide = eligibleMinutesEachSide
+        self.beforeMedian = beforeMedian; self.afterMedian = afterMedian; self.change = change
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case signal, unit
+        case minuteRule = "minute_rule"
+        case points
+        case beforeValidMinutes = "before_valid_minutes"
+        case afterValidMinutes = "after_valid_minutes"
+        case eligibleMinutesEachSide = "eligible_minutes_each_side"
+        case beforeMedian = "before_median"
+        case afterMedian = "after_median"
+        case change
+    }
+}
+
+/// HR, skin-temperature and movement curves around the ESTIMATED wake boundary (the effective
+/// window end — the same boundary the thermal post-wake slope uses). A response around a detected
+/// boundary, not proof of awakening physiology; each signal keeps its own coverage.
+public struct SleepAnalyticsMorningResponseGroup: Codable, Equatable, Sendable {
+    public let quality: SleepAnalyticsQuality
+    /// `effective_window_end`.
+    public let anchorKind: String
+    public let anchorTs: Int?
+    public let anchorAt: String?
+    public let windowBeforeSeconds: Int
+    public let windowAfterSeconds: Int
+    public let heartRate: SleepAnalyticsSignalWindow
+    public let skinTemperature: SleepAnalyticsSignalWindow
+    public let movement: SleepAnalyticsSignalWindow
+    /// `morning-response-1`.
+    public let algorithmVersion: String
+    /// `response_around_detected_boundary_not_awakening_physiology`.
+    public let interpretation: String
+
+    public init(quality: SleepAnalyticsQuality, anchorKind: String, anchorTs: Int?, anchorAt: String?,
+                windowBeforeSeconds: Int, windowAfterSeconds: Int,
+                heartRate: SleepAnalyticsSignalWindow, skinTemperature: SleepAnalyticsSignalWindow,
+                movement: SleepAnalyticsSignalWindow, algorithmVersion: String, interpretation: String) {
+        self.quality = quality; self.anchorKind = anchorKind; self.anchorTs = anchorTs
+        self.anchorAt = anchorAt
+        self.windowBeforeSeconds = windowBeforeSeconds; self.windowAfterSeconds = windowAfterSeconds
+        self.heartRate = heartRate; self.skinTemperature = skinTemperature; self.movement = movement
+        self.algorithmVersion = algorithmVersion; self.interpretation = interpretation
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case quality
+        case anchorKind = "anchor_kind"
+        case anchorTs = "anchor_ts"
+        case anchorAt = "anchor_at"
+        case windowBeforeSeconds = "window_before_seconds"
+        case windowAfterSeconds = "window_after_seconds"
+        case heartRate = "heart_rate"
+        case skinTemperature = "skin_temperature"
+        case movement
+        case algorithmVersion = "algorithm_version"
+        case interpretation
     }
 }
 
@@ -913,6 +1098,9 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
     public let movement: SleepAnalyticsMovementGroup
     public let thermal: SleepAnalyticsThermalGroup
     public let prvDiagnostics: SleepAnalyticsPrvDiagnosticsGroup
+    /// HR / skin-temperature / movement curves around the estimated wake boundary (spec-02 §4.3).
+    /// nil while not computed and when the group fails (the key is then omitted).
+    public let morningResponse: SleepAnalyticsMorningResponseGroup?
 
     /// Wire keys are the spec section 8 names (snake_case). Synthesized Codable
     /// would emit camelCase (`schemaVersion`) — the spec's contract example and field
@@ -938,6 +1126,7 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
         case movement
         case thermal
         case prvDiagnostics = "prv_diagnostics"
+        case morningResponse = "morning_response"
     }
 
     public init(schemaVersion: Int, algorithmVersion: String, configVersion: String,
@@ -949,7 +1138,8 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
                 stageDynamics: SleepAnalyticsStageDynamicsGroup,
                 movement: SleepAnalyticsMovementGroup,
                 thermal: SleepAnalyticsThermalGroup,
-                prvDiagnostics: SleepAnalyticsPrvDiagnosticsGroup) {
+                prvDiagnostics: SleepAnalyticsPrvDiagnosticsGroup,
+                morningResponse: SleepAnalyticsMorningResponseGroup? = nil) {
         self.schemaVersion = schemaVersion
         self.algorithmVersion = algorithmVersion
         self.configVersion = configVersion
@@ -967,6 +1157,7 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
         self.movement = movement
         self.thermal = thermal
         self.prvDiagnostics = prvDiagnostics
+        self.morningResponse = morningResponse
     }
 }
 
@@ -975,7 +1166,8 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
 /// Versioned engineering gates/defaults (spec: conservative PRODUCT rules, not physiological
 /// validity thresholds; version them and test their boundaries).
 public struct SleepAnalyticsConfig: Equatable, Sendable {
-    /// Recorded on the document (`config_version`).
+    /// Recorded on the document (`config_version`). Stays `v1` with `algorithmVersion` until the spec-02 change
+    /// lands; then `v2`.
     public var version: String = "v1"
     // ── Support mask (spec 4.4) ─────────────────────────────────────────
     /// Native epoch length the support mask grids at (s).
@@ -1030,6 +1222,18 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
     public var prvMinValidPairs: Int = 200
     public var prvMinCoverageFraction: Double = 0.90
     public var prvMaxRejectedFraction: Double = 0.05
+    /// pNN50's successive-difference threshold (ms) — the conventional 50 ms, fixed.
+    public var prvPnn50ThresholdMs: Double = 50
+    // ── Morning response (spec-02 §4.3) ─────────────────────────────────
+    /// Curve span before / after the anchor (s).
+    public var morningWindowBeforeSeconds: Int = 1800
+    public var morningWindowAfterSeconds: Int = 1800
+    /// A side's median (and the change) needs at least this many valid minutes.
+    public var morningMinValidMinutesPerSide: Int = 20
+    /// An HR minute is valid with at least this many distinct plausible HR seconds.
+    public var morningHrMinuteMinDistinctSeconds: Int = 30
+    /// A movement minute is valid with at least this many eligible one-second adjacencies.
+    public var morningMovementMinuteMinAdjacencies: Int = 30
 
     public init() {}
 
@@ -1054,6 +1258,8 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
         parts += [tempPlausibilityMinC, tempPlausibilityMaxC].map { String(format: "%.1f", $0) }
         parts += [prvDiagnosticsEnabled ? "1" : "0"]
         parts += [prvWindowSeconds, prvMinValidPairs].map(String.init)
+        // The spec-02 gates (pNN50 threshold, morning-response windows) join the fingerprint with config v2,
+        // when the groups that read them compute. Until then identical inputs keep identical fingerprints.
         return parts.joined(separator: "|")
     }
 }
@@ -1066,6 +1272,9 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
 /// dependencies. Canonical scoring is untouched.
 public enum SleepAnalyticsV1 {
     public static let schemaVersion = 1
+    /// Stays `-1` until a spec-02 change alters a meaning: pNN50, stage-associated movement and the morning
+    /// response are optional and absent until their groups compute, so the contents are unchanged. The bump to
+    /// `-2` lands with the thermal change that makes the post-wake slope computable on the full analysis span.
     public static let algorithmVersion = "nara-sleep-analytics-1"
     public static let scope = "main_night"
 

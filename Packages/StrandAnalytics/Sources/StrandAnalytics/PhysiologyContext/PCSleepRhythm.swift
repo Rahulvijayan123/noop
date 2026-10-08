@@ -330,6 +330,42 @@ extension PhysiologyContext {
         }
     }
 
+    /// Awake vs main-sleep heart rate on the document's day (spec-02, docs/spec-02/CONTRACT.md §6): the existing
+    /// day/night contrast with BOTH medians and their coverage. The sleep side was selected by a detector that reads
+    /// HR, so this is a masked proxy, never endogenous phase. `percentDip` is an explicitly defined transformation of
+    /// the same two medians (`percentDipDefinition`), not a separate physiological model.
+    public struct DayNightHeartRate: Codable, Equatable, Sendable {
+        public var state: AvailabilityState
+        public var awakeMedianBpm: Double?
+        public var sleepMedianBpm: Double?
+        /// `awakeMedianBpm - sleepMedianBpm` — the value `proxy_hr_day_night_contrast` already publishes.
+        public var differenceBpm: Double?
+        /// `100 × (awake − sleep) / awake`; nil when either median is missing.
+        public var percentDip: Double?
+        public var percentDipDefinition: String
+        public var awakeSamples: Int
+        public var sleepSamples: Int
+        /// Seconds evaluated on each side (awake: the day window outside every sleep episode, up to the cutoff in
+        /// causal mode; sleep: the main sleep episodes).
+        public var awakeEligibleS: Int
+        public var sleepEligibleS: Int
+        /// HR samples per eligible second on each side, in [0, 1].
+        public var awakeCoverage: Double?
+        public var sleepCoverage: Double?
+        public var reasons: [ReasonCode]
+        public init(state: AvailabilityState, awakeMedianBpm: Double?, sleepMedianBpm: Double?, differenceBpm: Double?,
+                    percentDip: Double?, percentDipDefinition: String = DayNightHeartRate.percentDipFormula,
+                    awakeSamples: Int, sleepSamples: Int, awakeEligibleS: Int, sleepEligibleS: Int,
+                    awakeCoverage: Double?, sleepCoverage: Double?, reasons: [ReasonCode]) {
+            self.state = state; self.awakeMedianBpm = awakeMedianBpm; self.sleepMedianBpm = sleepMedianBpm
+            self.differenceBpm = differenceBpm; self.percentDip = percentDip
+            self.percentDipDefinition = percentDipDefinition; self.awakeSamples = awakeSamples
+            self.sleepSamples = sleepSamples; self.awakeEligibleS = awakeEligibleS; self.sleepEligibleS = sleepEligibleS
+            self.awakeCoverage = awakeCoverage; self.sleepCoverage = sleepCoverage; self.reasons = reasons
+        }
+        public static let percentDipFormula = "100*(awake_median_bpm-sleep_median_bpm)/awake_median_bpm"
+    }
+
     /// Circadian phase. The inputs (hourly/1 Hz HR, behaviour) cannot measure endogenous phase or a core-temperature
     /// minimum, so this is always `unavailable`; it never blocks the rest of the summary.
     public struct RhythmPhaseEstimate: Codable, Equatable, Sendable {
@@ -360,6 +396,8 @@ extension PhysiologyContext {
         public var rhythm: [RhythmDescriptor]
         public var phase: RhythmPhaseEstimate
         public var finality: Finality
+        /// Awake vs main-sleep HR with both medians and their coverage (spec-02). nil in older documents.
+        public var dayNightHeartRate: DayNightHeartRate? = nil
         public init(episodes: [SleepEpisode], mainSleepId: String?, reasons: [ReasonCode],
                     dependence: [DependenceNote], mainSleep: MainSleepSummary? = nil, naps: NapSummary = .none,
                     totalSleepS: Int? = nil, fragmentation: SleepFragmentation? = nil,

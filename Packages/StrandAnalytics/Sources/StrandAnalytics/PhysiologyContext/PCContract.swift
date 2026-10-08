@@ -873,6 +873,9 @@ extension PhysiologyContext {
         /// nil on a complete document. An empty `envelopes` with a non-nil index means "stored separately", not
         /// "no measurements".
         public var envelopeIndex: [EnvelopeTableIndex]? = nil
+        /// Sustained high / low pulse episodes and HR accelerations with movement over qualified inactive HR
+        /// (spec-02, `PCPulseEpisodes.swift`). nil when not evaluated and in older documents.
+        public var pulseEpisodes: PulseEpisodeSummary? = nil
 
         public init(header: DocumentHeader, status: ProductStatus, statusReasons: [ReasonCode],
                     inputReport: InputContractReport, availability: [AvailabilityEntry], regimes: RegimeTimeline,
@@ -909,6 +912,11 @@ extension PhysiologyContext {
         public var change: String
         public var functional: String
         public var featureRegistry: String
+        /// Pulse-episode detector (spec-02). nil in documents written before it existed.
+        public var pulse: String? = nil
+        /// Post-exertion respiratory return (spec-02), versioned apart from the HR exertion products so adding
+        /// it does not split the `hr_response.*` / `hr_recovery_*` regimes. nil in older documents.
+        public var respiratoryRecovery: String? = nil
     }
 
     /// All tunables of the layer. Every field participates in `fingerprint`, so changing any parameter changes
@@ -923,15 +931,16 @@ extension PhysiologyContext {
         public var reference: ReferenceConfig
         public var change: ChangeConfig
         public var functional: FunctionalConfig
+        public var pulse: PulseEpisodeConfig
 
         public init(join: JoinConfig = .init(), validity: ValidityConfig = .init(),
                     eligibility: EligibilityConfig = .init(), sleep: SleepConfig = .init(),
                     exertion: ExertionConfig = .init(), exposure: ExposureConfig = .init(),
                     reference: ReferenceConfig = .init(), change: ChangeConfig = .init(),
-                    functional: FunctionalConfig = .init()) {
+                    functional: FunctionalConfig = .init(), pulse: PulseEpisodeConfig = .init()) {
             self.join = join; self.validity = validity; self.eligibility = eligibility; self.sleep = sleep
             self.exertion = exertion; self.exposure = exposure; self.reference = reference
-            self.change = change; self.functional = functional
+            self.change = change; self.functional = functional; self.pulse = pulse
         }
 
         public static let `default` = Policy()
@@ -941,7 +950,8 @@ extension PhysiologyContext {
                            validity: validity.version, eligibility: eligibility.version, sleep: sleep.version,
                            exertion: exertion.version, exposure: exposure.version, reference: reference.version,
                            change: change.version, functional: functional.version,
-                           featureRegistry: FeatureRegistry.version)
+                           featureRegistry: FeatureRegistry.version, pulse: pulse.version,
+                           respiratoryRecovery: exertion.respiratoryRecoveryVersion)
         }
 
         /// FNV-1a 64 over the canonical (sorted-key) JSON of the policy plus the feature registry version.
