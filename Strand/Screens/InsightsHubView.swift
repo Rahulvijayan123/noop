@@ -394,7 +394,7 @@ private struct DoseCurveChart: View {
                         }
                 }
             }
-            .frame(height: NoopMetrics.chartHeightCompact)
+            .frame(height: NoopMetrics.chartHeightSecondary)
             if typical {
                 ChartLegend([ChartLegendItem(.estimate(accent), String(localized: "Typical"))])
             }

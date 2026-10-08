@@ -446,3 +446,37 @@ struct InsightsScatterChart: View {
         .accessibilityLabel(Text(verbatim: "\(xTitle), \(yTitle): \(pairs.count)"))
     }
 }
+
+// MARK: - DEBUG: open a page one tap down at launch, for screenshots
+
+#if DEBUG
+/// `--demo-page <id>` opens the page registered under `id` on launch, so pages one tap down can be
+/// screenshotted in a simulator without a tap. DEBUG only; a no-op without the argument.
+private struct InsightsDemoPage<Page: View>: ViewModifier {
+    @State private var shown: Bool
+    let page: () -> Page
+
+    init(id: String, page: @escaping () -> Page) {
+        let args = CommandLine.arguments
+        let requested = args.firstIndex(of: "--demo-page").flatMap { $0 + 1 < args.count ? args[$0 + 1] : nil }
+        _shown = State(initialValue: requested == id)
+        self.page = page
+    }
+
+    func body(content: Content) -> some View {
+        content.navigationDestination(isPresented: $shown) { page() }
+    }
+}
+#endif
+
+extension View {
+    /// DEBUG: register a page `--demo-page id` opens at launch. Compiles to nothing in Release.
+    @ViewBuilder
+    func insightsDemoPage<Page: View>(_ id: String, @ViewBuilder page: @escaping () -> Page) -> some View {
+        #if DEBUG
+        modifier(InsightsDemoPage(id: id, page: page))
+        #else
+        self
+        #endif
+    }
+}

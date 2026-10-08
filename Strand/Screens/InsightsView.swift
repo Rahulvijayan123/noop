@@ -252,6 +252,9 @@ struct InsightsView: View {
         .onChangeCompat(of: scenePhase) { phase in
             if phase == .active { refreshCurrentDayKey() }
         }
+        .insightsDemoPage("experiment") { experimentPage }
+        .insightsDemoPage("activitycost") { activityCostPage }
+        .insightsDemoPage("relationships") { relationshipsPage }
     }
 
     /// Re-stamp `currentDayKey` to today's local calendar day. A no-op while the day is unchanged; when the

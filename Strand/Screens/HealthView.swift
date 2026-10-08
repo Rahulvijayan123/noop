@@ -309,6 +309,15 @@ private struct FitnessSection: View {
         }
         .task(id: repo.refreshSeq) { await load() }
         .task(id: repo.refreshSeq) { await loadVitality() }
+        .insightsDemoPage("fitnessage") {
+            FitnessReadinessPage(readiness: readiness, lead: fitnessAge == nil ? fitnessReadyLead() : nil,
+                                 fitnessAge: fitnessAge, vo2max: vo2max, vo2maxEstimator: vo2maxEstimator,
+                                 refreshing: refreshing, onFix: openSettings, onRefresh: refreshFitnessAge)
+        }
+        .insightsDemoPage("vitality") {
+            VitalityFactorsPage(vitality: vitality, bodyAge: bodyAge, chronoAge: profile.age,
+                                contributions: contributions)
+        }
         #if os(macOS)
         .sheet(isPresented: $showSettings) {
             NavigationStack { SettingsView() }
