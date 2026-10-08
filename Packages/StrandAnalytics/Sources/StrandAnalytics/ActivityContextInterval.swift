@@ -130,6 +130,10 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// `PositionChanges.minimumProbability` or more (weaker postural readings are mostly shifting in a chair or
     /// in bed). Rest statistics over those seconds still carry the recovery. 0 for movement rows.
     public var settlingSeconds: Int?
+    /// Where the label came from when it was not the decoder: `ActivityContextProvenance.userCorrection` when
+    /// the wearer's own correction overrode these seconds (applied at read time by `ActivityContextCorrections`,
+    /// never written to the store). nil for decoder output.
+    public var provenance: String?
 
     public var durationSeconds: Int { end - start }
 
@@ -145,7 +149,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 respRateBpm: Double? = nil, respBreaths: Int = 0, gait: ActivityGaitSummary? = nil,
                 inBed: Bool? = nil, uncertainty: Double? = nil, experts: [String]? = nil, transitionCount: Int? = nil,
                 absorbedClasses: [ActivityClass]? = nil, absorbedSeconds: Int? = nil, precededByGapS: Int? = nil,
-                settlingSeconds: Int? = nil) {
+                settlingSeconds: Int? = nil, provenance: String? = nil) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -163,6 +167,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.transitionCount = transitionCount
         self.absorbedClasses = absorbedClasses; self.absorbedSeconds = absorbedSeconds
         self.precededByGapS = precededByGapS; self.settlingSeconds = settlingSeconds
+        self.provenance = provenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -202,6 +207,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         absorbedSeconds = try c.decodeIfPresent(Int.self, forKey: .absorbedSeconds)
         precededByGapS = try c.decodeIfPresent(Int.self, forKey: .precededByGapS)
         settlingSeconds = try c.decodeIfPresent(Int.self, forKey: .settlingSeconds)
+        provenance = try c.decodeIfPresent(String.self, forKey: .provenance)
     }
 
     /// Whether `ts` falls inside the interval.
