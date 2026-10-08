@@ -14,10 +14,13 @@ bedding, contact, medication or fever; no vasodilation, core temperature or caus
 inferred from the wrist channel alone.
 
 The multi-day observed rhythm is a separately named sub-block (existing CircadianEngine
-untouched). The request carries ONE day and no multi-day skin-temperature history, so the
-sub-block is withheld with ``multi_day_history_not_requested``; the pure fit functions
-(``cosinor_fit``, ``interdaily_stability``, ``intradaily_variance``, ``rhythm_gate``) are
-implemented and unit-tested so a later multi-day wave can be switched on without new math.
+untouched). Since spec-02 it is computed by ``features/rhythm.py`` from the request's bounded
+``rhythm_history`` (hourly UTC bins of converted skin temperature, worn HR and movement,
+aggregated near the source by the worker) on the MAIN night only; naps carry
+``not_applicable`` and a request without the history keeps
+``multi_day_history_not_requested``. The pure helpers below (``cosinor_fit``,
+``interdaily_stability``, ``intradaily_variance``, ``rhythm_gate``) remain for complete,
+consecutive day grids; ``intradaily_variance`` now includes the day-boundary pairs.
 """
 
 from __future__ import annotations
@@ -31,7 +34,8 @@ import numpy as np
 from scipy.stats import theilslopes
 
 from .config import CONFIG, SleepFeaturesConfig
-from .contract import SleepFeaturesRequest, json_finite
+from . import rhythm
+from .contract import NightIn, SleepFeaturesRequest, json_finite
 from .timeline import Timeline, actual_sleep_onset, final_sleep_end
 
 #: Minimum valid minutes for any windowed median / slope (same convention as the
@@ -201,8 +205,11 @@ def interdaily_stability(hourly_by_day: Sequence[Sequence[float]]) -> float | No
 def intradaily_variance(hourly_by_day: Sequence[Sequence[float]]) -> float | None:
     """IV = (n/(n-1)) * sum_t((x_{t+1}-x_t)^2) / sum_t((x_t - global_mean)^2).
 
-    Only ACTUAL consecutive hours (within a day, hour h to h+1) enter the numerator;
-    no pairs span a day boundary. Zero overall variance -> None.
+    ``hourly_by_day``: CONSECUTIVE complete days of 24 hourly bins. The series is the days
+    joined in order, so the 23:00 -> 00:00 pairs across midnight are consecutive hours and
+    count (spec-02: the earlier variant dropped every day-boundary pair, which is not the
+    standard full-series IV). Equal to ``rhythm.intradaily_variability`` on the same grid
+    (n - 1 valid pairs). Zero overall variance -> None.
     """
     days = [list(d) for d in hourly_by_day]
     if not days or any(len(d) != 24 for d in days):
@@ -213,10 +220,7 @@ def intradaily_variance(hourly_by_day: Sequence[Sequence[float]]) -> float | Non
     denom = sum((x - global_mean) ** 2 for x in all_vals)
     if denom <= _VAR_EPS:
         return None
-    num = 0.0
-    for d in days:
-        for h in range(23):
-            num += (d[h + 1] - d[h]) ** 2
+    num = sum((all_vals[i + 1] - all_vals[i]) ** 2 for i in range(n - 1))
     return (n / (n - 1.0)) * num / denom
 
 
@@ -345,30 +349,28 @@ NIGHTLY_NOTES = [
      "time-support only."),
 ]
 
-RHYTHM_NOTES = [
-    ("acrophase is skin-temperature acrophase, not DLMO or core-temperature minimum"),
-    ("IS/IV use the spec's population-moment formulas; other packages may use "
-     "sample-variance conventions and differ slightly at finite n."),
-]
+RHYTHM_NOTES = rhythm.RHYTHM_NOTES
 
 
 def _rhythm_withheld_block() -> dict[str, Any]:
-    return {
-        "status": "withheld",
-        "reasons": ["multi_day_history_not_requested"],
-        "mesor_c": None,
-        "amplitude_c": None,
-        "acrophase_h": None,
-        "fit_quality": None,
-        "is": None,
-        "iv": None,
-        "daily_amplitude_c": None,
-        "phase_stability_h": None,
-        "notes": list(RHYTHM_NOTES),
-    }
+    """The rhythm sub-block when no multi-day history was requested."""
+    return rhythm.not_requested_block()
 
 
-def _withheld_block() -> dict[str, Any]:
+def _rhythm_block(req: SleepFeaturesRequest, night: NightIn) -> dict[str, Any]:
+    """The observed multi-day rhythm for this night, isolated from the nightly thermal
+    block: a failure here withholds only the rhythm (``module_error``)."""
+    try:
+        return rhythm.observed_skin_temp_rhythm(req, night)
+    except Exception as exc:  # noqa: BLE001 - isolation is the contract
+        block = rhythm.not_requested_block()
+        block["reasons"] = ["module_error"]
+        block["phase_status"] = {"status": "unavailable", "reasons": ["module_error"]}
+        block["error"] = f"{type(exc).__name__}: {exc}"
+        return block
+
+
+def _withheld_block(req: SleepFeaturesRequest, night: NightIn) -> dict[str, Any]:
     return {
         "status": "withheld",
         "reasons": ["no_sleep_onset"],
@@ -379,7 +381,7 @@ def _withheld_block() -> dict[str, Any]:
         "pre_wake_slope_c_min": None,
         "thermal_transition": find_thermal_transition({}, CONFIG),
         "thermal_to_sleep_latency_min": None,
-        "observed_skin_temp_rhythm": _rhythm_withheld_block(),
+        "observed_skin_temp_rhythm": _rhythm_block(req, night),
         "notes": list(NIGHTLY_NOTES),
     }
 
@@ -390,7 +392,7 @@ def compute_night(
     """The per-night ``thermal`` block (contract section 3 thermal)."""
     s = actual_sleep_onset(tl)
     if s is None:
-        return _withheld_block()
+        return _withheld_block(req, tl.night)
 
     reasons: list[str] = []
     f = final_sleep_end(tl)
@@ -474,7 +476,7 @@ def compute_night(
         "pre_wake_slope_c_min": json_finite(pre_wake_slope),
         "thermal_transition": transition,
         "thermal_to_sleep_latency_min": json_finite(thermal_to_sleep),
-        "observed_skin_temp_rhythm": _rhythm_withheld_block(),
+        "observed_skin_temp_rhythm": _rhythm_block(req, tl.night),
         "notes": list(NIGHTLY_NOTES),
     }
     return block

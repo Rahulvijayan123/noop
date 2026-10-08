@@ -182,6 +182,11 @@ class RhythmDayIn:
     day_start: int
     day_end: int
     bins: tuple[RhythmBinIn, ...]
+    #: spec-02 (rhythm): the day's own conversion identity / device family when the producer
+    #: records them per day (None = the history's top-level values). Differing identities
+    #: make the history mixed, so the phase is unavailable (``mixed_devices``).
+    conversion_identity: str | None = None
+    device_family: str | None = None
 
 
 @dataclass(frozen=True)
@@ -572,8 +577,16 @@ def _parse_rhythm_history(raw: Any) -> RhythmHistoryIn | None:
                                                     f"{bwhere}.movement_s_per_min"),
                 movement_valid_minutes=minutes("movement_valid_minutes")))
         bins.sort(key=lambda b: b.start)
+        day_ids: dict[str, str | None] = {}
+        for key in ("conversion_identity", "device_family"):
+            v = d.get(key)
+            _require(v is None or (isinstance(v, str) and v), "invalid_rhythm_history",
+                     f"{dwhere}.{key} must be a non-empty string or absent")
+            day_ids[key] = v
         days.append(RhythmDayIn(day=day, timezone=tz, revision=None if rev is None else int(rev),
-                                day_start=int(ds), day_end=int(de), bins=tuple(bins)))
+                                day_start=int(ds), day_end=int(de), bins=tuple(bins),
+                                conversion_identity=day_ids["conversion_identity"],
+                                device_family=day_ids["device_family"]))
     days.sort(key=lambda d: d.day_start)
     return RhythmHistoryIn(schema=RHYTHM_HISTORY_SCHEMA, device_family=raw["device_family"],
                            conversion_identity=raw["conversion_identity"],

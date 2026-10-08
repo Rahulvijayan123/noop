@@ -30,7 +30,7 @@ import yasa
 from . import ALGORITHM_VERSION, SCHEMA_VERSION
 from .config import CONFIG, CONFIG_VERSION
 from .contract import SleepFeaturesRequest, fmt_utc
-from . import architecture, continuity, physiology, regularity, respiration, settling, thermal
+from . import architecture, continuity, physiology, regularity, respiration, rhythm, settling, thermal
 from .timeline import Timeline, actual_sleep_onset, build_timeline, final_sleep_end
 
 try:  # the shadow report is optional at import time; a broken import must not
@@ -201,6 +201,9 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
         })
 
     reg_block, reg_err = _isolated(regularity.compute, req, CONFIG)
+    # spec-02 5.4: document-level rest-activity rhythm from the bounded rhythm_history
+    # (isolated: a failure withholds only this block).
+    rest_activity_block, _ = _isolated(rhythm.rest_activity_rhythm, req, CONFIG)
     capabilities: dict[str, Any] = {
         # Group B gates (spec section 6 / contract section 7): honest blockers.
         "oxygen_events": {"ready": False, "reason": "unverified_sparse_oxygen"},
@@ -241,6 +244,7 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
         "status_reasons": sorted(set(status_reasons)),
         "nights": nights_out,
         "regularity": reg_block,
+        "rest_activity_rhythm": rest_activity_block,
         "dependencies": {**deps,
                          "config_version": CONFIG_VERSION,
                          "config": CONFIG.to_wire()},
