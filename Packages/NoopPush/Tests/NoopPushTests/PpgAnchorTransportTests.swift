@@ -125,13 +125,15 @@ final class PpgAnchorTransportTests: XCTestCase {
         }
     }
 
-    /// The batch exactly as the phone's object lane builds it: the streaming encoder into an
-    /// account-owned directory (the coordinator's wake-budgeted path), protocol 1.5.
-    private func phoneBatch(_ rows: [GoldenRow], protocolVersion: String = PushProtocol.ppgAnchorVersion) throws -> PushBinaryBatch {
+    /// The batch exactly as the phone's object lane builds it. `ImuObjectTransport` offers no binary
+    /// preparation, so the coordinator takes the in-memory path (no payload directory) even under its
+    /// wake budget; the 4 MiB decoded limit is the budget's per-object cap.
+    private func phoneBatch(_ rows: [GoldenRow], protocolVersion: String = PushProtocol.ppgAnchorVersion,
+                            streamed: Bool = false) throws -> PushBinaryBatch {
         try PushProtocol.binaryObjectBatch(table: .ppgWaveformSample, sourceId: Self.sourceId,
             deviceId: Self.deviceId, startCursor: nil, rows: rows.map { .ppgWaveform($0.record) },
             protocolVersion: protocolVersion, decodedLimit: 4 * 1_048_576,
-            payloadDirectory: try directory())
+            payloadDirectory: streamed ? try directory() : nil)
     }
 
     func testGoldenVectorsMatchTheCodecAndTheStreamingPhonePath() throws {
@@ -144,9 +146,14 @@ final class PpgAnchorTransportTests: XCTestCase {
                                                   ppgIdentityV2: true, ppgAnchorV3: anchored)
             XCTAssertEqual(packed[4], anchored ? PushBinaryCodec.ppgAnchorFormatVersion : PushBinaryCodec.ppgIdentityFormatVersion)
             let batch = try phoneBatch(rows, protocolVersion: version)
-            XCTAssertEqual(batch.contentSha256, PushBinaryCodec.sha256Hex(packed),
-                           "the streaming phone path and the in-memory packer must emit identical bytes")
+            XCTAssertEqual(batch.contentSha256, PushBinaryCodec.sha256Hex(packed))
             XCTAssertEqual(batch.uncompressedBytes, packed.count)
+            // A client with a preparation directory streams the same bytes; only its object id
+            // (an immutable-representation id) differs, by design.
+            let streamed = try phoneBatch(rows, protocolVersion: version, streamed: true)
+            XCTAssertEqual(streamed.contentSha256, batch.contentSha256)
+            XCTAssertEqual(streamed.batchId, batch.batchId)
+            XCTAssertEqual(streamed.wireSHA256, batch.wireSHA256)
             let wire = try batch.payload
             XCTAssertEqual(try gunzip(wire, size: packed.count), packed)
             let manifest = PushObjectManifest(batch: batch)

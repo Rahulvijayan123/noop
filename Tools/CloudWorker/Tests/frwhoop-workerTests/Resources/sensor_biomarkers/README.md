@@ -24,8 +24,9 @@ Three NPB1 `ppgWaveformSample` objects (kind 1, gzip wire):
 - `overlap-v2`: ts 1007..1009 with an identical duplicate (ts 1008 twice, identical) and a
   conflicting duplicate (ts 1009 twice, different samples/recordIndex).
 - `legacy-v1` (v1, no recordIndex): a single clean burst with no burst counter.
-The wire carries NO absolute anchor (`baseCode` is a phone-side DB column), so every wire record
-decodes with `baseCode == null` — those seconds are withheld `missing_ppg_anchor`, never emitted.
+These are formats 1 and 2, which carry NO absolute anchor (`baseCode` was a phone-side DB column),
+so every record decodes with `baseCode == null` — those seconds are withheld `missing_ppg_anchor`,
+never emitted. Format 3 (push protocol 1.5) carries the anchor; its fixture is the shared golden below.
 
 ## sensor_biomarkers_ppg_records.json
 Decoded per-second v26 PPG records (the reconstruction layer's `PpgWaveformInput` shape) with
@@ -42,6 +43,21 @@ fixtures, not invented): u32 unix @15, u16 burst_index @21, u32 ppg_base_code @2
 @27..75, CRC32 trailer over bytes 8..end. `absolute_window` (base + running sum) is written
 explicitly and independently of WhoopProtocol. A corrupted trailer must be rejected by
 WhoopProtocol's `parseFrame`/`extractHistoricalStreams` (failed-CRC records never become input).
+
+## Shared PPG anchor golden (not in this directory)
+`Packages/NoopPush/Tests/NoopPushTests/Resources/ppg_anchor_v3_golden.json` is the cross-stack byte
+fixture for NPB1 format 3: written by NoopPush `PpgAnchorTransportTests` (the phone's streaming
+encoder), read unchanged by the receiver's Deno tests and by `PpgTransportTests` here (path relative to
+`Tools/CloudWorker`). Vectors: `phone_real_frames` (the two real v26 frames above plus two synthetic
+neighbours, as the phone banks them), `all_members` (every format 3 member and edge value) and
+`phone_real_frames_legacy_v2` (the same seconds as a 1.3 sender carried them, without the anchor).
+
+## sensor_biomarkers_request_envelope.json
+The exact `POST /v1/infer` body `SensorBiomarkerInputs.buildRequests` + `SensorBiomarkerLane.inferenceBody`
+produce for the `phone_real_frames` golden plus two seconds of synthetic stationary IMU: 25 Hz PPG
+segments with `run_id`, `config` and `clock`, the request `coverage` and recorded `placement`. Written
+by `PpgTransportTests.testRequestEnvelopeGolden` (set `FRWHOOP_SENSOR_ENVELOPE_OUTPUT` to regenerate);
+the sidecar tests consume it.
 
 ## Regeneration
 Run the generator script (tools/fixture_generator.py in this directory if present) and commit the

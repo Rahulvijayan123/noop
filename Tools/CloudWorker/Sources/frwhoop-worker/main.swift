@@ -94,8 +94,9 @@ import FoundationNetworking
 //                                without it the lane idles and reports sensor_tables_missing
 //   FRWHOOP_SENSOR_BIOMARKERS_BUDGET  sensor-biomarker jobs per wake (default 2)
 //   FRWHOOP_SENSOR_BIOMARKERS_LEASE_SECONDS  sensor-biomarker job lease length (default 300)
-//   FRWHOOP_SENSOR_PPG_ENABLED   "1" adds ppg_quality + pulse_shape (default OFF: the ppgWaveformSample upload
-//                                carries no optical anchor yet, so both would only ever be withheld)
+//   FRWHOOP_SENSOR_PPG_ENABLED   "1" adds ppg_quality + pulse_shape (default OFF: only push protocol 1.5
+//                                ppgWaveformSample objects carry the optical anchor; every older second is
+//                                withheld missing_ppg_anchor, see docs/model-integration/ppg-transport.md)
 //   FRWHOOP_PARADIGMA_ENABLED    "1" adds tremor + arm_swing to the sensor families (research)
 //   FRWHOOP_DEEPBEAT_SHADOW_ENABLED "1" adds rhythm_shadow to the sensor families (shadow, never user-facing)
 //   FRWHOOP_SIAMAF_SHADOW_ENABLED    "1" lets the sidecar attach the optional SiamAF shadow adapter to
@@ -887,6 +888,7 @@ if sensorState.read().enabled, let dbSensor, let inferenceClient {
                 $0.lastError = sensor.stats.lastError
                 $0.lastErrorKind = sensor.stats.lastErrorKind
                 $0.lastActivityAt = sensor.stats.lastActivityAt
+                $0.identity = SensorBiomarkerLane.identity
             }
             return settled() > before
         }, ensureConnected: { try dbSensor.ensureConnected() })
