@@ -62,6 +62,8 @@ final class CoachChatViewModelThreadTests: XCTestCase {
                     .map { ["clientId": $0["clientId"] as? String ?? "", "reason": "thread_deleted"] }
                 return .json(["saved": rows.count - refused.count, "rejected": refused])
             case ("GET", "memories"): return .json(["memories": [["id": "m1", "content": "User runs", "topic": "training", "importance": 3]]])
+            case ("POST", "memories"):
+                return .json(["memory": ["id": "m2", "content": r.json["content"] as? String ?? "", "topic": "health", "importance": 3]])
             case ("GET", "messages"):
                 guard features else { return .json(["messages": []]) }
                 let key = (r.query["threadId"] ?? "") + "|" + (r.query["cursor"] ?? "")
@@ -313,6 +315,76 @@ final class CoachChatViewModelThreadTests: XCTestCase {
         XCTAssertTrue(savedRows.contains { $0["threadId"] as? String == first.uuidString.lowercased() && $0["role"] as? String == "assistant" },
                       "the first chat's answer was still saved")
         XCTAssertFalse(vm.queuePrompt("   "))
+    }
+
+    // MARK: Screen handoff
+
+    private let hrvScreen = "Screen: Heart rate variability, RMSSD side. Last night (Tue 6 Oct 2026): 48 ms, within the usual range of 42–61 ms."
+    private let hrvMemory = "Wants to understand their heart rate variability (asked Sana from the HRV page)"
+
+    @MainActor
+    func testAHandoffAsksInANewChatWithTheScreenOnEveryTurnAndSavesTheMemoryOnce() async throws {
+        let vm = makeVM().vm
+        await vm.start()
+        XCTAssertTrue(vm.send("How did I sleep?"))
+        try await waitUntil("the first answer") { !vm.isGenerating }
+        let first = vm.threadId
+
+        XCTAssertTrue(vm.queueHandoff(CoachHandoff(prompt: "Help me understand my heart rate variability.",
+                                                   screenContext: hrvScreen, memory: hrvMemory)))
+        XCTAssertNotEqual(vm.threadId, first, "a handoff opens a new chat")
+        XCTAssertEqual(vm.messages.first?.content, "Help me understand my heart rate variability.")
+        XCTAssertEqual(vm.messages.first?.screenContext, hrvScreen)
+        let id = vm.threadId.uuidString.lowercased()
+        try await waitUntil("the answer") { !vm.isGenerating }
+        XCTAssertTrue(systemPrompt(try XCTUnwrap(chatRequests.last)).contains(CoachPrompt.screenBlock(hrvScreen)))
+        XCTAssertFalse(systemPrompt(try XCTUnwrap(chatRequests.first)).contains("SCREEN CONTEXT"), "the earlier chat had none")
+        try await waitUntil("the question saved with its screen") {
+            savedRows.contains { $0["threadId"] as? String == id && ($0["meta"] as? [String: Any])?["screenContext"] as? String == hrvScreen }
+        }
+        try await waitUntil("the memory") { CoachURLProtocolStub.requests("POST", "memories").count == 1 }
+        let memory = try XCTUnwrap(CoachURLProtocolStub.requests("POST", "memories").first).json
+        XCTAssertEqual(memory["content"] as? String, hrvMemory)
+        XCTAssertEqual(memory["topic"] as? String, "health")
+        XCTAssertEqual(memory["importance"] as? Int, 3)
+        XCTAssertEqual(memory["threadId"] as? String, id)
+
+        // A follow-up in the same chat still reads the screen; its own question carries none, and nothing is saved again.
+        XCTAssertTrue(vm.send("What should I do tonight?"))
+        try await waitUntil("the follow-up answer") { !vm.isGenerating }
+        XCTAssertTrue(systemPrompt(try XCTUnwrap(chatRequests.last)).contains(CoachPrompt.screenBlock(hrvScreen)))
+        XCTAssertNil(vm.messages[2].screenContext)
+        XCTAssertEqual(CoachURLProtocolStub.requests("POST", "memories").count, 1)
+
+        // A new chat leaves it behind.
+        vm.newChat()
+        XCTAssertTrue(vm.send("Plan my week"))
+        try await waitUntil("the new chat's answer") { !vm.isGenerating }
+        XCTAssertFalse(systemPrompt(try XCTUnwrap(chatRequests.last)).contains("SCREEN CONTEXT"))
+    }
+
+    @MainActor
+    func testAHandoffWaitsForTheReplyInProgressAndARefusedOneCarriesNothing() async throws {
+        fake.chat = .sse("Your HRV averaged 52 ms this week.", delay: 0.5)
+        let vm = makeVM().vm
+        await vm.start()
+        XCTAssertTrue(vm.send("First question about HRV?"))
+        let first = vm.threadId
+        XCTAssertTrue(vm.queueHandoff(CoachHandoff(prompt: "Help me understand my heart rate variability.",
+                                                   screenContext: hrvScreen, memory: hrvMemory)))
+        XCTAssertEqual(vm.messages.first?.content, "First question about HRV?", "the running reply is not interrupted")
+        XCTAssertTrue(CoachURLProtocolStub.requests("POST", "memories").isEmpty, "nothing is saved before it is sent")
+        try await waitUntil("the queued handoff") { vm.threadId != first && vm.messages.first?.screenContext == hrvScreen }
+        try await waitUntil("its answer") { !vm.isGenerating }
+        try await waitUntil("the memory") { CoachURLProtocolStub.requests("POST", "memories").count == 1 }
+        XCTAssertFalse(vm.queueHandoff(CoachHandoff(prompt: "  ", screenContext: hrvScreen, memory: nil)))
+
+        fake.chat = .sse("Your HRV averaged 52 ms this week.")
+        XCTAssertTrue(vm.queueHandoff(CoachHandoff(prompt: "I want to kill myself", screenContext: hrvScreen, memory: hrvMemory)))
+        XCTAssertTrue(vm.messages.allSatisfy(\.blocked))
+        XCTAssertNil(vm.messages.first?.screenContext, "a refused question carries nothing from the screen")
+        try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(CoachURLProtocolStub.requests("POST", "memories").count, 1, "and saves no memory")
     }
 
     @MainActor

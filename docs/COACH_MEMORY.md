@@ -675,6 +675,12 @@ New tools, in the core bundle on every turn:
 - **Manifest fallback.** When the fresh manifest misses the 1.2 s wait, the cached one is used without its `relevant` list and without any other thread's summary or a deleted chat; `updateManifests` keeps the files' order.
 - **Leak markers.** `CoachSafety` adds `"context library (queryable"` and `"earlier in this conversation (summary"`.
 
+#### Screen handoff ("Ask Sana" from another screen)
+- **Caller.** A screen sets `AICoachEngine.pendingHandoff = CoachHandoff(prompt:screenContext:memory:)` and calls `NavRouter.openCoach()`. `CoachChatView` consumes it once, like `pendingPrompt`: `queueHandoff(_:)` starts a new chat (after any reply in progress) and sends `prompt` as the user's first message.
+- **Context.** `screenContext` (what the screen showed, ≤ 2,400 characters) is stored on that user message as `meta.screenContext`, so it survives a reload. Each turn of the chat appends `SCREEN CONTEXT:` (`CoachPrompt.screenBlock`) after the other blocks and before the image block; it uses the question's own context, else the latest earlier question in the open thread that has one. A refused question carries none. Empty context leaves both `system(...)` outputs byte-identical. `CoachSafety` adds the leak marker `"opened this chat from a screen in the app"`.
+- **Memory.** When the prompt is sent (not refused), `memory` is saved once with `POST memories` (topic `health`, importance 3, the thread id on a thread-aware server). The save path's dedupe (`saveTarget`) confirms an existing near-duplicate instead of adding it again. The memory names what the person asked about and never quotes a reading.
+- **Server.** No change: `meta` is free-form JSON (≤ 20 KB per message in `coach_store.ts`). The macOS coach (`CoachView`, the user's own key) sends only the prompt; it keeps no cloud memory.
+
 ### 7.5 State snapshot for suggestions
 `CoachUserStateSnapshot` is sent as `state` and includes:
 - `day`;

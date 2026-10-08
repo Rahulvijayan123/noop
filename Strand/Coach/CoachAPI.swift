@@ -99,18 +99,24 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
     var blocked: Bool? = nil
     /// What the vision model saw in the photo this question carried (≤ 1,200 characters).
     var imageContext: String? = nil
+    /// What the screen this question was asked from showed (`CoachHandoff`, ≤ 2,400 characters). Every later turn
+    /// of the chat reads it again.
+    var screenContext: String? = nil
 
     init(toolNames: [String]? = nil, viz: CoachViz? = nil, hadImage: Bool? = nil, followUps: [String]? = nil,
-         blocked: Bool? = nil, imageContext: String? = nil) {
+         blocked: Bool? = nil, imageContext: String? = nil, screenContext: String? = nil) {
         self.toolNames = toolNames
         self.viz = viz
         self.hadImage = hadImage
         self.followUps = followUps
         self.blocked = blocked
         self.imageContext = imageContext
+        self.screenContext = screenContext
     }
 
-    private enum CodingKeys: String, CodingKey { case toolNames, viz, hadImage, followUps, blocked, imageContext }
+    private enum CodingKeys: String, CodingKey {
+        case toolNames, viz, hadImage, followUps, blocked, imageContext, screenContext
+    }
 
     /// Field by field, so one malformed value (an old visual shape, say) never drops the rest of the meta.
     init(from decoder: Decoder) throws {
@@ -121,6 +127,7 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
         followUps = c.lossy([String].self, .followUps)
         blocked = c.lossy(Bool.self, .blocked)
         imageContext = c.lossy(String.self, .imageContext)
+        screenContext = c.lossy(String.self, .screenContext)
     }
 
     /// `newer` over `self`, field by field: a non-nil field wins, so a re-save that only carries the visual
@@ -129,7 +136,8 @@ struct CoachMessageMeta: Codable, Equatable, Sendable {
         guard let newer else { return self }
         return CoachMessageMeta(toolNames: newer.toolNames ?? toolNames, viz: newer.viz ?? viz,
                                 hadImage: newer.hadImage ?? hadImage, followUps: newer.followUps ?? followUps,
-                                blocked: newer.blocked ?? blocked, imageContext: newer.imageContext ?? imageContext)
+                                blocked: newer.blocked ?? blocked, imageContext: newer.imageContext ?? imageContext,
+                                screenContext: newer.screenContext ?? screenContext)
     }
 }
 
