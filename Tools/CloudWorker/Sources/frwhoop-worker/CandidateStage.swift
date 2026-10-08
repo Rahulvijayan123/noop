@@ -712,7 +712,9 @@ struct CandidateStage {
             let recorded = record(call, metric: item.metric, selection: selection, claim: claim, inputs: inputs,
                                   extra: ["pending_attempts": .int(item.attempts + 1), "pending_terminal": .bool(true)])
             switch recorded {
-            case .written(let id), .alreadyPresent(let id):
+            case .written(let id):
+                settle(pending, item, .withheld(reason: "attempts_exhausted:\(reason)", candidateId: id))
+            case .alreadyPresent(let id):
                 settle(pending, item, .withheld(reason: "attempts_exhausted:\(reason)", candidateId: id))
             case .writeFailed:
                 settle(pending, item, .retry(reason: "write_failed", countAttempt: false, retryAfterSeconds: backoff))
