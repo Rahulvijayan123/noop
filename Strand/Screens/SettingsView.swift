@@ -57,9 +57,7 @@ struct SettingsView: View {
                 aboutGroup
             }
         }
-        // The app root applies the scheme with `.preferredColorScheme`, which repaints the screens behind but
-        // not a sheet that is already open, and Settings opens as a sheet. Setting the window's style as well
-        // repaints the open sheet and every page pushed in it the moment the choice changes.
+        // See `WindowAppearanceSync`: the open Settings sheet follows the Appearance picker.
         .modifier(WindowAppearanceSync(raw: appearanceRaw))
         .alert(dataAlert?.title ?? "", isPresented: Binding(get: { dataAlert != nil },
                                                            set: { if !$0 { dataAlert = nil } }),
@@ -674,27 +672,28 @@ private struct PlacementEditorView: View {
     }
 }
 
-/// Pushes the light/dark choice onto the app's windows the moment it changes (iOS). See the call site in
-/// `SettingsView` for why the root `.preferredColorScheme` is not enough for an open sheet.
+/// Applies the light/dark choice to Settings itself (iOS). Settings opens as a sheet, and a sheet keeps the
+/// appearance it was presented with: the app root's `.preferredColorScheme` repaints the screens behind it
+/// but not an open sheet or the pages pushed inside it. Stating the scheme on the sheet's own content makes
+/// them follow the picker at once. "System" states whatever the device itself is set to.
 private struct WindowAppearanceSync: ViewModifier {
     let raw: String
 
     func body(content: Content) -> some View {
         #if os(iOS)
-        content.onChange(of: raw) { _, newValue in
-            let style: UIUserInterfaceStyle
-            switch AppearanceMode.resolve(newValue) {
-            case .system: style = .unspecified
-            case .light: style = .light
-            case .dark: style = .dark
-            }
-            for scene in UIApplication.shared.connectedScenes {
-                guard let windowScene = scene as? UIWindowScene else { continue }
-                for window in windowScene.windows { window.overrideUserInterfaceStyle = style }
-            }
-        }
+        content.preferredColorScheme(scheme)
         #else
         content
         #endif
     }
+
+    #if os(iOS)
+    private var scheme: ColorScheme {
+        switch AppearanceMode.resolve(raw) {
+        case .light: return .light
+        case .dark: return .dark
+        case .system: return UIScreen.main.traitCollection.userInterfaceStyle == .dark ? .dark : .light
+        }
+    }
+    #endif
 }
