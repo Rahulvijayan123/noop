@@ -124,8 +124,14 @@ struct LiquidTodayView: View {
     /// launch, before the store has been read, finishes with nothing in hand; that is not "no data".
     @State private var loadedFromRepository = false
 
+    /// The same gate for the opt-in hosted cards, whose builds (the shared SleepModel, the day's stress)
+    /// run last in `load()`: the page does not wait for them, and their placeholders do.
+    @State private var hostedLoadedDayOffset: Int?
+
     /// True while the page has no data for the day it shows.
     private var isLoading: Bool { loadedDayOffset != selectedDayOffset || !loadedFromRepository }
+    /// True while the hosted cards' builds for the day are still running.
+    private var isHostedLoading: Bool { isLoading || hostedLoadedDayOffset != selectedDayOffset }
 
     // MARK: - Day navigation (swipe, chevrons and calendar; day-keyed reads)
 
@@ -756,7 +762,7 @@ struct LiquidTodayView: View {
                 Text(card.title)
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
-                if isLoading {
+                if isHostedLoading {
                     ChartPlaceholder(height: NoopMetrics.chartHeightCompact)
                 } else {
                     EmptyChartMessage("Not enough nights yet.", height: NoopMetrics.chartHeightCompact)
@@ -775,15 +781,26 @@ struct LiquidTodayView: View {
         let cal = Calendar.current
         let start = cal.startOfDay(for: Date())
         let end = cal.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400)
-        let state: ChartState = isLoading ? .loading
+        let state: ChartState = isHostedLoading ? .loading
             : (samples.isEmpty ? .empty(String(localized: "No waking hours scored yet")) : .ready)
         return NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 TodayCardTitleRow(title: card.title, showsChevron: card.route != nil)
+                // The Stress page's scale: 0–3 with the Low / Medium / High bands its `StressBand` uses
+                // (below 1, below 2, above), so a line on a card says which band each hour sat in.
                 IntradayChart(samples: samples, bucketSeconds: 3600, color: StrandPalette.stressColor,
-                              compact: true, state: state, window: start...end,
+                              valueBands: [
+                                .init(id: "low", range: 0...1, color: StrandPalette.statusPositive,
+                                      label: String(localized: "Low")),
+                                .init(id: "medium", range: 1...2, color: StrandPalette.statusWarning,
+                                      label: String(localized: "Medium")),
+                                .init(id: "high", range: 2...3, color: StrandPalette.statusCritical,
+                                      label: String(localized: "High")),
+                              ],
+                              state: state, window: start...end,
                               y: ChartValueAxis(unit: nil, domain: .fixed(0...3), ticks: [0, 1, 2, 3]),
-                              selection: .constant(nil), accessibilityTitle: card.title)
+                              selection: .constant(nil), height: NoopMetrics.chartHeightSecondary,
+                              accessibilityTitle: card.title)
             }
         }
         // The card is a link, so the chart passes taps through to it.
@@ -812,7 +829,7 @@ struct LiquidTodayView: View {
     // MARK: - Data
 
     private func load() async {
-        // The loaded-day gate: the day this load is for, marked loaded at the very end (see `loadedDayOffset`).
+        // The loaded-day gate: the day this load is for, marked loaded once its reads land (see `loadedDayOffset`).
         let loadingDayOffset = selectedDayOffset
         let repositoryWasLoaded = repo.loaded
         // Resolve the O(days) lookups ONCE here (not on every body re-render): the selected day and the
@@ -988,6 +1005,15 @@ struct LiquidTodayView: View {
         hrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
         hrTimes = hrBuckets.map { Double($0.ts) }
         workouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
+        // Only a load for the day still on screen opens the gate: one left over from before a day swipe
+        // finishes for a day nobody is looking at. (Cancellation is not the test: the launch burst of
+        // refreshes restarts the `.task` again and again, and each of those loads is for the right day.)
+        // Opened here, once every read the page draws has landed; the hosted-card builds below have their
+        // own gate at the end.
+        if loadingDayOffset == selectedDayOffset {
+            loadedDayOffset = loadingDayOffset
+            if repositoryWasLoaded { loadedFromRepository = true }
+        }
 
         // #today-hosted-cards: build the shared SleepModel that backs the hosted sleep cards, but ONLY when
         // at least one sleep-origin card is actually hosted — otherwise Today pays no extra Repository cost.
@@ -1038,11 +1064,7 @@ struct LiquidTodayView: View {
         } else {
             spo2NightReadings = nil
         }
-        // A load superseded by a newer one (a day swipe cancels the old `.task`) leaves the gate to it.
-        if !Task.isCancelled {
-            loadedDayOffset = loadingDayOffset
-            if repositoryWasLoaded { loadedFromRepository = true }
-        }
+        if loadingDayOffset == selectedDayOffset { hostedLoadedDayOffset = loadingDayOffset }
     }
 
     // MARK: - Derived (sync, off repo.today / repo.days)
@@ -1324,7 +1346,9 @@ private struct TodayHeartRateCard: View {
                 IntradayChart(samples: samples, bucketSeconds: 300, color: StrandPalette.metricRose,
                               references: resting.map { [ChartReference(Double($0), label: String(localized: "Resting"))] } ?? [],
                               state: chartState, window: window,
-                              y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 30)),
+                              // Steps a heart rate reads in, so a 50–155 day is not stretched to 0–200.
+                              y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 30),
+                                                stepCandidates: [10, 20, 25, 30, 40]),
                               selection: $selection, height: NoopMetrics.chartHeightSecondary,
                               accessibilityTitle: isToday ? String(localized: "Heart rate today")
                                                           : String(localized: "Heart rate"))

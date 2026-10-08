@@ -33,8 +33,8 @@ struct CaffeineLogCard: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Caffeine", overline: "Log")
-            NoopCard(tint: StrandPalette.accent) {
+            SectionHeader("Caffeine")
+            NoopCard {
                 VStack(alignment: .leading, spacing: 10) {
                     Text("Log a coffee, tea, or energy drink and Nara shows a rough estimate of how much may still be active. It's a guide based on a typical 5 to 6 hour half-life, not a measurement.")
                         .font(StrandFont.footnote)

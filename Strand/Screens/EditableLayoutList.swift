@@ -47,7 +47,7 @@ where Item: Identifiable & Equatable, Options: View {
                 }
                 .onMove(perform: moveVisible)
             } header: {
-                Text(shownTitle)
+                Text(shownTitle).textCase(nil)
             } footer: {
                 Text("Drag to reorder.")
                     .font(StrandFont.footnote)
@@ -65,14 +65,14 @@ where Item: Identifiable & Equatable, Options: View {
                     Section {
                         ForEach(groups[i].items) { item in hiddenRow(item) }
                     } header: {
-                        Text(groups[i].name)
+                        Text(groups[i].name).textCase(nil)
                     }
                 }
             } else {
                 Section {
                     ForEach(draft.hidden) { item in hiddenRow(item) }
                 } header: {
-                    Text(hiddenTitle)
+                    Text(hiddenTitle).textCase(nil)
                 }
             }
 

@@ -311,7 +311,7 @@ private struct KeyMetricsCustomizationPage: View {
                     .pickerStyle(.segmented)
                 }
             } header: {
-                Text("Display")
+                Text("Display").textCase(nil)
             }
         }
         .navigationTitle("Key metrics")
