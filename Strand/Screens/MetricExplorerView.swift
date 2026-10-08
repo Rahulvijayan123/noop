@@ -412,8 +412,8 @@ struct MetricExplorerView: View {
 
     var body: some View {
         #if os(macOS)
-        // macOS: Explore is a standalone detail pane, so it owns its NavigationStack.
-        NavigationStack { exploreScaffold }
+        // macOS: Explore is a standalone detail pane, so it owns its NavigationStack, unless Browse pushed it.
+        MorePaneNavigation { exploreScaffold }
             .task(id: repo.refreshSeq) { await probe(refreshSeq: repo.refreshSeq) }
         #else
         // iOS: Explore is pushed inside a tab's NavigationStack. A nested NavigationStack made tapping a

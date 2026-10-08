@@ -100,7 +100,7 @@ struct TrendsView: View {
             #if os(macOS)
             // Register the value routes at THIS stack's root; on iOS the host stack registers them
             // instead (once per stack — a double registration double-pushes, #38).
-            NavigationStack { scaffold.tabRouteDestinations() }
+            MorePaneNavigation { scaffold }
             #else
             scaffold
             #endif

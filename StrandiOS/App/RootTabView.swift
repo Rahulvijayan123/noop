@@ -415,6 +415,7 @@ struct RootTabView: View {
     private func quickScreen<V: View>(_ view: V) -> some View {
         NavigationStack {
             view
+                .tabRouteDestinations()
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .navigationBarTitleDisplayMode(.inline)
                 // #1027: these screens draw a full-bleed liquid sky (ScreenScaffold topBackground) that runs
@@ -455,6 +456,9 @@ struct RootTabView: View {
     private var settingsScreen: some View {
         NavigationStack {
             SettingsView()
+                // "Day & night usuals" opens the Monitor, whose rows push TabRoute values: this sheet's own
+                // stack has to register their destinations or those rows do nothing.
+                .tabRouteDestinations()
                 .background(StrandPalette.surfaceBase.ignoresSafeArea())
                 .navigationBarTitleDisplayMode(.inline)
                 .toolbarBackground(.hidden, for: .navigationBar)

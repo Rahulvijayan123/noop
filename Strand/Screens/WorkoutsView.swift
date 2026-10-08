@@ -159,7 +159,7 @@ struct WorkoutsView: View {
         #if os(macOS)
         // The Mac sidebar hosts this pane without a navigation stack of its own, and the session rows and
         // the zone / recovery / sport pages push (MetricExplorerView makes the same choice).
-        NavigationStack { page }
+        MorePaneNavigation { page }
         #else
         page
         #endif
