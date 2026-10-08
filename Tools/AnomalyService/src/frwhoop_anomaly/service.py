@@ -266,6 +266,13 @@ class Service:
         if old:
           self._save_json(st, name, {"last": max(r.window.start for r in old)})
 
+  @staticmethod
+  def _empty(now: int, lo: int | None = None, hi: int | None = None) -> dict:
+    iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
+    lo = lo if lo is not None else now - 60
+    hi = hi if hi is not None and hi > lo else lo + 60
+    return {"scored_from": iso(lo), "scored_to": iso(hi), "candidates": [], "window_scores": []}
+
   # ---- small per-user state helpers ----------------------------------------------------------------------------
   @staticmethod
   def _load_json(st: UserState, name: str) -> dict:

@@ -144,3 +144,15 @@ def test_run_longer_than_the_recent_memory_keeps_its_key(tmp_path):
   keys = [k for k in seen if int(k.split(":")[1]) >= 5 * 86400 - 1800]
   assert keys == ["anomaly:432000"], keys
   assert seen[keys[0]][-1][1]["context"]["windows"] >= 30
+
+
+def test_no_measured_minutes_and_too_short_spans_return_an_empty_publishable_result(tmp_path):
+  svc = Service(cfg(tmp_path), scorers=[StubScorer()])
+  st = UserState(str(tmp_path), UID, DID)
+  f = make_frame(600, np.full(600, 60.0))
+  f.data["hr_n"][:] = 0
+  out = svc.score_frame(f, st, None, 600 * 60)
+  assert out["candidates"] == [] and out["window_scores"] == [] and out["scored_to"] > out["scored_from"]
+  g = make_frame(600, np.full(600, 60.0))
+  out = svc.score_frame(g, st, 600 * 60 - 600, 600 * 60)          # watermark 10 min ago: nothing complete
+  assert out["candidates"] == [] and out["scored_to"] > out["scored_from"]
