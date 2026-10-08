@@ -72,7 +72,11 @@ struct TodayCustomizationSheet: View {
         _keyMetricsWindowDays = keyMetricsWindowDays
         _hostedCardsRaw = hostedCardsRaw
 
+        // `.synthesis` keeps its persisted identity (Android parity, `.noopbak`) but draws nothing on Today,
+        // so the editor does not offer it. `save()` writes an order without it and `decodeOrder` puts it
+        // back at its default place, so nothing persisted changes shape.
         let fullSectionOrder = TodayLayoutPrefs.decodeOrder(sectionOrderRaw.wrappedValue)
+            .filter { $0 != .synthesis }
         let hiddenSectionSet = Set(TodayLayoutPrefs.decodeHidden(hiddenSectionsRaw.wrappedValue))
         let sections = EditableLayoutDraft(
             visible: fullSectionOrder.filter { !hiddenSectionSet.contains($0) },
@@ -168,13 +172,14 @@ struct TodayCustomizationSheet: View {
     private func resetCurrentLayout() {
         switch currentDestination {
         case .today:
+            let editable = TodaySection.defaultOrder.filter { $0 != .synthesis }
             sectionDraft = EditableLayoutDraft(
-                visible: TodaySection.defaultOrder,
-                allItems: TodaySection.defaultOrder
+                visible: editable,
+                allItems: editable
             )
         case .keyMetrics:
             keyMetricDraft = EditableLayoutDraft(
-                visible: KeyMetric.defaultOrder,
+                visible: KeyMetric.defaultEnabled,
                 allItems: KeyMetric.defaultOrder
             )
             detailed = false
@@ -286,7 +291,7 @@ private struct KeyMetricsCustomizationPage: View {
             onConfigure: { _ in },
             onReset: onReset
         ) {
-            Section("Display") {
+            Section {
                 Toggle(isOn: $detailed) {
                     VStack(alignment: .leading, spacing: NoopMetrics.space1) {
                         Text("Detailed tiles")
@@ -305,9 +310,11 @@ private struct KeyMetricsCustomizationPage: View {
                     }
                     .pickerStyle(.segmented)
                 }
+            } header: {
+                Text("Display").textCase(nil)
             }
         }
-        .navigationTitle("Key Metrics")
+        .navigationTitle("Key metrics")
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif
@@ -338,7 +345,7 @@ private struct HostedCardsCustomizationPage: View {
         ) {
             EmptyView()
         }
-        .navigationTitle(String(localized: "Added Cards"))
+        .navigationTitle(String(localized: "Added cards"))
         #if os(iOS)
         .navigationBarTitleDisplayMode(.inline)
         #endif

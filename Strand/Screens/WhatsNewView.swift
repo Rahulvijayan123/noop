@@ -2,47 +2,51 @@ import SwiftUI
 import StrandDesign
 
 /// "What's New" — a proper in-app changelog, shown automatically after an update and reachable any
-/// time from Settings. It also restates, up top, what NOOP is and what to expect, so people who never
+/// time from Settings. It also restates, up top, what Nara is and what to expect, so people who never
 /// open GitHub still understand the experimental footing and the WHOOP 5/MG status.
+///
+/// Always presented as a sheet, so it brings its own NavigationStack: the inline title and a trailing
+/// Done are the system bar's (no custom header, no scenic backdrop, no footer bar).
 struct WhatsNewView: View {
     let onClose: () -> Void
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-                // A scenic Charge-tinted hero behind the title region — the same premium backdrop
-                // the Today rings float over, so the changelog opens on-brand.
-                .background {
-                    ScenicHeroBackground(domain: .charge, starCount: 28, fadesToBase: true)
-                }
-            Divider().overlay(StrandPalette.hairline)
+        NavigationStack {
             ScrollView {
                 // PERF: the changelog grows with every release, so this is an ever-lengthening column.
-                // LazyVStack (byte-identical layout to VStack inside a ScrollView — same leading
-                // alignment + sectionGap spacing) builds the off-screen release cards on demand instead
-                // of constructing the entire history up-front each time the sheet opens.
+                // LazyVStack builds the off-screen release cards on demand instead of constructing the
+                // entire history up-front each time the sheet opens.
                 LazyVStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    Text(verbatim: "Nara \(AppChangelog.currentVersion)")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
                     expectationsCard
-                    ForEach(Array(AppChangelog.releases.enumerated()), id: \.element.id) { index, release in
-                        // The newest release is the headline — give it the brand-green wash; the
-                        // rest stay frosted-neutral so the latest stands out at a glance.
-                        releaseCard(release, isLatest: index == 0)
+                    ForEach(AppChangelog.releases, id: \.id) { release in
+                        releaseCard(release)
                     }
                 }
-                .padding(20)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.vertical, NoopMetrics.space6)
             }
             #if os(iOS)
-            // #697/#horizontal-swipe parity: every other screen (ScreenScaffold, Liquid Today) already
-            // stops a vertical scroll from drifting/bouncing the screen left-right. This sheet runs its
-            // own ScrollView and had never gotten the fix.
+            // #697/#horizontal-swipe parity: stop a vertical scroll from drifting the sheet sideways.
             .scrollBounceBehavior(.basedOnSize, axes: .horizontal)
             #endif
-            Divider().overlay(StrandPalette.hairline)
-            footer
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(Text("What's new"))
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Done", action: onClose)
+                        .foregroundStyle(StrandPalette.accent)
+                        .keyboardShortcut(.defaultAction)
+                }
+            }
         }
         // A fixed 560×640 is right for the macOS sheet window, but on iPhone it's wider than the
-        // screen, so the content (and the "Got it" button) ran off the right edge (#185). iOS fills
-        // the presented sheet instead.
+        // screen (#185). iOS fills the presented sheet instead.
         #if os(macOS)
         .frame(width: 560, height: 640)
         #else
@@ -50,37 +54,13 @@ struct WhatsNewView: View {
         // A long changelog scroll → open full-height, with a grabber for swipe-to-dismiss.
         .noopSheetPresentation(largeFirst: true)
         #endif
-        .background(StrandPalette.surfaceBase)
-    }
-
-    private var header: some View {
-        HStack(spacing: 12) {
-            VStack(alignment: .leading, spacing: 4) {
-                Text("What's new").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                Text("NOOP \(AppChangelog.currentVersion)")
-                    .font(StrandFont.rounded(26, weight: .semibold))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("Release notes").font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-            Spacer()
-            Button(action: onClose) {
-                Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 22))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Close")
-        }
-        .padding(20)
     }
 
     private var expectationsCard: some View {
-        NoopCard(tint: StrandPalette.accent) {
-            VStack(alignment: .leading, spacing: 14) {
-                Text("What to expect").font(StrandFont.overline)
-                    .foregroundStyle(StrandPalette.textSecondary)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("What to expect").font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 ForEach(AppChangelog.expectations) { e in
                     HStack(alignment: .top, spacing: 12) {
                         Image(systemName: e.icon)
@@ -101,8 +81,8 @@ struct WhatsNewView: View {
         }
     }
 
-    private func releaseCard(_ release: AppChangelog.Release, isLatest: Bool = false) -> some View {
-        NoopCard(tint: isLatest ? StrandPalette.accent : nil) {
+    private func releaseCard(_ release: AppChangelog.Release) -> some View {
+        NoopCard {
             VStack(alignment: .leading, spacing: 10) {
                 HStack(spacing: 8) {
                     SourceBadge("v\(release.version)")
@@ -114,7 +94,7 @@ struct WhatsNewView: View {
                 }
                 ForEach(Array(release.items.enumerated()), id: \.offset) { _, item in
                     HStack(alignment: .top, spacing: 8) {
-                        Circle().fill(StrandPalette.accent).frame(width: 5, height: 5)
+                        Circle().fill(StrandPalette.textTertiary).frame(width: 5, height: 5)
                             .padding(.top, 7)
                         Text(item).font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
@@ -124,18 +104,5 @@ struct WhatsNewView: View {
             }
             .frame(maxWidth: .infinity, alignment: .leading)
         }
-    }
-
-    private var footer: some View {
-        HStack {
-            Spacer()
-            Button(action: onClose) {
-                Text("Got it").frame(minWidth: 120).padding(.vertical, 4)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(StrandPalette.accent)
-            .keyboardShortcut(.defaultAction)
-        }
-        .padding(16)
     }
 }

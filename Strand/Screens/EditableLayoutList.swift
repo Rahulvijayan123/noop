@@ -47,62 +47,39 @@ where Item: Identifiable & Equatable, Options: View {
                 }
                 .onMove(perform: moveVisible)
             } header: {
-                Text(shownTitle)
-                    .strandOverline()
+                Text(shownTitle).textCase(nil)
             } footer: {
-                Text("Drag to reorder. Move an item to Hidden to remove it from Today without deleting it.")
+                Text("Drag to reorder.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
             }
 
+            // An empty Hidden list is simply not drawn.
             if draft.hidden.isEmpty {
-                Section {
-                    Text("Nothing hidden")
-                        .foregroundStyle(StrandPalette.textTertiary)
-                } header: {
-                    Text(hiddenTitle)
-                        .strandOverline()
-                } footer: {
-                    Text("Hidden items remain available here and can be restored at any time.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
+                EmptyView()
             } else if group != nil {
                 // Grouped Available list: one titled Section per origin (e.g. "Sleep", "Trends"), so the
-                // hidden cards read by category. The last group carries the shared restore-hint footer.
+                // hidden cards read by category.
                 let groups = groupedHidden
                 ForEach(groups.indices, id: \.self) { i in
                     Section {
                         ForEach(groups[i].items) { item in hiddenRow(item) }
                     } header: {
-                        Text(groups[i].name)
-                            .strandOverline()
-                    } footer: {
-                        if i == groups.count - 1 {
-                            Text("Hidden items remain available here and can be restored at any time.")
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                        }
+                        Text(groups[i].name).textCase(nil)
                     }
                 }
             } else {
                 Section {
                     ForEach(draft.hidden) { item in hiddenRow(item) }
                 } header: {
-                    Text(hiddenTitle)
-                        .strandOverline()
-                } footer: {
-                    Text("Hidden items remain available here and can be restored at any time.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                    Text(hiddenTitle).textCase(nil)
                 }
             }
 
             Section {
-                Button("Reset This Layout", role: .destructive, action: onReset)
+                Button("Reset layout", role: .destructive, action: onReset)
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.statusCritical)
-                    .accessibilityLabel("Reset This Layout")
             }
         }
         #if os(iOS)

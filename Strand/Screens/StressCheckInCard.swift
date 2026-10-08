@@ -48,14 +48,16 @@ struct StressCheckInCard: View {
 
     var body: some View {
         if let nudge = center.pending {
-            StrandCard(tint: StrandPalette.restColor) {
+            StrandCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                     HStack(spacing: NoopMetrics.space2) {
                         Image(systemName: "wind")
-                            .font(.system(size: 14, weight: .semibold))
-                            .foregroundStyle(StrandPalette.restBright)
+                            .font(StrandFont.icon(.row))
+                            .foregroundStyle(StrandPalette.restColor)
                             .accessibilityHidden(true)
-                        Text("Stress check-in").strandOverline()
+                        Text("Stress check-in")
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
                         Spacer()
                         StatePill("Passive", tone: .neutral, showsDot: true)
                     }

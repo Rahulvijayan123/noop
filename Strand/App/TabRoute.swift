@@ -55,6 +55,8 @@ enum TabRoute: Hashable {
     case event(HealthEvent, history: [HealthEvent])
     case allEvents([HealthEvent])
     case recoveryDetails(HealthEvent, history: [HealthEvent])
+    /// Every screen without a tab of its own, grouped (Today's "Browse" footer action).
+    case browse
 }
 
 extension View {
@@ -102,6 +104,7 @@ extension View {
             case .event(let event, let history): EventDetailView(event: event, history: history)
             case .allEvents(let events): AllEventsView(events: events)
             case .recoveryDetails(let event, let history): RecoveryDetailsView(event: event, history: history)
+            case .browse: BrowseView()
             }
         }
     }

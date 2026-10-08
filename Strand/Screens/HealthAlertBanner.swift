@@ -5,32 +5,82 @@ import Foundation
 
 /// Strain/illness early-warning banner. Observes AppModel in isolation so the ~1 Hz HR stream
 /// re-renders only this small view, not the whole screen. Renders nothing when there's no alert.
+///
+/// A glance, not a paragraph: what the body looks like, which signals moved, and the one caveat a
+/// medical-adjacent claim must carry. The reasoning (what was logged, what to do) lives on the Health page
+/// the banner opens. The warning symbol carries the state; the card itself is the plain card.
 struct HealthAlertBanner: View {
     @EnvironmentObject var model: AppModel
-    var body: some View {
-        if let alert = model.healthAlert {
-            let copy = localizedHealthAlertCopy(alert)
-            // A frosted, warning-tinted alert card (not a flat coloured bar) — prominent but on-brand.
-            // The amber wash + a glyph in a soft amber chip read as an early-warning without a hard rule.
-            NoopCard(padding: 14, tint: StrandPalette.statusWarning) {
-                HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "exclamationmark.triangle.fill")
-                        .font(.system(size: 15, weight: .semibold))
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.statusWarning.opacity(0.16), in: Circle())
-                        .accessibilityHidden(true)
-                    Text(copy)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer(minLength: 0)
-                }
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
-            .accessibilityElement(children: .combine)
-            .accessibilityLabel(copy)
+
+    /// The alert to show: the model's, or in DEBUG with `--demo-health-alert` a raised sample, so the
+    /// banner can be screenshotted without an illness signal.
+    private var shownAlert: AppModel.HealthAlert? {
+        #if DEBUG
+        if CommandLine.arguments.contains("--demo-health-alert") {
+            return model.healthAlert ?? AppModel.HealthAlert(message: .raised,
+                                                             firedSignals: ["HRV", "resting heart rate"])
         }
+        #endif
+        return model.healthAlert
+    }
+
+    var body: some View {
+        if let alert = shownAlert {
+            let copy = homeHealthAlertCopy(alert)
+            NavigationLink(value: TabRoute.health) {
+                NoopCard {
+                    HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space3) {
+                        Image(systemName: "exclamationmark.triangle.fill")
+                            .font(StrandFont.icon(.row))
+                            .foregroundStyle(StrandPalette.statusWarning)
+                            .accessibilityHidden(true)
+                        VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                            Text(copy.title)
+                                .font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if let detail = copy.detail {
+                                Text(detail)
+                                    .font(StrandFont.subhead)
+                                    .foregroundStyle(StrandPalette.textSecondary)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                            Text("Estimate, not a diagnosis")
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        Image(systemName: "chevron.right")
+                            .font(StrandFont.icon(.inline))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .accessibilityHidden(true)
+                    }
+                }
+            }
+            .buttonStyle(LiquidPressStyle())
+            .accessibilityElement(children: .combine)
+            .accessibilityHint(Text("Opens Health"))
+        }
+    }
+}
+
+/// The banner's short form of the semantic illness result: a title and, when there is one, the signals
+/// line. The full sentences (`localizedHealthAlertCopy`) stay for the places that read them.
+func homeHealthAlertCopy(_ alert: AppModel.HealthAlert) -> (title: String, detail: String?) {
+    switch alert.message {
+    case .raised:
+        let formatter = ListFormatter()
+        formatter.locale = AppLanguage.activeLocale
+        let signals = formatter.string(from: alert.firedSignals) ?? alert.firedSignals.joined(separator: ", ")
+        return (String(localized: "Signals look strained"),
+                alert.firedSignals.isEmpty ? nil : String(localized: "Up: \(signals)"))
+    case .alreadyUnwellAgree:
+        return (String(localized: "You logged feeling unwell"), String(localized: "Your signals agree"))
+    case .alreadyUnwell:
+        return (String(localized: "You logged feeling unwell"), nil)
+    default:
+        // The publisher gates the banner to raised/already-unwell; keep the impossible fallback semantic.
+        return (String(localized: "Nothing notable. Your signals look like their normal range."), nil)
     }
 }
 

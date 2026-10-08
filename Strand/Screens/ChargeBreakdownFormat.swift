@@ -213,7 +213,7 @@ enum ChargeBreakdownFormat {
     /// on the phone and the strap has long since trimmed that night from its own flash, so there is no
     /// honest "do this and it comes back" step to offer. What it CAN promise is that the night is not
     /// lost from history and that the problem does not continue, and it says both.
-    static let chargeLegacyRRGapDetail = String(localized: "This night was recorded before NOOP labelled which WHOOP 5 transport each heartbeat came from, so its intervals mix two different units with nothing stored to tell them apart. The night stays in your history, and nights recorded from now on score normally.")
+    static let chargeLegacyRRGapDetail = String(localized: "This night was recorded before Nara labelled which WHOOP 5 transport each heartbeat came from, so its intervals mix two different units with nothing stored to tell them apart. The night stays in your history, and nights recorded from now on score normally.")
 
     /// VoiceOver plain string (title + detail).
     static var chargeLegacyRRGapAccessibility: String {
@@ -234,20 +234,20 @@ struct ConfidenceTierChip: View {
     private var hue: Color { ChargeBreakdownFormat.confidenceDotColor(confidence) }
 
     var body: some View {
+        // The StatePill look: a dot in the tier's hue and the word, on the neutral inset well (no glow,
+        // no tinted fill or ring).
         HStack(spacing: 6) {
             Circle()
                 .fill(hue)
-                .frame(width: 7, height: 7)
-                .shadow(color: hue.opacity(0.8), radius: 2)
+                .frame(width: 6, height: 6)
                 .accessibilityHidden(true)
             Text(tag)
-                .font(StrandFont.overline)
-                .foregroundStyle(hue)
+                .font(StrandFont.footnote.weight(.medium))
+                .foregroundStyle(StrandPalette.textSecondary)
         }
         .padding(.horizontal, 10)
-        .padding(.vertical, 5)
-        .background(Capsule(style: .continuous).fill(hue.opacity(0.12)))
-        .overlay(Capsule(style: .continuous).stroke(hue.opacity(0.32), lineWidth: 1))
+        .padding(.vertical, 4)
+        .background(Capsule(style: .continuous).fill(StrandPalette.surfaceInset))
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(accessibility)
     }
@@ -277,7 +277,9 @@ struct ChargeBreakdownSection: View {
         VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
             Divider().overlay(StrandPalette.hairline)
             HStack(alignment: .firstTextBaseline) {
-                Text("What shaped it").strandOverline()
+                Text("What shaped it")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 Spacer()
                 ConfidenceTierChip(confidence: confidence)
             }
@@ -338,9 +340,17 @@ struct ChargeDriverRow: View {
                 }
                 Spacer(minLength: 0)
             }
-            // A thin magnitude bar tinted to the chip hue, reading the term's share of the biggest mover.
-            PipBar(value: magnitude, range: 0...barMax, segments: 16, tint: chipHue, height: 6)
-                .accessibilityHidden(true)
+            // A thin magnitude bar in the chip hue: the term's share of the day's biggest mover (a real
+            // proportion of the drivers shown, not a goal).
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(StrandPalette.surfaceInset)
+                    Capsule().fill(chipHue)
+                        .frame(width: geo.size.width * min(1, magnitude / barMax))
+                }
+            }
+            .frame(height: 4)
+            .accessibilityHidden(true)
             Text(LocalizedStringKey(driver.verdict))
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
@@ -363,7 +373,7 @@ struct SkinTempDeviationRow: View {
     var body: some View {
         HStack(alignment: .firstTextBaseline, spacing: 8) {
             Image(systemName: "thermometer.medium")
-                .font(.system(size: 12, weight: .semibold))
+                .font(StrandFont.icon(.inline))
                 .foregroundStyle(StrandPalette.metricAmber)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: 2) {
@@ -397,7 +407,7 @@ struct SkinTempDeviationRow: View {
                 ConfidenceTierChip(confidence: .building)
                 ConfidenceTierChip(confidence: .solid)
             }
-            NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
+            NoopCard {
                 ChargeBreakdownSection(
                     drivers: [
                         ChargeDriver(label: "Heart rate variability", deltaPoints: 7,
@@ -429,7 +439,7 @@ struct ChargeBreakdownDemoHost: View {
         NavigationStack {
             ScrollView {
                 VStack(spacing: NoopMetrics.gap) {
-                    NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
+                    NoopCard {
                         ChargeBreakdownSection(
                             drivers: [
                                 ChargeDriver(label: "Heart rate variability", deltaPoints: 9,

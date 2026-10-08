@@ -757,6 +757,7 @@ enum DemoScreens {
         case "exposurelist": return AnyView(EventsDemoScreens.exposureList())
         case "exposureeditor": return AnyView(EventsDemoScreens.exposureEditor())
         case "markereditor": return AnyView(EventsDemoScreens.markerEditor())
+        case "whatsnew": return AnyView(WhatsNewView(onClose: {}))
         default:         return nil
         }
     }

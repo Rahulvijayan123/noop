@@ -47,6 +47,7 @@ enum DemoLaunch {
         case "allEvents": return .allEvents(HealthEvent.sample)
         case "recoveryDetails":
             return sampleEvent(parts.count > 1 ? parts[1] : nil).map { .recoveryDetails($0, history: HealthEvent.sample) }
+        case "browse": return .browse
         default: return nil
         }
     }
