@@ -143,7 +143,8 @@ public enum PushBinaryCodec {
         appendI64(record.ts, to: &out)
         if format >= ppgIdentityFormatVersion {
             if let index = record.recordIndex {
-                guard index >= 0 else { throw PushProtocolException("invalid PPG record index") }
+                // The strap's record counter is a u32; the decoders, the receiver and the worker all refuse more.
+                guard (0...Int64(UInt32.max)).contains(index) else { throw PushProtocolException("invalid PPG record index") }
                 out.append(1)
                 appendI64(index, to: &out)
             } else { out.append(0) }
