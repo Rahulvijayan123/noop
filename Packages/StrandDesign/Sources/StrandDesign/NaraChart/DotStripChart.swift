@@ -47,7 +47,8 @@ public struct DotStripChart: View {
                 state: ChartState = .ready, window: ClosedRange<Date>, xStyle: ChartAxisStyle,
                 selection: Binding<Date?>, height: CGFloat = NoopMetrics.chartHeightPrimary,
                 accessibilityTitle: String, calendar: Calendar = .current) {
-        let windowed = points.filter { $0.value.isFinite }.inWindow(window)
+        // One check-in per local day: two on one day draw as their mean, on the nearest level.
+        let windowed = points.normalisedDays(calendar).inWindow(window)
         let palette = Dictionary(uniqueKeysWithValues: levels.map { ($0, color($0)) })
         let dots = windowed.map { point -> Dot in
             let level = Self.level(for: point.value, in: levels)
@@ -115,7 +116,7 @@ public struct DotStripChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: .day, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,

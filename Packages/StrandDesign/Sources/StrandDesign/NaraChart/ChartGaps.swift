@@ -8,9 +8,10 @@ import Foundation
 /// Where a chart's line lifts: one run id per unbroken stretch, per series. Pure.
 ///
 /// A line joined across a missing week draws a steady change the wearer never had, so every kit line breaks
-/// wherever the series skips more than its cadence. The intraday and adaptive rules are the existing,
-/// tested ones (`hrGapSegments`, `TrendChart.gapSegments`); this only chooses between them by cadence and
-/// adds the day-based rules for nightly, weekly and sparse metrics.
+/// wherever the series skips more than its cadence. The adaptive rule is the existing, tested
+/// `TrendChart.gapSegments`; the intraday rule is `hrGapSegments`' with half a bucket of tolerance for
+/// samples timed at their measurement rather than their bucket start; the day-based rules cover nightly,
+/// weekly and sparse metrics.
 public enum ChartGaps {
 
     /// Run ids for ascending `days`, one per point. A run ends where the gap to the next point exceeds the
@@ -39,9 +40,19 @@ public enum ChartGaps {
             let ids = TrendChart.gapSegments(dates: days, segments: Array(repeating: "", count: days.count))
             return days.indices.map { $0 > 0 && ids[$0] != ids[$0 - 1] }
         case .buckets(let seconds):
-            let ids = hrGapSegments(bucketTs: days.map { Int($0.timeIntervalSince1970.rounded()) },
-                                    bucketSeconds: seconds)
-            return days.indices.map { $0 > 0 && ids[$0] != ids[$0 - 1] }
+            // The `hrGapSegments` rule (a step longer than one bucket is a skipped bucket), made tolerant of
+            // samples stamped at the moment they were measured rather than at their bucket start (a 1 Hz live
+            // trace reading at 1.0 s, 2.6 s, 3.4 s): a break needs a whole bucket with no sample in it (the
+            // bucket indices skip one) AND a step of more than one and a half buckets. Bucket starts, which
+            // step by exactly one bucket or by two or more, break exactly where `hrGapSegments` breaks them.
+            let size = Double(max(1, seconds))
+            return days.indices.map { i in
+                guard i > 0 else { return false }
+                let previous = days[i - 1].timeIntervalSince1970
+                let current = days[i].timeIntervalSince1970
+                return current - previous > size * 1.5
+                    && (current / size).rounded(.down) - (previous / size).rounded(.down) > 1
+            }
         case .daily, .weekly, .sparse:
             let limit = maxGapDays(cadence)
             return days.indices.map { i in

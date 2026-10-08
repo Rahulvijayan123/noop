@@ -8,8 +8,10 @@ import Charts
 /// Stacked bars per day: sleep stages, heart-rate zone minutes, macro mix. One category can be highlighted
 /// (the stage a detail page is about): it sits at the BOTTOM of every stack so its height reads straight off
 /// the axis, and the others step back to 30 %. `normalised` shows each day as shares of its total. Long
-/// ranges bin to weekly or monthly mean stacks (`bin: range.totalsBin`). Estimated days are drawn light and
-/// the legend says "Estimate".
+/// ranges bin to weekly or monthly stacks (`bin: range.totalsBin`): the mean day by default (sleep stages),
+/// or the per-category totals with `aggregation: .sum` (heart-rate zone minutes, so the stack agrees with a
+/// summed single-zone chart and a "Total" stat). Two entries on one day are added together. Estimated days
+/// are drawn light and the legend says "Estimate".
 ///
 /// ```swift
 /// StackedBarChart(days: nights, categories: [deep, rem, light], highlighted: "deep",
@@ -81,15 +83,16 @@ public struct StackedBarChart: View {
     ///   - categories: the stack order, bottom first (the highlighted one is moved to the bottom).
     ///   - highlighted: the category drawn at full strength; nil draws them all at full strength.
     ///   - normalised: each day as percentages of its own total, on a fixed 0-100 % axis.
-    ///   - bin: `.day`, `.weekOfYear` or `.month`: each stack is the mean night of its bin (`Self.bin`).
+    ///   - bin: `.day`, `.weekOfYear` or `.month`: each stack is its bin's mean day, or its total with
+    ///     `aggregation: .sum` (`Self.bin`).
     public init(days: [Day], categories: [Category], highlighted: String? = nil, normalised: Bool = false,
-                bin: Calendar.Component = .day,
+                bin: Calendar.Component = .day, aggregation: ChartAggregation = .mean,
                 legend: [ChartLegendItem]? = nil, state: ChartState = .ready,
                 window: ClosedRange<Date>, xStyle: ChartAxisStyle, y: ChartValueAxis,
                 selection: Binding<Date?>, height: CGFloat = NoopMetrics.chartHeightPrimary,
                 accessibilityTitle: String, calendar: Calendar = .current) {
         let window = bin == .day ? window : ChartAxis.snap(window, to: bin, calendar: calendar)
-        let windowed = (bin == .day ? days : Self.bin(days, by: bin, calendar: calendar))
+        let windowed = Self.bin(days, by: bin, aggregation: aggregation, calendar: calendar)
             .filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
             .sorted { $0.day < $1.day }
         let colors = Dictionary(categories.map { ($0.id, $0.color) }, uniquingKeysWith: { first, _ in first })
@@ -156,23 +159,36 @@ public struct StackedBarChart: View {
         self.legend = legend ?? automatic
     }
 
-    /// `days` combined into one mean day per calendar `unit` (week, month), dated at the unit's start,
-    /// ascending: each category is the average over the days in the bin, a missing category counting as
-    /// zero for that day. A bin is an estimate when at least half of its days are. Pure.
-    public static func bin(_ days: [Day], by unit: Calendar.Component, calendar: Calendar = .current) -> [Day] {
-        var groups: [Date: (sums: [String: Double], count: Int, estimates: Int)] = [:]
+    /// `days` combined into one day per calendar `unit` (day, week, month), dated at the unit's start,
+    /// ascending. Entries on the same local day are first added together (two sessions, two workouts). Then
+    /// each category of a week or month is the average over the days in the bin (`.mean`, a missing
+    /// category counting as zero for that day) or their total (`.sum`). A bin is an estimate when at least
+    /// half of its days are. Non-finite values are ignored. Pure.
+    public static func bin(_ days: [Day], by unit: Calendar.Component, aggregation: ChartAggregation = .mean,
+                           calendar: Calendar = .current) -> [Day] {
+        // One entry per local day.
+        var byDay: [Date: (values: [String: Double], entries: Int, estimates: Int)] = [:]
         for day in days {
-            let start = calendar.dateInterval(of: unit, for: day.day)?.start ?? calendar.startOfDay(for: day.day)
-            var group = groups[start] ?? ([:], 0, 0)
-            for (key, value) in day.values where value.isFinite { group.sums[key, default: 0] += value }
+            let start = calendar.startOfDay(for: day.day)
+            var entry = byDay[start] ?? ([:], 0, 0)
+            for (key, value) in day.values where value.isFinite { entry.values[key, default: 0] += value }
+            entry.entries += 1
+            if day.isEstimate { entry.estimates += 1 }
+            byDay[start] = entry
+        }
+        var groups: [Date: (sums: [String: Double], count: Int, estimates: Int)] = [:]
+        for (start, entry) in byDay {
+            let key = unit == .day ? start : (calendar.dateInterval(of: unit, for: start)?.start ?? start)
+            var group = groups[key] ?? ([:], 0, 0)
+            for (category, value) in entry.values { group.sums[category, default: 0] += value }
             group.count += 1
-            if day.isEstimate { group.estimates += 1 }
-            groups[start] = group
+            if entry.estimates * 2 >= entry.entries { group.estimates += 1 }
+            groups[key] = group
         }
         return groups.keys.sorted().compactMap { start in
             guard let group = groups[start], group.count > 0 else { return nil }
-            return Day(day: start, values: group.sums.mapValues { $0 / Double(group.count) },
-                       isEstimate: group.estimates * 2 >= group.count)
+            let values = aggregation == .sum ? group.sums : group.sums.mapValues { $0 / Double(group.count) }
+            return Day(day: start, values: values, isEstimate: group.estimates * 2 >= group.count)
         }
     }
 
@@ -229,7 +245,7 @@ public struct StackedBarChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: bin, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,

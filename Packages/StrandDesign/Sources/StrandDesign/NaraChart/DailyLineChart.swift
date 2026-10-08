@@ -12,13 +12,15 @@ import Charts
 /// Rules it keeps for every caller:
 /// - the line breaks wherever the series skips more than its `cadence`, and wherever a point's `series`
 ///   (method) changes;
-/// - fewer than three points in the window draws points only, because two points joined by a line imply a
-///   trend nobody measured;
+/// - a series with fewer than three points in the window draws points only, because two points joined by a
+///   line imply a trend nobody measured (each series on its own: a second series with two readings does
+///   not join the first one's);
 /// - nothing is ever filled under a line (an area reads as a quantity); the typical band is a range, drawn
 ///   as a band;
 /// - estimated readings are hollow, and a run of nothing but estimates is dashed;
-/// - long series are downsampled for drawing (`ChartDownsample`) after the gaps are found on the full
-///   series, so a missing day still breaks the line.
+/// - long series are downsampled for drawing one run at a time (`ChartDownsample`), after the gaps are found
+///   on the full series, so a missing day still breaks the line and a short run between two gaps keeps its
+///   ends.
 ///
 /// ```swift
 /// DailyLineChart(series: [.init(id: "hrv", name: "HRV", color: StrandPalette.metricCyan, points: nights)],
@@ -116,9 +118,9 @@ public struct DailyLineChart: View {
                 y: ChartValueAxis, selection: Binding<Date?>,
                 height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                 calendar: Calendar = .current) {
-        let windowed = series.map { line in (line, line.points.filter { $0.value.isFinite }.inWindow(window)) }
-        let total = windowed.reduce(0) { $0 + $1.1.count }
-        let pointsOnly = marks == .pointsOnly || total < 3
+        let windowed = series.map { line in (line, line.points.normalisedDays(calendar).inWindow(window)) }
+        // Per series: a series of one or two readings is drawn as points whatever the others hold.
+        func pointsOnly(_ count: Int) -> Bool { marks == .pointsOnly || count < 3 }
 
         var lineMarks: [Mark] = []
         var pointMarks: [Mark] = []
@@ -138,17 +140,16 @@ public struct DailyLineChart: View {
                 runEstimates[mark.run] = (runEstimates[mark.run] ?? true) && mark.isEstimate
             }
             dashedRuns.formUnion(runEstimates.filter(\.value).keys)
-            if !pointsOnly {
-                lineMarks += ChartDownsample.minMaxBucketed(all, threshold: ChartDownsample.markThreshold,
-                                                            targetCount: ChartDownsample.targetVertices,
-                                                            date: \.day, value: \.value)
+            let joined = !pointsOnly(points.count)
+            if joined {
+                lineMarks += NaraRunDownsample.reduce(all, run: \.run, date: \.day, value: \.value)
             }
             // A reading alone between two gaps, and every estimate: a line cannot show either (an estimate
             // inside a measured run is only told apart by its hollow point), so they keep their points even
             // where the rest of the series draws its line alone.
             let isolated = all.filter { runCounts[$0.run] == 1 || $0.isEstimate }
             switch marks {
-            case _ where pointsOnly:
+            case _ where !joined:
                 pointMarks += all
             case .lineOnly:
                 pointMarks += isolated
@@ -159,7 +160,11 @@ public struct DailyLineChart: View {
 
         var bandPoints: [BandPoint] = []
         if let rollingBand {
-            let days = rollingBand.filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
+            // One range per local day (the last one given wins), so a day is the band point's identity.
+            var byBandDay: [Date: ClosedRange<Double>] = [:]
+            for entry in rollingBand { byBandDay[calendar.startOfDay(for: entry.day)] = entry.range }
+            let days = byBandDay.map { (day: $0.key, range: $0.value) }
+                .filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
                 .sorted { $0.day < $1.day }
             let runs = ChartGaps.runs(days.map(\.day), series: days.map { _ in "band" }, cadence: cadence, calendar: calendar)
             bandPoints = zip(days, runs).map { BandPoint(day: $0.day, low: $0.range.lowerBound, high: $0.range.upperBound, run: $1) }
@@ -175,7 +180,7 @@ public struct DailyLineChart: View {
         self.pointMarks = pointMarks
         self.dashedRuns = dashedRuns
         self.byDay = byDay
-        self.drawsLines = !pointsOnly
+        self.drawsLines = !lineMarks.isEmpty
         self.interpolation = interpolation
         self.typicalBand = typicalBand
         self.rollingBand = bandPoints
@@ -187,7 +192,7 @@ public struct DailyLineChart: View {
             marks: windowed.flatMap { $0.1 }.map { .init(x: ChartDay.center(of: $0.day, calendar: calendar),
                                                           low: $0.value, high: $0.value) },
             window: window, domain: yLayout.domain)
-        self.pointSize = pointsOnly && total > NaraChartStyle.densePointThreshold
+        self.pointSize = windowed.contains { pointsOnly($0.1.count) && $0.1.count > NaraChartStyle.densePointThreshold }
             ? NaraChartStyle.densePointSize : NaraChartStyle.pointSize
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
@@ -216,7 +221,7 @@ public struct DailyLineChart: View {
             dateText: { NaraChartText.date($0, unit: .day, calendar: calendar) },
             valueText: { NaraChartText.value($0, format: format, unit: unitLabel) },
             series: windowed.map { line, points in
-                .init(name: line.name, isContinuous: !pointsOnly, points: points.map { ($0.day, $0.value) })
+                .init(name: line.name, isContinuous: !pointsOnly(points.count), points: points.map { ($0.day, $0.value) })
             })
 
         if let legend {
@@ -281,7 +286,7 @@ public struct DailyLineChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: .day, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,
