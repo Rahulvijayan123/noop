@@ -105,6 +105,7 @@ public extension PushSnapshotSource {
             guard limits.shouldContinue() else { throw PushSourceReadError.deferred }
             let bytes = try PushBinaryCodec.packedRowSize(row,
                 ppgIdentityV2: PushProtocol.hasPPGIdentity(limits.protocolVersion),
+                ppgAnchorV3: PushProtocol.hasPPGAnchor(limits.protocolVersion),
                 v18IdentityV2: limits.protocolVersion == PushProtocol.auxiliaryIdentityVersion)
             if bytes > limits.maximumDecodedBytes - size {
                 if count == 0 { throw PushSourceReadError.requiresCompatibleEncoding }

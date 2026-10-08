@@ -29,7 +29,7 @@ public enum PushBinaryStreamEncoder {
     /// can retire that directory without a delayed encoder recreating it.
     public static func encode(
         table: PushBinaryTable, rowCount: Int, encoding: String,
-        ppgIdentityV2: Bool = false, v18IdentityV2: Bool = false,
+        ppgIdentityV2: Bool = false, ppgAnchorV3: Bool = false, v18IdentityV2: Bool = false,
         directory: URL, requireExistingDirectory: Bool = false,
         maxDecodedBytes: Int = 4 * 1_048_576,
         maxWireBytes: Int = 4 * 1_048_576 + bufferBytes, maxRows: Int = 2_000,
@@ -57,7 +57,7 @@ public enum PushBinaryStreamEncoder {
             wireBytes += bytes.count
         }
         let decodedBytes = try visitDecodedBytes(table: table, rowCount: rowCount,
-            ppgIdentityV2: ppgIdentityV2, v18IdentityV2: v18IdentityV2,
+            ppgIdentityV2: ppgIdentityV2, ppgAnchorV3: ppgAnchorV3, v18IdentityV2: v18IdentityV2,
             maxDecodedBytes: maxDecodedBytes, maxRows: maxRows, allowsWork: allowsWork,
             nextRow: nextRow) { bytes in
                 decodedHash.update(bufferPointer: bytes)
@@ -81,7 +81,7 @@ public enum PushBinaryStreamEncoder {
     @discardableResult
     public static func visitDecodedBytes(
         table: PushBinaryTable, rowCount: Int, ppgIdentityV2: Bool = false,
-        v18IdentityV2: Bool = false, maxDecodedBytes: Int = 4 * 1_048_576,
+        ppgAnchorV3: Bool = false, v18IdentityV2: Bool = false, maxDecodedBytes: Int = 4 * 1_048_576,
         maxRows: Int = 2_000, allowsWork: () -> Bool = { true },
         nextRow: () throws -> PushBinaryRow?, consume: (UnsafeRawBufferPointer) throws -> Void
     ) throws -> Int {
@@ -108,8 +108,12 @@ public enum PushBinaryStreamEncoder {
             }
         }
         var header = PushBinaryCodec.magic
-        let identityV2 = (table == .ppgWaveformSample && ppgIdentityV2) || (table == .v18AuxSample && v18IdentityV2)
-        header.append(identityV2 ? 2 : PushBinaryCodec.formatVersion)
+        let ppgFormat = PushBinaryCodec.ppgFormat(identityV2: ppgIdentityV2, anchorV3: ppgAnchorV3)
+        switch table {
+        case .ppgWaveformSample: header.append(ppgFormat)
+        case .v18AuxSample: header.append(v18IdentityV2 ? 2 : PushBinaryCodec.formatVersion)
+        case .rawBatch, .rawImuSession: header.append(PushBinaryCodec.formatVersion)
+        }
         header.append(PushBinaryCodec.kind(for: table).rawValue)
         if table != .rawBatch { appendLE(Int32(rowCount), to: &header) }
         try emit(header)
@@ -121,13 +125,7 @@ public enum PushBinaryStreamEncoder {
             let blob: Data
             switch (table, row) {
             case (.ppgWaveformSample, .ppgWaveform(let record)):
-                guard ppgIdentityV2 || record.recordIndex == nil else {
-                    throw PushProtocolException("PPG record identity requires negotiated protocol 1.3")
-                }
-                appendLE(record.rowId, to: &fields); appendLE(record.ts, to: &fields)
-                if ppgIdentityV2 { try appendIdentity(record.recordIndex, maximum: Int64.max, to: &fields) }
-                if let burstIndex = record.burstIndex { fields.append(1); appendLE(burstIndex, to: &fields) }
-                else { fields.append(0) }
+                fields = try PushBinaryCodec.ppgRecordFields(record, format: ppgFormat)
                 blob = record.samples
             case (.v18AuxSample, .v18Aux(let record)):
                 guard v18IdentityV2 || record.recordIndex == nil else {

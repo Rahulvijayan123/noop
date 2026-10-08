@@ -49,20 +49,48 @@ public enum PushBinaryTable: String, CaseIterable, PushTable, Sendable {
     }
 }
 
+/// What a PPG record's `ts` was taken from. Formats 1 and 2 carry no clock member and decode as
+/// `.unknown`; nothing infers a source for them.
+public enum PushPpgClockSource: UInt8, Sendable, Codable, Equatable {
+    case unknown = 0
+    /// The strap's per-record unix second from the type-47 record header, as the phone banked it
+    /// (after its stale-RTC correction). The sub-second phase is `subsecQ15` when the record carries it.
+    case strapRecordSecond = 1
+}
+
 public struct PushPpgWaveformRecord: Sendable {
     public let rowId: Int64
     public let ts: Int64
     public let burstIndex: Int32?
     public let recordIndex: Int64?
     public let samples: Data
+    /// The v26 window's absolute optical code (`ppg_base_code`, u32 at frame offset 23), exactly as the
+    /// strap reported it. nil when the phone never read it; deltas alone cannot recover it.
+    public let anchor: UInt32?
+    public let clockSource: PushPpgClockSource
+    /// The record header's u16 at frame offset 19 (1/32768 s), verbatim, when the phone kept it.
+    public let subsecQ15: UInt16?
+    /// The type-47 header flags byte at frame offset 10, verbatim, when the phone kept it.
+    public let frontEndFlags: UInt8?
 
-    public init(rowId: Int64, ts: Int64, burstIndex: Int32?, samples: Data, recordIndex: Int64? = nil) {
+    public init(rowId: Int64, ts: Int64, burstIndex: Int32?, samples: Data, recordIndex: Int64? = nil,
+                anchor: UInt32? = nil, clockSource: PushPpgClockSource = .unknown,
+                subsecQ15: UInt16? = nil, frontEndFlags: UInt8? = nil) {
         precondition(rowId > 0)
         self.rowId = rowId
         self.ts = ts
         self.burstIndex = burstIndex
         self.recordIndex = recordIndex
         self.samples = samples
+        self.anchor = anchor
+        self.clockSource = clockSource
+        self.subsecQ15 = subsecQ15
+        self.frontEndFlags = frontEndFlags
+    }
+
+    /// Members only NPB1 format 3 (protocol 1.5) can carry. An older format never drops them silently.
+    public var carriesAnchorFormatMembers: Bool {
+        anchor != nil || clockSource != .unknown || subsecQ15 != nil || frontEndFlags != nil
     }
 }
 
@@ -211,6 +239,7 @@ public struct PushBinaryBatch: Sendable {
         var packedSize = PushBinaryCodec.packedHeaderSize(for: table)
         for row in rows {
             let n = try PushBinaryCodec.packedRowSize(row, ppgIdentityV2: PushProtocol.hasPPGIdentity(manifest.protocolVersion),
+                ppgAnchorV3: PushProtocol.hasPPGAnchor(manifest.protocolVersion),
                 v18IdentityV2: manifest.protocolVersion == PushProtocol.auxiliaryIdentityVersion)
             guard n <= PushProtocolLimits.maxObjectDecodedBytes - packedSize else { throw PushPreparedSelection.invalid() }
             packedSize += n
@@ -218,6 +247,7 @@ public struct PushBinaryBatch: Sendable {
         var cursor = 0, digest = SHA256()
         let verifiedSize = try PushBinaryStreamEncoder.visitDecodedBytes(table: table, rowCount: rows.count,
             ppgIdentityV2: PushProtocol.hasPPGIdentity(manifest.protocolVersion),
+            ppgAnchorV3: PushProtocol.hasPPGAnchor(manifest.protocolVersion),
             v18IdentityV2: manifest.protocolVersion == PushProtocol.auxiliaryIdentityVersion,
             maxDecodedBytes: PushProtocolLimits.maxObjectDecodedBytes, maxRows: PushProtocolLimits.maxRecords,
             nextRow: { guard cursor < rows.count else { return nil }; defer { cursor += 1 }; return rows[cursor] },
