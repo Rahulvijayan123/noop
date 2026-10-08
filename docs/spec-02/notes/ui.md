@@ -37,7 +37,7 @@ The convention follows the existing section: a detail row always renders, and an
 | Block | Chapter | Content |
 | --- | --- | --- |
 | `respiratory_variability` (existing + §5.2) | Breathing | Rate, CV, interval SD and RMSSD, the interval distribution (median with IQR, p10–p90, p05–p95, and the number of consecutive intervals), stable modulation shown as components (stable / evaluated minutes and fraction, not-evaluated minutes, share of the night, `definition_version`), per-stage rate / SD / RMSSD / median (IQR) with window counts, coverage, supported range (`detected 6–24 · shown 8–25 br/min` with a note that rates outside are not measured), source ("estimated from the heart-rate rhythm, not measured airflow") and `method_version`. |
-| `prv_nonlinear` | Pulse-interval research statistics | "Secondary" in the line. Sample entropy and DFA α1 (median with IQR, segment counts), segments used / rejected, parameters, an "About this" row (optical PRV, not ECG, no health / fitness / training-zone claim), method and NeuroKit2 version. |
+| `prv_nonlinear` | Pulse-interval research statistics | "Secondary" in the line. Sample entropy and DFA α1 (median with IQR, segment counts), segments used / rejected with `segments_evaluated` of `segments_available` (and `max_segments`), parameters (marked "non-overlapping boxes" when `dfa_overlap` is false), an "About this" row (optical PRV, not ECG, no health / fitness / training-zone claim), method and NeuroKit2 version. |
 | `thermal.observed_skin_temp_rhythm` | Skin-temperature rhythm | Mesor, amplitude ± SE, acrophase (local clock) ± SE, fit, qualifying / evaluated days, day / night / quadrant coverage, IS / IV with the across-midnight IV note, both phase relations (with their components and support days), drift per day (elapsed time), clock changes ("not counted as drift"), observed realignment ("looking back only"), a disclaimer (not core temperature, not the body clock) and the method. An unavailable phase gate withholds the time and shows its reason. A withheld rhythm shows only the reason (plus qualifying days, when given). |
 | `rest_activity_rhythm` | Rest-activity rhythm | IS, IV, L5 and M10 (with their start times), RA, days used, signal / epoch and method. When withheld (the likely case today) it shows only the reason and the definition, with no numbers. |
 | `rebound` | After short or broken nights | The personal reference, then each set's next-night differences in asleep / awake time (median with IQR, number of pairs). A set with 0 pairs reads "No such nights in this period". Also an "About this" row (not a cause, not a prediction) and `definition_version`. |
@@ -96,6 +96,39 @@ codes `multi_day_history_not_requested`, `insufficient_daytime_temperature`, `ze
 `no_short_nights`, `no_fragmented_nights`. An unknown code reads as humanized words. To add a code, add a line to
 `phrases` and its catalog entry.
 
+Lead follow-ups folded in: the prv_nonlinear reasons `not_main_night`, `no_rr_beats`, `insufficient_segments`,
+`compute_budget_exceeded` (cardiac); the respiration/rebound/rhythm codes seen on the producer branches
+(`insufficient_usable_windows`, `no_evaluable_windows`, `no_true_intervals_in_usable_windows`,
+`unknown_time_never_stable`, `history_nights_not_in_request`, `history_nights_without_minutes_excluded`,
+`insufficient_reference_nights`, `no_consecutive_night_pairs`, `pair_spans_timezone_change`, `descriptive_only`,
+`duplicate_history_day_resolved`, `movement_history_absent`, `insufficient_days_around_clock_change`,
+`insufficient_daytime`, `insufficient_daytime_heart_rate`, `insufficient_daytime_movement`,
+`insufficient_sleep_periods`, `incomplete_daily_profile`, `no_clock_change`, `no_consecutive_hour_pairs`,
+`not_main_night`, `phase_unavailable`, `quadrant_unobserved`, `temperature_phase_unavailable`,
+`unstable_sleep_midpoint`, `zero_activity`, `zero_variance`, `fit_failed`, `invalid_timezone_days`); PC codes
+`episode_censored_window` (pc-cardiac, not in CONTRACT) and `respiratory_return_unconfirmed` (respiratory).
+`cutoff_reached` was already worded. The rhythm producer's phase labels `heart_rate_acrophase`,
+`skin_temp_acrophase`, `sleep_period_midpoint` are mapped.
+
+**Respiratory / rhythm final branches** (`d074d8011`, `3d782eb8c`), also folded in: `nap`, `hr_insufficient_days`,
+`hr_quadrant_unobserved`, `hr_zero_amplitude`, `hr_unstable_phase`, `hr_fit_failed`, `no_short_nights_observed`,
+`no_fragmented_nights_observed`, `after_short_insufficient_pairs`, `after_fragmented_insufficient_pairs`. A rebound
+set with pairs but no median (below `min_pairs`) reads "n pairs, too few to summarize". The temperature IS/IV row is
+labelled "Temperature regularity (IS / IV)" (the producer's `regularity_name` = `temperature_regularity`). The
+rest-activity chapter renders IS/IV/L5/M10/RA/days/signal when the block is available (tested), and its reason
+when it is withheld. `SleepMetricStatus.unavailable` (rhythm branch's one-line enum addition, applied verbatim)
+counts as not showable. **Bug fix:** `MeasurementContextSelection.dayStableAwakeComparisons` derived the series
+name from the envelope's `windowS`, so a 2-minute RR envelope looked for `resp_rate.stable_awake_2min`. Respiratory
+envelopes now use the reference's own 5-minute grid (`resp_rate.stable_awake_5min`). On this branch the foundation
+`stableAwakeSeriesKey` returns nil for respiratory rate, so the fix only takes effect after the respiratory branch
+merges. It has no test here.
+
+**StressView (cardiac's rewritten frequency section)**: its new `String(localized:)` / `LocalizedStringKey`
+strings are now catalog entries in all nine locales (`%lld ms²`, `0.15–0.40 Hz · optical PRV`, `LF/HF ratio`,
+`Optical PRV · descriptive`, the full-window coverage footnote with positional `%1$lld/%2$lld/%3$lld`, the HF-only
+note, and the three "not shown" reasons). `StressView.swift` itself is not edited on this branch (cardiac-owned);
+the keys match the cardiac branch's literals byte for byte, so they apply once it merges.
+
 **Sleep analytics** reasons are a closed Swift enum and already fully worded (`SleepAnalyticsWording`). I added
 `morningReason`, so `insufficient_coverage` on a morning side reads "too few valid minutes on one side".
 
@@ -109,6 +142,10 @@ pass.
 ## 4. Edits to root-owned files
 
 `Packages/StrandAnalytics/Sources/StrandAnalytics/SleepFeatureDocument.swift` (decode-only, additive):
+0a. The rhythm branch's `SleepMetricStatus.unavailable` case, applied verbatim from `3d782eb8c` (an identical hunk).
+0. The cardiac branch's `prv_nonlinear` decoder hunk (`segments_available`, `segments_evaluated`, `dfa_overlap`,
+   `max_segments`) applied verbatim from `7f7f4ab60` (identical hunk, so it merges cleanly) so the card can render
+   those fields.
 1. `SleepPhaseRelations` now also decodes the CONTRACT §5.4 keys `hr_minus_temp_acrophase_h` and
    `sleep_midpoint_minus_temp_acrophase_h`. The foundation decoder read only `hr_minus_temp` and
    `sleep_midpoint_minus_temp`, so a contract-shaped document silently decoded to nil. Both spellings are accepted
@@ -146,11 +183,16 @@ Results: see §8.
 
 ## 7. Integration notes for the lead (producer field names I assumed)
 
-- `DayNightHeartRate`: built against the foundation fields. The pc-cardiac branch adds the optional `method`,
-  `units`, `minSamplesPerSide` and `awakeWindow`. These are not shown yet; showing `method` takes one more row.
-- `PulseEpisodeSummary.thresholds` diagnostic names assumed: `high_enter_bpm`, `high_exit_bpm`, `low_enter_bpm`,
-  `low_exit_bpm` and `min_duration_s`. Episode `kind` values: `sustained_high` and `sustained_low`. `context` values:
-  `asleep`, `awake`, `mixed` and `unknown`.
+- `DayNightHeartRate`: built against the foundation fields. The final pc-cardiac branch (`635bb95a7`) adds the
+  optional `method`, `units`, `minSamplesPerSide` and `awakeWindow`, plus `PulseEpisode.coverage` /
+  `evidence_source` and `PulseEpisodeSummary.units` / `window` / `evaluated_span` / `evidence_seconds`. None of these
+  are shown yet; each would take one more row.
+- `PulseEpisodeSummary.thresholds` diagnostic names (`high_enter_bpm`, `high_exit_bpm`, `low_enter_bpm`,
+  `low_exit_bpm`, `min_duration_s`), episode `kind` (`sustained_high`, `sustained_low`) and `context` (`asleep`,
+  `awake`, `mixed`, `unknown`) were checked against `635bb95a7`. They match.
+- The day/night codes are string literals in `MeasurementContextDetailView`, because the
+  `SleepRhythm.awakeHrInsufficient` and related constants exist only on the producer branch. Switch to the constants
+  after the merge.
 - `RespiratoryRecovery.state` values: `returned`, `returned_by`, `not_returned` and `unknown`.
 - Phase-relation labels (`a_label` / `b_label`) are mapped for `hr_acrophase`, `temp_acrophase` and `sleep_midpoint`.
   Anything else is shown title-cased.

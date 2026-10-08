@@ -60,8 +60,8 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
             "status": "available", "reasons": [], "method_version": "prv-nonlinear-1", "neurokit2": "0.2.13",
             "source": "prv_optical", "secondary": true,
             "config": ["segment_beats": 300, "sampen_dimension": 2, "sampen_tolerance_sd": 0.2,
-                       "dfa_scales": [4, 16], "min_segments": 3],
-            "segments_used": 12, "segments_rejected": 3,
+                       "dfa_scales": [4, 16], "min_segments": 3, "dfa_overlap": false, "max_segments": 24],
+            "segments_used": 12, "segments_rejected": 3, "segments_available": 40, "segments_evaluated": 15,
             "sample_entropy": ["median": 1.42, "iqr": 0.21, "segments": 12],
             "dfa_alpha1": ["median": 0.98, "iqr": 0.12, "segments": 12],
         ]
@@ -265,12 +265,28 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         XCTAssertEqual(row(m, .prvResearch, "DFA α1")?.value, "0.98 (IQR 0.12)")
         XCTAssertEqual(row(m, .prvResearch, "Gap-free segments")?.value, "12 used · 3 rejected")
         XCTAssertEqual(row(m, .prvResearch, "Gap-free segments")?.note,
-                       "Each 300 consecutive beats; nothing joined across gaps")
-        XCTAssertEqual(row(m, .prvResearch, "Parameters")?.value, "m = 2 · r = 0.2 SD · DFA scales 4–16 beats")
+                       "Each 300 consecutive beats; nothing joined across gaps · 15 of 40 available segments evaluated (at most 24, spread over the night)")
+        XCTAssertEqual(row(m, .prvResearch, "Parameters")?.value,
+                       "m = 2 · r = 0.2 SD · DFA scales 4–16 beats, non-overlapping boxes")
         XCTAssertEqual(row(m, .prvResearch, "Definition")?.value, "prv-nonlinear-1 · NeuroKit2 0.2.13")
         let about = try XCTUnwrap(row(m, .prvResearch, "About this")?.value)
         XCTAssertTrue(about.contains("pulse-rate variability, not ECG"))
         XCTAssertTrue(about.contains("Secondary"))
+    }
+
+    func testAWithheldPrvBlockShowsTheProducerReason() throws {
+        var json = try Self.spec02DocumentJSON()
+        var nights = try XCTUnwrap(json["nights"] as? [[String: Any]])
+        nights[0]["prv_nonlinear"] = ["status": "withheld", "reasons": ["compute_budget_exceeded"],
+                                      "method_version": "prv-nonlinear-1", "neurokit2": "0.2.13",
+                                      "source": "prv_optical", "secondary": true,
+                                      "sample_entropy": ["median": NSNull(), "iqr": NSNull(), "segments": 0]]
+        json["nights"] = nights
+        let m = try model(json)
+        XCTAssertEqual(m.summary(for: .prvResearch)?.line, "Not available: took too long to compute this time")
+        XCTAssertNil(row(m, .prvResearch, "Sample entropy"))
+        XCTAssertEqual(SleepFeatureWording.reason("no_rr_beats"), "no beats recorded this night")
+        XCTAssertEqual(SleepFeatureWording.reason("not_main_night"), "does not apply to this night")
     }
 
     func testSkinTemperatureRhythmRoundTrip() throws {
@@ -282,7 +298,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         XCTAssertEqual(row(m, .temperatureRhythm, "Days used")?.value, "6 of 9 checked")
         XCTAssertEqual(row(m, .temperatureRhythm, "Coverage")?.value,
                        "62 h daytime · 48 h night · 4 of 4 quarters of the day")
-        XCTAssertEqual(row(m, .temperatureRhythm, "Day-to-day stability / hour-to-hour variability")?.value,
+        XCTAssertEqual(row(m, .temperatureRhythm, "Temperature regularity (IS / IV)")?.value,
                        "IS 0.58 · IV 0.71")
         // CONTRACT §5.4 keys decode (the decoder used to read only the short keys).
         let hr = try XCTUnwrap(row(m, .temperatureRhythm, "Heart-rate peak minus temperature peak"))
@@ -310,6 +326,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         json["nights"] = nights
         let document = try Self.decode(json)
         XCTAssertEqual(document.nights.first?.thermal?.observedSkinTempRhythm?.phaseStatus?.reasons, ["zero_amplitude"])
+        XCTAssertEqual(document.nights.first?.thermal?.observedSkinTempRhythm?.phaseStatus?.status, .unavailable)
         let m = try model(json)
         XCTAssertEqual(row(m, .temperatureRhythm, "Peak time (acrophase)")?.value,
                        "Not available: the temperature rhythm was too flat to time")
@@ -362,6 +379,13 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         XCTAssertEqual(row(m, .rebound, "Night after a short night")?.note,
                        "4 pairs of nights, compared with your usual night")
         XCTAssertEqual(row(m, .rebound, "Night after a broken night")?.value, "No such nights in this period")
+        // Pairs below the summary minimum: the count, never an invented median.
+        var json = try Self.spec02DocumentJSON()
+        var rebound = try XCTUnwrap(json["rebound"] as? [String: Any])
+        rebound["after_fragmented"] = ["pairs": 2, "next_night_asleep_diff_min": ["median": NSNull(), "iqr": NSNull()]]
+        rebound["reasons"] = ["after_fragmented_insufficient_pairs"]
+        json["rebound"] = rebound
+        XCTAssertEqual(row(try model(json), .rebound, "Night after a broken night")?.value, "2 pairs, too few to summarize")
         XCTAssertEqual(row(m, .rebound, "Definition")?.value, "sleep-rebound-1")
         XCTAssertTrue(row(m, .rebound, "About this")?.value.contains("Not a cause and not a prediction") == true)
     }

@@ -98,7 +98,9 @@ enum MeasurementContextSelection {
         -> [PhysiologyContext.ReferenceComparison] {
         guard !isNightly(e), e.comparisons.isEmpty, e.method.windowS > 0, e.method.windowS % 60 == 0 else { return [] }
         var config = PhysiologyContext.ReferenceConfig()
-        config.stableAwakeWindowS = e.method.windowS
+        // Respiratory rate's stable-awake series is built by its own adapter on the reference's 5-minute grid from
+        // shorter estimates (`resp_rate.stable_awake_5min`), so its window never names the series.
+        if e.metric != .respiratoryRate { config.stableAwakeWindowS = e.method.windowS }
         guard let series = PhysiologyContext.ContextReferences.stableAwakeSeriesKey(metric: e.metric, config: config)
         else { return [] }
         let matching = comparisons.filter { $0.seriesKey == series }

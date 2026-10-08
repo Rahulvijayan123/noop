@@ -85,6 +85,9 @@ public enum SleepMetricStatus: String, Codable, Equatable, Sendable {
     case notRun = "not_run"
     case timeout
     case error
+    /// spec-02 §5.4: a phase that was evaluated and found undefined (`phase_status`:
+    /// zero amplitude, unstable phase, mixed devices, insufficient days / daytime data).
+    case unavailable
     case unknown
 }
 
@@ -1441,6 +1444,10 @@ public struct SleepPrvNonlinearConfig: Codable, Equatable, Sendable {
     public let sampenToleranceSd: Double?
     public let dfaScales: [Int]
     public let minSegments: Int?
+    /// Non-overlapping DFA boxes (the Peng 1995 textbook definition) when false (cardiac, prv-nonlinear-1).
+    public let dfaOverlap: Bool?
+    /// Latency cap: at most this many segments are evaluated, spread evenly over the night.
+    public let maxSegments: Int?
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
@@ -1449,12 +1456,14 @@ public struct SleepPrvNonlinearConfig: Codable, Equatable, Sendable {
         sampenToleranceSd = c.tolerant(Double.self, forKey: .sampenToleranceSd)
         dfaScales = c.tolerant([Int].self, forKey: .dfaScales) ?? []
         minSegments = c.tolerant(Int.self, forKey: .minSegments)
+        dfaOverlap = c.tolerant(Bool.self, forKey: .dfaOverlap)
+        maxSegments = c.tolerant(Int.self, forKey: .maxSegments)
     }
 
     enum CodingKeys: String, CodingKey {
         case segmentBeats = "segment_beats", sampenDimension = "sampen_dimension"
         case sampenToleranceSd = "sampen_tolerance_sd", dfaScales = "dfa_scales"
-        case minSegments = "min_segments"
+        case minSegments = "min_segments", dfaOverlap = "dfa_overlap", maxSegments = "max_segments"
     }
 }
 
@@ -1470,6 +1479,10 @@ public struct SleepPrvNonlinear: Codable, Equatable, Sendable {
     public let config: SleepPrvNonlinearConfig?
     public let segmentsUsed: Int?
     public let segmentsRejected: Int?
+    /// Equal-length segments the night offered, and how many were evaluated under the latency cap
+    /// (`segments_used + segments_rejected == segments_evaluated`).
+    public let segmentsAvailable: Int?
+    public let segmentsEvaluated: Int?
     public let sampleEntropy: SleepMedianIqr?
     public let dfaAlpha1: SleepMedianIqr?
     public let notes: String?
@@ -1485,6 +1498,8 @@ public struct SleepPrvNonlinear: Codable, Equatable, Sendable {
         config = c.tolerant(SleepPrvNonlinearConfig.self, forKey: .config)
         segmentsUsed = c.tolerant(Int.self, forKey: .segmentsUsed)
         segmentsRejected = c.tolerant(Int.self, forKey: .segmentsRejected)
+        segmentsAvailable = c.tolerant(Int.self, forKey: .segmentsAvailable)
+        segmentsEvaluated = c.tolerant(Int.self, forKey: .segmentsEvaluated)
         sampleEntropy = c.tolerant(SleepMedianIqr.self, forKey: .sampleEntropy)
         dfaAlpha1 = c.tolerant(SleepMedianIqr.self, forKey: .dfaAlpha1)
         notes = c.tolerant(String.self, forKey: .notes)
@@ -1494,6 +1509,7 @@ public struct SleepPrvNonlinear: Codable, Equatable, Sendable {
         case status = "status", reasons = "reasons", methodVersion = "method_version"
         case neurokit2 = "neurokit2", source = "source", secondary = "secondary", config = "config"
         case segmentsUsed = "segments_used", segmentsRejected = "segments_rejected"
+        case segmentsAvailable = "segments_available", segmentsEvaluated = "segments_evaluated"
         case sampleEntropy = "sample_entropy", dfaAlpha1 = "dfa_alpha1", notes = "notes"
     }
 }

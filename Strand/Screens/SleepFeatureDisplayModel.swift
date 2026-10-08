@@ -114,6 +114,7 @@ struct SleepFeatureDisplayModel: Equatable {
     static func available(_ s: SleepMetricStatus?) -> Bool {
         guard let s else { return false }
         return s != .withheld && s != .notApplicable && s != .notRun && s != .timeout && s != .error
+            && s != .unavailable
     }
 
     /// "Not available: needs several days of full-day temperature".
@@ -338,7 +339,8 @@ struct SleepFeatureDisplayModel: Equatable {
             var parts: [String] = []
             if let isv = r.isValue { parts.append("IS \(String(format: "%.2f", isv))") }
             if let iv = r.iv { parts.append("IV \(String(format: "%.2f", iv))") }
-            rows.append(Row("Day-to-day stability / hour-to-hour variability", parts.joined(separator: " · "),
+            // These are TEMPERATURE regularity statistics (the producer's `regularity_name`), not rest-activity IS/IV.
+            rows.append(Row("Temperature regularity (IS / IV)", parts.joined(separator: " · "),
                             note: r.ivDefinition == "consecutive_valid_hour_pairs_across_midnight"
                                 ? "Hour-to-hour pairs include the hours across midnight" : nil))
         }
@@ -462,6 +464,11 @@ struct SleepFeatureDisplayModel: Equatable {
                 rows.append(Row(title, "No such nights in this period"))
                 continue
             }
+            if set.nextNightAsleepDiffMin?.median == nil && set.nextNightAwakeDiffMin?.median == nil {
+                // Fewer pairs than the summary needs (`<set>_insufficient_pairs`): no median is invented.
+                rows.append(Row(title, pairs == 1 ? "1 pair, too few to summarize" : "\(pairs) pairs, too few to summarize"))
+                continue
+            }
             var parts: [String] = []
             if let asleep = set.nextNightAsleepDiffMin?.median {
                 var p = "\(SleepFeatureFormat.signedMinutes(asleep)) asleep"
@@ -512,14 +519,22 @@ struct SleepFeatureDisplayModel: Equatable {
         if let used = p.segmentsUsed {
             var value = "\(used) used"
             if let rejected = p.segmentsRejected { value += " · \(rejected) rejected" }
-            rows.append(Row("Gap-free segments", value,
-                            note: p.config?.segmentBeats.map { "Each \($0) consecutive beats; nothing joined across gaps" }))
+            var note: [String] = []
+            if let beats = p.config?.segmentBeats { note.append("Each \(beats) consecutive beats; nothing joined across gaps") }
+            if let evaluated = p.segmentsEvaluated, let available = p.segmentsAvailable {
+                note.append("\(evaluated) of \(available) available segments evaluated"
+                            + (p.config?.maxSegments.map { " (at most \($0), spread over the night)" } ?? ""))
+            }
+            rows.append(Row("Gap-free segments", value, note: note.isEmpty ? nil : note.joined(separator: " · ")))
         }
         if let c = p.config {
             var parts: [String] = []
             if let m = c.sampenDimension { parts.append("m = \(m)") }
             if let r = c.sampenToleranceSd { parts.append("r = \(String(format: "%.2g", r)) SD") }
-            if c.dfaScales.count == 2 { parts.append("DFA scales \(c.dfaScales[0])–\(c.dfaScales[1]) beats") }
+            if c.dfaScales.count == 2 {
+                parts.append("DFA scales \(c.dfaScales[0])–\(c.dfaScales[1]) beats"
+                             + (c.dfaOverlap == false ? ", non-overlapping boxes" : ""))
+            }
             if !parts.isEmpty { rows.append(Row("Parameters", parts.joined(separator: " · "))) }
         }
         rows.append(about)
@@ -594,6 +609,8 @@ enum SleepFeatureWording {
         "high_rejected_fraction": String(localized: "too many beats were rejected"),
         "insufficient_pairs": String(localized: "too few pairs to compare"),
         "insufficient_segments": String(localized: "too few long gap-free stretches of beats"),
+        "no_rr_beats": String(localized: "no beats recorded this night"),
+        "compute_budget_exceeded": String(localized: "took too long to compute this time"),
         // Rhythm (observed_skin_temp_rhythm, rest_activity_rhythm)
         "multi_day_history_not_requested": String(localized: "needs several days of full-day temperature"),
         "insufficient_daytime_temperature": String(localized: "needs daytime temperature too, not only nights"),
@@ -634,6 +651,16 @@ enum SleepFeatureWording {
         "zero_variance": String(localized: "the values did not vary"),
         "fit_failed": String(localized: "could not be computed"),
         "invalid_timezone_days": String(localized: "some days had an unreadable time zone"),
+        "nap": String(localized: "does not apply to a nap"),
+        "hr_insufficient_days": String(localized: "not enough days of heart rate"),
+        "hr_quadrant_unobserved": String(localized: "heart rate was missing for part of the day"),
+        "hr_zero_amplitude": String(localized: "the heart-rate rhythm was too flat to time"),
+        "hr_unstable_phase": String(localized: "the heart-rate peak time changed too much between days"),
+        "hr_fit_failed": String(localized: "could not be computed"),
+        "no_short_nights_observed": String(localized: "no short nights in this period"),
+        "no_fragmented_nights_observed": String(localized: "no broken nights in this period"),
+        "after_short_insufficient_pairs": String(localized: "too few pairs to compare"),
+        "after_fragmented_insufficient_pairs": String(localized: "too few pairs to compare"),
     ]
 
     /// Clinical or causal words no sleep-feature wording may use.
