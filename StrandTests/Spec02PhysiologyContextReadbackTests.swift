@@ -131,7 +131,7 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
         return object
     }
 
-    private func contextDay(_ object: [String: Any]) throws -> PhysiologyContextDay {
+    private func makeContextDay(_ object: [String: Any]) throws -> PhysiologyContextDay {
         let document = try XCTUnwrap(PhysiologyContextDocument.decode(try JSONSerialization.data(withJSONObject: object)))
         return PhysiologyContextDay(day: day, deviceId: "whoop-TEST", metric: nil, status: .available,
                                     mode: .retrospective, contextRevision: 7, finality: .final, document: document,
@@ -165,7 +165,7 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
     // MARK: - Awake vs asleep heart rate
 
     func testAwakeAndAsleepMediansKeepTheirOwnCoverage() throws {
-        let contextDay = try contextDay(try documentJSON(dayNight: dayNightJSON, pulse: pulseJSON))
+        let contextDay = try makeContextDay(try documentJSON(dayNight: dayNightJSON, pulse: pulseJSON))
         let dn = try XCTUnwrap(contextDay.document?.dayNightHeartRate)
         XCTAssertEqual(dn.awakeMedianBpm, 64.0)
         XCTAssertEqual(dn.sleepMedianBpm, 52.0)
@@ -200,7 +200,7 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
         dn["percent_dip"] = NSNull()
         dn["sleep_samples"] = 120
         dn["reasons"] = ["sleep_hr_insufficient"]
-        let model = MeasurementContextDetailModel.build(day: try contextDay(try documentJSON(dayNight: dn)),
+        let model = MeasurementContextDetailModel.build(day: try makeContextDay(try documentJSON(dayNight: dn)),
                                                         metric: .restingHeartRate, isStale: false, locale: gb)
         let s = try XCTUnwrap(section(model, "dayNightHeartRate"))
         let asleep = try XCTUnwrap(s.rows.first { $0.id == "asleep" })
@@ -213,7 +213,7 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
     // MARK: - Pulse episodes
 
     func testPulseEpisodesAreDescriptiveWithExposureAndThresholds() throws {
-        let contextDay = try contextDay(try documentJSON(dayNight: dayNightJSON, pulse: pulseJSON))
+        let contextDay = try makeContextDay(try documentJSON(dayNight: dayNightJSON, pulse: pulseJSON))
         let p = try XCTUnwrap(contextDay.document?.pulseEpisodes)
         XCTAssertEqual(p.version, "pc-pulse-1")
         XCTAssertEqual(p.episodes.first?.medianBpm, 104.0)
@@ -297,7 +297,7 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
     // MARK: - Old documents and member failures
 
     func testAnOlderDocumentHasNoneOfTheNewSections() throws {
-        let contextDay = try contextDay(try documentJSON())
+        let contextDay = try makeContextDay(try documentJSON())
         XCTAssertNil(contextDay.document?.pulseEpisodes)
         XCTAssertNil(contextDay.document?.dayNightHeartRate)
         XCTAssertNotNil(contextDay.document?.full)

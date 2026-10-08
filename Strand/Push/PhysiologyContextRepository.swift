@@ -770,13 +770,13 @@ enum PhysiologyContextSpec02 {
             dropped.append("sleep.day_night_heart_rate")
         }
         if let bouts = object["bouts"] as? [Any] {
-            var any = false
+            var anyDropped = false
             object["bouts"] = bouts.map { bout -> Any in
                 let (clean, wasDropped) = sanitizeBout(bout)
-                any = any || wasDropped
+                anyDropped = anyDropped || wasDropped
                 return clean
             }
-            if any { dropped.append("bouts.recovery.respiratory_recovery") }
+            if anyDropped { dropped.append("bouts.recovery.respiratory_recovery") }
         }
         guard !dropped.isEmpty, JSONSerialization.isValidJSONObject(object),
               let clean = try? JSONSerialization.data(withJSONObject: object) else { return (data, []) }

@@ -325,7 +325,6 @@ struct MeasurementContextDetailModel: Equatable {
     /// their own coverage, the difference, and the percent dip with its definition. Nil when the document has none.
     static func dayNightSection(_ document: PhysiologyContextDocument, locale: Locale) -> ContextDetailSection? {
         typealias W = PhysiologyContextWording
-        typealias SR = PhysiologyContext.SleepRhythm
         guard let dn = document.dayNightHeartRate else { return nil }
         func side(_ id: String, _ title: String, median: Double?, samples: Int, eligibleS: Int, coverage: Double?,
                   missing: PhysiologyContext.ReasonCode) -> ContextDetailRow {
@@ -345,9 +344,9 @@ struct MeasurementContextDetailModel: Equatable {
         }
         var rows = [
             side("awake", String(localized: "Awake median"), median: dn.awakeMedianBpm, samples: dn.awakeSamples,
-                 eligibleS: dn.awakeEligibleS, coverage: dn.awakeCoverage, missing: SR.awakeHrInsufficient),
+                 eligibleS: dn.awakeEligibleS, coverage: dn.awakeCoverage, missing: "awake_hr_insufficient"),
             side("asleep", String(localized: "Asleep median"), median: dn.sleepMedianBpm, samples: dn.sleepSamples,
-                 eligibleS: dn.sleepEligibleS, coverage: dn.sleepCoverage, missing: SR.sleepHrInsufficient),
+                 eligibleS: dn.sleepEligibleS, coverage: dn.sleepCoverage, missing: "sleep_hr_insufficient"),
         ]
         if let diff = dn.differenceBpm {
             rows.append(ContextDetailRow("difference", String(localized: "Awake minus asleep"),
@@ -358,7 +357,7 @@ struct MeasurementContextDetailModel: Equatable {
                                          note: String(localized: "Awake minus asleep, as a percentage of the awake median")))
         }
         var notes = [String(localized: "Sleep was found partly from heart rate, so this comparison is not independent of it.")]
-        if let r = W.reasonList(dn.reasons.filter { $0 != SR.percentDipDefinition }) { notes.append(r) }
+        if let r = W.reasonList(dn.reasons.filter { $0.rawValue != "percent_dip_definition" }) { notes.append(r) }
         return ContextDetailSection(id: "dayNightHeartRate", title: String(localized: "Awake and asleep heart rate"),
                                     rows: rows, footnote: notes.joined(separator: " "))
     }

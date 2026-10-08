@@ -132,7 +132,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         return HostedDayResult(day: "2026-10-03", object: ["result_revision": "sha256:r", "daily": daily, "sleep": []])
     }
 
-    private func plan(_ json: [String: Any], analytics: Bool) throws -> SleepFeatureSectionPlan {
+    private func makePlan(_ json: [String: Any], analytics: Bool) throws -> SleepFeatureSectionPlan {
         let result = try XCTUnwrap(Self.hosted(features: json, analytics: analytics))
         let document = try XCTUnwrap(result.sleepFeatures)
         XCTAssertEqual(result.sleepAnalytics != nil, analytics)
@@ -154,7 +154,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
     // MARK: - The section-hiding regression
 
     func testBothDocumentsPresentStillRenderTheFeatureChapters() throws {
-        let plan = try plan(Self.spec02DocumentJSON(), analytics: true)
+        let plan = try makePlan(Self.spec02DocumentJSON(), analytics: true)
         XCTAssertFalse(plan.isEmpty, "sleep_analytics_v1 must not hide the whole Sleep details section")
         XCTAssertEqual(plan.chapters, [.regularity, .physiology, .settling, .breathing,
                                        .temperatureRhythm, .restActivityRhythm, .rebound, .prvResearch])
@@ -167,7 +167,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
     }
 
     func testWithoutTheAnalyticsDocumentContinuityAndArchitectureStillRender() throws {
-        let plan = try plan(Self.spec02DocumentJSON(), analytics: false)
+        let plan = try makePlan(Self.spec02DocumentJSON(), analytics: false)
         XCTAssertEqual(plan.chapters, [.continuity, .regularity, .architecture, .physiology, .settling, .breathing,
                                        .temperatureRhythm, .restActivityRhythm, .rebound, .prvResearch])
         XCTAssertEqual(plan.headline.map(\.label), ["Awake in bed", "Longest stretch", "Regularity"])
@@ -187,7 +187,7 @@ final class Spec02SleepFeaturesReadbackTests: XCTestCase {
         XCTAssertNil(night.thermal?.observedSkinTempRhythm?.methodVersion)
 
         for analytics in [true, false] {
-            let plan = try plan(old, analytics: analytics)
+            let plan = try makePlan(old, analytics: analytics)
             XCTAssertTrue(plan.chapters.contains(.regularity))
             XCTAssertTrue(plan.chapters.contains(.physiology))
             XCTAssertTrue(plan.chapters.contains(.settling))
