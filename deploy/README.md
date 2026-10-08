@@ -367,7 +367,7 @@ candidate lane's promotion semantics.
   from the cached hosted snapshot (`HostedDayResult.sleepFeatures`), decoded
   non-fatally.
 
-## Sidecar provision (run once per host)
+## Sidecar provision and model revisions
 
 ```bash
 FRWHOOP_UV_SHA256=<published uv digest> sudo deploy/provision.sh                 # cold host
@@ -375,6 +375,53 @@ FRWHOOP_UV_SHA256=<published uv digest> /opt/noop/releases/<id>/deploy/provision
 ```
 
 The sidecar section of `provision.sh` does not touch the Swift or SQLite steps, and
-`--sidecar-only` runs nothing else. The model step alone, unprivileged, against any
-directory: `deploy/provision.sh --models-only --models-root DIR [--offline] [--mirror DIR]`.
-See `deploy/OPERATIONS.md` for start/verify/rollback commands.
+`--sidecar-only` runs nothing else. Its model step is the sidecar's own materializer and verifier
+(`Tools/InferenceWorker/scripts/materialize_model_root.py` with `frwhoop_inference.artifacts`),
+run with the release's venv; the shell never parses the manifest. In order:
+
+1. **Plan** from `models/manifest.json`: every entry and nested artifact gets an action
+   (`stage`, `check_installed`, `record`, `skip`) and a reason. Only wired `eligible` /
+   `shadow_eligible` entries are staged; blocked, unverified and unwired entries are recorded,
+   never fetched. Print it without touching anything:
+   `/opt/frwhoop-inference/venv/bin/python /opt/noop/current/Tools/InferenceWorker/scripts/materialize_model_root.py plan`.
+2. **Stage** a complete revision in `/opt/frwhoop-models/revisions/.staging-*`: the SleepECG
+   checkpoint is copied from the installed `sleepecg` wheel and its inner `classifier.keras`
+   extracted from that zip; optional `url` artifacts are fetched over HTTPS (or taken from a
+   `--mirror DIR`), size-capped, and installed only after their pinned sha256 and size match.
+   `--offline` fetches nothing and records the optional ones as missing.
+3. **Verify** every staged artifact with `verify_manifest` (the check the sidecar runs at
+   startup), then **probe**: a child process builds the sidecar's `Application` against the staged
+   root with the service's environment (from the unit and `/etc/frwhoop/inference.env`), as
+   `frwhoop-inf`.
+4. **Reject or select.** A missing or mismatched required artifact, or a required provider that
+   is not ready, rejects the revision: staging is removed, `current` is untouched, the script
+   exits non-zero. Otherwise `revision.json` is written, the tree is made read-only, renamed to
+   `revisions/<id>` (a content id over the manifest digest and the verified artifact digests, so
+   a re-run with the same bytes selects the same revision) and `current` is replaced atomically
+   (a temporary symlink renamed over it). A missing optional artifact is recorded in
+   `revision.json` `withheld` and withholds only its own provider.
+5. **Restart** `frwhoop-inference`: it resolves `current` once at startup and keeps that revision
+   for its lifetime, so a later switch never changes a running process underneath it.
+
+Model rollback: `materialize_model_root.py list --models-root /opt/frwhoop-models`, then
+`select --models-root /opt/frwhoop-models <revision-id>` and restart the sidecar (see
+[OPERATIONS.md](OPERATIONS.md#rollback)). The model step alone, unprivileged, against any
+directory (operators and tests use the same code path):
+`deploy/provision.sh --models-only --models-root DIR [--offline] [--mirror DIR]`.
+
+## Identity checks after a deploy
+
+Run the read-only [runtime identity checklist](OPERATIONS.md#runtime-identity-checklist). In short:
+
+- the heartbeat's `meta.identity.executable.sha256` equals `sha256sum /proc/<worker pid>/exe` and
+  `BUILD.json`'s recorded digest, `matches_release` is `true`, and `release.git_commit` is the
+  commit you shipped;
+- the sidecar's `GET /healthz` `identity` names the same commit in `code_revision`, with
+  `source_matches_release`, `uv_lock_matches_release` and `manifest.matches_release` all `true`,
+  the selected `model_revision.revision_id` equal to `readlink /opt/frwhoop-models/current`, and
+  every required artifact `verified`;
+- `FRWHOOP_SOURCE_REVISION` is only `claimed_source_revision` in both; it proves nothing.
+
+A release built on another architecture (for example the arm64 Linux build used to check a
+release before shipping) has a different binary digest from the x86_64 droplet's build of the same
+commit; only the droplet's own `BUILD.json` and process digest identify what it runs.
