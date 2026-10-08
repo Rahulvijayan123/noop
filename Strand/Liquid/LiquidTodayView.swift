@@ -47,6 +47,10 @@ struct LiquidTodayView: View {
     @State private var importedActiveKcalDay: Double?  // #616: Apple Health active energy for the day (calorie fallback)
     @State private var weightKg: Double?           // #204: Apple Health weight ?: profile fallback
     @State private var hrValues: [Double] = []     // hrBuckets for the day's window → 5-min means
+    /// The day's lowest and highest heart-rate samples (the buckets' own extremes, not the 5-minute means the
+    /// chart plots), for the High / Low figures.
+    @State private var hrLow: Double?
+    @State private var hrHigh: Double?
     /// Line identity for [hrValues] (#2082). The kit chart finds the same gaps from `hrTimes` itself; kept
     /// because `load()` writes it.
     @State private var hrSegments: [String] = []
@@ -681,6 +685,7 @@ struct LiquidTodayView: View {
     private var heartRateSection: some View {
         TodayHeartRateCard(times: hrTimes, values: hrValues,
                            resting: displayDay?.restingHr ?? restingHrDay?.restingHr,
+                           low: hrLow, high: hrHigh,
                            isToday: selectedDayOffset == 0,
                            window: heartRateWindow,
                            isLoading: isLoading,
@@ -1002,6 +1007,8 @@ struct LiquidTodayView: View {
         // would describe a different series than the one drawn.
         let hrBuckets = await hrA
         hrValues = hrBuckets.map { $0.bpm }
+        hrLow = hrBuckets.map(\.minBpm).min()
+        hrHigh = hrBuckets.map(\.maxBpm).max()
         hrSegments = hrGapSegments(bucketTs: hrBuckets.map { $0.ts }, bucketSeconds: 300)
         hrTimes = hrBuckets.map { Double($0.ts) }
         workouts = (await wkA).filter { $0.startTs >= from && $0.startTs < to }
@@ -1314,6 +1321,9 @@ private struct TodayHeartRateCard: View {
     let times: [Double]
     let values: [Double]
     let resting: Int?
+    /// The day's own lowest and highest samples; the chart's `values` are 5-minute means and would understate both.
+    let low: Double?
+    let high: Double?
     let isToday: Bool
     let window: ClosedRange<Date>
     let isLoading: Bool
@@ -1391,8 +1401,8 @@ private struct TodayHeartRateCard: View {
     private var stats: some View {
         HStack(spacing: NoopMetrics.space2) {
             statCell(String(localized: "Resting"), resting.map(Double.init))
-            statCell(String(localized: "High"), values.max())
-            statCell(String(localized: "Low"), values.min())
+            statCell(String(localized: "High"), high ?? values.max())
+            statCell(String(localized: "Low"), low ?? values.min())
         }
         .loadingRedaction(isLoading)
         .accessibilityElement(children: .combine)

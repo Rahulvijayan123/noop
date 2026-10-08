@@ -312,7 +312,9 @@ struct MetricDetailView: View {
 
         // Every reading as a local day, in display units.
         let dailyPoints: [DailyPoint] = series.enumerated().compactMap { index, row in
-            DailyPoint(key: row.day, value: shown(row.value), isEstimate: isEstimate(row.day),
+            // HRV of zero (or less) is a failed reading, never a night: leave it as a gap.
+            if metric.key == "hrv", !(row.value > 0) { return nil }
+            return DailyPoint(key: row.day, value: shown(row.value), isEstimate: isEstimate(row.day),
                        series: segmentIds[index], calendar: calendar)
         }
 
@@ -397,7 +399,8 @@ struct MetricDetailView: View {
         }
         let statsInput = MetricStatsInput(window: statsWindow, previous: previous, typical: typical,
                                           asleepByDay: asleepByDay, needByDay: needByDay, zonesByDay: zonesByDay,
-                                          age: profile.age > 0 ? profile.age : nil, unit: unitLabel)
+                                          age: profile.age > 0 ? profile.age : nil, unit: unitLabel,
+                                          thresholdScale: p.displayDelta(1, units: units, unitLabel: metric.unit))
         var stats = MetricStats.items(p, input: statsInput)
         if isStepsDetail, let vsIndex = p.stats.firstIndex(of: .vsPrevious) {
             // Steps compare the bucket series with the previous equal calendar period, as before.
@@ -449,7 +452,7 @@ struct MetricDetailView: View {
             calendar: calendar, unit: unitLabel, axisUnit: p.axisUnit(catalogUnit: metric.unit, units: units),
             chartPoints: chartPoints, readoutPoints: readoutPoints, windowRows: windowRows,
             hasData: !chartPoints.isEmpty, typical: typical, baseline: baseline,
-            sdnnPoints: metric.key == "hrv" ? sdnnSeries.compactMap { DailyPoint(key: $0.day, value: $0.value) } : [],
+            sdnnPoints: metric.key == "hrv" ? sdnnSeries.filter { $0.value > 0 }.compactMap { DailyPoint(key: $0.day, value: $0.value) } : [],
             stack: stack, stats: stats, idleContext: idle, readings: readingRows,
             widened: effRange != coercedSelection, age: profile.age > 0 ? profile.age : nil,
             goal: goal, scoreMax: scoreMax, divergingReference: divergingReference)
@@ -860,11 +863,11 @@ struct MetricDetailView: View {
                 let rowsWithEither = days.count { $0.skinTempC != nil || $0.skinTempDevC != nil }
                 if shouldExplainSkinTempFallback(prefer: skinTempPreferred, leadsAbsolute: leadsAbsolute,
                                                  anyAbsoluteInWindow: anyAbsolute) {
-                    skinTempNote = String(localized: "No measured temperature for these nights — showing the difference from your baseline instead. A re-score refills temperatures for nights that have one.")
+                    skinTempNote = String(localized: "No measured temperature for these nights. Showing the difference from your baseline instead. A re-score refills temperatures for nights that have one.")
                 } else if shouldExplainShortenedSkinTempSeries(leadsAbsolute: leadsAbsolute,
                                                                 shownReadings: shownReadings,
                                                                 rowsWithEitherNumber: rowsWithEither) {
-                    skinTempNote = String(localized: "Only nights with a measured temperature are shown — the others only have a baseline difference.")
+                    skinTempNote = String(localized: "Only nights with a measured temperature are shown. The others only have a baseline difference.")
                 }
             }
         }

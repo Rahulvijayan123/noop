@@ -568,6 +568,8 @@ struct MetricStatsInput {
     var zonesByDay: [String: [Double]] = [:]
     var age: Int?
     var unit: String?
+    /// Multiplies a stored-unit DELTA threshold into display units (skin temperature's +0.5 °C is +0.9 °F).
+    var thresholdScale: Double = 1
 }
 
 enum MetricStats {
@@ -631,7 +633,8 @@ enum MetricStats {
             let n = values.filter { $0 < threshold }.count
             return counted(thresholdLabel(p, "<", threshold), values.isEmpty ? nil : n,
                            detail: values.isEmpty ? nil : String(localized: "of \(values.count)"))
-        case .above(let threshold):
+        case .above(let storedThreshold):
+            let threshold = storedThreshold * input.thresholdScale
             let n = values.filter { $0 > threshold }.count
             return counted(thresholdLabel(p, ">", threshold), values.isEmpty ? nil : n,
                            detail: values.isEmpty ? nil : String(localized: "of \(values.count)"))
