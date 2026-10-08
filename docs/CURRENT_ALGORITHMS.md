@@ -79,12 +79,13 @@ only over contiguous pairs. Also computed, but not the headline number: SDNN (sa
 - **Intraday series (hosted worker only).** The scoring snapshot's `daily.hrv_series` holds one RMSSD per **15-minute** slot of the local day (`{slot_s, points: [[slotStartUnix, rmssd, cleanBeats]], context: [...]}`), recomputed on every re-score. A slot needs ≥ 60 clean beats, coverage ≤ the over-count ceiling, and the spot-reading rejection limit. Daytime wrist RMSSD is artifact-prone, so this series is informational and never feeds Charge or baselines.
   - **Per-slot context (D6-14).** An additive `context` array has one entry per point, in the same order: `{slot_s, weak, reasons, moving_share, unknown_share, clean_coverage, post_activity}`.
     - The shares come from the same full-support join as `contexts.hrv_slots` (`ActivityContextJoin.hrvSlotContexts`, section 9f), over the day's published activity epochs.
-    - `reasons` can hold three flags:
+    - `reasons` can hold these flags:
       - `movement`: walking + running + other movement is ≥ 0.25 of the slot.
       - `unknown_context`: the unknown share is ≥ 0.5.
       - `sparse_beats`: clean beats × mean NN is under one third of the slot.
-    - A slot with any reason is `weak`. With no published epochs, every slot is `unknown_context`.
-    - Points are never dropped. The Today chart (`HrvSeriesChart`) draws a weak point hollow and faded, keeps it out of the line and the "Latest" value, and explains why in a caption. A snapshot without `context` renders as before.
+      - `context_pending`: no published activity epoch overlaps the slot, or the slot runs past the newest published epoch and is mostly uncovered.
+    - A slot with `movement`, `unknown_context` or `sparse_beats` is `weak`. `context_pending` alone never makes a slot weak: the activity lane has not described it yet, which is not evidence against the reading. The app also treats a point whose only reason is `context_pending` as not weak, which covers older worker builds.
+    - Points are never dropped. The Today chart (`HrvSeriesChart`) draws a weak point hollow and faded, keeps it out of the line and the "Latest" value, and explains why in a caption. A pending point is drawn normally, with a quiet caption that activity context is not yet available. A snapshot without `context` renders as before.
 - **Dense series (hosted worker only).** `server_metric_series` holds RMSSD per **5-minute** bucket (≥ 45 clean beats, quiet wrist) for the app's "Through the day" card, next to the 15-minute slots above; see the backend runbook.
 
 ### What it does not do
@@ -720,15 +721,13 @@ On the phone the windows use the corrected activity lookup (user corrections ove
 
 Otherwise it is `provisional`. A provisional day is re-derived once it has been closed for 12 h, so it becomes final. `ctxProvisional` exposes the state on every joined sample.
 
-**Retrospective pass (`ActivityContextRetrospective`, `ctx-retro-1`).** This pass re-reads a final day's runs with a forward-backward smoother over each still segment:
+**Retrospective pass (`ActivityContextRetrospective`, `ctx-retro-2`).** For a final day only, this pass re-reads the day's runs and may **remove** posture claims, never add them:
 
-- **Hidden state.** Recumbent, seated or upright.
-- **Emission.** Each run's posture head, renormalised and tempered. Weight is one evidence unit per minute, capped at 120 s per run.
-- **Persistence.** A posture persists with switch probability 1 − exp(−d/3600 s).
-- **Supported boundaries.** At a boundary that a postural event of probability ≥ 0.40 explains (its onset-to-detection span within 5 s of the boundary), nothing carries across.
-- **Unchanged.** Only the posture head changes. Locomotion, arm, sleep, wear, in-bed and every event stay the decoder's.
-- **Stops.** A walk or run stop whose onset lies up to 30 s before the drawn boundary moves the boundary back.
-- **Short evidenced fragments.** The retrospective build keeps a short posture fragment that a flagged change explains as its own row (`keepEvidencedPostureFragments`). The causal build does not.
+- **Smoothing is used only to demote.** A forward-backward smoother runs over each still segment. Its hidden state is recumbent, seated or upright. Each run's posture head is the emission, renormalised and floored at 0.02, at one evidence unit per minute, capped at 120 s per run. A posture persists with switch probability 1 − exp(−d/3600 s). Nothing carries across a boundary that a postural event of probability ≥ the position-change minimum explains, with its onset-to-detection span within 5 s. A causal posture row is demoted to `stationary` only when the smoothed mass of its own posture is below 0.5 and another posture leads. A demoted row then merges with matching neighbours in the ordinary interval build. Lying is never smoothed across into sitting or standing.
+- **Stops.** A walk or run stop boundary moves back to the flagged stop onset, at most `ActivityTransitionEvent.maxOnsetLeadS` (10 s). It moves only into a row that makes no posture claim, and never leaves a gait row shorter than 10 s.
+- **Unchanged.** Locomotion, arm, sleep, wear, in-bed and every event stay the decoder's. Short fragments are kept exactly as the causal build keeps them.
+- **Guard.** `guarded` demotes any output row that would claim a posture for a second the causal build did not claim with that same posture. It also caps every row's confidence at the causal confidence for those seconds. A property test over random run sequences asserts that retrospective claim seconds are a subset of causal same-posture seconds, that confidence is at or below causal, and that there are no more rows than causal.
+- **Measured effect.** On the D7 replays, wrong posture claims and fragmentation equal the causal build's. The only posture change is on PAMAP2 + HART, where 60 s of wrong standing were removed. The stop refinement costs 0.3–0.7 points of locomotion recall and gains 0.3–1.0 points of active precision. The first version, `ctx-retro-1`, extended postures into unresolved stretches, multiplied wrong claims about fivefold on Capture-24, and never shipped.
 
 `ActivityContextPersistence.retrospectiveIntervals` returns nothing unless the day is final.
 
@@ -766,7 +765,8 @@ The physiology-context engine (`PhysiologyContext`, run by the worker's context 
 
 - a decoder run claims sitting, sitting at a desk, standing or lying down;
 - the claim's confidence is ≥ 0.8 (`contextMinConfidence`);
-- the decoder is `hsmm-1.8` or newer, compared numerically;
+- the decoder is `hsmm-1.9` or newer, compared numerically (hsmm-1.8 rows could claim sit/stand at 0.8–0.9 without learned agreement);
+- the seconds are not in a vehicle (`context_in_vehicle_not_used`);
 - the second is outside the heart-rate-confirmed in-bed window;
 - one posture covers ≥ 90% of the support;
 - the forearm gravity reading does not contradict it (lying vs upright).
@@ -786,7 +786,7 @@ The predecessor is compatible only when all of these hold:
 - same vendor and source kind;
 - same hardware family, positively identified on both rows (unknown is incompatible);
 - no known firmware difference (unknown firmware adds `predecessor_firmware_unknown`);
-- optical valid share within 0.25 (median of the last 14 days);
+- optical valid share within 0.25, comparing the new device's recent median with the median of the predecessor's own last 14 days of data, all before the scored day. If either is unknown, the borrow proceeds with the reason `predecessor_signal_quality_unknown`;
 - the same regime key per series.
 
 How the fallback applies:
@@ -817,7 +817,7 @@ The worker identifies the hardware family per device row from its label. A bare 
 | `ActivityClassVersions.interval` | `ctx-int-2` | `ActivityContextClass.swift` |
 | `ActivityContextVersions.decoder` | `hsmm-1.9` | `ActivityContextOntology.swift` |
 | `ActivityContextVersions.ontology` / `.featureSchema` / `.schema` | `v2.0` / `imu-feat-2` / 2 | `ActivityContextOntology.swift` |
-| `ActivityContextRetrospective.version` | `ctx-retro-1` | `ActivityContextRetrospective.swift` |
+| `ActivityContextRetrospective.version` | `ctx-retro-2` | `ActivityContextRetrospective.swift` |
 | `ActivityContextJoin.version` | `join-2` | `ActivityContextJoin.swift` |
 | `ActivityPersonalProfile.currentVersion` | `personal-profile-3` | `ActivityPersonalProfile.swift` |
 | PC eligibility / join / reference / posture | `pc-eligibility-4` / `pc-join-3` / `pc-reference-4` / `pc-posture-2` | `PhysiologyContext/PCEligibility.swift`, `PCIntervalAlgebra.swift`, `PCReferences.swift`, `PCPostureTransitions.swift` |
@@ -840,7 +840,7 @@ The worker identifies the hardware family per device row from its label. A bare 
 - A wrist cannot reliably separate sitting from standing in free living. The learned cap's own justification cites a HART fine sit/stand AUC of about 0.68 in free living, and wrist-only standing claims were right about 7% of the time on Capture-24 (code comments, `ActivityContextModel.swift`, `ActivityContextClass.swift`). The system says `stationary` when it cannot tell.
 - Lying awake vs sitting is weak in the daytime. Held forearm orientation alone is capped below a lying claim, so a short daytime lie-down may read as `stationary`.
 - Raw IMU is recorded one minute in three by default. HART, the motion features, the learned posture rows and any transition expert are absent the other two minutes.
-- Heart-rate circularity is guarded but not removed: heart rate has one level across postures, and the context strata refuse decoders older than `hsmm-1.8` and in-bed seconds. The in-bed window itself comes from the heart-rate-confirmed sleep detector.
+- Heart-rate circularity is guarded but not removed: heart rate has one level across postures, and the context strata refuse decoders older than `hsmm-1.9`, in-vehicle seconds and in-bed seconds. The in-bed window itself comes from the heart-rate-confirmed sleep detector.
 - Every threshold and prior above is an engineering default set on lab and free-living replays. None is fitted on labelled strap data, and no calibration map exists.
 - The transition expert is not deployed. Inertia is dormant, and ElderNet reaches the phone's decode only from non-shadow server days.
 
