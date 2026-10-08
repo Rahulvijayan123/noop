@@ -324,6 +324,7 @@ public extension DailyPoint {
             ? ChartDay.day(fromUTCMidnight: point.date, calendar: calendar)
             : calendar.startOfDay(for: point.date)
         self.init(day: day, value: point.value, isEstimate: isEstimate, series: point.segment)
+        self.zone = calendar.timeZone
     }
 }
 
@@ -331,6 +332,45 @@ extension Array where Element == DailyPoint {
     /// The points whose day lies inside `window` (start inclusive, end exclusive), ascending.
     func inWindow(_ window: ClosedRange<Date>) -> [DailyPoint] {
         filter { $0.day >= window.lowerBound && $0.day < window.upperBound }.sorted { $0.day < $1.day }
+    }
+
+    /// What every daily chart draws from: finite values only, each moved to its local day in `calendar`
+    /// (`DailyPoint.localDay(in:)`), one point per day (two values on one day become their mean, an
+    /// estimate when at least half of them are), ascending. A day is then a mark's identity, so a day
+    /// logged twice cannot give two marks the same id.
+    func normalisedDays(_ calendar: Calendar) -> [DailyPoint] {
+        DailyBarChart.bin(self, by: .day, aggregation: .mean, calendar: calendar)
+    }
+}
+
+// MARK: - Downsampling by run
+
+/// `ChartDownsample` applied one run at a time, for lines that break across gaps.
+///
+/// Bucketing a whole series mixes its runs: a short stretch between two gaps can fall inside one bucket
+/// whose minimum and maximum come from a neighbouring run, and then disappears from the chart. Here every
+/// run gets a share of the vertex budget in proportion to its length (at least four), and each run keeps its
+/// first and last reading, so a run of two or more always draws as a line and the gaps keep their width.
+/// Nothing changes for series at or under `ChartDownsample.markThreshold`. Pure.
+enum NaraRunDownsample {
+    static func reduce<Point>(_ points: [Point], run: (Point) -> String, date: (Point) -> Date,
+                              value: (Point) -> Double) -> [Point] {
+        let total = points.count
+        guard total > ChartDownsample.markThreshold else { return points }
+        var out: [Point] = []
+        out.reserveCapacity(ChartDownsample.targetVertices + 16)
+        var start = 0
+        while start < total {
+            let id = run(points[start])
+            var end = start + 1
+            while end < total, run(points[end]) == id { end += 1 }
+            let slice = Array(points[start..<end])
+            let budget = Swift.max(4, Int((Double(slice.count) / Double(total)
+                                           * Double(ChartDownsample.targetVertices)).rounded()))
+            out += ChartDownsample.minMaxBucketed(slice, threshold: budget, targetCount: budget, date: date, value: value)
+            start = end
+        }
+        return out
     }
 }
 #endif
