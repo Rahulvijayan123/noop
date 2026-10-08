@@ -2421,6 +2421,39 @@ public final class BLEManager: NSObject, ObservableObject {
         }
     }
 
+    /// Set when switching IMU saving off (105 [1,0]) also stopped the live IMU: keep the strap banking it.
+    private var imuSavingOffFailed = false
+    private var imuSavingOffVerifiedLogged = false
+
+    /// With live IMU verified, ask the strap to stop BANKING the IMU too (105 [1,0]). The banked copy only
+    /// fills link drops (98% of stored IMU seconds arrive live), yet it is 1,244 B per captured second of
+    /// offload. If saving off turns out to stop the producer, live IMU stops with it, so this checks for a
+    /// fresh live frame after `imuOnlyVerifySeconds` and, if none came, re-requests IMU collection at once
+    /// and keeps the banked copy for the rest of the process.
+    private func dropImuSavingIfPossible() {
+        guard ActivityImuCapture.leanRawCapture(), !imuSavingOffFailed, activityImuInFlight else { return }
+        let sentAt = Date()
+        leanRawCaptureInFlight = true
+        send(.toggleIMUSaving, payload: [0x01, 0x00], writeType: .withResponse)
+        leanRawCaptureInFlight = false
+        DispatchQueue.main.asyncAfter(deadline: .now() + ActivityImuCapture.imuOnlyVerifySeconds) { [weak self] in
+            guard let self, self.activityImuInFlight, self.state.connected else { return }
+            if let last = self.lastLiveImuFrameAt, last > sentAt.addingTimeInterval(1) {
+                if !self.imuSavingOffVerifiedLogged {
+                    self.imuSavingOffVerifiedLogged = true
+                    self.log("Activity motion: IMU saving off verified - live IMU still flowing, the strap no longer banks raw IMU")
+                }
+                return
+            }
+            self.imuSavingOffFailed = true
+            self.log("Activity motion: IMU saving off stopped the live IMU - re-requesting IMU collection and keeping the banked copy")
+            self.leanRawCaptureInFlight = true
+            self.send(.toggleIMUSaving, payload: [0x01, 0x01], writeType: .withResponse)
+            self.leanRawCaptureInFlight = false
+            self.send(.toggleIMUMode, payload: [0x01, 0x01], writeType: .withResponse)
+        }
+    }
+
     private func verifyImuOnlyArm(armedAt: Date) {
         guard imuOnlyArmPendingSince == armedAt, activityImuInFlight, state.connected else { return }
         imuOnlyArmPendingSince = nil
@@ -2429,6 +2462,7 @@ public final class BLEManager: NSObject, ObservableObject {
                 imuOnlyArmVerifiedLogged = true
                 log("Activity motion: IMU-only arm verified - live IMU is flowing without the raw start")
             }
+            dropImuSavingIfPossible()
             return
         }
         imuOnlyArmFailed = true
