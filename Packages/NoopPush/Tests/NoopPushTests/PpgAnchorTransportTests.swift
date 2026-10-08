@@ -276,6 +276,12 @@ final class PpgAnchorTransportTests: XCTestCase {
         XCTAssertTrue(PushProtocol.isObjectVersion("1.5") && PushProtocol.hasPPGIdentity("1.5"))
         XCTAssertTrue(PushProtocol.hasPPGAnchor("1.5"))
         XCTAssertFalse(["1.0", "1.1", "1.2", "1.3", "1.4"].contains(where: PushProtocol.hasPPGAnchor))
+        // A sender that will not upload anchored PPG offers exactly the pre-1.5 list, so a receiver that
+        // advertises 1.5 still negotiates what it did before for that sender.
+        XCTAssertEqual(PushProtocol.acceptVersions(offeringPPGAnchor: false), "1.4,1.3,1.2,1.1,1.0")
+        XCTAssertEqual(PushProtocol.acceptVersions(offeringPPGAnchor: true), PushProtocol.capabilitiesAcceptVersions)
+        XCTAssertFalse(PushProtocol.acceptVersions(offeringPPGAnchor: false).split(separator: ",")
+            .contains(where: { PushProtocol.hasPPGAnchor(String($0)) }))
         // A scalar append at 1.5 carries the 1.3 contract: provenance is still refused.
         let step = PushAppendRecord(rowId: 1, key: ["ts": .int(100)],
             data: ["counter": .int(4), "activityClass": .null,

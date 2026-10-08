@@ -426,6 +426,8 @@ final class AppModel: ObservableObject {
         account.deviceIdProvider = { [weak self] in self?.deviceId ?? "my-whoop" }
         account.onReady = { [weak self] identity in await self?.cloudAccountReady(identity) }
         account.onAccountEnded = { [weak self] in await self?.cloudAccountEnded() }
+        // The object lane reads banked v26 rows through the app's one store handle (anchored PPG, default off).
+        PpgObjectSource.historyStore = { [weak self] in await self?.repo.storeHandle() }
         Task { await account.start() }
     }
 

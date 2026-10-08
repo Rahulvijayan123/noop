@@ -12,20 +12,29 @@ import NoopPush
 /// fleet token only for a legacy enrollment credential) and the capability negotiation header on every
 /// receiver request, plus the manifest body for intents and exactly `intent.requiredHeaders` on the
 /// presigned PUT.
+///
+/// It carries every object stream the phone uploads (raw IMU and, behind `PpgObjectUploadFeature`, anchored
+/// PPG). It offers protocol 1.5 only while `offersPpgAnchor` is true: a receiver that advertises 1.5
+/// negotiates it for the whole lane, so with the flag off the lane negotiates exactly what it did before.
 public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
     private let endpoint: URL
     private let identity: @Sendable () -> CloudPushIdentity?
     private let session: URLSession
+    private let offersPpgAnchor: @Sendable () -> Bool
     private let lock = NSLock()
     /// The negotiated protocol version, refreshed by `capabilities()`. Used as the expected
     /// version when parsing acks (the receiver echoes it).
     private var protocolVersion = PushProtocol.objectVersion
+    /// The stream of each object this transport opened, so a failed completion is labelled with its own stream.
+    private var streamsByObjectId: [String: PushBinaryTable] = [:]
 
     public init(endpoint: URL,
                 identity: @escaping @Sendable () -> CloudPushIdentity?,
-                session: URLSession? = nil) {
+                session: URLSession? = nil,
+                offersPpgAnchor: @escaping @Sendable () -> Bool = { false }) {
         self.endpoint = endpoint
         self.identity = identity
+        self.offersPpgAnchor = offersPpgAnchor
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
         configuration.timeoutIntervalForRequest = 90
@@ -54,6 +63,8 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
         let url = try objectURL(lane, objectId: nil)
         var request = try authRequest(url, method: "POST", contentType: "application/json")
         request.httpBody = try manifest.encode()
+        let table = PushBinaryTable(rawValue: manifest.stream) ?? .rawImuSession
+        lock.lock(); streamsByObjectId[manifest.objectId] = table; lock.unlock()
         let (data, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else {
             throw PushTransportException(PushFailure(code: .networkIO))
@@ -61,7 +72,7 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
         guard (200...299).contains(http.statusCode) else {
             throw PushTransportException(PushError.httpFailure(status: http.statusCode, body: data,
                                                                expectedVersion: manifest.protocolVersion,
-                                                               table: PushBinaryTable.rawImuSession))
+                                                               table: table))
         }
         return try PushObjectIntent.parse(data, expectedObjectId: manifest.objectId,
                                           expectedVersion: manifest.protocolVersion)
@@ -90,6 +101,7 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
     public func completeObject(objectId: String, lane: PushObjectLane) async throws -> PushObjectAck {
         let url = try objectURL(lane, objectId: objectId)
         let request = try authRequest(url, method: "POST", contentType: nil)
+        lock.lock(); let table = streamsByObjectId[objectId] ?? .rawImuSession; lock.unlock()
         let (data, response) = try await perform(request)
         guard let http = response as? HTTPURLResponse else {
             throw PushTransportException(PushFailure(code: .networkIO))
@@ -97,8 +109,9 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
         guard (200...299).contains(http.statusCode) else {
             throw PushTransportException(PushError.httpFailure(status: http.statusCode, body: data,
                                                                expectedVersion: negotiatedVersion(),
-                                                               table: PushBinaryTable.rawImuSession))
+                                                               table: table))
         }
+        lock.lock(); streamsByObjectId[objectId] = nil; lock.unlock()
         return try PushObjectAck.parse(data, expectedObjectId: objectId,
                                        expectedVersion: negotiatedVersion())
     }
@@ -118,7 +131,8 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
         var request = URLRequest(url: url)
         request.httpMethod = method
         CloudReceiverAuth.apply(identity, to: &request)
-        request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
+        request.setValue(PushProtocol.acceptVersions(offeringPPGAnchor: offersPpgAnchor()),
+                         forHTTPHeaderField: "noop-push-accept-version")
         if let contentType { request.setValue(contentType, forHTTPHeaderField: "Content-Type") }
         return request
     }

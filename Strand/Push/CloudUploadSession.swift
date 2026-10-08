@@ -144,6 +144,9 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
 
     /// The exact header set the deployed receiver requires.
     ///
+    /// The NDJSON lane never carries anchored PPG, so it never offers 1.5 (which a receiver negotiates for
+    /// every stream of the lane that offered it); it negotiates what it did before the object lane learned 1.5.
+    ///
     /// `Authorization` is the per-installation `noop_…` bearer. It is what binds the batch to an owner
     /// server-side (the body cannot choose another owner), and it is sufficient on its own: no shared
     /// credential is needed for an account-provisioned installation.
@@ -153,7 +156,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         request.httpMethod = "POST"
         CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
-        request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
+        request.setValue(PushProtocol.acceptVersionsWithoutPPGAnchor, forHTTPHeaderField: "noop-push-accept-version")
         if gzipped { request.setValue("gzip", forHTTPHeaderField: "Content-Encoding") }
         request.setValue(String(wireBytes), forHTTPHeaderField: "Content-Length")
         return request
@@ -165,7 +168,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         var request = URLRequest(url: endpoint)
         request.httpMethod = "GET"
         CloudReceiverAuth.apply(identity, to: &request)
-        request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
+        request.setValue(PushProtocol.acceptVersionsWithoutPPGAnchor, forHTTPHeaderField: "noop-push-accept-version")
         request.timeoutInterval = 20
         let (data, response) = try await foregroundSession.data(for: request)
         guard let http = response as? HTTPURLResponse else { throw UploadError.transport("no response") }
@@ -185,7 +188,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         request.httpMethod = "POST"
         CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
-        request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
+        request.setValue(PushProtocol.acceptVersionsWithoutPPGAnchor, forHTTPHeaderField: "noop-push-accept-version")
         // The sealed file IS the wire body (gzip applied at seal time), so what we hash, what we
         // upload and what we later delete are the same bytes.
         request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
@@ -212,7 +215,7 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         request.httpMethod = "POST"
         CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/x-ndjson", forHTTPHeaderField: "Content-Type")
-        request.setValue(PushProtocol.capabilitiesAcceptVersions, forHTTPHeaderField: "noop-push-accept-version")
+        request.setValue(PushProtocol.acceptVersionsWithoutPPGAnchor, forHTTPHeaderField: "noop-push-accept-version")
         request.setValue("gzip", forHTTPHeaderField: "Content-Encoding")
         let task = backgroundSession.uploadTask(with: request, fromFile: fileURL)
         stateLock.lock()
