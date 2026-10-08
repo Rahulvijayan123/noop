@@ -131,7 +131,7 @@ environment: `db_url` (a direct Postgres URL; the role must be able to `SET ROLE
 
 ```
 uv sync
-uv run pytest                       # unit, plumbing, Layer 1 and gait parity, PostgreSQL and end-to-end tests (91)
+uv run pytest                       # unit, plumbing, Layer 1 and gait parity, PostgreSQL and end-to-end tests (94)
 NARA_TEST_PRIME_BIN=... NARA_TEST_KERNEL_PYTHON=... uv run pytest -m prime   # end to end with Prime Agent
 ```
 
