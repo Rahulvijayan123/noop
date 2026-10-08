@@ -63,9 +63,8 @@ public struct DivergingBarChart: View {
                 height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                 calendar: Calendar = .current) {
         let window = bin == .day ? window : ChartAxis.snap(window, to: bin, calendar: calendar)
-        let finite = points.filter { $0.value.isFinite }
-        let windowed = (bin == .day ? finite : DailyBarChart.bin(finite, by: bin, aggregation: .mean, calendar: calendar))
-            .inWindow(window)
+        // Each day on its local day; two values on one day (or every day of a bin) become their mean.
+        let windowed = DailyBarChart.bin(points, by: bin, aggregation: .mean, calendar: calendar).inWindow(window)
         var axis = y
         switch y.domain {
         case .symmetric: break
@@ -163,7 +162,7 @@ public struct DivergingBarChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: bin, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,

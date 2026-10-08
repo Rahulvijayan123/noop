@@ -62,12 +62,32 @@ public enum ChartRange: String, CaseIterable, Identifiable, Hashable, Sendable {
     /// The bin for DAILY-TOTAL metrics (steps, calories, minutes) on this range: daily bars for W and M,
     /// weekly for 3M, monthly from 6M up. The same rule the steps detail already uses
     /// (`MetricDetailSteps.resolution(for:)`), so steps and every other total page agree.
+    ///
+    /// For `.all` this is always `.month`; prefer `totalsBin(for: window)`, which bins All by the span the
+    /// history actually covers.
     public var totalsBin: Calendar.Component {
         switch self {
         case .week, .month: return .day
         case .quarter: return .weekOfYear
         case .half, .year, .all: return .month
         }
+    }
+
+    /// The bin for this range's actual `window` (from `ChartAxis.window`): `totalsBin` for the fixed ranges,
+    /// and for `.all` the bin its span suits (`ChartRange.totalsBin(spanning:)`). A new user's All of three
+    /// weeks is 21 daily bars, not two fat monthly ones.
+    public func totalsBin(for window: ClosedRange<Date>, calendar: Calendar = .current) -> Calendar.Component {
+        self == .all ? Self.totalsBin(spanning: window, calendar: calendar) : totalsBin
+    }
+
+    /// The bin a window's span suits, by the same breakpoints as the fixed ranges: daily bars up to 62 days
+    /// (W, M), weekly up to 200 (3M), monthly beyond (6M, Y). Pure.
+    public static func totalsBin(spanning window: ClosedRange<Date>, calendar: Calendar = .current) -> Calendar.Component {
+        let last = window.upperBound > window.lowerBound ? window.upperBound.addingTimeInterval(-1) : window.lowerBound
+        let days = ChartDay.daysBetween(window.lowerBound, last, calendar: calendar) + 1
+        if days <= 62 { return .day }
+        if days <= 200 { return .weekOfYear }
+        return .month
     }
 }
 
@@ -80,12 +100,16 @@ public enum ChartRange: String, CaseIterable, Identifiable, Hashable, Sendable {
 /// and "All" and no "Longer ranges unlock…" helper is needed. With one option left there is nothing to
 /// choose, and the control is not drawn.
 ///
-/// The selection is coerced for DISPLAY only, never written back: a stored "Y" on a history that cannot
-/// fill a year shows as the largest range that it can, and comes back as soon as the history grows. That is
-/// the same non-destructive rule as the detail page's `ExploreRangeGating`, so the two never disagree.
+/// The selection is coerced for DISPLAY only, never written back on its own: a stored "Y" on a history that
+/// cannot fill a year shows as the largest range that it can, and comes back as soon as the history grows.
+/// That is the same non-destructive rule as the detail page's `ExploreRangeGating`, so the two never
+/// disagree. The page draws `RangeControl.effectiveRange(range, …)` (the same coercion), so the chart always
+/// shows the highlighted segment. Tapping the highlighted segment commits it (a stored "Y" shown as "3M"
+/// becomes "3M").
 ///
 /// ```swift
 /// RangeControl(selection: $range, isAvailable: { unlocked(ExploreRange($0)) })
+/// let shown = RangeControl.effectiveRange(range, isAvailable: { unlocked(ExploreRange($0)) })
 /// ```
 public struct RangeControl: View {
     /// The control's fixed height: a 32 pt segment inside the 3 pt track inset.
@@ -119,6 +143,20 @@ public struct RangeControl: View {
     /// Whether the control draws at all.
     public static func isHidden(visible: [ChartRange]) -> Bool { visible.count <= 1 }
 
+    /// The range a page should DRAW for a stored `selection`: the segment the control shows for it
+    /// (`displayedSelection`), or the selection itself when the control has nothing to show. Compute it once
+    /// and use it for the window, the axis style and the bin, so the chart always matches the highlighted
+    /// segment. Pure.
+    ///
+    /// ```swift
+    /// let shown = RangeControl.effectiveRange(range, isAvailable: { unlocked(ExploreRange($0)) })
+    /// let window = ChartAxis.window(shown, firstDataDay: points.first?.day)
+    /// ```
+    public static func effectiveRange(_ selection: ChartRange, options: [ChartRange] = ChartRange.allCases,
+                                      isAvailable: (ChartRange) -> Bool = { _ in true }) -> ChartRange {
+        displayedSelection(selection, visible: visibleOptions(options, isAvailable: isAvailable)) ?? selection
+    }
+
     /// The segment shown as selected: the selection itself when visible, else the largest visible finite
     /// range no longer than it, else the shortest visible range. Never coerces to `.all` unless that is the
     /// selection or the only option. Pure.
@@ -137,7 +175,8 @@ public struct RangeControl: View {
                 get: { Self.displayedSelection(selection, visible: visible) ?? selection },
                 set: { selection = $0 }
             )
-            SegmentedPillControl(visible, selection: shown, fillsAvailableWidth: true) { $0.label }
+            SegmentedPillControl(visible, selection: shown, fillsAvailableWidth: true, isEnabled: { _ in true },
+                                 commitsReselection: true) { $0.label }
                 .frame(height: Self.height)
                 // The segments are single letters; VoiceOver reads a picker of full names instead.
                 .accessibilityRepresentation {
