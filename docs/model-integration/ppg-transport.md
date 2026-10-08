@@ -370,6 +370,12 @@ Round-2 runs on this branch (macOS, Xcode 26.3 toolchain via `DEVELOPER_DIR`; lo
 | Sidecar envelope consumers (read-only) | `cd Tools/InferenceWorker && uv run --frozen pytest -q tests/sensor_biomarkers` | 2 failures in `test_family_dispatch.py`; on retry one passes and `test_one_broken_family_never_discards_the_others` still fails with an optional family reporting `timeout` instead of `adapter_broken`. That test builds its own request and does not read the envelope this branch regenerated |
 | iOS compile | `xcodebuild -scheme NOOPiOS -configuration Debug -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build` | BUILD SUCCEEDED |
 
+Round 3 (after fast-forwarding to the integration branch): NoopPush `xcrun swift test` 203 tests, 0 failures;
+worker `FRWHOOP_TEST_DB_URL=… xcrun swift test --filter 'PpgTransportTests|SensorBiomarker'` 81 tests,
+0 failures, 0 skipped (scratch cluster from `scripts/worker_db.py`, 193 migrations, stopped afterwards);
+sidecar `uv run --frozen pytest tests/sensor_biomarkers/{test_worker_pulse_shape_fixture,test_worker_envelope_http,test_sensor_biomarkers_ppg}.py`
+27 passed.
+
 What the phone tests prove: flag off stages nothing and the lane offers exactly `1.4,1.3,1.2,1.1,1.0` (so a
 1.5-advertising receiver negotiates 1.3); flag on with a receiver at 1.2/1.3/1.4 gets nothing; flag on at 1.5
 sends the golden's `phone_real_frames` rows, banked in a real `WhoopStore`, through the real `PushCoordinator`
