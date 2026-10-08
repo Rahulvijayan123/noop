@@ -158,6 +158,11 @@ final class Backfiller {
     /// #1008: 1-based chunk counter for the per-chunk `hist clock` diag line, so a strap log can be read
     /// as a trajectory across one offload. Reset per session alongside the clock ref above.
     private var chunkIndex = 0
+    /// Where an offload's time goes, chunk by chunk: the strap and the radio (ack to the next HISTORY_END) versus
+    /// the phone's commit (HISTORY_END to the ack). The strap sends the next burst only after the ack, so every
+    /// millisecond of commit is a millisecond the link sits idle. Logged once per session.
+    private(set) var sessionTiming = OffloadTiming()
+    private var lastAckAt: ContinuousClock.Instant?
     /// Logged once per session when the strap reports trim=0xFFFFFFFF — the "no valid flash cursor"
     /// sentinel: it has no banked history to offload (a clock/charge state, not a decode bug).
     private var loggedNoCursor = false
@@ -374,6 +379,8 @@ final class Backfiller {
         sessionClockWall = nil
         sessionUsedIdentityRef = false
         chunkIndex = 0
+        sessionTiming = OffloadTiming()
+        lastAckAt = nil
         loggedNoCursor = false
         loggedFutureRtc = false
         sessionDroppedImplausible = 0
@@ -422,6 +429,11 @@ final class Backfiller {
                 chunk.append(frame)
             }
         }
+    }
+
+    nonisolated static func ms(_ d: Duration) -> Int {
+        let c = d.components
+        return Int(c.seconds) * 1_000 + Int(c.attoseconds / 1_000_000_000_000_000)
     }
 
     /// The 8-byte `end_data` the high-freq-sync ack requires: metadata.data[10:18].
@@ -647,6 +659,13 @@ final class Backfiller {
 
     private func finishChunk(unix: UInt32, trim: UInt32, endFrame: [UInt8]) async {
         guard let endData = Backfiller.endData(from: endFrame, family: family) else { return }
+        let clock = ContinuousClock()
+        let commitStart = clock.now
+        if let lastAckAt { sessionTiming.linkMs += Self.ms(commitStart - lastAckAt) }
+        sessionTiming.bytes += chunk.reduce(endFrame.count) { $0 + $1.count }
+        // The cloud journal's copy of this chunk, written while the archive and cursor steps run and awaited
+        // before the ack. It never decides the ack, but it is still in hand before the strap frees its copy.
+        var journalCapture: Task<Void, Never>?
 
         // #773: corrupt future-RTC detection. A HISTORY_END carries the strap's own clock; a genuine offload
         // is always PAST-dated (it's banked history), so an end dated days into the future can only be a
@@ -689,7 +708,10 @@ final class Backfiller {
             let dev = ref.device, wall = ref.wall
             let oldest = sessionOldestUnix, newest = sessionNewestUnix
             let extractFn = extract   // keep the injected Extractor seam (tests override it); prod == extractHistoricalStreams
-            var d = await Task.detached(priority: .utility) { () -> DecodedChunk in
+            // `.userInitiated`, not `.utility`: the strap is idle until this chunk is acked, so this decode is on
+            // the critical path of the whole offload. Still below the UI, which the off-main move protects.
+            let decodeStart = clock.now
+            var d = await Task.detached(priority: .userInitiated) { () -> DecodedChunk in
                 let parsed = frames.map { parseFrame($0, family: fam) }
                 let decoded = extractFn(parsed, dev, wall, fam, oldest, newest)
                 let rejected = rejectedHistoricalRecords(frames, family: fam)
@@ -698,6 +720,7 @@ final class Backfiller {
                     : []
                 return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected, rawSensor: rawSensor)
             }.value
+            sessionTiming.decodeMs += Self.ms(clock.now - decodeStart)
             // A new owner's offload: whatever is dated before the pairing is read so the ack can free it, and
             // goes no further. It is cut here, after decode and before every sink below (the store, the cloud
             // journal, the reject archive, raw capture, the IMU files), so there is exactly one place where
@@ -951,11 +974,18 @@ final class Backfiller {
             // has already absorbed part of it.
             let rrCensus = RrEmissionStats.compute(decoded.rr.map { (ts: $0.ts, rrMs: $0.rrMs) })
             do {
+                let storeStart = clock.now
                 counts = try await store.insert(decoded, deviceId: deviceId)
+                sessionTiming.storeMs += Self.ms(clock.now - storeStart)
                 onBankedOffload(counts)
                 // Cloud mode only (a no-op otherwise): journal the rows now that they are banked. It never
                 // throws and never decides the ack; the local store stays the copy the strap is trimmed on.
-                await CloudCapture.recordHistory(decoded, deviceId: deviceId, family: family, clockRef: ref)
+                // It runs alongside the archive and cursor writes below (a different database) and is
+                // awaited before the ack, so the order the strap sees is unchanged.
+                let captureDeviceId = deviceId
+                journalCapture = Task(priority: .userInitiated) {
+                    _ = await CloudCapture.recordHistory(decoded, deviceId: captureDeviceId, family: fam, clockRef: ref)
+                }
             } catch {
                 // Diag (#601): the decoded rows couldn't be written — this is the "history stalls but live HR
                 // works" class. We return WITHOUT acking so the strap keeps this chunk and re-sends it next
@@ -1081,6 +1111,7 @@ final class Backfiller {
             return
         }
 
+        let cursorStart = clock.now
         do { try await store.setCursor("strap_trim", Int(trim)) } catch {
             // Diag (#601): decoded (and raw, if on) are durable but the strap_trim cursor write failed. We
             // return WITHOUT acking — acking now would let the strap trim past records the cursor hasn't
@@ -1092,8 +1123,18 @@ final class Backfiller {
             return
         }
 
+        sessionTiming.cursorMs += Self.ms(clock.now - cursorStart)
+        if let journalCapture {
+            let waitStart = clock.now
+            await journalCapture.value
+            sessionTiming.journalWaitMs += Self.ms(clock.now - waitStart)
+        }
+
         ackTrim(trim, endData)
         lastAckedTrim = trim   // #364: record the advanced cursor for the auto-continue spin-detector
+        let ackedAt = clock.now
+        lastAckAt = ackedAt
+        sessionTiming.record(commitMs: Self.ms(ackedAt - commitStart))
     }
 
     /// Called when a backfill watchdog timer fires (strap went silent mid-offload).
@@ -1102,5 +1143,43 @@ final class Backfiller {
         isBackfilling = false
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = false
+    }
+}
+
+/// Per-offload timing, split where the strap waits on the phone and where the phone waits on the strap. The
+/// strap sends a burst (about a minute of history), then waits for the ack before the next one, so the phone's
+/// commit time is pure idle link time. Measured on 2026-10-08: an eight-hour backlog took 525 bursts at about
+/// 470 ms each; this line says how much of each burst is ours.
+struct OffloadTiming: Equatable {
+    var chunks = 0
+    /// HISTORY_END to ack, per chunk: everything the phone does while the strap waits.
+    var commitMs: [Int] = []
+    /// Ack to the next HISTORY_END: the strap reading flash plus the radio carrying the burst.
+    var linkMs = 0
+    var decodeMs = 0
+    var storeMs = 0
+    var cursorMs = 0
+    /// Time the ack still waited for the cloud journal after the cursor was written.
+    var journalWaitMs = 0
+    var bytes = 0
+
+    mutating func record(commitMs ms: Int) {
+        chunks += 1
+        commitMs.append(ms)
+    }
+
+    /// One strap-log line, or nil for an offload too short to say anything about throughput.
+    func line() -> String? {
+        guard chunks >= 5 else { return nil }
+        let sorted = commitMs.sorted()
+        let median = sorted[sorted.count / 2]
+        let p90 = sorted[min(sorted.count - 1, sorted.count * 9 / 10)]
+        let commitTotal = commitMs.reduce(0, +)
+        let linkKBps = linkMs > 0 ? Double(bytes) / 1_024 / (Double(linkMs) / 1_000) : 0
+        return String(format: "Backfill: timing chunks=%d bytes=%dKB link=%.1fs (%.1f KB/s) phoneCommit=%.1fs "
+                      + "median=%dms p90=%dms [decode %.1fs, store %.1fs, cursor %.1fs, journal wait %.1fs]",
+                      chunks, bytes / 1_024, Double(linkMs) / 1_000, linkKBps, Double(commitTotal) / 1_000,
+                      median, p90, Double(decodeMs) / 1_000, Double(storeMs) / 1_000, Double(cursorMs) / 1_000,
+                      Double(journalWaitMs) / 1_000)
     }
 }
