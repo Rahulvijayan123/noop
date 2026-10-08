@@ -134,24 +134,30 @@ extension Baselines {
     /// Resolve one day's scoring baseline from a method-consistent CHILD fold and the all-method PARENT fold
     /// of the same regime (D4-04).
     ///
-    /// - The child is used alone once it is trusted (`nValid >= minNightsTrust`), or when the parent cannot
-    ///   help (absent, not usable, or no more nights than the child, i.e. the two folds saw the same data).
+    /// - The child is used alone once it is trusted (`nValid >= minNightsTrust`) and not stale, or when the
+    ///   parent cannot help (absent, not usable, or no more nights than the child, i.e. the two folds saw the
+    ///   same data).
     /// - Otherwise the centre and spread are shrunk toward the parent with a child weight that ramps
     ///   LINEARLY from 0 (no child nights) to 1 at `minNightsTrust`, so the hand-over to the child is
     ///   continuous rather than a step on the night the child becomes trusted. The result never claims
     ///   `.trusted` (it is at most `.provisional`, so Charge reads "building"), and `fallbackUsed` is set.
+    /// - A STALE child (its method has not produced a night for more than `staleDays` parent nights, e.g. a
+    ///   vendor-import-only stretch) gets weight 0: its centre is old news, and `.stale` is not usable, so
+    ///   using it alone would blank a Charge the parent can still honestly score.
     public static func resolveHierarchical(child: BaselineState, childAsOf: String?,
                                            parent: BaselineState?, parentAsOf: String?) -> AsOfBaseline {
-        guard let p = parent, p.usable, child.nValid < minNightsTrust, p.nValid > child.nValid else {
+        let childStale = child.status == .stale
+        guard let p = parent, p.usable, child.nValid < minNightsTrust || childStale,
+              p.nValid > child.nValid || childStale else {
             return AsOfBaseline(state: child, asOfDay: childAsOf, fallbackUsed: false, childWeight: 1)
         }
-        let w = Double(child.nValid) / Double(minNightsTrust)
-        let centre = child.nValid == 0 ? p.baseline : w * child.baseline + (1 - w) * p.baseline
-        let spread = child.nValid == 0 ? p.spread : w * child.spread + (1 - w) * p.spread
-        let since = child.nValid == 0 ? p.nightsSinceUpdate : Swift.min(child.nightsSinceUpdate, p.nightsSinceUpdate)
+        let w = childStale ? 0 : Double(child.nValid) / Double(minNightsTrust)
+        let centre = w == 0 ? p.baseline : w * child.baseline + (1 - w) * p.baseline
+        let spread = w == 0 ? p.spread : w * child.spread + (1 - w) * p.spread
+        let since = w == 0 ? p.nightsSinceUpdate : Swift.min(child.nightsSinceUpdate, p.nightsSinceUpdate)
         var status = computeStatus(nValid: p.nValid, nightsSinceUpdate: since)
         if status == .trusted { status = .provisional }
-        let asOf = [childAsOf, parentAsOf].compactMap { $0 }.max()
+        let asOf = (w == 0 ? [parentAsOf] : [childAsOf, parentAsOf]).compactMap { $0 }.max()
         return AsOfBaseline(state: BaselineState(baseline: centre, spread: spread, nValid: p.nValid,
                                                  nightsSinceUpdate: since, status: status),
                             asOfDay: asOf, fallbackUsed: true, childWeight: w)
@@ -201,5 +207,90 @@ extension Baselines {
         }
         return (byDay, resolveHierarchical(child: child.end, childAsOf: child.endAsOfDay,
                                            parent: parent.end, parentAsOf: parent.endAsOfDay))
+    }
+}
+
+// MARK: - Charge (recovery) baselines, as of each night
+
+/// The four Charge baselines a night is scored against, all CAUSAL (built only from nights before it).
+public struct ChargeBaselineSnapshot: Sendable {
+    /// Ready to hand to `RecoveryScorer` / `ScoreConfidence.charge`. `resp` and `skinTemp` are nil unless
+    /// usable (the scorer includes those terms whenever a baseline object is present, so a calibrating one
+    /// must not reach it); `hrv` and `restingHR` are always present (the scorer applies their gates).
+    public let profile: AnalyticsEngine.ProfileBaselines
+    /// Newest night folded behind the HRV baseline (the headline driver), or nil when none preceded it.
+    public let hrvAsOfDay: String?
+    /// True when ANY of the HRV / resting-HR / respiration baselines used the method fallback (the
+    /// NOOP-computed child was thin or stale, so it was shrunk toward the vendor-import parent).
+    public let fallbackUsed: Bool
+
+    public init(profile: AnalyticsEngine.ProfileBaselines, hrvAsOfDay: String?, fallbackUsed: Bool) {
+        self.profile = profile
+        self.hrvAsOfDay = hrvAsOfDay
+        self.fallbackUsed = fallbackUsed
+    }
+}
+
+extension Baselines {
+
+    /// The causal Charge baselines for every night in a history, plus the end-of-history snapshot for
+    /// forward-looking displays (D4-01, D4-V02, D4-04).
+    ///
+    /// - `imported*`: vendor-import nightly values (they win the day in the all-method PARENT).
+    /// - `computed*`: NOOP's own nightly values (the method the scored nights use: the CHILD). Skin is
+    ///   on-device only, so it is a single-method fold.
+    /// - `sourceByDay`: each day's WINNING source id (see `deviceEraEpoch`). HRV, resting HR and
+    ///   respiration restart at every brand-era boundary; skin keeps its pre-existing epoch-only scope.
+    /// - `hrvEpoch` scopes HRV; `recoveryEpoch` scopes resting HR, respiration and skin (the manual
+    ///   Recalibrate epochs, passed explicitly so the caller reads each preference once).
+    ///
+    /// The merged parent follows `IntelligenceEngine.mergeNightlyIntoHistory`: an imported NON-nil value
+    /// wins; a nil or absent import slot takes the computed value.
+    public static func chargeBaselinesAsOf(
+        importedHrv: [String: Double?], importedRhr: [String: Double?], importedResp: [String: Double?],
+        computedHrv: [String: Double?], computedRhr: [String: Double?], computedResp: [String: Double?],
+        computedSkin: [String: Double?],
+        sourceByDay: [String: String], defaultSource: String,
+        hrvEpoch: Double, recoveryEpoch: Double
+    ) -> (byDay: [String: ChargeBaselineSnapshot], end: ChargeBaselineSnapshot) {
+        func merged(_ imp: [String: Double?], _ comp: [String: Double?]) -> [String: Double?] {
+            var m = imp
+            for (day, v) in comp {
+                if let existing = m[day], existing != nil { continue }
+                m[day] = v
+            }
+            return m
+        }
+        let hrv = regimeScopedAsOf(merged: merged(importedHrv, computedHrv), computed: computedHrv,
+                                   sourceByDay: sourceByDay, defaultSource: defaultSource,
+                                   cfg: hrvCfg, baselineEpoch: hrvEpoch)
+        let rhr = regimeScopedAsOf(merged: merged(importedRhr, computedRhr), computed: computedRhr,
+                                   sourceByDay: sourceByDay, defaultSource: defaultSource,
+                                   cfg: restingHRCfg, baselineEpoch: recoveryEpoch)
+        let resp = regimeScopedAsOf(merged: merged(importedResp, computedResp), computed: computedResp,
+                                    sourceByDay: sourceByDay, defaultSource: defaultSource,
+                                    cfg: respCfg, baselineEpoch: recoveryEpoch)
+        let skinCfg = metricCfg["skin_temp"]!
+        let skinKeys = computedSkin.keys.sorted()
+        let skin = foldHistoryAsOfDetailed(skinKeys.map { computedSkin[$0] ?? nil }, dayKeys: skinKeys,
+                                           cfg: skinCfg, baselineEpoch: recoveryEpoch)
+
+        func snapshot(_ h: AsOfBaseline?, _ r: AsOfBaseline?, _ rs: AsOfBaseline?,
+                      _ sk: BaselineState?) -> ChargeBaselineSnapshot {
+            let profile = AnalyticsEngine.ProfileBaselines(
+                hrv: h?.state ?? emptyState(hrvCfg),
+                restingHR: r?.state ?? emptyState(restingHRCfg),
+                resp: (rs?.state).flatMap { $0.usable ? $0 : nil },
+                skinTemp: sk.flatMap { $0.usable ? $0 : nil })
+            let fb = (h?.fallbackUsed ?? false) || (r?.fallbackUsed ?? false) || (rs?.fallbackUsed ?? false)
+            return ChargeBaselineSnapshot(profile: profile, hrvAsOfDay: h?.asOfDay, fallbackUsed: fb)
+        }
+        var days = Set(hrv.byDay.keys)
+        days.formUnion(rhr.byDay.keys); days.formUnion(resp.byDay.keys); days.formUnion(skin.before.keys)
+        var byDay: [String: ChargeBaselineSnapshot] = [:]
+        for d in days {
+            byDay[d] = snapshot(hrv.byDay[d], rhr.byDay[d], resp.byDay[d], skin.before[d] ?? emptyState(skinCfg))
+        }
+        return (byDay, snapshot(hrv.end, rhr.end, resp.end, skin.end))
     }
 }

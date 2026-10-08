@@ -207,4 +207,83 @@ final class BaselinesAsOfTests: XCTestCase {
         XCTAssertEqual(Baselines.foldHistory(v, dayKeys: keys, cfg: cfg, baselineEpoch: 0, rejectHardOutliers: false),
                        Baselines.foldHistory(v, cfg: cfg, rejectHardOutliers: false))
     }
+
+    // MARK: Stale child + the Charge snapshot helper
+
+    /// A NOOP history that went quiet through a long vendor-import-only stretch is STALE (not usable):
+    /// scoring against it alone would blank a Charge the parent can still score, so it falls back fully.
+    func testStaleChildFallsBackToTheParent() {
+        var merged: [String: Double?] = [:]
+        var computed: [String: Double?] = [:]
+        for i in 0..<20 { merged[key(i)] = 60; computed[key(i)] = 60 }       // NOOP nights
+        for i in 20..<40 { merged[key(i)] = 70; computed[key(i)] = .some(nil) } // vendor-only stretch
+        merged[key(40)] = 62; computed[key(40)] = 62
+        let r = Baselines.regimeScopedAsOf(merged: merged, computed: computed, sourceByDay: [:],
+                                           defaultSource: "my-whoop", cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        let d = r.byDay[key(40)]!
+        XCTAssertTrue(d.fallbackUsed)
+        XCTAssertEqual(d.childWeight, 0)
+        XCTAssertTrue(d.state.usable, "the parent still scores the night")
+    }
+
+    /// The engine-facing helper: night 31 (40 ms after 30 nights at 60) is scored against nights 1-30 only,
+    /// its snapshot is unchanged when nights 32-40 arrive, and the end state is the forward-looking fold.
+    func testChargeSnapshotIsCausalAndStableUnderAppend() {
+        func run(_ n: Int) -> (byDay: [String: ChargeBaselineSnapshot], end: ChargeBaselineSnapshot) {
+            var hrv: [String: Double?] = [:], rhr: [String: Double?] = [:]
+            var resp: [String: Double?] = [:], skin: [String: Double?] = [:]
+            for i in 0..<n {
+                hrv[key(i)] = i < 30 ? 60 : 40
+                rhr[key(i)] = i < 30 ? 50 : 58
+                resp[key(i)] = 15
+                skin[key(i)] = 33.5
+            }
+            return Baselines.chargeBaselinesAsOf(
+                importedHrv: [:], importedRhr: [:], importedResp: [:],
+                computedHrv: hrv, computedRhr: rhr, computedResp: resp, computedSkin: skin,
+                sourceByDay: [:], defaultSource: "my-whoop", hrvEpoch: 0, recoveryEpoch: 0)
+        }
+        let a = run(31), b = run(40)
+        let causalHrv = Baselines.foldHistory(Array(repeating: 60, count: 30), cfg: Baselines.hrvCfg)
+        XCTAssertEqual(a.byDay[key(30)]?.profile.hrv, causalHrv)
+        XCTAssertEqual(b.byDay[key(30)]?.profile.hrv, causalHrv)
+        XCTAssertEqual(b.byDay[key(30)]?.profile.restingHR, a.byDay[key(30)]?.profile.restingHR)
+        XCTAssertEqual(b.byDay[key(30)]?.profile.resp, a.byDay[key(30)]?.profile.resp)
+        XCTAssertEqual(b.byDay[key(30)]?.profile.skinTemp, a.byDay[key(30)]?.profile.skinTemp)
+        XCTAssertEqual(b.byDay[key(30)]?.hrvAsOfDay, key(29))
+        XCTAssertEqual(b.byDay[key(30)]?.fallbackUsed, false)
+        // The recovery a scorer derives from the snapshot is therefore identical too.
+        func charge(_ s: ChargeBaselineSnapshot?) -> Double? {
+            guard let p = s?.profile, let h = p.hrv else { return nil }
+            return RecoveryScorer.recovery(hrv: 40, rhr: 58, resp: 15, hrvBaseline: h, rhrBaseline: p.restingHR,
+                                           respBaseline: p.resp, sleepPerf: 0.85, skinTempDev: nil)
+        }
+        XCTAssertNotNil(charge(a.byDay[key(30)]))
+        XCTAssertEqual(charge(a.byDay[key(30)]), charge(b.byDay[key(30)]))
+        XCTAssertNotEqual(charge(b.byDay[key(30)]), charge(b.end), "the end-of-history state differs")
+        // A day before any night has no usable baseline (honest cold start), never the end state.
+        XCTAssertEqual(b.byDay[key(0)]?.profile.hrv?.nValid, 0)
+        XCTAssertNil(b.byDay[key(0)]?.profile.resp)
+        XCTAssertNil(b.byDay[key(2)]?.profile.skinTemp, "a calibrating skin baseline never reaches the scorer")
+    }
+
+    /// Oura import history then WHOOP strap nights: the strap nights' HRV and RHR baselines restart at the
+    /// brand boundary (D4-04: era scoping now applies to HRV and resting HR, not just respiration).
+    func testChargeSnapshotScopesHrvAndRhrToTheDeviceEra() {
+        var hrv: [String: Double?] = [:], rhr: [String: Double?] = [:], src: [String: String] = [:]
+        for i in 0..<70 {
+            hrv[key(i)] = i < 60 ? 40 : 60
+            rhr[key(i)] = i < 60 ? 62 : 52
+            src[key(i)] = i < 60 ? "oura-import" : "my-whoop"
+        }
+        let r = Baselines.chargeBaselinesAsOf(
+            importedHrv: [:], importedRhr: [:], importedResp: [:],
+            computedHrv: hrv, computedRhr: rhr, computedResp: [:], computedSkin: [:],
+            sourceByDay: src, defaultSource: "my-whoop", hrvEpoch: 0, recoveryEpoch: 0)
+        XCTAssertEqual(r.end.profile.hrv?.baseline ?? 0, 60, accuracy: 0.5)
+        XCTAssertEqual(r.end.profile.restingHR?.baseline ?? 0, 52, accuracy: 0.5)
+        XCTAssertEqual(r.byDay[key(65)]?.profile.hrv?.nValid, 5)
+        XCTAssertEqual(r.byDay[key(30)]?.profile.hrv?.baseline ?? 0, 40, accuracy: 0.5,
+                       "an Oura-era night is judged against its own era")
+    }
 }

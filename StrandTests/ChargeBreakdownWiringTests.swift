@@ -112,4 +112,50 @@ final class ChargeBreakdownWiringTests: XCTestCase {
         XCTAssertEqual(implicit?.drivers.map(\.baselineText), explicitZero?.drivers.map(\.baselineText))
         XCTAssertEqual(implicit?.drivers.map(\.deltaPoints), explicitZero?.drivers.map(\.deltaPoints))
     }
+
+    /// D4-02: a past day opened from the day picker is explained against the days BEFORE it only. Ten
+    /// later days at a very different HRV / resting HR must not move its rows or its tier.
+    func testLaterDaysDoNotMoveAPastDaysBreakdown() {
+        let past = (1...20).map { day(String(format: "2026-01-%02d", $0), hrv: 60 + Double($0 % 3), rhr: 50) }
+        let shown = day("2026-01-21", hrv: 45, rhr: 58, recovery: 30)
+        let later = (22...31).map { day(String(format: "2026-01-%02d", $0), hrv: 30, rhr: 70) }
+        let alone = ChargeBreakdownWiring.breakdown(days: past + [shown], row: shown, sleepPerfPercent: 85)
+        let withLater = ChargeBreakdownWiring.breakdown(days: past + [shown] + later, row: shown,
+                                                        sleepPerfPercent: 85)
+        XCTAssertNotNil(alone)
+        XCTAssertEqual(alone?.drivers.map(\.baselineText), withLater?.drivers.map(\.baselineText))
+        XCTAssertEqual(alone?.drivers.map(\.deltaPoints), withLater?.drivers.map(\.deltaPoints))
+        XCTAssertEqual(alone?.confidence, withLater?.confidence)
+    }
+
+    /// D4-02: the shown night itself is not part of its own baseline (no self-inclusion).
+    func testTheShownNightIsNotInItsOwnBaseline() {
+        let past = (1...20).map { day(String(format: "2026-01-%02d", $0), hrv: 60) }
+        let a = ChargeBreakdownWiring.breakdown(days: past + [day("2026-01-21", hrv: 40)],
+                                                row: day("2026-01-21", hrv: 40), sleepPerfPercent: 85)
+        let b = ChargeBreakdownWiring.breakdown(days: past + [day("2026-01-21", hrv: 90)],
+                                                row: day("2026-01-21", hrv: 40), sleepPerfPercent: 85)
+        let hrvText: ((drivers: [ChargeDriver], confidence: ScoreConfidence)?) -> String? = {
+            $0?.drivers.first(where: { $0.label == "Heart rate variability" })?.baselineText
+        }
+        XCTAssertNotNil(hrvText(a))
+        XCTAssertEqual(hrvText(a), hrvText(b))
+    }
+
+    /// D4-02: resting HR honours the Charge-wide recalibration epoch, as the engine's headline does.
+    func testRestingHrBaselineHonoursTheRecoveryEpoch() {
+        let old = (1...10).map { day(String(format: "2026-01-%02d", $0), rhr: 70) }
+        let since = (11...20).map { day(String(format: "2026-01-%02d", $0), rhr: 50) }
+        let today = day("2026-01-21", rhr: 51, recovery: 70)
+        let rhrRow: ((drivers: [ChargeDriver], confidence: ScoreConfidence)?) -> ChargeDriver? = {
+            $0?.drivers.first(where: { $0.label == "Resting heart rate" })
+        }
+        let whole = rhrRow(ChargeBreakdownWiring.breakdown(days: old + since + [today], row: today,
+                                                           sleepPerfPercent: 85))
+        let fromEpoch = rhrRow(ChargeBreakdownWiring.breakdown(days: old + since + [today], row: today,
+                                                               sleepPerfPercent: 85,
+                                                               recoveryBaselineEpoch: epochOf("2026-01-11")))
+        XCTAssertNotNil(whole); XCTAssertNotNil(fromEpoch)
+        XCTAssertNotEqual(whole?.baselineText, fromEpoch?.baselineText)
+    }
 }
