@@ -32,17 +32,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
 
     /// The inputs fixtures resource (same file-system lookup the inputs tests use).
     private func ppgWireFixtureResource() throws -> Data {
-        if let dir = ProcessInfo.processInfo.environment["FRWHOOP_SENSOR_FIXTURE_DIR"], !dir.isEmpty,
-           FileManager.default.fileExists(atPath: dir + "/sensor_biomarkers_ppg_wire.json") {
-            return try Data(contentsOf: URL(fileURLWithPath: dir + "/sensor_biomarkers_ppg_wire.json"))
-        }
-        for candidate in [
-            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sensor_biomarkers_ppg_wire.json",
-            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers_ppg_wire.json",
-        ] where FileManager.default.fileExists(atPath: candidate) {
-            return try Data(contentsOf: URL(fileURLWithPath: candidate))
-        }
-        throw SensorBiomarkerLane.SensorBiomarkerError.deterministic("ppg_wire_fixture_missing")
+        try SensorFixturePaths.data(SensorFixturePaths.sensor("sensor_biomarkers_ppg_wire.json"))
     }
 
     private func hexData(_ hex: String) -> Data {
@@ -499,7 +489,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         guard case .object(var obj) = stageJSON(
             family: "movement", status: "ok", observed: Double(epochs.count) * 5,
             measurements: ["low_movement_bout_count": ["value": boutCount, "unit": "count"]]) else {
-            throw XCTSkip("stage fixture")
+            XCTFail("stage fixture is not an object"); throw SensorFixturePaths.Missing(path: "movement stage")
         }
         obj["calibrated"] = .bool(true)
         obj["enmo_epochs"] = .array(epochs.map { .array([.double($0.0), .double($0.1)]) })
@@ -720,10 +710,67 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         let b = try pulseStage(configurations: [block("cfg-A", accepted: 4, counts: [4, 0, 0], median: 5)], top: top)
         guard case .object(let same) = try SensorBiomarkerFamilyStage.merge([a, b]).measurements else { return XCTFail() }
         XCTAssertNotNil(same["pulse_amplitude_median_au"], "one known identity all day: the top level still merges")
+        // An amplitude member on an unidentified configuration (no sidecar emits one) never reaches the day.
         let u1 = try pulseStage(configurations: [block("unknown", accepted: 4, counts: [4, 0, 0], median: 5)], top: top)
         let u2 = try pulseStage(configurations: [block("unknown", accepted: 4, counts: [4, 0, 0], median: 5)], top: top)
-        guard case .object(let unknown) = try SensorBiomarkerFamilyStage.merge([u1, u2]).measurements else { return XCTFail() }
-        XCTAssertTrue(unknown.isEmpty, "unknown configurations are never pooled across runs")
+        let smuggled = try SensorBiomarkerFamilyStage.merge([u1, u2])
+        guard case .object(let unknown) = smuggled.measurements else { return XCTFail() }
+        XCTAssertNil(unknown["pulse_amplitude_median_au"], "amplitude of an unidentified configuration is never pooled")
+        XCTAssertEqual(unknown["pulse_accepted_count"].flatMap { if case .object(let f) = $0 { return f["value"] }; return nil },
+                       .double(8))
+    }
+
+    /// Real v26 days are always `config.identity: "unknown"`. Two hours of the sidecar's own pulse_shape
+    /// output for such segments (`sidecar_pulse_shape_unknown_stages.json`, written by the sidecar's
+    /// `test_worker_pulse_shape_fixture.py` from the golden request envelope's config/clock members) must
+    /// give the day the gain-independent measurements at the top level, pooled from the bins with every
+    /// accepted pulse counted once, and never an amplitude.
+    func testUnknownIdentityDayPoolsGainIndependentPulseShapeFromTheRealSidecarOutput() throws {
+        let data = try SensorFixturePaths.data(SensorFixturePaths.sensor("sidecar_pulse_shape_unknown_stages.json"))
+        // Decoded the way the lane decodes the sidecar's HTTP body (JSONDecoder), not through
+        // JSONSerialization, whose NSNumber 0/1 would read as booleans.
+        guard case .array(let list) = try JSONDecoder().decode(JSONValue.self, from: data) else {
+            return XCTFail("fixture is a list of stages")
+        }
+        let stages = try list.map { try SensorBiomarkerFamilyStage.parse(family: "pulse_shape", $0) }
+        XCTAssertEqual(stages.count, 2)
+        func value(_ stage: SensorBiomarkerFamilyStage, _ key: String) -> Double? {
+            guard case .object(let m) = stage.measurements, case .object(let f)? = m[key] else { return nil }
+            return f["value"]?.doubleValue
+        }
+        let hourly = stages.compactMap { value($0, "pulse_upstroke_median_ms") }
+        let accepted = stages.compactMap { value($0, "pulse_accepted_count") }
+        XCTAssertEqual(hourly.count, 2)
+        XCTAssertNotEqual(hourly[0], hourly[1], "the fixture's hours differ, so the day value must be pooled")
+
+        let day = try SensorBiomarkerFamilyStage.merge(stages)
+        guard case .object(let top) = day.measurements else { return XCTFail("measurements") }
+        XCTAssertFalse(top.isEmpty, "the phone reads only the top level; it must not be empty for a v26 day")
+        XCTAssertTrue(top.keys.allSatisfy(SensorBiomarkerFamilyStage.gainIndependentPulseKeys.contains))
+        XCTAssertFalse(top.keys.contains { $0.hasPrefix("pulse_amplitude") })
+        XCTAssertEqual(value(day, "pulse_accepted_count"), accepted.reduce(0, +), "every accepted pulse counts once")
+        guard case .object(let upstroke)? = top["pulse_upstroke_median_ms"] else { return XCTFail("upstroke") }
+        XCTAssertEqual(upstroke["aggregation"]?.stringValue, "pooled-day-bins")
+        XCTAssertEqual(upstroke["count"]?.intValue, Int(accepted.reduce(0, +)))
+        let pooled = try XCTUnwrap(upstroke["value"]?.doubleValue)
+        XCTAssertGreaterThanOrEqual(pooled, hourly.min()! - 10, "within one bin of the hours' own medians")
+        XCTAssertLessThanOrEqual(pooled, hourly.max()! + 10)
+        XCTAssertNotNil(top["pulse_width50_iqr_ms"], "IQR re-derived from the pooled bins")
+        XCTAssertEqual(day.extra["pooled_across_configurations"], .bool(false))
+        XCTAssertEqual(day.extra["top_level_scope"]?.stringValue, "gain_independent_pooled_across_unidentified_runs")
+        guard case .array(let blocks)? = day.extra["configurations"], blocks.count == 1,
+              case .object(let block) = blocks[0] else { return XCTFail("one merged unknown block") }
+        XCTAssertEqual(block["configuration"]?.stringValue, "unknown")
+        XCTAssertEqual(block["accepted"]?.intValue, Int(accepted.reduce(0, +)))
+        XCTAssertEqual(block["runs"]?.intValue, 4)
+        // Amplitude stays per run, from every request.
+        guard case .object(let runAmplitudes)? = day.extra["run_amplitudes"] else { return XCTFail("run_amplitudes") }
+        XCTAssertEqual(runAmplitudes["configuration"]?.stringValue, "unknown")
+        XCTAssertEqual(runAmplitudes["runs"]?.intValue, 4)
+        guard case .array(let listed)? = runAmplitudes["listed"] else { return XCTFail("listed runs") }
+        XCTAssertEqual(listed.count, 4, "every request's runs, each with its own amplitude")
+        // What is published carries no internal bins.
+        XCTAssertNil(day.withoutInternalFields().extra["distributions"])
     }
 
     func testFamiliesWithoutInputAreWithheldWithTheCoverageReason() {
@@ -1136,9 +1183,8 @@ final class SensorBiomarkerLaneTests: XCTestCase {
     /// decoded with its anchor, sent as 25 Hz segments that carry run, configuration and clock
     /// identity, and published with the day's actual input coverage.
     func testAnchoredGoldenObjectReachesTheSidecarWithRunConfigAndClock() throws {
-        let goldenURL = URL(fileURLWithPath: "../../Packages/NoopPush/Tests/NoopPushTests/Resources/ppg_anchor_v3_golden.json")
-        guard FileManager.default.fileExists(atPath: goldenURL.path) else { throw XCTSkip("ppg anchor golden not found") }
-        let golden = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(contentsOf: goldenURL)) as? [String: Any])
+        let golden = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: SensorFixturePaths.data(SensorFixturePaths.ppgAnchorGolden)) as? [String: Any])
         let vector = try XCTUnwrap((golden["vectors"] as? [[String: Any]])?.first { $0["name"] as? String == "phone_real_frames" })
         let db = try connect()
         let f = try makeFixture(db: db, day: "2026-06-08", dayStart: 1_780_876_800)
@@ -1201,6 +1247,59 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         try? db.exec("delete from auth.users where id = '\(f.user)'")
     }
 
+    /// One PPG object whose verified bytes disagree with their recorded schema (format 3 bytes admitted
+    /// as schema 2) is skipped and counted; the day still publishes, IMU families included.
+    func testABadPpgObjectIsSkippedAndCountedNotTheWholeDay() throws {
+        let golden = try XCTUnwrap(JSONSerialization.jsonObject(
+            with: SensorFixturePaths.data(SensorFixturePaths.ppgAnchorGolden)) as? [String: Any])
+        let vector = try XCTUnwrap((golden["vectors"] as? [[String: Any]])?.first { $0["name"] as? String == "phone_real_frames" })
+        let db = try connect()
+        let f = try makeFixture(db: db, day: "2026-06-08", dayStart: 1_780_876_800)
+        let imuID = UUID().uuidString.lowercased()
+        let imuSeconds = (0..<300).map { f.dayStart + Int64($0) }
+        let imuDigest = try seedImuObject(f, seconds: imuSeconds, objectID: imuID)
+        let ppgID = UUID().uuidString.lowercased()
+        let ppgDigest = try XCTUnwrap(vector["decoded_sha256"] as? String)
+        _ = try f.db.query("""
+            insert into public.object_manifests(id,user_id,device_id,object_class,object_kind,object_key,
+              start_at,end_at,sha256,sha256_source,status,verified_at,durability_receipt,
+              schema_version,push_protocol_version)
+            values($1::uuid,$2::uuid,$3::uuid,'raw','ppgWaveformSample',$4::text,
+              to_timestamp(1780917232),to_timestamp(1780918393),$5::text,'server_verified','ready',clock_timestamp(),
+              jsonb_build_object('state','verified_indexed'),2,'1.3')
+            """, [ppgID, f.user, f.device, "sb-test-\(ppgID)", ppgDigest])
+        let families = ["movement", "pulse_shape"]
+        let fp = try fingerprintSQL(f, digests: [imuDigest, ppgDigest].sorted())
+        try enqueue(f, objectID: imuID, digest: imuDigest, fingerprint: fp, families: families)
+        let server = StubHTTPServer { _ in .json(self.okEnvelope()) }
+        defer { server.stop() }
+        var lane = SensorBiomarkerLane(db: f.db, storage: B2Storage(keyID: "unused", applicationKey: "unused", bucket: "unused"),
+                                       inference: InferenceClient(baseURL: URL(string: server.baseURL)!, timeoutMS: 5000),
+                                       leaseSeconds: 300, families: families)
+        let ppgWire = try XCTUnwrap(Data(base64Encoded: try XCTUnwrap(vector["wire_base64"] as? String)))
+        let imuWire = try syntheticImu(seconds: imuSeconds).zstd
+        lane.downloadObject = { key in key == "sb-test-\(ppgID)" ? ppgWire : imuWire }
+        lane.drain(budget: 1)
+
+        XCTAssertEqual(lane.stats.failed, 0, "one bad object does not fail the day")
+        XCTAssertEqual(lane.stats.ppgObjectsSkipped, 1)
+        let row = try f.db.query(
+            "select document->'families'->'movement'->>'status' as movement, "
+            + "document->'families'->'pulse_shape'->>'status' as pulse, "
+            + "document->'input_coverage'->'ppg'->'objects_skipped'->>'ppg_object_format_mismatch' as skipped "
+            + "from public.sensor_biomarker_days where user_id=$1::uuid and device_id=$2::uuid",
+            [f.user, f.device]).first ?? [:]
+        XCTAssertEqual(row["movement"], "ok", "the IMU families still run")
+        XCTAssertEqual(row["pulse"], "withheld", "no readable PPG: the PPG family is withheld, not invented")
+        XCTAssertEqual(row["skipped"], "1")
+        XCTAssertTrue(server.servedRequests.allSatisfy { request in
+            let input = ((try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any])?["input"] as? [String: Any]
+            return input?["ppg"] == nil
+        }, "nothing of the skipped object reaches the sidecar")
+        db.rollbackTransaction()
+        try? db.exec("delete from auth.users where id = '\(f.user)'")
+    }
+
     /// A busy sidecar (HTTP 429 `busy`) defers the job: no day row, no failure accounted, the lease
     /// shortened to the retry delay so the job comes back, and the lane stops claiming this wake.
     func testBusySidecarDefersWithoutConsumingFailures() throws {
@@ -1214,6 +1313,8 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         let server = StubHTTPServer { _ in .json("{\"status\":\"error\",\"error\":{\"code\":\"busy\"}}", status: 429) }
         defer { server.stop() }
         var lane = makeLane(f: f, server: server, zstdByKey: ["sb-test-\(objectID)": zstd])
+        var waits: [TimeInterval] = []
+        lane.sleep = { waits.append($0) }
         lane.drain(budget: 2)
         XCTAssertEqual(try dayCount(f), 0, "a busy answer is never stored as a result")
         let job = try jobRow(f)
@@ -1224,11 +1325,65 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         let remaining = try db.query("select extract(epoch from lease_until - clock_timestamp())::int::text as s "
             + "from public.sensor_biomarker_jobs where user_id=$1::uuid and device_id=$2::uuid", [f.user, f.device])
         XCTAssertLessThanOrEqual(Int(remaining.first?["s"] ?? "") ?? 999, SensorBiomarkerLane.busyRetrySeconds)
-        XCTAssertEqual(lane.stats.sidecarBusy, 1)
+        let attempts = 1 + SensorBiomarkerLane.busyRetriesPerRequest
+        XCTAssertEqual(lane.stats.sidecarBusy, attempts)
         XCTAssertEqual(lane.stats.deferredBusy, 1)
         XCTAssertEqual(lane.stats.failed, 0)
         XCTAssertEqual(lane.stats.sidecarFailures, 0)
-        XCTAssertEqual(server.requestCount, 1, "the wake stops at the first busy answer")
+        XCTAssertEqual(server.requestCount, attempts, "bounded retries of the one request, then the wake stops")
+        XCTAssertEqual(waits, Array(repeating: TimeInterval(InferenceClient.defaultBusyRetryAfterSeconds),
+                                    count: SensorBiomarkerLane.busyRetriesPerRequest),
+                       "each retry waits the busy answer's Retry-After (the client default when absent)")
+        db.rollbackTransaction()
+        try? db.exec("delete from auth.users where id = '\(f.user)'")
+    }
+
+    /// A busy answer on a later hour keeps the earlier hours' answers: the job resumes on its next claim
+    /// and sends only the request still unanswered, so a host the scoring lane keeps busy still finishes.
+    func testBusyLaterHourKeepsEarlierHoursAcrossTheDeferral() throws {
+        let db = try connect()
+        let f = try makeFixture(db: db)
+        let objectID = UUID().uuidString.lowercased()
+        let seconds = (0..<300).map { f.dayStart + Int64($0) } + (0..<300).map { f.dayStart + 3_600 + Int64($0) }
+        let digest = try seedImuObject(f, seconds: seconds, objectID: objectID)
+        let fp = try fingerprintSQL(f, digests: [digest])
+        try enqueue(f, objectID: objectID, digest: digest, fingerprint: fp)
+        let zstd = try syntheticImu(seconds: seconds).zstd
+        let secondHour = SensorBiomarkerLane.iso(f.dayStart + 3_600)
+        final class Script: @unchecked Sendable {
+            let lock = NSLock()
+            var secondHourBusy = true
+            var starts: [String] = []
+        }
+        let script = Script()
+        let server = StubHTTPServer { request in
+            let object = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any]
+            let start = ((object?["context"] as? [String: Any])?["interval_start_utc"] as? String) ?? ""
+            script.lock.lock(); defer { script.lock.unlock() }
+            script.starts.append(start)
+            if start == secondHour && script.secondHourBusy {
+                return .json("{\"status\":\"error\",\"error\":{\"code\":\"busy\"}}", status: 429)
+            }
+            return .json(self.okEnvelope())
+        }
+        defer { server.stop() }
+        var lane = makeLane(f: f, server: server, zstdByKey: ["sb-test-\(objectID)": zstd])
+        lane.sleep = { _ in }
+        lane.drain(budget: 1)
+        XCTAssertEqual(try dayCount(f), 0, "busy: nothing published, nothing failed")
+        XCTAssertEqual(try jobRow(f)["consecutive_failures"], "0")
+        let firstPass = script.starts
+        XCTAssertEqual(firstPass.filter { $0 != secondHour }.count, 1, "the first hour was answered once")
+        XCTAssertEqual(firstPass.filter { $0 == secondHour }.count, 1 + SensorBiomarkerLane.busyRetriesPerRequest)
+
+        // The host frees up; the deferred lease runs out and the job is claimed again.
+        script.lock.lock(); script.secondHourBusy = false; script.starts = []; script.lock.unlock()
+        _ = try db.query("update public.sensor_biomarker_jobs set lease_until = clock_timestamp() - interval '1 second' "
+            + "where user_id=$1::uuid and device_id=$2::uuid", [f.user, f.device])
+        lane.backoffUntil = nil
+        lane.drain(budget: 1)
+        XCTAssertEqual(script.starts, [secondHour], "only the unanswered hour is sent again")
+        XCTAssertEqual(try dayCount(f), 1, "the day publishes from both hours")
         db.rollbackTransaction()
         try? db.exec("delete from auth.users where id = '\(f.user)'")
     }

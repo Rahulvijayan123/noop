@@ -16,30 +16,10 @@ final class SensorBiomarkerInputsTests: XCTestCase {
 
     // MARK: - Fixture loading
 
-    private func sensorFixturePath(_ name: String) -> String? {
-        if let dir = ProcessInfo.processInfo.environment["FRWHOOP_SENSOR_FIXTURE_DIR"], !dir.isEmpty {
-            let p = dir + "/" + name
-            if FileManager.default.fileExists(atPath: p) { return p }
-        }
-        let candidates = [
-            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers/" + name,
-            "Tests/frwhoop-workerTests/Resources/" + name,
-        ]
-        for c in candidates where FileManager.default.fileExists(atPath: c) {
-            return c
-        }
-        return nil
-    }
-
     private func sensorJSON(_ name: String) throws -> [String: Any] {
-        guard let path = sensorFixturePath(name) else {
-            throw XCTSkip("sensor-biomarker fixture \(name) not found; set FRWHOOP_SENSOR_FIXTURE_DIR")
-        }
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        guard let obj = (try JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            throw XCTSkip("fixture \(name) is not a JSON object")
-        }
-        return obj
+        let data = try SensorFixturePaths.data(SensorFixturePaths.sensor(name))
+        return try XCTUnwrap((try JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                             "fixture \(name) is not a JSON object")
     }
 
     private func hexData(_ hex: String) -> Data {

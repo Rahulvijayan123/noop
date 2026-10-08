@@ -234,6 +234,16 @@ final class PpgAnchorTransportTests: XCTestCase {
             rowCount: anchored.count, ppgIdentityV2: true, nextRow: { iterator.next() }, consume: { _ in }))
     }
 
+    func testRecordIndexIsBoundedToU32LikeEveryDecoder() throws {
+        func pack(_ index: Int64) throws -> Data {
+            try PushBinaryCodec.pack(table: .ppgWaveformSample, rows: [.ppgWaveform(.init(rowId: 1, ts: 1_800_000_000,
+                burstIndex: nil, samples: Self.deltas([1, 2]), recordIndex: index))], ppgIdentityV2: true)
+        }
+        XCTAssertEqual(try PushBinaryCodec.unpackPpgRecords(try pack(Int64(UInt32.max))).first?.recordIndex, Int64(UInt32.max))
+        XCTAssertThrowsError(try pack(Int64(UInt32.max) + 1), "the receiver and the worker refuse an index above u32")
+        XCTAssertThrowsError(try pack(-1))
+    }
+
     func testDecoderRejectsMalformedFormat3() throws {
         let row = Self.allMemberRows()[0].record
         let packed = try PushBinaryCodec.pack(table: .ppgWaveformSample, rows: [.ppgWaveform(row)], ppgAnchorV3: true)

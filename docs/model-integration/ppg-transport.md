@@ -41,6 +41,8 @@ records, all little-endian. Per record:
 | u8 sampleFlags (bit 0: a delta at an i16 rail; other bits zero) | — | — | yes |
 | u32 sampleBytes + i16 deltas | yes | yes | yes |
 
+- `recordIndex` is the strap's u32 record counter carried in an i64: every encoder and decoder (NoopPush, the
+  receiver, the worker) accepts exactly 0…4,294,967,295.
 - `anchor` is the v26 `ppg_base_code` (u32 at frame offset 23), verbatim. `subsecQ15` is the header u16 at
   offset 19, `frontEndFlags` the header byte at offset 10, both verbatim when the phone kept them (it keeps
   neither today, so both are absent on every phone record). `sampleFlags` is derived from the deltas by every
@@ -94,7 +96,7 @@ records, all little-endian. Per record:
 
 - Flag: `PpgObjectUploadFeature`, UserDefaults key `noop.cloud.ppgAnchorUpload`, default OFF (absent = off).
   It is an owner decision because it adds phone upload volume: about 80 bytes decoded per optical second
-  (~3,600 records ≈ 290 KB decoded per full optical hour, gzip on the wire). There is no UI for it.
+  (a continuous optical hour is 3,600 records ≈ 290 KB decoded, gzip on the wire). There is no UI for it.
 - Second gate: `PpgObjectUploadFeature.laneOpen` requires the negotiated version to be 1.5 and
   `objectLane.streams` to list `ppgWaveformSample`. The source itself also returns nothing unless the
   page's negotiated version is 1.5, so a 1.4-or-older receiver gets nothing (not deltas without anchors).
@@ -125,8 +127,10 @@ recoverable local history: exactly the anchored rows still on the phone. Bounds:
   per device.
 - Never at or below the durable cursor's second, even when the row the cursor names has been pruned and the
   coordinator restarts from an empty cursor (`sentThrough` reads the progress store on every page).
-- One object covers at most one hour from its first anchored second (`targetObjectWindowSeconds = 3600`) and
-  at most 5,000 records / the wake budget's decoded cap. An hour with nothing newer after it goes out only once
+- One object holds at most 2,000 records (the coordinator's `PushWakeBudget.rowsPerJob`; the protocol's own
+  ceiling of 5,000 is never reached), spans at most 3,600 s from its first anchored second
+  (`targetObjectWindowSeconds`) and at most 4 MiB decoded, whichever binds first. A continuous optical hour
+  therefore goes up as two objects (2,000 + 1,600 records); a typical 40 s burst every ~20 min fits in one. An hour with nothing newer after it goes out only once
   the phone clock is 15 minutes past its end (`settleSeconds`), because v26 rows arrive with the offload.
 - Anchor-less stretches are crossed in bounded reads (2,000 rows, 8 reads per call) with the position
   remembered in memory, so they are neither sent nor able to stall the lane.
@@ -239,11 +243,50 @@ families whose modality they carry; a family whose input is absent is withheld w
 counted in `families_without_input`. Lane counters: `ppg_expected_seconds`, `ppg_eligible_seconds`,
 `sidecar_busy`, `deferred_busy`.
 
+## Day merge of pulse shape for unidentified configurations
+
+Every real v26 day is `config.identity: "unknown"`. Per request, the sidecar reports the unknown block's
+gain-independent measurements (`pulse_upstroke_*`, `pulse_width50_*`, `pulse_normalized_area_*`,
+`pulse_accepted_count`, `pulse_rejected_count`) at the top level, and amplitude only per run
+(`run_amplitudes`). The worker's day merge does the same across requests (`SensorBiomarkerFamilyStage.merge`):
+
+- the unknown blocks of all requests merge into one block: `runs`, `segments`, `accepted`, `observed_seconds`,
+  `eligible_seconds` and `rejected.*` sum; the bounded-bin distributions pool per key; medians and IQRs are
+  re-derived from the pooled bins (every accepted pulse counts once, so each hour weighs by its real
+  exposure); counts sum;
+- the day's top level carries that block's gain-independent measurements, with
+  `extra.top_level_scope = "gain_independent_pooled_across_unidentified_runs"` and
+  `pooled_across_configurations: false`. No amplitude key ever reaches the top level or the merged unknown
+  block (`gainIndependentPulseKeys` allow-list, mirroring the sidecar's `GAIN_INDEPENDENT_KEYS`);
+- `run_amplitudes.listed` concatenates every request's runs (bounded at 2,048), never pooled;
+- a day with any known identity keeps the earlier rule: top level only for exactly one known identity.
+
+This is tested against the sidecar's real output: `test_worker_pulse_shape_fixture.py` runs two hourly
+requests built from the golden request envelope's `config`/`clock` members through the real provider and pins
+the result as `Tools/CloudWorker/Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sidecar_pulse_shape_unknown_stages.json`
+(`FRWHOOP_PULSE_SHAPE_FIXTURE_OUTPUT=<path>` rewrites it), and
+`SensorBiomarkerLaneTests.testUnknownIdentityDayPoolsGainIndependentPulseShapeFromTheRealSidecarOutput`
+merges it.
+
 ## Busy answers
 
-A sidecar 429 (`busy`, or an `inference_busy` description) is isolated in
-`SensorBiomarkerLane.isSidecarBusy`. The job's lease is shortened to 30 s, the wake stops, and nothing is
-stored or counted as a failure (`sidecar_busy`, `deferred_busy`).
+A sidecar 429 (`busy`, the typed `InferenceClientError.busy`, or an `inference_busy` description) is isolated
+in `SensorBiomarkerLane.isSidecarBusy`. A busy request is retried `busyRetriesPerRequest` (2) times within the
+lease, each after its `Retry-After` (client default 5 s, capped at 10 s), renewing the lease before each retry.
+Still busy, the job is deferred: its lease is shortened to 30 s, the wake stops, and nothing is stored or
+counted as a failure (`sidecar_busy` counts every busy answer, `deferred_busy` every deferral). The answers the
+job already got stay in memory (`AnsweredRequests`, keyed by the job's identity and input revision and by each
+request body's sha256, one job at a time, at most 256 requests), so when the job is claimed again only the
+unanswered requests go to the sidecar. They are cleared when the job publishes, is superseded or fails. A
+worker restart loses them, which only costs re-sending.
+
+## Bad PPG objects
+
+A PPG object whose digest-verified bytes cannot be read under their recorded schema (format/schema mismatch,
+or undecodable) is skipped, counted in `input_coverage.ppg.objects_skipped` by reason
+(`ppg_object_format_mismatch`, `ppg_object_undecodable`) and in the lane counter `ppg_objects_skipped`; the day
+still runs, IMU families included. A digest mismatch stays a retryable failure, because skipping a transient
+bad read would publish a day that never re-runs.
 
 ## Compatibility matrix
 
@@ -327,6 +370,12 @@ Round-2 runs on this branch (macOS, Xcode 26.3 toolchain via `DEVELOPER_DIR`; lo
 | Sidecar envelope consumers (read-only) | `cd Tools/InferenceWorker && uv run --frozen pytest -q tests/sensor_biomarkers` | 2 failures in `test_family_dispatch.py`; on retry one passes and `test_one_broken_family_never_discards_the_others` still fails with an optional family reporting `timeout` instead of `adapter_broken`. That test builds its own request and does not read the envelope this branch regenerated |
 | iOS compile | `xcodebuild -scheme NOOPiOS -configuration Debug -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build` | BUILD SUCCEEDED |
 
+Round 3 (after fast-forwarding to the integration branch): NoopPush `xcrun swift test` 203 tests, 0 failures;
+worker `FRWHOOP_TEST_DB_URL=… xcrun swift test --filter 'PpgTransportTests|SensorBiomarker'` 81 tests,
+0 failures, 0 skipped (scratch cluster from `scripts/worker_db.py`, 193 migrations, stopped afterwards);
+sidecar `uv run --frozen pytest tests/sensor_biomarkers/{test_worker_pulse_shape_fixture,test_worker_envelope_http,test_sensor_biomarkers_ppg}.py`
+27 passed.
+
 What the phone tests prove: flag off stages nothing and the lane offers exactly `1.4,1.3,1.2,1.1,1.0` (so a
 1.5-advertising receiver negotiates 1.3); flag on with a receiver at 1.2/1.3/1.4 gets nothing; flag on at 1.5
 sends the golden's `phone_real_frames` rows, banked in a real `WhoopStore`, through the real `PushCoordinator`
@@ -340,9 +389,8 @@ upload; an open hour waits for the offload.
 1. **Accept the 25 Hz deviation from the spec text** (§3 "first 24 at ts + i/24"). Evidence above: the v20
    cross-check shows the 25 reconstructed points are the strap's own 25 samples per second (823/824 seconds
    exact) and the next anchor is the next record's first sample (778/782 boundaries, never the 25th point).
-   The 24-point convention would drop a real sample every second. Revert is one enum value. The shared README
-   already says 25 Hz; `docs/sensor-biomarkers/CONTRACTS.md` still says 24 Hz (its `native_rate_hz: 24` example
-   and the §4 "24 Hz native" sentence) and needs the Sensor families area to update it.
+   The 24-point convention would drop a real sample every second. Revert is one enum value. (The parent has
+   updated `docs/sensor-biomarkers/CONTRACTS.md` to 25 Hz.)
 2. Owner decision before anyone sets `noop.cloud.ppgAnchorUpload` or `NOOP_PUSH_ADVERTISE_PPG_ANCHOR=1`: added
    phone upload volume (~80 B per optical second), and the deploy order above.
 3. `deploy/README.md` (not mine): add `NOOP_PUSH_ADVERTISE_PPG_ANCHOR` (default unset) to the receiver's

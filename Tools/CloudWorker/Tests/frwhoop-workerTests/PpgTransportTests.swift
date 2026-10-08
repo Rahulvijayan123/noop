@@ -13,12 +13,8 @@ final class PpgTransportTests: XCTestCase {
     // MARK: - Fixtures
 
     private func goldenPath() throws -> String {
-        let candidates = [
-            "../../Packages/NoopPush/Tests/NoopPushTests/Resources/ppg_anchor_v3_golden.json",
-            "Packages/NoopPush/Tests/NoopPushTests/Resources/ppg_anchor_v3_golden.json",
-        ]
-        for c in candidates where FileManager.default.fileExists(atPath: c) { return c }
-        throw XCTSkip("ppg_anchor_v3_golden.json not found from \(FileManager.default.currentDirectoryPath)")
+        _ = try SensorFixturePaths.data(SensorFixturePaths.ppgAnchorGolden)
+        return SensorFixturePaths.ppgAnchorGolden.path
     }
 
     private func golden() throws -> [String: Any] {
@@ -313,11 +309,8 @@ final class PpgTransportTests: XCTestCase {
         if let path = ProcessInfo.processInfo.environment["FRWHOOP_SENSOR_ENVELOPE_OUTPUT"] {
             try body.write(to: URL(fileURLWithPath: path), options: .atomic)
         } else {
-            let path = "Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sensor_biomarkers_request_envelope.json"
-            guard FileManager.default.fileExists(atPath: path) else {
-                throw XCTSkip("\(path) not found from \(FileManager.default.currentDirectoryPath)")
-            }
-            XCTAssertEqual(body, try Data(contentsOf: URL(fileURLWithPath: path)),
+            let url = SensorFixturePaths.sensorResources.appendingPathComponent("sensor_biomarkers_request_envelope.json")
+            XCTAssertEqual(body, try SensorFixturePaths.data(url),
                            "the committed envelope must be exactly what the lane posts")
         }
     }
