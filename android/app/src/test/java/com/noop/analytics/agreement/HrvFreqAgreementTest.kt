@@ -10,10 +10,11 @@ import kotlin.math.abs
 
 /**
  * Frequency-domain HRV agreement — the CONVENTION-ROBUST LF/HF ratio. Feeds gold NN windows through
- * [HrvFreqDomain.freqDomainRaw] and compares the LF/HF ratio to an independent scipy Lomb-Scargle
- * reference (hrv_freq_cases.json). Absolute LF/HF band POWERS are NOT compared: scipy's periodogram
- * normalisation differs from noop's hand-rolled Lomb-Scargle (ms^2), so absolute powers are not on the
- * same scale — but the LF/HF RATIO cancels the normalisation, so it is the meaningful cross-check.
+ * [HrvFreqDomain.analyzeAssumingContiguous] (gold NN windows are gapless ECG recordings, so the contiguity
+ * assumption holds) and compares the LF/HF ratio to an independent scipy Lomb-Scargle
+ * reference (hrv_freq_cases.json). Since lomb_scargle_psd_ms2_v2 the band powers are absolute
+ * (ms², S = 2·Δt̄·P with P = scipy.signal.lombscargle normalize=False), but the fixture only records the
+ * ratio, and the v2 window rule (span-weighted 300 s windows) may differ from the reference's windowing.
  *
  * This confirms noop's LF/HF is in the right ballpark (Task-Force bands, correct spectral shape), within
  * a tolerance that reflects the residual windowing/detrend differences between the two implementations.
@@ -38,7 +39,7 @@ class HrvFreqAgreementTest {
             val nnArr = c.getJSONArray("nn")
             val nn = ArrayList<Double>(nnArr.length())
             for (j in 0 until nnArr.length()) nn.add(nnArr.getDouble(j))
-            val bands = HrvFreqDomain.freqDomainRaw(nn) ?: continue
+            val bands = HrvFreqDomain.analyzeAssumingContiguous(nn).bands ?: continue
             val lfhf = bands.lfhf ?: continue
             if (c.isNull("refLfHf")) continue
             val ref = c.getDouble("refLfHf")
