@@ -33,6 +33,7 @@ public struct DotStripChart: View {
     private let summary: String
     private let descriptor: NaraChartDescriptor
     private let levelLabels: [Int: String]
+    private let dotSize: CGFloat
     private let calendar: Calendar
     @Binding private var selection: Date?
 
@@ -63,7 +64,11 @@ public struct DotStripChart: View {
         self.xs = dots.map(\.day)
         self.state = state
         self.height = height
-        self.legend = legend ?? []
+        self.legend = legend ?? (dots.contains(where: \.isEstimate)
+            ? [ChartLegendItem(.estimate(StrandPalette.textSecondary), String(localized: "Estimate", bundle: .module))]
+            : [])
+        // A year of check-ins at the full dot size merges into a bar along each row.
+        self.dotSize = dots.count > NaraChartStyle.densePointThreshold ? NaraChartStyle.pointSize : NaraChartStyle.pointSize * 2
         self.accessibilityTitle = accessibilityTitle
         self.calendar = calendar
         self._selection = selection
@@ -103,7 +108,7 @@ public struct DotStripChart: View {
             ForEach(dots) { dot in
                 PointMark(x: .value("Day", dot.day, unit: .day), y: .value("Level", Double(dot.level)))
                     .symbol(NaraPointSymbol.shape(estimate: dot.isEstimate))
-                    .symbolSize(selected == dot.day ? NaraChartStyle.selectedPointSize : NaraChartStyle.pointSize * 2)
+                    .symbolSize(selected == dot.day ? NaraChartStyle.selectedPointSize : dotSize)
                     .foregroundStyle(dot.color)
                     .opacity(selected == nil || selected == dot.day ? 1 : NaraChartStyle.dimmedOpacity)
             }

@@ -34,7 +34,15 @@ struct NaraChartFrame<Content: View>: View {
                     .accessibilityLabel(Text(accessibilityTitle))
                     .accessibilityValue(Text(message))
             }
-            if showsLegend { ChartLegend(legend) }
+            if showsLegend {
+                // The legend names marks that are drawn, so it only appears once they are; while loading or
+                // empty its row stays reserved, so the plot is the same height in every state.
+                if state == .ready {
+                    ChartLegend(legend)
+                } else {
+                    Color.clear.frame(height: NaraChartStyle.legendHeight).accessibilityHidden(true)
+                }
+            }
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .frame(height: height)
@@ -200,26 +208,95 @@ enum NaraChartText {
 
 // MARK: - Shared marks
 
-/// The labelled reference rules every chart draws the same way.
+/// The labelled reference rules every chart draws the same way, in two layers: the rules behind the data
+/// (`NaraReferenceMarks`) and their labels in front of it (`NaraReferenceLabels`), so a line, point or bar
+/// never draws over "Baseline 64".
 struct NaraReferenceMarks: ChartContent {
     let references: [ChartReference]
-    let showsLabels: Bool
 
     var body: some ChartContent {
         ForEach(Array(references.enumerated()), id: \.offset) { _, reference in
             RuleMark(y: .value("Reference", reference.value))
                 .lineStyle(reference.style == .dashed ? NaraChartStyle.reference : NaraChartStyle.solidReference)
                 .foregroundStyle(NaraChartStyle.referenceColor)
-                .annotation(position: .top, alignment: .trailing, spacing: 2) {
-                    if showsLabels, let label = reference.label {
-                        Text(label)
-                            .font(NaraChartStyle.referenceLabelFont)
-                            .foregroundStyle(NaraChartStyle.referenceColor)
-                            .padding(.horizontal, 3)
-                            .background(StrandPalette.surfaceRaised.opacity(0.85),
-                                        in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+        }
+    }
+}
+
+/// The reference labels, drawn after the data marks. Each sits just above its rule at the trailing edge, or
+/// at the leading edge when the newest data would sit under it (`NaraReferenceLabelPlacement`).
+struct NaraReferenceLabels: ChartContent {
+    let references: [ChartReference]
+    let anchors: [ChartAxisLabelAnchor]
+    let showsLabels: Bool
+
+    var body: some ChartContent {
+        ForEach(Array(references.enumerated()), id: \.offset) { index, reference in
+            if showsLabels, let label = reference.label {
+                // A clear, zero-width rule carries the label: an annotation is drawn in its mark's layer.
+                RuleMark(y: .value("Reference", reference.value))
+                    .lineStyle(StrokeStyle(lineWidth: 0))
+                    .foregroundStyle(Color.clear)
+                    .annotation(position: .top,
+                                alignment: index < anchors.count && anchors[index] == .leading ? .leading : .trailing,
+                                spacing: 2) {
+                        NaraChartLabel(text: label, color: NaraChartStyle.referenceColor)
                     }
-                }
+            }
+        }
+    }
+}
+
+/// A label inside the plot (reference, value band, marker): footnote tabular digits on a 85 % card-colour
+/// plate, so whatever passes behind it stays faintly visible but never cuts through the text.
+struct NaraChartLabel: View {
+    let text: String
+    let color: Color
+
+    var body: some View {
+        Text(text)
+            .font(NaraChartStyle.referenceLabelFont)
+            .foregroundStyle(color)
+            .lineLimit(1)
+            .fixedSize()
+            .padding(.horizontal, 3)
+            .background(StrandPalette.surfaceRaised.opacity(0.85),
+                        in: RoundedRectangle(cornerRadius: 3, style: .continuous))
+    }
+}
+
+/// Which end of the plot a reference label goes to. Pure.
+enum NaraReferenceLabelPlacement {
+    /// A mark's x and its vertical extent in value units (a point has `low == high`; a bar runs from its
+    /// base to its value).
+    struct Extent {
+        var x: Date
+        var low: Double
+        var high: Double
+    }
+
+    /// The label's share of the plot height, in which it sits above its rule.
+    static let labelHeightShare = 0.11
+
+    /// Trailing, unless a mark in the trailing label's footprint would sit under it and the leading
+    /// footprint is clear. The footprint is the label's estimated width at the plot's end, by its height
+    /// above the rule (with a little room below for a point sitting on the rule).
+    static func anchors(for references: [ChartReference], marks: [Extent], window: ClosedRange<Date>,
+                        domain: ClosedRange<Double>) -> [ChartAxisLabelAnchor] {
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        let valueSpan = domain.upperBound - domain.lowerBound
+        guard span > 0, valueSpan > 0 else { return references.map { _ in .trailing } }
+        return references.map { reference in
+            guard let label = reference.label else { return .trailing }
+            let width = span * (ChartAxis.estimatedWidth(label) + 6) / ChartAxis.assumedPlotWidth
+            let low = reference.value - valueSpan * 0.03
+            let high = reference.value + valueSpan * labelHeightShare
+            func collides(_ xs: ClosedRange<Date>) -> Bool {
+                marks.contains { xs.contains($0.x) && $0.high >= low && $0.low <= high }
+            }
+            let trailing = window.upperBound.addingTimeInterval(-width)...window.upperBound
+            let leading = window.lowerBound...window.lowerBound.addingTimeInterval(width)
+            return collides(trailing) && !collides(leading) ? .leading : .trailing
         }
     }
 }

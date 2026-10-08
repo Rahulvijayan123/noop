@@ -20,16 +20,28 @@ public struct ChartLegend: View {
     }
 
     public var body: some View {
+        // The full spacing, then a tighter one, then a sideways scroll whose trailing edge fades out, so an
+        // item that does not fit never ends in a hard cut ("Off wr").
         ViewThatFits(in: .horizontal) {
-            row
-            ScrollView(.horizontal, showsIndicators: false) { row }
+            row(spacing: NoopMetrics.space3)
+            row(spacing: NoopMetrics.space2)
+            ScrollView(.horizontal, showsIndicators: false) {
+                row(spacing: NoopMetrics.space2).padding(.trailing, NoopMetrics.space5)
+            }
+            .mask(
+                HStack(spacing: 0) {
+                    Color.black
+                    LinearGradient(colors: [.black, .clear], startPoint: .leading, endPoint: .trailing)
+                        .frame(width: NoopMetrics.space6)
+                }
+            )
         }
         .frame(height: NaraChartStyle.legendHeight)
         .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private var row: some View {
-        HStack(spacing: NoopMetrics.space3) {
+    private func row(spacing: CGFloat) -> some View {
+        HStack(spacing: spacing) {
             ForEach(items) { item in
                 if let onToggle {
                     Button { onToggle(item.id) } label: { entry(item) }
@@ -80,6 +92,14 @@ struct ChartLegendGlyph: View {
                     .frame(width: 14, height: 9)
             case .estimate(let color):
                 Circle().strokeBorder(color, lineWidth: NaraChartStyle.estimateStroke).frame(width: 8, height: 8)
+            case .estimateBar(let color):
+                // The estimated-bar mark in small: a light fill under a solid cap.
+                VStack(spacing: 0) {
+                    Rectangle().fill(color).frame(height: 2)
+                    Rectangle().fill(color.opacity(NaraChartStyle.estimateFillOpacity))
+                }
+                .frame(width: 9, height: 10)
+                .clipShape(RoundedRectangle(cornerRadius: 2, style: .continuous))
             case .hatched(let color):
                 DiagonalHatch(spacing: 3)
                     .stroke(color.opacity(0.7), lineWidth: 1)

@@ -31,10 +31,16 @@ public enum NaraChartStyle {
     public static let pointSize: CGFloat = 24
     /// The point under the selection rule.
     public static let selectedPointSize: CGFloat = 64
+    /// Points in a points-only series with more than `densePointThreshold` readings in the window (a year
+    /// of nightly SpO2, a year of mood check-ins), so neighbouring dots do not merge into a blob.
+    public static let densePointSize: CGFloat = 10
+    public static let densePointThreshold = 90
     /// The ring of a hollow (estimated) point.
     public static let estimateStroke: CGFloat = 1.5
 
     public static let barCornerRadius: CGFloat = 3
+    /// The solid cap on an estimated bar, as a share of the value-axis span.
+    public static let estimateCapShare: Double = 0.012
     /// Bar width as a share of its day, week or month.
     public static let barWidthRatio: CGFloat = 0.62
     /// Floating (bedtime to wake) bars are narrower so a run of nights reads as a rhythm.

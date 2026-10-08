@@ -7,7 +7,9 @@ import Charts
 
 /// Stacked bars per day: sleep stages, heart-rate zone minutes, macro mix. One category can be highlighted
 /// (the stage a detail page is about): it sits at the BOTTOM of every stack so its height reads straight off
-/// the axis, and the others step back to 30 %. `normalised` shows each day as shares of its total.
+/// the axis, and the others step back to 30 %. `normalised` shows each day as shares of its total. Long
+/// ranges bin to weekly or monthly mean stacks (`bin: range.totalsBin`). Estimated days are drawn light and
+/// the legend says "Estimate".
 ///
 /// ```swift
 /// StackedBarChart(days: nights, categories: [deep, rem, light], highlighted: "deep",
@@ -59,6 +61,7 @@ public struct StackedBarChart: View {
     }
 
     private let pieces: [Piece]
+    private let bin: Calendar.Component
     private let xLayout: ChartXAxisLayout
     private let yLayout: ChartYAxisLayout
     private let xs: [Date]
@@ -78,12 +81,16 @@ public struct StackedBarChart: View {
     ///   - categories: the stack order, bottom first (the highlighted one is moved to the bottom).
     ///   - highlighted: the category drawn at full strength; nil draws them all at full strength.
     ///   - normalised: each day as percentages of its own total, on a fixed 0-100 % axis.
+    ///   - bin: `.day`, `.weekOfYear` or `.month`: each stack is the mean night of its bin (`Self.bin`).
     public init(days: [Day], categories: [Category], highlighted: String? = nil, normalised: Bool = false,
+                bin: Calendar.Component = .day,
                 legend: [ChartLegendItem]? = nil, state: ChartState = .ready,
                 window: ClosedRange<Date>, xStyle: ChartAxisStyle, y: ChartValueAxis,
                 selection: Binding<Date?>, height: CGFloat = NoopMetrics.chartHeightPrimary,
                 accessibilityTitle: String, calendar: Calendar = .current) {
-        let windowed = days.filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
+        let window = bin == .day ? window : ChartAxis.snap(window, to: bin, calendar: calendar)
+        let windowed = (bin == .day ? days : Self.bin(days, by: bin, calendar: calendar))
+            .filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
             .sorted { $0.day < $1.day }
         let colors = Dictionary(categories.map { ($0.id, $0.color) }, uniquingKeysWith: { first, _ in first })
         let names = Dictionary(categories.map { ($0.id, $0.name) }, uniquingKeysWith: { first, _ in first })
@@ -114,6 +121,7 @@ public struct StackedBarChart: View {
         let yLayout = axis.layout(for: totals + [0])
 
         self.pieces = pieces
+        self.bin = bin
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
         self.xs = Array(Set(pieces.map(\.day))).sorted()
@@ -126,7 +134,7 @@ public struct StackedBarChart: View {
         self.format = format
         self.unit = unitLabel
         self.summary = NaraChartText.summary(
-            title: accessibilityTitle, count: totals.count, noun: .days,
+            title: accessibilityTitle, count: totals.count, noun: bin == .day ? .days : .bars,
             low: totals.min().map { NaraChartText.value($0, format: format, unit: unitLabel) },
             high: totals.max().map { NaraChartText.value($0, format: format, unit: unitLabel) })
         let byCategory = Dictionary(grouping: pieces, by: \.category)
@@ -134,13 +142,38 @@ public struct StackedBarChart: View {
             title: accessibilityTitle, summary: summary,
             xTitle: String(localized: "Date", bundle: .module), yTitle: unitLabel ?? accessibilityTitle,
             yRange: yLayout.domain,
-            dateText: { NaraChartText.date($0, unit: .day, calendar: calendar) },
+            dateText: { NaraChartText.date($0, unit: bin, calendar: calendar) },
             valueText: { NaraChartText.value($0, format: format, unit: unitLabel) },
             series: categories.compactMap { category in
                 guard let items = byCategory[category.id] else { return nil }
                 return .init(name: category.name, isContinuous: false, points: items.map { ($0.day, $0.end - $0.start) })
             })
-        self.legend = legend ?? categories.map { ChartLegendItem(.swatch($0.color), $0.name) }
+        var automatic = categories.map { ChartLegendItem(.swatch($0.color), $0.name) }
+        if pieces.contains(where: \.isEstimate) {
+            automatic.append(ChartLegendItem(.estimateBar(StrandPalette.textSecondary),
+                                             String(localized: "Estimate", bundle: .module)))
+        }
+        self.legend = legend ?? automatic
+    }
+
+    /// `days` combined into one mean day per calendar `unit` (week, month), dated at the unit's start,
+    /// ascending: each category is the average over the days in the bin, a missing category counting as
+    /// zero for that day. A bin is an estimate when at least half of its days are. Pure.
+    public static func bin(_ days: [Day], by unit: Calendar.Component, calendar: Calendar = .current) -> [Day] {
+        var groups: [Date: (sums: [String: Double], count: Int, estimates: Int)] = [:]
+        for day in days {
+            let start = calendar.dateInterval(of: unit, for: day.day)?.start ?? calendar.startOfDay(for: day.day)
+            var group = groups[start] ?? ([:], 0, 0)
+            for (key, value) in day.values where value.isFinite { group.sums[key, default: 0] += value }
+            group.count += 1
+            if day.isEstimate { group.estimates += 1 }
+            groups[start] = group
+        }
+        return groups.keys.sorted().compactMap { start in
+            guard let group = groups[start], group.count > 0 else { return nil }
+            return Day(day: start, values: group.sums.mapValues { $0 / Double(group.count) },
+                       isEstimate: group.estimates * 2 >= group.count)
+        }
     }
 
     /// The pieces of one stack, bottom first: the highlighted category, then the rest in `order`, then any
@@ -178,15 +211,15 @@ public struct StackedBarChart: View {
     }
 
     private var chart: some View {
-        let selected = selection.map { calendar.startOfDay(for: $0) }
+        let selected = selection.flatMap { calendar.dateInterval(of: bin, for: $0)?.start }
         return Chart {
-            SelectionRule(selected, unit: .day)
+            SelectionRule(selected, unit: bin)
             ForEach(pieces) { piece in
                 let emphasis = piece.emphasised ? 1 : NaraChartStyle.deemphasisedOpacity
                 let estimate = piece.isEstimate ? NaraChartStyle.estimateFillOpacity : 1
                 let dim = selected == nil || selected == piece.day ? 1 : NaraChartStyle.dimmedOpacity
                 // Square pieces: a radius on every piece would notch the stack where they meet.
-                BarMark(x: .value("Day", piece.day, unit: .day),
+                BarMark(x: .value("Day", piece.day, unit: bin),
                         yStart: .value("Start", piece.start),
                         yEnd: .value("End", piece.end),
                         width: .ratio(NaraChartStyle.barWidthRatio))
@@ -201,14 +234,14 @@ public struct StackedBarChart: View {
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,
                                 selection: $selection,
-                                describe: { [pieces, names, format, unit, calendar] date in
-                                    let day = calendar.startOfDay(for: date)
+                                describe: { [pieces, names, format, unit, calendar, bin] date in
+                                    guard let day = calendar.dateInterval(of: bin, for: date)?.start else { return nil }
                                     let stack = pieces.filter { $0.day == day }
                                     guard !stack.isEmpty else { return nil }
                                     let parts = stack.map { piece in
                                         "\(names[piece.category] ?? piece.category) \(NaraChartText.value(piece.end - piece.start, format: format, unit: unit))"
                                     }
-                                    return NaraChartText.reading(day, unit: .day, parts: parts,
+                                    return NaraChartText.reading(day, unit: bin, parts: parts,
                                                                  isEstimate: stack.contains(where: \.isEstimate), calendar: calendar)
                                 })
     }

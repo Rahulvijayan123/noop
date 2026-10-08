@@ -1,5 +1,61 @@
 import SwiftUI
 
+// MARK: - Value and unit as one line
+
+/// A value and its unit as ONE `Text`, so `lineLimit(1)` + `minimumScaleFactor` shrink them together:
+/// two `Text`s in an `HStack` shrink separately and the value is cut ("252,6… steps") before the pair as a
+/// whole gets smaller. The unit follows a space, in its own font and colour, on the value's baseline.
+enum ValueUnitText {
+    static func make(_ value: String, font: Font, color: Color, tracking: CGFloat = 0,
+                     unit: String?, unitFont: Font, unitColor: Color = StrandPalette.textSecondary) -> Text {
+        let number = colored(Text(value).font(font).tracking(tracking), color)
+        guard let unit, !unit.isEmpty else { return number }
+        return number + colored(Text(" " + unit).font(unitFont), unitColor)
+    }
+
+    private static func colored(_ text: Text, _ color: Color) -> Text {
+        if #available(iOS 17.0, macOS 14.0, watchOS 10.0, *) {
+            return text.foregroundStyle(color)
+        }
+        return text.foregroundColor(color)
+    }
+}
+
+/// One value line (value and unit as one piece) at the largest of a few sizes that fits the width: full
+/// size whenever it fits, then 85 %, 72 % and 60 %, then 50 % cut at the end. The line keeps the full
+/// size's height at every rung, so a long value never makes its readout, cell or tile shorter.
+///
+/// An explicit ladder rather than `minimumScaleFactor`: on a value and unit concatenated into one `Text`,
+/// that modifier jumps straight to its minimum as soon as the text does not fit at full size.
+struct FittingValueLine: View {
+    let value: String
+    let unit: String?
+    let color: Color
+    /// The value's font at a scale (1 is full size).
+    let valueFont: (CGFloat) -> Font
+    let unitFont: (CGFloat) -> Font
+    var tracking: (CGFloat) -> CGFloat = { _ in 0 }
+
+    var body: some View {
+        ZStack(alignment: .leading) {
+            Text(verbatim: " ").font(valueFont(1)).hidden().accessibilityHidden(true)
+            ViewThatFits(in: .horizontal) {
+                line(1).fixedSize(horizontal: true, vertical: false)
+                line(0.85).fixedSize(horizontal: true, vertical: false)
+                line(0.72).fixedSize(horizontal: true, vertical: false)
+                line(0.6).fixedSize(horizontal: true, vertical: false)
+                line(0.5)
+            }
+        }
+    }
+
+    private func line(_ scale: CGFloat) -> some View {
+        ValueUnitText.make(value, font: valueFont(scale), color: color, tracking: tracking(scale),
+                           unit: unit, unitFont: unitFont(scale))
+            .lineLimit(1)
+    }
+}
+
 // MARK: - ValueReadout
 //
 // The pinned header above a detail chart. It shows the latest value, or the value under the finger while
@@ -139,28 +195,26 @@ public struct ValueReadout: View {
                 .foregroundStyle(StrandPalette.textSecondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
-                Text(isLoading ? LoadingText.value : content.displayValue)
-                    .font(StrandFont.display(40))
-                    .tracking(StrandFont.displayTracking(40))
-                    .foregroundStyle(content.valueColor ?? StrandPalette.textPrimary)
-                if let unit = isLoading ? content.unit : content.displayUnit {
-                    Text(unit)
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
+            HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                FittingValueLine(value: isLoading ? LoadingText.value : content.displayValue,
+                                 unit: isLoading ? content.unit : content.displayUnit,
+                                 color: content.valueColor ?? StrandPalette.textPrimary,
+                                 valueFont: { StrandFont.display(40 * $0) },
+                                 unitFont: { $0 == 1 ? StrandFont.title2
+                                                     : StrandFont.scaled(20 * $0, weight: .semibold, relativeTo: .title3) },
+                                 tracking: { StrandFont.displayTracking(40 * $0) })
                 if content.isEstimate && !isLoading {
                     StatePill("Estimate", tone: .neutral, showsDot: false)
+                        .fixedSize()
+                        .layoutPriority(1)
                 }
             }
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
             // Reserved when empty, so a readout with a context line is not taller than one without.
             Text(lineText(content.context ?? "", placeholder: LoadingText.line))
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
+                .minimumScaleFactor(0.7)
         }
         .frame(maxWidth: .infinity, minHeight: NoopMetrics.readoutHeight, alignment: .topLeading)
         .redacted(reason: isLoading ? .placeholder : [])

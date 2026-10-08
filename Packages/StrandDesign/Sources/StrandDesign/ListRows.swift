@@ -23,22 +23,27 @@ import SwiftUI
 ///
 /// The row is at least `NoopMetrics.listRowMinHeight` tall with the card padding on both sides, and its
 /// whole width is the tap target. Wrap it in a `NavigationLink` or `Button` with `.buttonStyle(.plain)`;
-/// pass `showsChevron: false` for a row that does not navigate.
+/// pass `showsChevron: false` for a row that does not navigate. `valueTone` colours the value for a state
+/// ("Re-pair to sync" in `.warning`, "Syncing" in `.accent`); the word carries the meaning, the colour
+/// only reinforces it.
 public struct NoopListRow: View {
     private let icon: String?
     private let iconColor: Color
     private let title: LocalizedStringKey
     private let subtitle: String?
     private let value: String?
+    private let valueTone: StrandTone
     private let showsChevron: Bool
 
     public init(icon: String?, iconColor: Color = StrandPalette.textSecondary, title: LocalizedStringKey,
-                subtitle: String? = nil, value: String? = nil, showsChevron: Bool = true) {
+                subtitle: String? = nil, value: String? = nil, valueTone: StrandTone = .neutral,
+                showsChevron: Bool = true) {
         self.icon = icon
         self.iconColor = iconColor
         self.title = title
         self.subtitle = subtitle
         self.value = value
+        self.valueTone = valueTone
         self.showsChevron = showsChevron
     }
 
@@ -67,7 +72,7 @@ public struct NoopListRow: View {
             if let value {
                 Text(value)
                     .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .foregroundStyle(valueTone.color)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }

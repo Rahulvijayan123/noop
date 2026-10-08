@@ -88,18 +88,9 @@ public struct MetricTile: View {
                     Spacer(minLength: 0)
                 }
                 Spacer(minLength: NoopMetrics.space2)
-                HStack(alignment: .firstTextBaseline, spacing: 3) {
-                    Text(displayValue)
-                        .font(StrandFont.number(28))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    if let displayUnit {
-                        Text(displayUnit)
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                }
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
+                FittingValueLine(value: displayValue, unit: displayUnit, color: StrandPalette.textPrimary,
+                                 valueFont: { StrandFont.number(28 * $0) },
+                                 unitFont: { StrandFont.scaled(14 * $0, weight: .regular, relativeTo: .subheadline) })
                 // Reserved when empty: a tile with a state word is never taller than one without.
                 Text(MetricTile.stateLine(state: state, isEstimate: isEstimate) ?? " ")
                     .font(StrandFont.footnote)

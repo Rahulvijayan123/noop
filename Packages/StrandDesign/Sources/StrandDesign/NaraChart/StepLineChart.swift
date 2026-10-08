@@ -39,6 +39,7 @@ public struct StepLineChart: View {
     private let dashedRuns: Set<String>
     private let color: Color
     private let references: [ChartReference]
+    private let referenceAnchors: [ChartAxisLabelAnchor]
     private let xLayout: ChartXAxisLayout
     private let yLayout: ChartYAxisLayout
     private let xs: [Date]
@@ -88,6 +89,10 @@ public struct StepLineChart: View {
         self.dashedRuns = Set(estimateRuns.filter(\.value).keys)
         self.color = color
         self.references = references
+        self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
+            for: references,
+            marks: steps.map { .init(x: ChartDay.center(of: $0.day, calendar: calendar), low: $0.value, high: $0.value) },
+            window: window, domain: yLayout.domain)
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
         self.xs = windowed.map(\.day)
@@ -131,7 +136,7 @@ public struct StepLineChart: View {
     private var chart: some View {
         let selected = selection.map { calendar.startOfDay(for: $0) }
         return Chart {
-            NaraReferenceMarks(references: references, showsLabels: !compact)
+            NaraReferenceMarks(references: references)
             SelectionRule(selected, unit: .day)
             ForEach(steps) { step in
                 LineMark(x: .value("Day", step.day, unit: .day),
@@ -147,6 +152,7 @@ public struct StepLineChart: View {
                     .symbolSize(selected == reading.day ? NaraChartStyle.selectedPointSize : NaraChartStyle.pointSize * 1.5)
                     .foregroundStyle(color)
             }
+            NaraReferenceLabels(references: references, anchors: referenceAnchors, showsLabels: !compact)
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in

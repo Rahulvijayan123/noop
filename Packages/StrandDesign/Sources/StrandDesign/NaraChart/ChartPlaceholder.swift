@@ -59,11 +59,14 @@ public struct EmptyChartMessage: View {
 }
 
 /// The empty axes both states draw: four hairlines over a leading gutter the width of a value label, and a
-/// baseline gutter the height of a time label, so the real chart lands in the same place.
+/// baseline gutter the height of a time label, so the real chart lands in the same place. A compact chart
+/// has no value labels, so its placeholder has no leading gutter either.
 struct ChartPlaceholderGrid: View {
+    @Environment(\.naraChartCompact) private var compact
+
     var body: some View {
         GeometryReader { geo in
-            let gutterX: CGFloat = 28
+            let gutterX: CGFloat = compact ? 0 : 28
             let gutterY: CGFloat = 20
             let plotHeight = max(0, geo.size.height - gutterY - NaraChartStyle.plotTopPadding)
             Path { path in

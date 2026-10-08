@@ -696,6 +696,11 @@ enum DemoScreens {
         // + self-service pairing guidance, screenshot-able WITHOUT reproducing the bond refusal on real
         // hardware.
         case "bondrefused": return AnyView(BondRefusedDemoScreen())
+        // The shared design kit on synthetic data (Strand/Screens/KitGalleryView.swift): every chart type in
+        // every state, and every component. Add `--demo-chart-select <fraction>` for the scrubbed state and
+        // `--demo-kit-only <ids>` for a few sections.
+        case "kitcharts": return AnyView(KitChartsGallery())
+        case "kitcomponents": return AnyView(KitComponentsGallery())
         default:         return nil
         }
     }

@@ -58,6 +58,7 @@ public struct DailyBarChart: View {
     private let bars: [Bar]
     private let mean: [MeanPoint]
     private let references: [ChartReference]
+    private let referenceAnchors: [ChartAxisLabelAnchor]
     private let bin: Calendar.Component
     private let capHeight: Double
     private let xLayout: ChartXAxisLayout
@@ -118,9 +119,17 @@ public struct DailyBarChart: View {
 
         self.bars = binned.map { Bar(day: $0.day, value: $0.value, isEstimate: $0.isEstimate, color: fill.color(for: $0.value)) }
         self.mean = meanPoints
-        self.references = reference.map { [$0] } ?? []
+        let references = reference.map { [$0] } ?? []
+        self.references = references
+        self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
+            for: references,
+            marks: binned.map { .init(x: ChartDay.center(of: $0.day, unit: bin, calendar: calendar),
+                                      low: min(0, $0.value), high: max(0, $0.value)) }
+                + meanPoints.map { .init(x: ChartDay.center(of: $0.day, unit: bin, calendar: calendar),
+                                         low: $0.value, high: $0.value) },
+            window: window, domain: yLayout.domain)
         self.bin = bin
-        self.capHeight = (yLayout.domain.upperBound - yLayout.domain.lowerBound) * 0.012
+        self.capHeight = (yLayout.domain.upperBound - yLayout.domain.lowerBound) * NaraChartStyle.estimateCapShare
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
         self.xs = binned.map(\.day)
@@ -154,9 +163,11 @@ public struct DailyBarChart: View {
                 automatic.append(ChartLegendItem(.line(NaraChartStyle.meanLineColor, dashed: true),
                                                  Self.meanLabel(count: count, unit: bin)))
             }
-            if let estimate = binned.first(where: \.isEstimate) {
-                automatic.append(ChartLegendItem(.estimate(fill.color(for: estimate.value)),
-                                                 String(localized: "Estimate", bundle: .module)))
+            if binned.contains(where: \.isEstimate) {
+                // Band and ramp colours vary bar to bar, so their estimate glyph is neutral.
+                let color: Color
+                if case .single(let single) = fill { color = single } else { color = StrandPalette.textSecondary }
+                automatic.append(ChartLegendItem(.estimateBar(color), String(localized: "Estimate", bundle: .module)))
             }
             self.legend = automatic
         }
@@ -164,14 +175,18 @@ public struct DailyBarChart: View {
 
     /// Charge, Rest, Effort, day stress: one score a day on its fixed scale, each bar in its band's colour,
     /// with the trailing 7-day mean.
+    ///
+    /// Pass `bin: range.totalsBin` so 3M reads as weekly and 6M and longer as monthly mean bars (each in the
+    /// band of its mean); the mean line is drawn on daily bars only, since a weekly bar already is a mean.
     public static func scores(_ points: [DailyPoint], bands: ScoreBands, scale: ClosedRange<Double> = 0...100,
-                              meanLine: Int? = 7, unit: String? = nil,
+                              bin: Calendar.Component = .day, meanLine: Int? = 7, unit: String? = nil,
                               format: @escaping @Sendable (Double) -> String = ChartValueAxis.integer,
                               legend: [ChartLegendItem]? = nil, state: ChartState = .ready,
                               window: ClosedRange<Date>, xStyle: ChartAxisStyle, selection: Binding<Date?>,
                               height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                               calendar: Calendar = .current) -> DailyBarChart {
-        DailyBarChart(points: points, fill: .bands(bands), meanLine: meanLine, legend: legend, state: state,
+        DailyBarChart(points: points, fill: .bands(bands), bin: bin, aggregation: .mean,
+                      meanLine: bin == .day ? meanLine : nil, legend: legend, state: state,
                       window: window, xStyle: xStyle,
                       y: ChartValueAxis(unit: unit, domain: .fixed(scale), format: format),
                       selection: selection, height: height, accessibilityTitle: accessibilityTitle,
@@ -180,13 +195,15 @@ public struct DailyBarChart: View {
 
     /// A score on a fixed scale coloured by a continuous ramp instead of bands (Effort's strain tint).
     public static func scores(_ points: [DailyPoint], ramp: @escaping (Double) -> Color,
-                              scale: ClosedRange<Double> = 0...100, meanLine: Int? = 7, unit: String? = nil,
+                              scale: ClosedRange<Double> = 0...100, bin: Calendar.Component = .day,
+                              meanLine: Int? = 7, unit: String? = nil,
                               format: @escaping @Sendable (Double) -> String = ChartValueAxis.integer,
                               legend: [ChartLegendItem]? = nil, state: ChartState = .ready,
                               window: ClosedRange<Date>, xStyle: ChartAxisStyle, selection: Binding<Date?>,
                               height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                               calendar: Calendar = .current) -> DailyBarChart {
-        DailyBarChart(points: points, fill: .ramp(ramp), meanLine: meanLine, legend: legend, state: state,
+        DailyBarChart(points: points, fill: .ramp(ramp), bin: bin, aggregation: .mean,
+                      meanLine: bin == .day ? meanLine : nil, legend: legend, state: state,
                       window: window, xStyle: xStyle,
                       y: ChartValueAxis(unit: unit, domain: .fixed(scale), format: format),
                       selection: selection, height: height, accessibilityTitle: accessibilityTitle,
@@ -288,7 +305,8 @@ public struct DailyBarChart: View {
             SelectionRule(selected, unit: bin)
             barMarks(selected: selected)
             meanMarks
-            NaraReferenceMarks(references: references, showsLabels: !compact)
+            NaraReferenceMarks(references: references)
+            NaraReferenceLabels(references: references, anchors: referenceAnchors, showsLabels: !compact)
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in

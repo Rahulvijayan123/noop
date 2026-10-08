@@ -112,19 +112,12 @@ private struct StatCell: View {
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .lineLimit(1)
-                .minimumScaleFactor(0.8)
-            HStack(alignment: .firstTextBaseline, spacing: 3) {
-                Text(isLoading && item.value == nil ? LoadingText.value : item.displayValue)
-                    .font(StrandFont.number(20))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                if let unit = item.displayUnit ?? (isLoading ? item.unit : nil) {
-                    Text(unit)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-            }
-            .lineLimit(1)
-            .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.7)
+            FittingValueLine(value: isLoading && item.value == nil ? LoadingText.value : item.displayValue,
+                             unit: item.displayUnit ?? (isLoading ? item.unit : nil),
+                             color: StrandPalette.textPrimary,
+                             valueFont: { StrandFont.number(20 * $0) },
+                             unitFont: { StrandFont.scaled(14 * $0, weight: .regular, relativeTo: .subheadline) })
             if reservesDetail {
                 Text(item.detail ?? " ")
                     .font(StrandFont.footnote)

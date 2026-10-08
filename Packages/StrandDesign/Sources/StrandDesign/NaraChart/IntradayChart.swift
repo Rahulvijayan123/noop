@@ -10,8 +10,10 @@ import Charts
 ///
 /// - The line breaks wherever a bucket is skipped (the `hrGapSegments` rule): an hour the strap was off is
 ///   empty, not a straight line across it. A bucket alone between two gaps is drawn as a point.
-/// - Spans of the day (sleep, a workout, an event, off-wrist time) are bands behind the line, with a label;
-///   `hatched` bands are hatched, for time with no trustworthy signal.
+/// - Spans of the day (sleep, a workout, an event, off-wrist time) are bands behind the line. A band wide
+///   enough for its label carries it inside, at the top; the others, and every `hatched` band (time with no
+///   trustworthy signal), are named in the legend instead, so labels never run past a narrow band into the
+///   next one or under its hatching.
 /// - `valueBands` shade ranges of the value axis (stress Low/Medium/High, heart-rate zones); `markers` are
 ///   labelled vertical rules at a moment (wake, a dose, an alert).
 /// - Long series are downsampled for drawing after the gaps are found on the full series.
@@ -125,6 +127,9 @@ public struct IntradayChart: View {
     private let valueBands: [ValueBand]
     private let markers: [Marker]
     private let references: [ChartReference]
+    private let referenceAnchors: [ChartAxisLabelAnchor]
+    /// Bands whose label is drawn inside them.
+    private let inlineLabelled: Set<String>
     private let compact: Bool
     private let live: Bool
     private let xLayout: ChartXAxisLayout
@@ -200,6 +205,17 @@ public struct IntradayChart: View {
         }
         self.markers = markers.filter { window.contains($0.time) }
         self.references = references
+        self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
+            for: references,
+            marks: windowed.map { .init(x: $0.time, low: $0.low ?? $0.value, high: $0.high ?? $0.value) },
+            window: window, domain: domain)
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        let inline = Set(self.bands.filter { band in
+            guard let label = band.label, !band.hatched, span > 0 else { return false }
+            let width = band.end.timeIntervalSince(band.start) / span * ChartAxis.assumedPlotWidth
+            return width >= ChartAxis.estimatedWidth(label) + 8
+        }.map(\.id))
+        self.inlineLabelled = inline
         self.compact = compact
         self.live = live
         self.xLayout = ChartAxis.layout(window, style: .hours, target: compact ? 4 : nil, calendar: calendar)
@@ -238,14 +254,15 @@ public struct IntradayChart: View {
         if let legend {
             self.legend = legend
         } else {
+            // The bands not labelled inside the plot (too narrow, or hatched), each name once.
             var automatic: [ChartLegendItem] = []
             var seen: Set<String> = []
-            for band in bands {
+            for band in self.bands where !inline.contains(band.id) {
                 guard let label = band.label, !seen.contains(label) else { continue }
                 seen.insert(label)
                 automatic.append(ChartLegendItem(band.hatched ? .hatched(band.color) : .band(band.color), label))
             }
-            self.legend = automatic.count > 1 ? automatic : []
+            self.legend = automatic
         }
     }
 
@@ -262,10 +279,10 @@ public struct IntradayChart: View {
     private func chart(compact: Bool) -> some View {
         let selectedIndex = selection.flatMap { ChartSelection.nearestIndex(to: $0, in: times) }
         let base = Chart {
-            valueBandMarks(showsLabels: !compact)
-            bandMarks(showsLabels: !compact)
-            NaraReferenceMarks(references: references, showsLabels: !compact)
-            markerMarks(showsLabels: !compact)
+            valueBandMarks
+            bandMarks
+            NaraReferenceMarks(references: references)
+            markerMarks
             SelectionRule(selectedIndex.map { times[$0] }, unit: nil)
             envelopeMarks
             lineMarks
@@ -274,6 +291,7 @@ public struct IntradayChart: View {
                     .symbolSize(NaraChartStyle.selectedPointSize)
                     .foregroundStyle(color)
             }
+            labelMarks(showsLabels: !compact)
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
@@ -307,63 +325,76 @@ public struct IntradayChart: View {
     }
 
     @ChartContentBuilder
-    private func valueBandMarks(showsLabels: Bool) -> some ChartContent {
+    private var valueBandMarks: some ChartContent {
         ForEach(valueBands) { band in
             RectangleMark(xStart: .value("Start", xLayout.window.lowerBound),
                           xEnd: .value("End", xLayout.window.upperBound),
                           yStart: .value("Low", band.range.lowerBound),
                           yEnd: .value("High", band.range.upperBound))
                 .foregroundStyle(band.color.opacity(NaraChartStyle.bandOpacity * 0.7))
-                .annotation(position: .overlay, alignment: .trailing) {
-                    if showsLabels, let label = band.label {
-                        Text(label)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(band.color)
-                            .fixedSize()
-                            .padding(.trailing, 4)
-                    }
-                }
         }
     }
 
     @ChartContentBuilder
-    private func bandMarks(showsLabels: Bool) -> some ChartContent {
+    private var bandMarks: some ChartContent {
         ForEach(bands) { band in
             RectangleMark(xStart: .value("Start", band.start), xEnd: .value("End", band.end))
                 .foregroundStyle(band.color.opacity(band.hatched ? NaraChartStyle.bandOpacity * 0.5 : NaraChartStyle.bandOpacity))
-                .annotation(position: .overlay, alignment: .topLeading) {
-                    // An overlay annotation is offered the mark's own width; a narrow band would squeeze its label
-                    // to nothing, so the label keeps its own size and may run past the band.
-                    if showsLabels, let label = band.label {
-                        Text(label)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(band.color)
-                            .fixedSize()
-                            .padding(.leading, 4)
-                            .padding(.top, 2)
-                    }
-                }
         }
     }
 
     @ChartContentBuilder
-    private func markerMarks(showsLabels: Bool) -> some ChartContent {
+    private var markerMarks: some ChartContent {
         ForEach(markers) { marker in
             RuleMark(x: .value("Time", marker.time))
                 .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
                 .foregroundStyle(marker.color)
-                .annotation(position: .overlay, alignment: .top) {
-                    if showsLabels {
-                        Text(marker.label)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(marker.color)
-                            .fixedSize()
-                            .padding(.horizontal, 4)
-                            .background(StrandPalette.surfaceRaised.opacity(0.9),
-                                        in: RoundedRectangle(cornerRadius: 3, style: .continuous))
-                    }
-                }
         }
+    }
+
+    /// Every label inside the plot, drawn after the line so the data never runs through text: value-band
+    /// names at the trailing edge, band names inside the bands that fit them, marker names at the top,
+    /// reference labels. Each rides on a clear mark, because an annotation is drawn in its mark's layer.
+    @ChartContentBuilder
+    private func labelMarks(showsLabels: Bool) -> some ChartContent {
+        if showsLabels {
+            ForEach(valueBands) { band in
+                if let label = band.label {
+                    RectangleMark(xStart: .value("Start", xLayout.window.lowerBound),
+                                  xEnd: .value("End", xLayout.window.upperBound),
+                                  yStart: .value("Low", band.range.lowerBound),
+                                  yEnd: .value("High", band.range.upperBound))
+                        .foregroundStyle(Color.clear)
+                        .annotation(position: .overlay, alignment: .trailing) {
+                            NaraChartLabel(text: label, color: band.color).padding(.trailing, 2)
+                        }
+                }
+            }
+            ForEach(bands.filter { inlineLabelled.contains($0.id) }) { band in
+                if let label = band.label {
+                    RectangleMark(xStart: .value("Start", band.start), xEnd: .value("End", band.end))
+                        .foregroundStyle(Color.clear)
+                        .annotation(position: .overlay, alignment: .topLeading) {
+                            Text(label)
+                                .font(StrandFont.footnote)
+                                .foregroundStyle(band.color)
+                                .lineLimit(1)
+                                .fixedSize()
+                                .padding(.leading, 4)
+                                .padding(.top, 2)
+                        }
+                }
+            }
+            ForEach(markers) { marker in
+                RuleMark(x: .value("Time", marker.time))
+                    .lineStyle(StrokeStyle(lineWidth: 0))
+                    .foregroundStyle(Color.clear)
+                    .annotation(position: .overlay, alignment: .top) {
+                        NaraChartLabel(text: marker.label, color: marker.color)
+                    }
+            }
+        }
+        NaraReferenceLabels(references: references, anchors: referenceAnchors, showsLabels: showsLabels)
     }
 
     @ChartContentBuilder

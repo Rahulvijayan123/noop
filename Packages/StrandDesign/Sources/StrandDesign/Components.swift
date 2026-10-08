@@ -348,7 +348,6 @@ public struct StatTile<Accessory: View>: View {
                     Spacer(minLength: 0)
                     accessory()
                 }
-                Spacer(minLength: NoopMetrics.space1)
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
                     Text(value)
                         .font(StrandFont.number(24, weight: .medium))
@@ -359,6 +358,7 @@ public struct StatTile<Accessory: View>: View {
                     // Trend chip — the delta as a tinted pill with a direction arrow.
                     if let delta { TrendChip(text: delta, color: deltaColor) }
                 }
+                .padding(.top, NoopMetrics.space1)
                 // Sparkline isn't available on watchOS (it relies on chart-hover helpers); the watch
                 // doesn't use StatTile, but guard the reference so the file still compiles there.
                 #if !os(watchOS)
@@ -379,6 +379,9 @@ public struct StatTile<Accessory: View>: View {
                     .padding(.top, NoopMetrics.spaceHalf)
                     .opacity(caption == nil ? 0 : 1)
                     .accessibilityHidden(caption == nil)
+                // The spare height of a tile stretched to a taller row-mate (one with a sparkline) goes to
+                // the bottom, so the labels and the values of a row stay on one line each.
+                Spacer(minLength: 0)
             }
         }
         // A FLOOR, not a fixed height: a sparkline tile's content exceeds the 96pt base and must be

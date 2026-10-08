@@ -444,7 +444,10 @@ public struct ChartLegendItem: Identifiable, Sendable {
         case line(Color, dashed: Bool)
         case point(Color)
         case band(Color)
+        /// A hollow point: estimated readings on a line, step or points chart.
         case estimate(Color)
+        /// A light bar with a solid cap: estimated bars (daily, diverging, stacked, range bars).
+        case estimateBar(Color)
         case hatched(Color)
     }
     public var id: String { label }

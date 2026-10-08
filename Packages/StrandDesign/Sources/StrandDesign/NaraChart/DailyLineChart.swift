@@ -78,6 +78,8 @@ public struct DailyLineChart: View {
     private let rollingBand: [BandPoint]
     private let bandColor: Color
     private let references: [ChartReference]
+    private let referenceAnchors: [ChartAxisLabelAnchor]
+    private let pointSize: CGFloat
     private let xLayout: ChartXAxisLayout
     private let yLayout: ChartYAxisLayout
     private let xs: [Date]
@@ -141,7 +143,10 @@ public struct DailyLineChart: View {
                                                             targetCount: ChartDownsample.targetVertices,
                                                             date: \.day, value: \.value)
             }
-            let isolated = all.filter { runCounts[$0.run] == 1 }
+            // A reading alone between two gaps, and every estimate: a line cannot show either (an estimate
+            // inside a measured run is only told apart by its hollow point), so they keep their points even
+            // where the rest of the series draws its line alone.
+            let isolated = all.filter { runCounts[$0.run] == 1 || $0.isEstimate }
             switch marks {
             case _ where pointsOnly:
                 pointMarks += all
@@ -177,6 +182,13 @@ public struct DailyLineChart: View {
         let bandColor = bandColor ?? series.first?.color ?? StrandPalette.textTertiary
         self.bandColor = bandColor
         self.references = references
+        self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
+            for: references,
+            marks: windowed.flatMap { $0.1 }.map { .init(x: ChartDay.center(of: $0.day, calendar: calendar),
+                                                          low: $0.value, high: $0.value) },
+            window: window, domain: yLayout.domain)
+        self.pointSize = pointsOnly && total > NaraChartStyle.densePointThreshold
+            ? NaraChartStyle.densePointSize : NaraChartStyle.pointSize
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
         self.xs = byDay.keys.sorted()
@@ -260,11 +272,12 @@ public struct DailyLineChart: View {
         let selected = selectedDay
         return Chart {
             bandMarks
-            NaraReferenceMarks(references: references, showsLabels: !compact)
+            NaraReferenceMarks(references: references)
             SelectionRule(selected, unit: .day)
             lineContent
             pointContent
             selectionPoints(selected)
+            NaraReferenceLabels(references: references, anchors: referenceAnchors, showsLabels: !compact)
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
@@ -324,7 +337,7 @@ public struct DailyLineChart: View {
         ForEach(pointMarks) { mark in
             PointMark(x: .value("Day", mark.day, unit: .day), y: .value("Value", mark.value))
                 .symbol(NaraPointSymbol.shape(estimate: mark.isEstimate))
-                .symbolSize(NaraChartStyle.pointSize)
+                .symbolSize(pointSize)
                 .foregroundStyle(mark.color)
         }
     }

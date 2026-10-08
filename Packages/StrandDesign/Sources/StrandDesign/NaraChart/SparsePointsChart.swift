@@ -46,6 +46,8 @@ public struct SparsePointsChart: View {
     private let trend: [TrendMark]
     private let color: Color
     private let references: [ChartReference]
+    private let referenceAnchors: [ChartAxisLabelAnchor]
+    private let pointSize: CGFloat
     private let xLayout: ChartXAxisLayout
     private let yLayout: ChartYAxisLayout
     private let xs: [Date]
@@ -84,6 +86,13 @@ public struct SparsePointsChart: View {
         self.trend = zip(smoothed, runs).map { TrendMark(day: $0.day, value: $0.value, run: $1) }
         self.color = color
         self.references = references
+        self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
+            for: references,
+            marks: (windowed + smoothed).map { .init(x: ChartDay.center(of: $0.day, calendar: calendar),
+                                                      low: $0.value, high: $0.value) },
+            window: window, domain: yLayout.domain)
+        self.pointSize = windowed.count > NaraChartStyle.densePointThreshold
+            ? NaraChartStyle.densePointSize : NaraChartStyle.pointSize
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
         self.xs = windowed.map(\.day)
@@ -173,7 +182,7 @@ public struct SparsePointsChart: View {
     private var chart: some View {
         let selected = selection.map { calendar.startOfDay(for: $0) }
         return Chart {
-            NaraReferenceMarks(references: references, showsLabels: !compact)
+            NaraReferenceMarks(references: references)
             SelectionRule(selected, unit: .day)
             ForEach(trend) { point in
                 LineMark(x: .value("Day", point.day, unit: .day),
@@ -186,9 +195,10 @@ public struct SparsePointsChart: View {
             ForEach(readings) { reading in
                 PointMark(x: .value("Day", reading.day, unit: .day), y: .value("Value", reading.value))
                     .symbol(NaraPointSymbol.shape(estimate: reading.isEstimate))
-                    .symbolSize(selected == reading.day ? NaraChartStyle.selectedPointSize : NaraChartStyle.pointSize)
+                    .symbolSize(selected == reading.day ? NaraChartStyle.selectedPointSize : pointSize)
                     .foregroundStyle(color)
             }
+            NaraReferenceLabels(references: references, anchors: referenceAnchors, showsLabels: !compact)
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in

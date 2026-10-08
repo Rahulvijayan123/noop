@@ -131,6 +131,7 @@ public struct ChartScrubLayer: View {
                     .frame(width: geo.size.width, height: geo.size.height)
             }
         }
+        .naraChartDemoSelection(xs: xs, selection: $selection, enabled: enabled)
     }
 
     @ViewBuilder
@@ -179,6 +180,67 @@ public struct ChartScrubLayer: View {
         var transaction = Transaction()
         transaction.disablesAnimations = true
         withTransaction(transaction) { selection = next }
+    }
+}
+
+// MARK: - Screenshot hook (DEBUG only)
+
+#if DEBUG
+/// DEBUG-only `--demo-chart-select <fraction>`: every kit chart whose selection is nil when it appears
+/// selects the x at that fraction of its x positions (0 the oldest, 1 the newest), as if a finger rested
+/// there, so a simulator screenshot can show the scrubbed state (rule, dimmed marks, the readout above).
+/// It runs once per chart, also when the chart's points arrive after it appeared, and never on a chart whose
+/// scrub is off (`naraChartScrubDisabled()`). The whole hook, launch argument included, is compiled out of
+/// Release builds.
+enum NaraChartDemoSelection {
+    /// The fraction from the launch arguments, clamped to 0...1; nil without the argument.
+    static let fraction: Double? = parse(ProcessInfo.processInfo.arguments)
+
+    static func parse(_ arguments: [String]) -> Double? {
+        guard let i = arguments.firstIndex(of: "--demo-chart-select"), i + 1 < arguments.count,
+              let value = Double(arguments[i + 1]), value.isFinite else { return nil }
+        return min(1, max(0, value))
+    }
+
+    /// The index `fraction` of the way through `count` positions, rounded to the nearest. Pure.
+    static func index(fraction: Double, count: Int) -> Int? {
+        guard count > 0, fraction.isFinite else { return nil }
+        return min(count - 1, max(0, Int((Double(count - 1) * fraction).rounded())))
+    }
+}
+
+private struct NaraChartDemoSelectionModifier: ViewModifier {
+    let xs: [Date]
+    @Binding var selection: Date?
+    let enabled: Bool
+    @State private var applied = false
+
+    func body(content: Content) -> some View {
+        content
+            .onAppear(perform: apply)
+            .onChangeCompat(of: xs.count) { _ in apply() }
+    }
+
+    private func apply() {
+        guard !applied, enabled, selection == nil, let fraction = NaraChartDemoSelection.fraction,
+              let index = NaraChartDemoSelection.index(fraction: fraction, count: xs.count) else { return }
+        applied = true
+        var transaction = Transaction()
+        transaction.disablesAnimations = true
+        withTransaction(transaction) { selection = xs[index] }
+    }
+}
+#endif
+
+extension View {
+    /// The DEBUG screenshot hook above; nothing at all in Release.
+    @ViewBuilder
+    func naraChartDemoSelection(xs: [Date], selection: Binding<Date?>, enabled: Bool) -> some View {
+        #if DEBUG
+        modifier(NaraChartDemoSelectionModifier(xs: xs, selection: selection, enabled: enabled))
+        #else
+        self
+        #endif
     }
 }
 
