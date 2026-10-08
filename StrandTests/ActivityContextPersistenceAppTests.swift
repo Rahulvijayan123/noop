@@ -107,6 +107,34 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
                       "the day is decoded and written again, not only re-stamped: \(logs)")
     }
 
+    // MARK: Interval context columns (INT-A)
+
+    @MainActor
+    func testAMaterializedDayStoresEveryIntervalContextFieldNotDefaults() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        let rows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertNotNil(row.inBed, "in-bed is recorded, not left NULL")
+            XCTAssertNotNil(row.uncertainty)
+            XCTAssertNotNil(row.experts)
+            XCTAssertNotNil(row.transitionCount)
+            XCTAssertNotNil(row.absorbedClasses)
+            XCTAssertNotNil(row.absorbedSeconds)
+            XCTAssertNotNil(row.settlingSeconds)
+            if !(ActivityClass(rawValue: row.activityClass)?.isMovement ?? true) {
+                XCTAssertNotNil(row.settledFromTs, "a still row says where its settled part starts")
+            }
+        }
+        XCTAssertTrue(rows.dropFirst().allSatisfy { $0.precededByGapS != nil })
+        // What the coach reads back is the context the builder produced, field for field.
+        let stored = await repo.storedActivityContext(from: day.start, to: day.end)
+        XCTAssertEqual(stored.intervals, rows.map(ActivityContextInterval.init(row:)))
+    }
+
     // MARK: Strap change (D5-08)
 
     @MainActor
