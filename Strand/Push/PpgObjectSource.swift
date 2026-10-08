@@ -72,13 +72,14 @@ public struct WhoopStorePpgReader: PpgObjectReading {
 ///    one later (the insert keeps the first copy of a second). It is skipped, not sent anchor-less.
 ///  - Pages only while the negotiated object version is 1.5, the only format that carries the anchor.
 ///  - Bounded: never older than `lookbackSeconds`, never at or below the durable cursor (even when the row
-///    it names has been pruned and the coordinator restarts from an empty cursor), at most one hour per
-///    object, and bounded reads per call. A second therefore goes up once; the receiver's content-addressed
+///    it names has been pruned and the coordinator restarts from an empty cursor), at most 2,000 records
+///    (the wake budget's per-object cap) within one hour per object, and bounded reads per call. A second therefore goes up once; the receiver's content-addressed
 ///    object identity turns a resent identical object into a duplicate, not a second copy.
 ///  - `acknowledgeBinary` is a no-op: the source never deletes store data.
 public final class PpgObjectSource: PushSnapshotSource, @unchecked Sendable {
-    /// Target object duration. An optical hour is at most 3,600 records (~290 KB decoded), under the 5,000-record
-    /// cap, and every object makes the server rebuild that day's inputs, so slivers are avoided.
+    /// The span one object may cover from its first second. The coordinator's wake budget caps an object at
+    /// 2,000 records (~160 KB decoded), so a continuous optical hour goes up as two objects; every object makes
+    /// the server rebuild that day's inputs, so slivers are avoided.
     public static let targetObjectWindowSeconds: Int64 = 3_600
     /// v26 rows arrive with the history offload after the strap reconnects, not live. An hour with no newer row
     /// yet goes out only once the phone clock is this far past its end.
