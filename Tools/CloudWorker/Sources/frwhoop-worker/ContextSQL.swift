@@ -244,6 +244,10 @@ enum ContextSQL {
                  as confidence,
                coalesce(r.value ->> 'sleep', '') as sleep, coalesce(r.value ->> 'wear', '') as wear,
                case when c.says_in_bed then coalesce(r.value ->> 'in_bed', 'false') else '' end as in_bed,
+               case when r.value ->> 'activity_detail' = 'in_vehicle'
+                      or coalesce(case when jsonb_typeof(r.value -> 'locomotion') = 'object'
+                                       then (r.value -> 'locomotion' ->> 'vehicle_motion')::real end, 0) >= 0.5
+                    then 'vehicle_motion' else '' end as locomotion,
                c.algorithm_version, c.decoder_version, c.day::text as doc_day,
                c.result_revision::text as revision,
                ceil(extract(epoch from c.computed_at))::bigint::text as at

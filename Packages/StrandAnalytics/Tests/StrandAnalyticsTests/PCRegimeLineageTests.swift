@@ -59,12 +59,40 @@ final class PCRegimeLineageTests: XCTestCase {
                           heartRateDependent: false, reasons: [])
     }
 
-    static func stratum(_ cls: String, confidence: Double = 0.85, inBed: Bool? = false, decoder: String = "hsmm-1.8",
+    static func stratum(_ cls: String, confidence: Double = 0.85, inBed: Bool? = false, decoder: String = "hsmm-1.9",
                         gravity g: PC.PostureStratum = .unknown) -> PC.PostureContext {
         let (track, bed) = decoderTrack([(cls, confidence, inBed, decoder)])
         let start = window.start + 8 * 3600
         return PC.PostureEvidence.withContext(gravity(g), over: .init(start, start + 300), decoder: track,
                                               inBed: bed, config: .init())
+    }
+
+    /// Every code the engine emits is in a registry (the app's wording coverage iterates them).
+    func testEmittedContextAndFeatureCodesAreRegistered() {
+        XCTAssertTrue(PC.PostureEvidence.reasonCodes.contains(PC.PostureEvidence.sittingStandingNotSeparatedByWrist))
+        XCTAssertTrue(PC.Functional.reasonCodes.contains(PC.FeatureRegistry.noValidatedDefinition))
+        let emitted = Self.stratum("standing", decoder: "hsmm-1.10").contextReasons ?? []
+        for code in emitted { XCTAssertTrue(PC.PostureEvidence.reasonCodes.contains(code), "\(code)") }
+    }
+
+    /// A ride never keys a seated stratum (review r5): an "In a vehicle" run is class `sitting` at a confidence the
+    /// vehicle mass carries past tau, but heart rate in a moving vehicle is not seated rest.
+    func testARideNeverKeysTheSeatedStratum() {
+        let (track, bed) = Self.decoderTrack([("sitting", 0.95, false, "hsmm-1.9")])
+        let start = Self.window.start + 8 * 3600
+        let support = PC.Interval(start, start + 300)
+        let parked = PC.PostureEvidence.withContext(Self.gravity(.unknown), over: support, decoder: track, inBed: bed,
+                                                    config: .init())
+        XCTAssertEqual(parked.context, .seated)
+        let ride = PC.PostureEvidence.withContext(Self.gravity(.unknown), over: support, decoder: track, inBed: bed,
+                                                  config: .init(), vehicle: [support])
+        XCTAssertEqual(ride.context, .unknown)
+        XCTAssertTrue(ride.contextReasons?.contains(PC.PostureEvidence.contextInVehicleNotUsed) == true)
+        XCTAssertTrue(PC.PostureEvidence.reasonCodes.contains(PC.PostureEvidence.contextInVehicleNotUsed))
+        // Part of the window in the car: the parked share is below the stratum's 90 % and it abstains too.
+        let partly = PC.PostureEvidence.withContext(Self.gravity(.unknown), over: support, decoder: track, inBed: bed,
+                                                    config: .init(), vehicle: [.init(start + 240, start + 300)])
+        XCTAssertEqual(partly.context, .unknown)
     }
 
     func testContextStratumComesOnlyFromConfidentHeartRateFreePostureClaims() {
@@ -82,6 +110,13 @@ final class PCRegimeLineageTests: XCTestCase {
         XCTAssertEqual(old.context, .unknown)
         XCTAssertTrue(old.contextReasons?.contains(PC.PostureEvidence.contextDecoderReadsHeartRate) == true)
         XCTAssertEqual(Self.stratum("sitting", decoder: "hsmm-1.10").context, .seated, "versions compare numerically")
+        // hsmm-1.8 stored sit / stand runs at up to ~0.9 whenever a learned source merely spoke (presence lifted
+        // the cap to 1.0), and its lie-down path read a lower heart rate: neither may key a stratum (review r5).
+        for cls in ["sitting", "standing", "lying_down"] {
+            let v18 = Self.stratum(cls, confidence: 0.9, decoder: "hsmm-1.8")
+            XCTAssertEqual(v18.context, .unknown, cls)
+            XCTAssertTrue(v18.contextReasons?.contains(PC.PostureEvidence.contextDecoderReadsHeartRate) == true, cls)
+        }
         // The heart-rate confirmed in-bed window is never context evidence.
         let bed = Self.stratum("lying_down", inBed: true)
         XCTAssertEqual(bed.context, .unknown)
