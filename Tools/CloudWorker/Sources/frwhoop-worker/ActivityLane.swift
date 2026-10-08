@@ -888,11 +888,14 @@ struct ActivityLane {
         for request in requests {
             // A request this host has already answered with the same model is not sent again: only
             // the run that grew since the last pass (normally the newest) costs model time.
+            // Keyed by the digests of what the child measured it loaded, plus the versions it reports, so changed
+            // bytes under a reused version label never reuse an answer. No measured identity: no caching.
+            var versions = ["model": out.versions.model, "preprocessing": out.versions.preprocessing]
+            versions["transition"] = out.transitionVersion
+            if let gait = service.reportedGaitVersion { versions["gait"] = gait }
             let cacheKey = cacheable
-                ? ActivityLocalCache.inferenceKey(request: request, modelVersion: out.versions.model,
-                                                  preprocessingVersion: out.versions.preprocessing,
-                                                  transitionVersion: out.transitionVersion,
-                                                  gaitVersion: service.reportedGaitVersion)
+                ? ActivityLocalCache.inferenceKey(request: request, identity: service.cacheIdentity ?? [:],
+                                                  versions: versions)
                 : nil
             if let cacheKey, let cached = cache?.inference(key: cacheKey) {
                 out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(cached))
