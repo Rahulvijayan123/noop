@@ -361,4 +361,27 @@ final class InferenceClientTests: XCTestCase {
         let b = try InferenceClient.inputDigest(.object(["beats": .array([.int(1)])]))
         XCTAssertNotEqual(a, b)
     }
+
+    // MARK: - JSONValue(any:) number classification
+
+    func testJSONSerializationNumbersKeepTheirKind() throws {
+        // NSNumber 0 and 1 from JSONSerialization must not become booleans (Darwin bridging).
+        let text = #"[0, 1, true, false, 1.5, 2.0, -3, 9007199254740993, {"edge": 0, "on": true}]"#
+        let parsed = try JSONSerialization.jsonObject(with: Data(text.utf8))
+        XCTAssertEqual(JSONValue(any: parsed), .array([
+            .int(0), .int(1), .bool(true), .bool(false), .double(1.5), .int(2), .int(-3),
+            .int(9_007_199_254_740_993), .object(["edge": .int(0), "on": .bool(true)]),
+        ]))
+    }
+
+    func testNativeSwiftValuesKeepTheirKind() {
+        XCTAssertEqual(JSONValue(any: true), .bool(true))
+        XCTAssertEqual(JSONValue(any: false), .bool(false))
+        XCTAssertEqual(JSONValue(any: 0), .int(0))
+        XCTAssertEqual(JSONValue(any: 1), .int(1))
+        XCTAssertEqual(JSONValue(any: 1.5), .double(1.5))
+        XCTAssertEqual(JSONValue(any: Int64(7)), .int(7))
+        XCTAssertEqual(JSONValue(any: ["edges": [0, 1, 2]] as [String: Any]),
+                       .object(["edges": .array([.int(0), .int(1), .int(2)])]))
+    }
 }
