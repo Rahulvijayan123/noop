@@ -36,6 +36,11 @@ def self_test(cfg: Config) -> int:
     try:
         for name in ("agent", "work", "home", "tmp"):
             (run / name).mkdir()
+        # The Linux sandbox read-only binds these paths from a real job's agent directory (see PrimeSession._start),
+        # and bubblewrap refuses a missing bind source: create the same shapes here so the probe tests the real argv.
+        for name in ("settings.json", "models.json", "auth.json"):
+            (run / "agent" / name).write_text("{}")
+        (run / "agent" / "harness").mkdir()
         readable = sandbox.python_prefixes(cfg.kernel_python)
         # The real secrets and the worker's own state must be unreachable too, not just a planted canary.
         targets = [str(secret), *cfg.secret_paths]

@@ -136,7 +136,9 @@ def linux_argv(plan: Plan, argv: list[str], env: dict[str, str], kernel_python: 
     for path in (f"{run}/agent/settings.json", f"{run}/agent/models.json", f"{run}/agent/auth.json",
                  f"{run}/agent/harness", f"{run}/work"):
         out += ["--ro-bind", path, path]
-    out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--chdir", f"{run}/work"]
+    # bubblewrap's root is a writable in-memory tmpfs: remount it read-only once every mount point exists, so model
+    # code cannot even create files outside the run directory and /tmp (the self-test proves this).
+    out += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--remount-ro", "/", "--chdir", f"{run}/work"]
     for key, value in sorted(env.items()):
         out += ["--setenv", key, value]
     assert plan.proxy_unix
