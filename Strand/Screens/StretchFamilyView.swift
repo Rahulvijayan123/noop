@@ -13,6 +13,8 @@ struct StretchFamilyView: View {
         case family(ActivityFamily)
         /// Every position change of the day, with no stretches.
         case positionChanges
+        /// Every stretch of the day under the day's lane, drawn across `window`.
+        case day(ClosedRange<Date>)
     }
 
     private enum Tab: Hashable { case stretches, changes }
@@ -33,8 +35,16 @@ struct StretchFamilyView: View {
         return nil
     }
 
+    private var dayWindow: ClosedRange<Date>? {
+        if case .day(let window) = scope { return window }
+        return nil
+    }
+
+    private var listsStretches: Bool { family != nil || dayWindow != nil }
+
     private var episodes: [ActivityEpisode] {
         let all = timeline.activityContext.map { ActivityContextEpisodes.build($0.runs) } ?? []
+        if dayWindow != nil { return all }
         guard let family else { return [] }
         return all.filter { ActivityFamily.of($0.label) == family }
     }
@@ -51,10 +61,14 @@ struct StretchFamilyView: View {
     }
 
     private var title: String {
-        family?.title ?? String(localized: "Position changes")
+        if dayWindow != nil { return String(localized: "Your day") }
+        return family?.title ?? String(localized: "Position changes")
     }
 
     private var subtitle: String {
+        if dayWindow != nil {
+            return StretchFormat.count(DayStretchLayout(episodes: episodes, recentCount: 0).count)
+        }
         guard family != nil else { return String(localized: "\(changes.count) flagged today") }
         guard let total else { return "" }
         let time = StretchFormat.duration(total.seconds)
@@ -63,8 +77,11 @@ struct StretchFamilyView: View {
 
     var body: some View {
         ScreenScaffold(title: LocalizedStringKey(title), subtitle: LocalizedStringKey(subtitle), lazy: true) {
-            if family != nil { picker }
-            if family == nil || tab == .changes {
+            if let dayWindow, let doc = timeline.activityContext, !episodes.isEmpty {
+                dayLane(doc, window: dayWindow)
+            }
+            if listsStretches { picker }
+            if !listsStretches || tab == .changes {
                 changesList
             } else {
                 stretchesList
@@ -85,6 +102,23 @@ struct StretchFamilyView: View {
         }
     }
 
+    private func open(_ target: StretchTarget) {
+        openStretch = StretchSheetInput(target: target, document: timeline.activityContext,
+                                        segments: timeline.dayStates)
+    }
+
+    private func dayLane(_ doc: ActivityContextDayDocument, window: ClosedRange<Date>) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            DayActivityLane(episodes: episodes, events: doc.events, window: window, onOpen: open, height: 96)
+            FineLabelLegend(shares: DayFineLabels.shares(episodes, in: window), limit: nil,
+                            showsPositionChanges: !LanePositionChanges.ticks(doc.events).isEmpty)
+        }
+        .padding(.horizontal, NoopMetrics.space2)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
     // MARK: Stretches
 
     @ViewBuilder
@@ -92,7 +126,9 @@ struct StretchFamilyView: View {
         let layout = DayStretchLayout(episodes: episodes, recentCount: 0)
         if layout.earlier.isEmpty {
             DataPendingNote(title: "No stretches this long",
-                            message: "This kind of activity only came in moments shorter than a minute.",
+                            message: dayWindow != nil
+                                ? "Nothing on this day lasted a minute or more yet."
+                                : "This kind of activity only came in moments shorter than a minute.",
                             symbol: "hourglass")
         } else {
             ForEach(layout.earlier, id: \.part) { group in
@@ -109,8 +145,7 @@ struct StretchFamilyView: View {
                     ForEach(group.stretches) { ep in
                         StretchRow(episode: ep,
                                    verdict: feedback.feedback(kind: .activityContext, start: ep.start, end: ep.end)) {
-                            openStretch = StretchSheetInput(target: .activity(ep), document: timeline.activityContext,
-                                                            segments: timeline.dayStates)
+                            open(.activity(ep))
                         }
                     }
                 }

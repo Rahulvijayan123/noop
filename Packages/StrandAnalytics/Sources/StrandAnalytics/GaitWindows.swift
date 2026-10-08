@@ -96,6 +96,8 @@ public struct WalkingDayReading: Equatable, Sendable {
     public var cadenceBandSeconds: [Int]
     /// Walking seconds in each hour from `from` (index 0 is the first hour).
     public var hourlySeconds: [Int]
+    /// Steps in each hour from `from`, from the windows that carry a step count.
+    public var hourlySteps: [Double]
     /// The median of the walks' own speeds: the pace this wearer usually walks at, steadier than the all-window
     /// mean because short shuffles do not pull it down.
     public var typicalSpeedMps: Double?
@@ -117,6 +119,7 @@ public struct WalkingDayReading: Equatable, Sendable {
         var walking = 0, brisk = 0, assessed = 0
         var bands = [Int](repeating: 0, count: Self.cadenceBands.count)
         var hourly = [Int](repeating: 0, count: max(1, (to - from + 3_599) / 3_600))
+        var hourlySteps = [Double](repeating: 0, count: hourly.count)
         var steps = 0.0, stepWindows = 0
         var sums: [Double] = [0, 0, 0, 0], counts: [Int] = [0, 0, 0, 0]
         var bouts: [Bout] = []
@@ -142,10 +145,11 @@ public struct WalkingDayReading: Equatable, Sendable {
             walking += hop
             if let c = w.cadenceSpm, c >= Self.briskCadenceSpm { brisk += hop }
             if let c = w.cadenceSpm, let band = Self.cadenceBands.lastIndex(where: { c >= $0 }) { bands[band] += hop }
-            hourly[min(hourly.count - 1, max(0, (w.start - from) / 3_600))] += hop
+            let hour = min(hourly.count - 1, max(0, (w.start - from) / 3_600))
+            hourly[hour] += hop
             let share = Double(hop) / Double(width)
             let stepShare = (w.steps ?? 0) * share
-            if w.steps != nil { steps += stepShare; stepWindows += 1 }
+            if w.steps != nil { steps += stepShare; stepWindows += 1; hourlySteps[hour] += stepShare }
             for (i, v) in [w.cadenceSpm, w.speedMps, w.strideM, w.regularity].enumerated() {
                 if let v { sums[i] += v; counts[i] += 1 }
             }
@@ -174,6 +178,7 @@ public struct WalkingDayReading: Equatable, Sendable {
         self.assessedWindows = assessed
         self.cadenceBandSeconds = bands
         self.hourlySeconds = hourly
+        self.hourlySteps = hourlySteps
         let speeds = bouts.compactMap(\.speedMps).sorted()
         self.typicalSpeedMps = speeds.isEmpty ? nil
             : speeds.count % 2 == 1 ? speeds[speeds.count / 2] : (speeds[speeds.count / 2 - 1] + speeds[speeds.count / 2]) / 2

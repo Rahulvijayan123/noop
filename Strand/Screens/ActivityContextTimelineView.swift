@@ -321,14 +321,23 @@ struct ActivityImprovementSection: View {
     /// The day these episodes belong to; its local date is the prompt-budget key.
     let dayStart: Date
     let deviceId: String?
+    /// A short section title in place of the full heading and explanation.
+    let compactTitle: LocalizedStringKey?
+    /// How many rows show here; the rest are one "See all" away. nil shows every row.
+    let inlineLimit: Int?
+    let showsHeader: Bool
 
     /// The stretch being asked about, or nil when no sheet is up.
     @State private var asking: ActivityImprovementPrompt?
 
-    init(episodes: [ActivityEpisode], dayStart: Date, deviceId: String? = nil) {
+    init(episodes: [ActivityEpisode], dayStart: Date, deviceId: String? = nil,
+         compactTitle: LocalizedStringKey? = nil, inlineLimit: Int? = nil, showsHeader: Bool = true) {
         self.episodes = episodes
         self.dayStart = dayStart
         self.deviceId = deviceId
+        self.compactTitle = compactTitle
+        self.inlineLimit = inlineLimit
+        self.showsHeader = showsHeader
     }
 
     init(document: ActivityContextDayDocument?, dayStart: Date, deviceId: String? = nil) {
@@ -371,10 +380,11 @@ struct ActivityImprovementSection: View {
 
     var body: some View {
         let candidates = visibleCandidates
+        let shown = inlineLimit.map { Array(candidates.prefix($0)) } ?? candidates
         if !candidates.isEmpty {
             VStack(alignment: .leading, spacing: 10) {
-                header
-                ForEach(candidates) { candidate in
+                if showsHeader { header(hasMore: shown.count < candidates.count) }
+                ForEach(shown) { candidate in
                     ActivityImprovementRow(candidate: candidate) {
                         open(candidate)
                     }
@@ -386,7 +396,28 @@ struct ActivityImprovementSection: View {
         }
     }
 
-    private var header: some View {
+    @ViewBuilder private func header(hasMore: Bool) -> some View {
+        if let compactTitle {
+            DaySectionHeader(title: compactTitle) {
+                if hasMore {
+                    NavigationLink {
+                        ScreenScaffold(title: compactTitle,
+                                       subtitle: "A few stretches were unclear. Tell me what you were doing and the labels get better.") {
+                            ActivityImprovementSection(episodes: episodes, dayStart: dayStart, deviceId: deviceId,
+                                                       showsHeader: false)
+                        }
+                    } label: {
+                        SeeAllLabel(text: "See all")
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+        } else {
+            fullHeader
+        }
+    }
+
+    private var fullHeader: some View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Help improve activity detection")
                 .font(StrandFont.title2)

@@ -21,6 +21,8 @@ enum TabRoute: Hashable {
     /// The day's heart-rate graph with the inferred-activity timeline underneath (Liquid Today's live-HR
     /// card tap). The Deep Timeline stays reachable from its footer link.
     case heartRateDay
+    /// One day's steps by hour and by walk, opened from the day page's Walking card.
+    case daySteps(Date)
     /// One metric's detail page by `MetricCatalog` key — the same tap-through Today's cards and
     /// Trends' small-multiples share. Each card opens ITS metric (2026-07-02: not the shared
     /// Health screen).
@@ -61,6 +63,7 @@ extension View {
             switch route {
             case .fullDayChart: FullDayChartView()
             case .heartRateDay: FullDayChartView(showsActivityTimeline: true)
+            case .daySteps(let dayStart): DayStepsView(dayStart: dayStart)
             case .metric(let key):
                 // Every caller passes a catalog key, so the fallback is theoretical; Health is the
                 // catch-all vitals surface. (Pre-#198 Trends fell back to the Explorer instead —

@@ -335,8 +335,9 @@ struct KeyMetricDetailView: View {
     }
 }
 
-/// The Steps page's "How you walked" card on a page of its own, opened from the key-metric Steps screen.
-private struct WalkingDetailScreen: View {
+/// The Steps page's "How you walked" card on a page of its own, opened from the key-metric Steps screen, the
+/// day page's Walking card and the day Steps page.
+struct WalkingDetailScreen: View {
     /// The local calendar day (`yyyy-MM-dd`) to open on.
     let day: String
 

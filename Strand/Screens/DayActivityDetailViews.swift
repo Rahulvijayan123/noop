@@ -45,10 +45,12 @@ enum DayFineLabels {
 /// Coloured chips for the labels on screen, under the lane.
 struct FineLabelLegend: View {
     let shares: [FineLabelShare]
+    /// How many labels to show, longest first; nil shows them all.
+    var limit: Int? = 10
     var showsPositionChanges = false
 
     var body: some View {
-        let shown = Array(shares.prefix(8))
+        let shown = limit.map { Array(shares.prefix($0)) } ?? shares
         FlowLayout(spacing: 6) {
             ForEach(shown) { share in
                 let family = ActivityFamily.of(share.label)
@@ -242,11 +244,71 @@ struct StrapSignalDay: Equatable {
 struct StrapSignalCard: View {
     let dayStart: Date
     let window: ClosedRange<Date>
+    /// One summary row that opens the full card on its own page.
+    var compact = false
 
     @State private var reading: StrapSignalDay?
     @State private var loaded = false
 
     var body: some View {
+        Group {
+            if compact {
+                NavigationLink {
+                    ScreenScaffold(title: "Strap signal") {
+                        StrapSignalCard(dayStart: dayStart, window: window)
+                    }
+                } label: {
+                    compactRow
+                }
+                .buttonStyle(.plain)
+            } else {
+                fullCard
+            }
+        }
+        .task(id: dayStart) { await load() }
+    }
+
+    private var compactRow: some View {
+        HStack(spacing: 12) {
+            Image(systemName: "waveform.path.ecg")
+                .font(.system(size: 17, weight: .semibold))
+                .foregroundStyle(StrandPalette.metricCyan)
+                .frame(width: 24)
+            VStack(alignment: .leading, spacing: 3) {
+                Text("Strap signal")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Text(compactSummary)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: 8)
+            if !loaded { ProgressView().controlSize(.small) }
+            Image(systemName: "chevron.right")
+                .font(StrandFont.caption.weight(.semibold))
+                .foregroundStyle(StrandPalette.textTertiary)
+        }
+        .padding(.horizontal, NoopMetrics.space3)
+        .padding(.vertical, 14)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NoopPanelSurface(cornerRadius: 18))
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
+        .accessibilityHint("Shows how well the strap could read you across the day")
+    }
+
+    private var compactSummary: String {
+        guard let reading, reading.assessedSeconds > 0 else {
+            return loaded ? String(localized: "No strap-signal reading for this day yet.")
+                          : String(localized: "Checking the server's reading…")
+        }
+        let good = reading.seconds[.onWristGood] ?? 0
+        let share = Int((Double(good) / Double(reading.assessedSeconds) * 100).rounded())
+        return String(localized: "Good contact \(share)% of the time it was assessed.")
+    }
+
+    private var fullCard: some View {
         VStack(alignment: .leading, spacing: 10) {
             HStack(spacing: 8) {
                 Image(systemName: "waveform.path.ecg")
@@ -275,7 +337,6 @@ struct StrapSignalCard: View {
         .padding(NoopMetrics.space3)
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(NoopPanelSurface(cornerRadius: 20))
-        .task(id: dayStart) { await load() }
     }
 
     private func lane(_ reading: StrapSignalDay) -> some View {
@@ -367,6 +428,14 @@ struct WalkingQualityCard: View {
                     .foregroundStyle(StrandPalette.textPrimary)
                 Spacer(minLength: 8)
                 if !loaded { ProgressView().controlSize(.small) }
+                if let reading, !reading.isEmpty {
+                    NavigationLink {
+                        WalkingDetailScreen(day: GaitDayLoader.dayString(dayStart))
+                    } label: {
+                        SeeAllLabel(text: "View details")
+                    }
+                    .buttonStyle(.plain)
+                }
             }
             if let reading, !reading.isEmpty {
                 headline(reading)
@@ -394,7 +463,24 @@ struct WalkingQualityCard: View {
     private func headline(_ r: WalkingDayReading) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 18) {
             stat(StretchFormat.duration(r.walkingSeconds), "walking")
-            if let steps = r.steps { stat(Int(steps.rounded()).formatted(), "steps") }
+            if let steps = r.steps {
+                NavigationLink(value: TabRoute.daySteps(dayStart)) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text(Int(steps.rounded()).formatted())
+                            .font(StrandFont.number(20))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        HStack(spacing: 3) {
+                            Text("steps")
+                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
+                        }
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.metricPurple)
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens your steps for this day")
+            }
             if r.briskSeconds > 0 { stat(StretchFormat.duration(r.briskSeconds), "brisk") }
         }
     }
@@ -417,7 +503,8 @@ struct WalkingQualityCard: View {
             if let s = r.strideM { chip("Stride", UnitFormatter.distanceFromMeters(s, system: system)) }
             if let g = r.regularity { chip("Step evenness", "\(Int((g * 100).rounded()))%") }
             if !r.bouts.isEmpty {
-                chip("Walks", "\(r.bouts.count) · longest \(StretchFormat.duration(r.bouts.map(\.seconds).max() ?? 0))")
+                chip("Walks", "\(r.bouts.count)")
+                chip("Longest", StretchFormat.duration(r.bouts.map(\.seconds).max() ?? 0))
             }
         }
     }
@@ -470,17 +557,40 @@ struct WalkingQualityCard: View {
 
     private func load() async {
         defer { loaded = true }
+        guard let day = await GaitDayLoader.load(dayStart: dayStart) else { return }
+        reading = WalkingDayReading(days: day.columns, from: day.from, to: day.to)
+    }
+}
+
+/// The server's gait windows for one local day, as the walking card and the Steps page read them.
+enum GaitDayLoader {
+    struct Day {
+        let columns: [GaitWindowColumns]
+        let from: Int
+        let to: Int
+    }
+
+    /// The local calendar day (`yyyy-MM-dd`) the walking pages key on.
+    static func dayString(_ dayStart: Date) -> String {
+        let formatter = DateFormatter()
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter.string(from: dayStart)
+    }
+
+    /// nil when the wearer is not signed in to the hosted pipeline or the server has no gait windows for the day.
+    static func load(dayStart: Date) async -> Day? {
         guard let identity = CloudPushIdentityStore.current(),
               let repository = CloudPushRuntime.shared.scoreRepository(),
-              let device = await IntradaySeriesStore.shared.readCandidates.first else { return }
+              let device = await IntradaySeriesStore.shared.readCandidates.first else { return nil }
         let from = Int(dayStart.timeIntervalSince1970)
         let to = Int((Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400))
             .timeIntervalSince1970)
         let days = ActivityEncoderWindowStore.utcDays(from: from, to: to)
         guard let columns = try? await GaitWindowsCache.shared.columns(
             utcDays: days, deviceId: device, ownerId: identity.ownerId, repository: repository),
-              !columns.isEmpty else { return }
-        reading = WalkingDayReading(days: columns, from: from, to: to)
+              !columns.isEmpty else { return nil }
+        return Day(columns: columns, from: from, to: to)
     }
 }
 

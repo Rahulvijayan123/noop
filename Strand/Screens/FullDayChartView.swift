@@ -105,21 +105,22 @@ struct FullDayChartView: View {
     private var visibleWindow: ClosedRange<Date> { zoomDomain ?? dayBounds }
 
     var body: some View {
-        ScreenScaffold(title: showsActivityTimeline ? "Heart rate" : "Deep Timeline",
-                       subtitle: showsActivityTimeline ? "Your whole day, and what you were doing."
+        ScreenScaffold(title: showsActivityTimeline ? LocalizedStringKey(dayLabel) : "Deep Timeline",
+                       subtitle: showsActivityTimeline ? "Your health and activity at a glance."
                                                        : "Every second of your day, zoomable.",
-                       lockHorizontalScroll: showsActivityTimeline) {
-            if !showsActivityTimeline { metricPills }
-            dayNav
-            if !showsActivityTimeline { sourcePill }
+                       lockHorizontalScroll: showsActivityTimeline,
+                       trailing: { if showsActivityTimeline { dayStepper } }) {
+            if !showsActivityTimeline {
+                metricPills
+                dayNav
+                sourcePill
+            }
             #if DEBUG
             if !demoHidesGraph {
-                chartCard
-                zoomHint
+                graph
             }
             #else
-            chartCard
-            zoomHint
+            graph
             #endif
             if showsActivityTimeline {
                 #if DEBUG
@@ -301,6 +302,44 @@ struct FullDayChartView: View {
         .padding(.horizontal, NoopMetrics.space1)
     }
 
+    /// The day page's header control. Older days sit to the right, so "Yesterday ›" steps back from today and,
+    /// once back, "‹ Today" returns.
+    private var dayStepper: some View {
+        HStack(spacing: 14) {
+            if !isOnLatestDay {
+                Button { stepDay(1) } label: {
+                    HStack(spacing: 4) {
+                        Image(systemName: "chevron.left").font(.system(size: 12, weight: .semibold))
+                        Text(shortLabel(dayStart.addingTimeInterval(86_400)))
+                    }
+                    .frame(minHeight: 44)
+                    .contentShape(Rectangle())
+                }
+                .accessibilityLabel(Text("Next day"))
+            }
+            Button { stepDay(-1) } label: {
+                HStack(spacing: 4) {
+                    Text(shortLabel(dayStart.addingTimeInterval(-86_400)))
+                    Image(systemName: "chevron.right").font(.system(size: 12, weight: .semibold))
+                }
+                .frame(minHeight: 44)
+                .contentShape(Rectangle())
+            }
+            .accessibilityLabel(Text("Previous day"))
+        }
+        .font(StrandFont.subhead)
+        .foregroundStyle(StrandPalette.metricPurple)
+        .buttonStyle(.plain)
+        .monospacedDigit()
+    }
+
+    private func shortLabel(_ day: Date) -> String {
+        let today = Repository.logicalDayStart(Date())
+        if Calendar.current.isDate(day, inSameDayAs: today) { return String(localized: "Today") }
+        if Calendar.current.isDate(day, inSameDayAs: today.addingTimeInterval(-86_400)) { return String(localized: "Yesterday") }
+        return day.formatted(.dateTime.weekday(.abbreviated).day())
+    }
+
     private var isOnLatestDay: Bool { dayStart >= Repository.logicalDayStart(Date()) }
 
     /// Step the shown day by `delta` days, clamped so you can never go past today, and drop any zoom so the
@@ -326,6 +365,98 @@ struct FullDayChartView: View {
     }()
 
     // MARK: Chart
+
+    @ViewBuilder private var graph: some View {
+        if showsActivityTimeline {
+            heartRateCard
+            if zoomDomain != nil { zoomHint }
+        } else {
+            chartCard
+            zoomHint
+        }
+    }
+
+    private var chartHeight: CGFloat { showsActivityTimeline ? 230 : 280 }
+
+    /// The day page's heart-rate card: the latest reading up top, the day's graph, and its low, average and high.
+    private var heartRateCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline) {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "heart.fill")
+                            .font(.system(size: 15, weight: .semibold))
+                            .foregroundStyle(StrandPalette.metricRose)
+                            .accessibilityHidden(true)
+                        Text("Heart rate")
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                    }
+                    Text(resolutionSubtitle)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                Spacer(minLength: 8)
+                if let last = displayPoints.last {
+                    HStack(alignment: .firstTextBaseline, spacing: 3) {
+                        Text(format(last.value))
+                            .font(StrandFont.number(24, weight: .bold))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("bpm")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                    }
+                    .monospacedDigit()
+                    .accessibilityElement(children: .combine)
+                    .accessibilityLabel(Text("Latest \(format(last.value)) beats per minute"))
+                }
+            }
+            Group {
+                if loading && series.points.isEmpty {
+                    loadingState
+                } else if series.points.isEmpty {
+                    emptyState
+                } else {
+                    chart
+                }
+            }
+            .frame(height: chartHeight)
+            if !displayPoints.isEmpty {
+                Divider().overlay(StrandPalette.hairline)
+                heartRateStats
+            }
+        }
+        .padding(NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
+    private var heartRateStats: some View {
+        let v = displayPoints.map(\.value)
+        let stats: [(LocalizedStringKey, String)] = [
+            ("Min", format(v.min() ?? 0)),
+            ("Avg", format(v.reduce(0, +) / Double(max(1, v.count)))),
+            ("Max", format(v.max() ?? 0)),
+        ]
+        return HStack(spacing: 0) {
+            ForEach(Array(stats.enumerated()), id: \.offset) { i, stat in
+                if i > 0 {
+                    Rectangle().fill(StrandPalette.hairline).frame(width: 1, height: 32)
+                }
+                VStack(alignment: i == 0 ? .leading : i == stats.count - 1 ? .trailing : .center, spacing: 2) {
+                    Text(stat.1)
+                        .font(StrandFont.number(20))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .monospacedDigit()
+                    Text(stat.0)
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                .frame(maxWidth: .infinity, alignment: i == 0 ? .leading : i == stats.count - 1 ? .trailing : .center)
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
 
     @ViewBuilder private var chartCard: some View {
         ChartCard(
@@ -371,7 +502,7 @@ struct FullDayChartView: View {
             gradient: gradientFor(metric),
             valueRange: valueRange(displayPoints),
             xRange: dayBounds,
-            height: 280,
+            height: chartHeight,
             // #979 spin-off — iPhone touch scrub: hold to pin the crosshair, drag to read values under
             // the finger (the Mac pointer hover's readout, made reachable on touch). Opt-in here only.
             // Not on the Heart rate day page: the gesture claims the touch, so a finger that lands on this

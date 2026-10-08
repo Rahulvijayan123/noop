@@ -90,49 +90,37 @@ struct DayStretchesSection: View {
 
     @EnvironmentObject private var repo: Repository
     @ObservedObject private var feedback = StretchFeedbackCenter.shared
-    @State private var openParts: Set<StretchDayPart> = []
+    @State private var showsAllFamilies = false
+
+    /// Boxes shown before "See all" opens the rest.
+    private static let collapsedFamilyCount = 6
 
     var body: some View {
         let document = timeline.activityContext
         let episodes = document.map { ActivityContextEpisodes.build($0.runs) } ?? []
         VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-            header
             if let document, !episodes.isEmpty {
                 content(document, episodes)
-            } else if timeline.activityBusy {
-                HStack(spacing: 10) {
-                    ProgressView()
-                    Text("Working out your day…")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .frame(maxWidth: .infinity)
-                .padding(.vertical, NoopMetrics.space6)
             } else {
-                Text("No motion data for this day yet.")
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                laneCardShell(hasDetails: false) {
+                    if timeline.activityBusy {
+                        HStack(spacing: 10) {
+                            ProgressView()
+                            Text("Working out your day…")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textTertiary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, NoopMetrics.space4)
+                    } else {
+                        Text("No motion data for this day yet.")
+                            .font(StrandFont.body)
+                            .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
         }
-    }
-
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 8) {
-                Text("Your day")
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                if timeline.activityBusy && timeline.activityContext != nil { ProgressView().controlSize(.small) }
-            }
-            if let reach = timeline.activityPartialReach {
-                Text("Reading your day, up to \(StretchFormat.clock(reach)) so far…")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .monospacedDigit()
-            }
-        }
-        .padding(.horizontal, NoopMetrics.space1)
     }
 
     @ViewBuilder
@@ -141,35 +129,177 @@ struct DayStretchesSection: View {
         #if DEBUG
         if !DemoLayout.listsOnly {
             laneCard(episodes, events: doc.events)
-            FamilyTileGrid(totals: DayStretchTotals.familyTotals(doc, episodes: episodes)) { family in
-                StretchFamilyView(scope: .family(family), timeline: timeline, onZoom: onZoom)
-            }
+            familySummary(DayStretchTotals.familyTotals(doc, episodes: episodes))
         }
         #else
         laneCard(episodes, events: doc.events)
-        FamilyTileGrid(totals: DayStretchTotals.familyTotals(doc, episodes: episodes)) { family in
-            StretchFamilyView(scope: .family(family), timeline: timeline, onZoom: onZoom)
-        }
+        familySummary(DayStretchTotals.familyTotals(doc, episodes: episodes))
         #endif
         recentList(layout)
-        // "Help improve activity detection": the day's few uncertain stretches, one tap to answer.
-        // Empty (and invisible) when the day has nothing worth asking or its question budget is used up.
-        ActivityImprovementSection(episodes: episodes, dayStart: dayStart, deviceId: repo.deviceId)
-        earlierList(layout)
-        positionChangesLink(doc)
+        // The day's few uncertain stretches, one tap to answer. Empty (and invisible) when the day has nothing
+        // worth asking or its question budget is used up.
+        ActivityImprovementSection(episodes: episodes, dayStart: dayStart, deviceId: repo.deviceId,
+                                   compactTitle: "Needs your input", inlineLimit: 4)
         WalkingQualityCard(dayStart: dayStart, window: window)
-        StrapSignalCard(dayStart: dayStart, window: window)
+        positionChangesLink(doc)
+        StrapSignalCard(dayStart: dayStart, window: window, compact: true)
         ActivityCalibrationEntry()
         footnote
     }
 
     // MARK: Lane
 
+    private var dayDetails: some View {
+        StretchFamilyView(scope: .day(window), timeline: timeline, onZoom: onZoom)
+    }
+
     private func laneCard(_ episodes: [ActivityEpisode], events: [ActivityTransitionEvent]) -> some View {
+        laneCardShell(hasDetails: true) {
+            DayActivityLane(episodes: episodes, events: events, window: window, onOpen: onOpen,
+                            height: 64, showsLabels: false)
+            FineLabelLegend(shares: DayFineLabels.shares(episodes, in: window),
+                            showsPositionChanges: !LanePositionChanges.ticks(events).isEmpty)
+        }
+    }
+
+    /// The "Your day" card: its title row, the reading-progress line while the day is still being read, then `body`.
+    private func laneCardShell<Body: View>(hasDetails: Bool, @ViewBuilder body: () -> Body) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 8) {
+                Image(systemName: "chart.bar.fill")
+                    .font(.system(size: 15, weight: .semibold))
+                    .foregroundStyle(StrandPalette.metricPurple)
+                Text("Your day")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                if timeline.activityBusy && timeline.activityContext != nil { ProgressView().controlSize(.small) }
+                Spacer(minLength: 8)
+                if hasDetails {
+                    NavigationLink { dayDetails } label: { SeeAllLabel(text: "View details") }
+                        .buttonStyle(.plain)
+                }
+            }
+            if let reach = timeline.activityPartialReach {
+                Text("Reading your day, up to \(StretchFormat.clock(reach)) so far…")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .monospacedDigit()
+            }
+            body()
+        }
+        .padding(.horizontal, NoopMetrics.space3)
+        .padding(.vertical, NoopMetrics.space3)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(NoopPanelSurface(cornerRadius: 20))
+    }
+
+    // MARK: Activity summary
+
+    @ViewBuilder
+    private func familySummary(_ totals: [FamilyTotal]) -> some View {
+        if !totals.isEmpty {
+            let collapsible = totals.count > Self.collapsedFamilyCount
+            let shown = collapsible && !showsAllFamilies ? Array(totals.prefix(Self.collapsedFamilyCount)) : totals
+            VStack(alignment: .leading, spacing: 10) {
+                DaySectionHeader(title: "Activity summary") {
+                    if collapsible {
+                        Button {
+                            withAnimation(StrandMotion.interactive) { showsAllFamilies.toggle() }
+                        } label: {
+                            SeeAllLabel(text: showsAllFamilies ? "Show less" : "See all",
+                                        symbol: showsAllFamilies ? "chevron.up" : "chevron.right")
+                        }
+                        .buttonStyle(.plain)
+                        .accessibilityValue(showsAllFamilies ? Text("Showing every kind") : Text("Showing the longest six"))
+                    }
+                }
+                FamilyTileGrid(totals: shown) { family in
+                    StretchFamilyView(scope: .family(family), timeline: timeline, onZoom: onZoom)
+                }
+            }
+        }
+    }
+
+    // MARK: Lists
+
+    @ViewBuilder
+    private func recentList(_ layout: DayStretchLayout) -> some View {
+        if !layout.recent.isEmpty {
+            VStack(alignment: .leading, spacing: 10) {
+                DaySectionHeader(title: "Recent activity") {
+                    NavigationLink { dayDetails } label: { SeeAllLabel(text: "See all") }
+                        .buttonStyle(.plain)
+                }
+                ForEach(layout.recent) { ep in
+                    StretchRow(episode: ep, isLatest: ep.id == layout.recent.first?.id,
+                               verdict: feedback.feedback(kind: .activityContext, start: ep.start, end: ep.end)) {
+                        onOpen(.activity(ep))
+                    }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func positionChangesLink(_ doc: ActivityContextDayDocument) -> some View {
+        let changes = PositionChanges.all(doc.events)
+        if !changes.isEmpty {
+            NavigationLink {
+                StretchFamilyView(scope: .positionChanges, timeline: timeline, onZoom: onZoom)
+            } label: {
+                HStack(spacing: 12) {
+                    Image(systemName: "chart.bar.fill")
+                        .font(.system(size: 17, weight: .semibold))
+                        .foregroundStyle(StrandPalette.metricPurple)
+                        .frame(width: 24)
+                    Text("Position changes")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer(minLength: 8)
+                    Text("\(changes.count)")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .monospacedDigit()
+                    Image(systemName: "chevron.right")
+                        .font(StrandFont.caption.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+                .padding(.horizontal, NoopMetrics.space3)
+                .padding(.vertical, 16)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .background(NoopPanelSurface(cornerRadius: 18))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Lists every position change flagged on this day")
+        }
+    }
+
+    private var footnote: some View {
+        Text("Fainter bars are less sure. Ticks under the bar are position changes. A wrist can't see height, so sitting and standing are best guesses.")
+            .font(StrandFont.footnote)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .padding(.horizontal, NoopMetrics.space1)
+    }
+}
+
+// MARK: Lane
+
+/// The day's stretches as coloured bars across `window`, with position changes as ticks underneath. Tapping a
+/// bar opens that stretch.
+struct DayActivityLane: View {
+    let episodes: [ActivityEpisode]
+    let events: [ActivityTransitionEvent]
+    let window: ClosedRange<Date>
+    let onOpen: (StretchTarget) -> Void
+    var height: CGFloat = 84
+    /// Name the stretches wide enough to hold their label. Off where a legend sits right under the lane.
+    var showsLabels = true
+
+    var body: some View {
         let marks = episodes.sorted { $0.durationSeconds > $1.durationSeconds }
         let ticks = LanePositionChanges.ticks(events)
         let span = max(1, window.upperBound.timeIntervalSince(window.lowerBound))
-        return VStack(alignment: .leading, spacing: 10) {
         Chart {
             ForEach(marks) { ep in
                 let range = laneRange(ep)
@@ -183,7 +313,7 @@ struct DayStretchesSection: View {
                 .foregroundStyle(ActivityFamily.of(ep.label).color.opacity(0.40 + 0.60 * ep.confidence))
                 // A stretch wide enough on screen carries its own finer label.
                 .annotation(position: .overlay, alignment: .center) {
-                    if Double(ep.durationSeconds) / span >= 0.16 {
+                    if showsLabels, Double(ep.durationSeconds) / span >= 0.16 {
                         Text(ep.label)
                             .font(StrandFont.caption.weight(.semibold))
                             .foregroundStyle(.white)
@@ -232,14 +362,8 @@ struct DayStretchesSection: View {
                     }
             }
         }
-        .frame(height: 84)
+        .frame(height: height)
         .accessibilityLabel(Text("Your day, as a timeline. The lists below have the same information."))
-        FineLabelLegend(shares: DayFineLabels.shares(episodes, in: window), showsPositionChanges: !ticks.isEmpty)
-        }
-        .padding(.horizontal, NoopMetrics.space2)
-        .padding(.vertical, NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
     }
 
     private var axisFormat: Date.FormatStyle {
@@ -259,117 +383,6 @@ struct DayStretchesSection: View {
         guard width < minWidth else { return start...end }
         let mid = start.addingTimeInterval(width / 2)
         return mid.addingTimeInterval(-minWidth / 2)...mid.addingTimeInterval(minWidth / 2)
-    }
-
-    // MARK: Lists
-
-    private func sectionTitle(_ text: LocalizedStringKey) -> some View {
-        Text(text)
-            .font(StrandFont.headline)
-            .foregroundStyle(StrandPalette.textPrimary)
-            .padding(.horizontal, NoopMetrics.space1)
-    }
-
-    private func row(_ episode: ActivityEpisode, isLatest: Bool = false) -> some View {
-        StretchRow(episode: episode, isLatest: isLatest,
-                   verdict: feedback.feedback(kind: .activityContext, start: episode.start, end: episode.end)) {
-            onOpen(.activity(episode))
-        }
-    }
-
-    @ViewBuilder
-    private func recentList(_ layout: DayStretchLayout) -> some View {
-        if !layout.recent.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                sectionTitle("Recent")
-                ForEach(layout.recent) { ep in
-                    row(ep, isLatest: ep.id == layout.recent.first?.id)
-                }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func earlierList(_ layout: DayStretchLayout) -> some View {
-        if !layout.earlier.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                sectionTitle("Earlier")
-                ForEach(layout.earlier, id: \.part) { group in
-                    partGroup(group)
-                }
-            }
-        }
-    }
-
-    private func partGroup(_ group: DayStretchLayout.Group) -> some View {
-        let open = openParts.contains(group.part)
-        return VStack(alignment: .leading, spacing: 10) {
-            Button {
-                withAnimation(StrandMotion.interactive) {
-                    if open { openParts.remove(group.part) } else { openParts.insert(group.part) }
-                }
-            } label: {
-                HStack(spacing: 8) {
-                    Text(group.part.title)
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text(StretchFormat.count(group.stretches.count))
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.down")
-                        .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .rotationEffect(.degrees(open ? 180 : 0))
-                }
-                .padding(.horizontal, NoopMetrics.space3)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(NoopPanelSurface(cornerRadius: 14))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityValue(open ? Text("Expanded") : Text("Collapsed"))
-            if open {
-                ForEach(group.stretches) { ep in row(ep) }
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func positionChangesLink(_ doc: ActivityContextDayDocument) -> some View {
-        let changes = PositionChanges.all(doc.events)
-        if !changes.isEmpty {
-            NavigationLink {
-                StretchFamilyView(scope: .positionChanges, timeline: timeline, onZoom: onZoom)
-            } label: {
-                HStack(spacing: 8) {
-                    Text("Position changes")
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("\(changes.count)")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .padding(.horizontal, NoopMetrics.space3)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(NoopPanelSurface(cornerRadius: 14))
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-        }
-    }
-
-    private var footnote: some View {
-        Text("Fainter bars are less sure. Ticks under the bar are position changes. A wrist can't see height, so sitting and standing are best guesses.")
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .padding(.horizontal, NoopMetrics.space1)
     }
 }
 
@@ -469,11 +482,15 @@ struct StretchRow: View {
         let from = Date(timeIntervalSince1970: TimeInterval(episode.start))
         let to = Date(timeIntervalSince1970: TimeInterval(episode.end))
         Button(action: action) {
-            HStack(alignment: .top, spacing: 12) {
-                RoundedRectangle(cornerRadius: 3).fill(color).frame(width: 6)
+            HStack(alignment: .center, spacing: 12) {
+                Image(systemName: family.symbol)
+                    .font(.system(size: 17, weight: .semibold))
+                    .foregroundStyle(color)
+                    .frame(width: 44, height: 44)
+                    .background(Circle().fill(color.opacity(0.16)))
+                    .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack(alignment: .firstTextBaseline) {
-                        Image(systemName: family.symbol).foregroundStyle(color)
                         Text(episode.label)
                             .font(StrandFont.headline)
                             .foregroundStyle(StrandPalette.textPrimary)
@@ -501,12 +518,45 @@ struct StretchRow: View {
             }
             .padding(12)
             .frame(maxWidth: .infinity, alignment: .leading)
-            .background(RoundedRectangle(cornerRadius: 14, style: .continuous).fill(color.opacity(0.10)))
-            .overlay(RoundedRectangle(cornerRadius: 14, style: .continuous).stroke(color.opacity(0.30), lineWidth: 1))
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            .background(NoopPanelSurface(cornerRadius: 16))
+            .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         }
         .buttonStyle(.plain)
         .accessibilityElement(children: .combine)
         .accessibilityHint("Shows this stretch up close and lets you say whether it is right")
+    }
+}
+
+/// A day-page section title with an optional trailing link ("See all", "View details").
+struct DaySectionHeader<Trailing: View>: View {
+    let title: LocalizedStringKey
+    @ViewBuilder var trailing: () -> Trailing
+
+    var body: some View {
+        HStack(alignment: .center) {
+            Text(title)
+                .font(StrandFont.rounded(19))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .accessibilityAddTraits(.isHeader)
+            Spacer(minLength: 8)
+            trailing()
+        }
+        .padding(.horizontal, NoopMetrics.space1)
+    }
+}
+
+/// The purple "See all ›" a section header links with. Sized to a full tap target.
+struct SeeAllLabel: View {
+    let text: LocalizedStringKey
+    var symbol = "chevron.right"
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text(text).font(StrandFont.subhead)
+            Image(systemName: symbol).font(.system(size: 11, weight: .semibold))
+        }
+        .foregroundStyle(StrandPalette.metricPurple)
+        .frame(minHeight: 44)
+        .contentShape(Rectangle())
     }
 }
