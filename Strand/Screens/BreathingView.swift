@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 import Foundation
 import AVFoundation
 import StrandDesign
@@ -137,6 +138,9 @@ private struct BreathingContent: View {
     @State private var sessionRmssdCount: Int = 0
     @State private var sessionRmssdPeak: Double = 0
     @State private var endedOutcome: String? = nil
+    /// The running session's RMSSD readings, for the coherence chart (presentation only).
+    @State private var rmssdTrace: [IntradayChart.Sample] = []
+    @State private var rmssdStart: Date?
 
     @AppStorage("breathe.lastOutcome") private var lastStoredOutcome = ""
 
@@ -179,11 +183,7 @@ private struct BreathingContent: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Breathe",
-                       subtitle: "Haptic-paced breathing · find your pace · calm down",
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Breathe sits in one atmosphere.
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Breathe") {
 
             modeSwitch
             StressCheckInCard(center: nudgeCenter) { startOneMinuteCue() }
@@ -248,13 +248,18 @@ private struct BreathingContent: View {
     // MARK: - Breathe mode (the shipped fixed-pace trainer)
 
     @ViewBuilder private var breatheMode: some View {
-        statusRow
         orbCard
         controlRow
-        if let line = outcomeLine { outcomeCard(line) }
-        readoutRow
-        coherenceCard
         if !live.bonded { hapticHint }
+        if let line = outcomeLine { outcomeCard(line) }
+        readoutGrid
+        coherenceCard
+        setupCard
+        AboutDisclosure("About breathing", paragraphs: [
+            String(localized: "Connect your strap for haptic guidance. You'll feel one pulse on the inhale, two on the exhale, so you can breathe with your eyes closed."),
+            String(localized: "Audio cues play a soft tone on each phase and respect silent mode."),
+            String(localized: "Estimate only: a higher RMSSD while paced usually means your parasympathetic \"rest\" branch is engaging. It is not a clinical reading; trends over a session matter more than any single number."),
+        ])
     }
 
     /// Start a one-minute haptic breathing cue at the user's locked resonance pace (or 5.5 fallback) —
@@ -266,85 +271,78 @@ private struct BreathingContent: View {
         controller.startResonanceSession(bpm: bpm, cycles: cycles)
     }
 
-    // MARK: - Status row
+    // MARK: - Session numbers
 
-    private var statusRow: some View {
-        HStack(spacing: 10) {
-            StatePill(running ? "Session live" : "Ready",
-                      tone: running ? .accent : .neutral,
-                      pulsing: running)
-
-            if live.bonded {
-                StatePill("Haptics on", tone: .positive, showsDot: true)
-            } else {
-                StatePill("Visual only", tone: .warning, showsDot: true)
-            }
-
-            Spacer()
-
-            HStack(spacing: 6) {
-                if let target = sessionLength.targetSeconds {
-                    Text("\(timeString(sessionSeconds)) / \(timeString(target))")
-                        .font(StrandFont.number(15))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                } else {
-                    Text(timeString(sessionSeconds))
-                        .font(StrandFont.number(15))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                }
-                Text("·").foregroundStyle(StrandPalette.textTertiary)
-                Text("\(breathCount) breaths")
-                    .font(StrandFont.captionNumber)
-                    .foregroundStyle(StrandPalette.textSecondary)
-            }
-        }
+    /// Time, breaths, HRV and the session's peak HRV, in one grid (the heart rate is in the orb).
+    private var readoutGrid: some View {
+        StatGrid([
+            StatItem(String(localized: "Time"),
+                     value: sessionLength.targetSeconds.map { "\(timeString(sessionSeconds)) / \(timeString($0))" }
+                        ?? timeString(sessionSeconds)),
+            StatItem(String(localized: "Breaths"), value: "\(breathCount)"),
+            StatItem(String(localized: "HRV (RMSSD)"), value: rmssd.map { String(format: "%.0f", $0) }, unit: "ms",
+                     detail: rrBuffer.isEmpty ? String(localized: "Waiting for R-R") : String(localized: "Last \(rrBuffer.count) beats")),
+            StatItem(String(localized: "Peak"), value: sessionRmssdPeak > 0 ? String(format: "%.0f", sessionRmssdPeak) : nil,
+                     unit: "ms", detail: live.worn ? nil : String(localized: "Strap not worn")),
+        ])
     }
 
     // MARK: - The orb
 
+    /// The pacer: the pace's name and rate, the breathing orb (its size is the cue), and the phase word.
     private var orbCard: some View {
-        StrandCard(padding: 24, tint: StrandPalette.restColor) {
-            VStack(spacing: 18) {
-                HStack {
-                    Text(pace.label).strandOverline()
-                    Spacer()
+        NoopCard {
+            VStack(spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(spacing: NoopMetrics.space2) {
+                    Text(pace.label)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(1)
                     Button {
                         showEdu = true
                     } label: {
                         Image(systemName: "info.circle")
-                            .font(.system(size: 16, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textSecondary)
+                            .font(StrandFont.icon(.row))
+                            .foregroundStyle(StrandPalette.accent)
+                            .frame(minWidth: NoopMetrics.minimumHitTarget, minHeight: NoopMetrics.minimumHitTarget)
+                            .contentShape(Rectangle())
                     }
+                    .buttonStyle(.plain)
                     .accessibilityLabel(String(localized: "Protocol info"))
+                    Spacer()
                     if selectedBpm > 0 {
                         Text(String(format: "%.1f br/min", selectedBpm))
-                            .font(StrandFont.captionNumber)
+                            .font(StrandFont.subhead.monospacedDigit())
                             .foregroundStyle(StrandPalette.textSecondary)
                     } else if isGuided {
                         Text(String(localized: "Guided"))
-                            .font(StrandFont.captionNumber)
+                            .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                     }
                 }
 
-                ZStack {
-                    ScenicHeroBackground(domain: .rest, starCount: 56)
-                        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
-                    breathingOrb
-                        .padding(.vertical, 6)
-                }
-                .frame(height: 320)
-                .frame(maxWidth: .infinity)
+                breathingOrb
+                    .frame(height: 280)
+                    .frame(maxWidth: .infinity)
 
                 Text(running ? phaseWord : selectedTagline)
                     .font(StrandFont.subhead)
-                    .foregroundStyle(running ? StrandPalette.restBright : StrandPalette.textSecondary)
+                    .foregroundStyle(running ? StrandPalette.textPrimary : StrandPalette.textSecondary)
                     .multilineTextAlignment(.center)
-                    .animation(.easeInOut(duration: 0.2), value: phaseWord)
-                    .animation(.easeInOut(duration: 0.2), value: running)
+                    .lineLimit(2)
+                    .frame(maxWidth: .infinity, minHeight: 40)
+            }
+        }
+    }
 
+    /// Pace, session length and audio cues: the setup, below the session itself.
+    private var setupCard: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Pace").strandLabel()
                 pacePills
                 durationPills
+                Divider().overlay(StrandPalette.hairline)
                 audioCueToggle
             }
         }
@@ -353,21 +351,15 @@ private struct BreathingContent: View {
     /// Opt-in audio pacer toggle, sitting on the orb card so it reads as part of the breathing setup.
     /// Default off; flipping it primes/tears down the tone engine via the onChange hook above.
     private var audioCueToggle: some View {
-        HStack(spacing: 10) {
+        HStack(spacing: NoopMetrics.space3) {
             Image(systemName: audioCues ? "speaker.wave.2.fill" : "speaker.slash.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(audioCues ? StrandPalette.restBright : StrandPalette.textTertiary)
+                .font(StrandFont.icon(.row))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: 28)
                 .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 1) {
-                Text("Audio cues")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("Soft tone on each phase · respects silent mode")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.8)
-            }
+            Text("Audio cues")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textPrimary)
             Spacer(minLength: 8)
             Toggle("", isOn: $audioCues)
                 .labelsHidden().toggleStyle(.switch).tint(StrandPalette.accent)
@@ -388,10 +380,8 @@ private struct BreathingContent: View {
     }
 
     private var durationPills: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(String(localized: "Session length"))
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            Text(String(localized: "Session length")).strandLabel()
             ScrollView(.horizontal, showsIndicators: false) {
                 SegmentedPillControl(SessionLength.allCases, selection: $sessionLength) { $0.label }
             }
@@ -470,40 +460,33 @@ private struct BreathingContent: View {
         }
     }
 
+    /// The pacer orb: a flat disc that grows on the inhale and shrinks on the exhale (`orbProgress`, 0
+    /// contracted → 1 expanded, eased over each phase), inside the ring it breathes within. The size is the
+    /// cue; under Reduce Motion `orbProgress` parks at a steady mid-size and the phase word and haptics carry
+    /// the pace. The live heart rate sits in the centre.
     private var breathingOrb: some View {
         GeometryReader { geo in
             let maxDiameter = min(geo.size.width, geo.size.height)
-            // The breath ring — the resting track the vessel breathes within. Crisp 1px stroke, no glow.
+            let diameter = maxDiameter * (0.42 + 0.58 * orbProgress)
             ZStack {
                 Circle()
-                    .strokeBorder(StrandPalette.restColor.opacity(0.28), lineWidth: 1)
+                    .strokeBorder(StrandPalette.hairline, lineWidth: 1)
                     .frame(width: maxDiameter, height: maxDiameter)
-
-                // The pacer is now the canonical liquid vessel: it FILLS on the inhale and drains on the
-                // exhale as `orbProgress` (0 contracted → 1 expanded) drives the level, so the breath is
-                // cued by water rising and falling rather than a swelling disc. Rest-tinted to match the
-                // world; under Reduce Motion `orbProgress` parks at a steady mid-level (no pulsing), and
-                // the phase word + haptics still carry the pace.
-                LiquidVessel(value: orbProgress, tint: StrandPalette.restColor, animated: running)
-                    .frame(width: maxDiameter, height: maxDiameter)
+                Circle()
+                    .fill(StrandPalette.restColor.opacity(0.16))
+                    .overlay(Circle().strokeBorder(StrandPalette.restColor, lineWidth: 2))
+                    .frame(width: diameter, height: diameter)
 
                 VStack(spacing: 2) {
-                    if let bpm = model.bpm {
-                        CountUpText(value: Double(bpm),
-                                    format: { "\(Int($0.rounded()))" },
-                                    font: StrandFont.number(40),
-                                    color: StrandPalette.textPrimary)
-                    } else {
-                        Text("—")
-                            .font(StrandFont.number(40))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    Text(String(localized: "BPM"))
+                    Text(model.bpm.map { "\($0)" } ?? "—")
+                        .font(StrandFont.display(40))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .monospacedDigit()
+                    Text("bpm")
                         .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
-                .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                .allowsHitTesting(false)   // taps fall through to the vessel → splash
+                .accessibilityElement(children: .combine)
             }
             .frame(width: geo.size.width, height: geo.size.height)
         }
@@ -540,11 +523,11 @@ private struct BreathingContent: View {
     }
 
     private func outcomeCard(_ line: String) -> some View {
-        StrandCard(padding: 14, tint: StrandPalette.restColor) {
-            HStack(spacing: 10) {
+        NoopCard {
+            HStack(spacing: NoopMetrics.space3) {
                 Image(systemName: "wind")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(StrandPalette.restBright)
+                    .font(StrandFont.icon(.row))
+                    .foregroundStyle(StrandPalette.restColor)
                     .accessibilityHidden(true)
                 Text(line)
                     .font(StrandFont.footnote)
@@ -576,100 +559,46 @@ private struct BreathingContent: View {
         return Int(head)
     }
 
-    // MARK: - Readouts
-
-    private var readoutRow: some View {
-        HStack(spacing: NoopMetrics.gap) {
-            readoutTile(label: String(localized: "Heart rate"),
-                        value: model.bpm.map { "\($0)" } ?? "—",
-                        unit: "bpm",
-                        accent: StrandPalette.metricRose,
-                        caption: live.worn ? String(localized: "Live") : String(localized: "Strap not worn"))
-
-            readoutTile(label: String(localized: "HRV (RMSSD)"),
-                        value: rmssd.map { String(format: "%.0f", $0) } ?? "—",
-                        unit: "ms",
-                        accent: StrandPalette.metricPurple,
-                        caption: rrBuffer.isEmpty ? String(localized: "Waiting for R-R") : String(localized: "Last \(rrBuffer.count) beats"))
-
-            readoutTile(label: String(localized: "Pace"),
-                        value: selectedBpm > 0 ? String(format: "%.1f", selectedBpm) : (isGuided ? "—" : "—"),
-                        unit: "br/min",
-                        accent: StrandPalette.restBright,
-                        caption: paceCaption)
-        }
-    }
-
-    private var paceCaption: String {
-        if case .resonance = pace {
-            let cycle = 60.0 / (lockedBpm ?? ResonanceEngine.fallbackBpm)
-            let inn = cycle * BreathPacer.defaultInhaleFraction
-            let out = cycle * (1 - BreathPacer.defaultInhaleFraction)
-            return String(format: "%.0f / %.0fs", inn, out)
-        }
-        guard let proto = selectedProtocol, !proto.stages.isEmpty else {
-            return isGuided ? String(localized: "Guided timer") : "—"
-        }
-        let parts = proto.stages.map { String(format: "%.1f", Double($0.durationMs) / 1000.0) }
-        return parts.joined(separator: " · ") + "s"
-    }
-
-    private func readoutTile(label: String, value: String, unit: String,
-                             accent: Color, caption: String) -> some View {
-        StrandCard(padding: 14, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text(label).strandOverline()
-                Spacer(minLength: 6)
-                HStack(alignment: .firstTextBaseline, spacing: 4) {
-                    Text(value)
-                        .font(StrandFont.number(26))
-                        .foregroundStyle(accent)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.6)
-                        .contentTransition(.numericText())
-                    Text(unit)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                Text(caption)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .padding(.top, 4)
-            }
-        }
-        .frame(height: NoopMetrics.tileHeight)
-    }
-
     // MARK: - Coherence estimate
 
+    /// The session's HRV as it responds to the pace: RMSSD over the beats so far, one reading per update,
+    /// with the coherence word. Empty until a session has R-R to read.
     private var coherenceCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 10) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
-                    Text("Coherence estimate").strandOverline()
+                    Text("Coherence")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
-                    StatePill("\(coherenceLabel)", tone: coherenceTone, showsDot: true)
+                    StatePill(LocalizedStringKey(coherenceLabel), tone: coherenceTone, showsDot: true)
                 }
-
-                // The coherence estimate as a filling liquid tube (the same horizontal vessel Today's Key
-                // Metrics use), Rest-tinted, filling to the RMSSD-derived fraction — replaces the flat
-                // gradient capsule. Live so it sloshes as the reading updates through a session.
-                LiquidTube(frac: coherenceFraction, tint: StrandPalette.restBright, height: 10)
-                    .accessibilityLabel("Coherence estimate")
-                    .accessibilityValue("\(Int(coherenceFraction * 100)) percent")
-
-                Text("Estimate only: a higher RMSSD while paced usually means your parasympathetic \"rest\" branch is engaging. It is not a clinical reading; trends over a session matter more than any single number.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+                IntradayChart(samples: rmssdTrace, bucketSeconds: 20, color: StrandPalette.metricPurple,
+                              legend: [],
+                              state: rmssdTrace.isEmpty ? .empty(String(localized: "Start a session to see your HRV respond")) : .ready,
+                              window: rmssdWindow,
+                              y: ChartValueAxis(unit: "ms", domain: .fitted(minSpan: 20, includeZero: false, clampTo: 0...300)),
+                              selection: .constant(nil), height: NoopMetrics.chartHeightCompact,
+                              accessibilityTitle: String(localized: "HRV (RMSSD)"))
+                    .naraChartScrubDisabled()
             }
+        }
+        .onChangeCompat(of: rmssd) { value in
+            // Presentation only: one point per RMSSD update while a session runs.
+            guard running, let value else { return }
+            if rmssdTrace.first.map({ Date().timeIntervalSince($0.time) > 3_600 }) ?? false { rmssdTrace.removeAll() }
+            rmssdTrace.append(.init(time: Date(), value: value))
+        }
+        .onChangeCompat(of: running) { isRunning in
+            if isRunning { rmssdTrace.removeAll(); rmssdStart = Date() }
         }
     }
 
-    private var coherenceFraction: CGFloat {
-        guard let r = rmssd else { return 0 }
-        return CGFloat(min(max(r / 120.0, 0), 1))
+    /// The session so far (at least two minutes, so a fresh session has room to grow into).
+    private var rmssdWindow: ClosedRange<Date> {
+        let start = rmssdStart ?? rmssdTrace.first?.time ?? Date().addingTimeInterval(-120)
+        let end = max(rmssdTrace.last?.time ?? start, start.addingTimeInterval(120))
+        return start...end
     }
 
     private var coherenceLabel: String {
@@ -694,22 +623,7 @@ private struct BreathingContent: View {
     // MARK: - Haptic hint
 
     private var hapticHint: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "applewatch.radiowaves.left.and.right")
-                .foregroundStyle(StrandPalette.statusWarning)
-            Text("Connect your strap for haptic guidance. You'll feel one pulse on the inhale, two on the exhale, so you can breathe with your eyes closed.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(StrandPalette.statusWarning.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
-                .strokeBorder(StrandPalette.statusWarning.opacity(0.25), lineWidth: 1)
-        )
+        InlineNotice(String(localized: "Connect your strap for haptic cues."), tone: .neutral)
     }
 
     // MARK: - Session control (catalog stages + guided timer)
@@ -1047,14 +961,11 @@ private struct ResonanceModeView: View {
     }
 
     private var explainerCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack {
-                    Text("Find your resonance pace").strandOverline()
-                    Spacer()
-                    StatePill(live.bonded ? "Haptics on" : "Visual only",
-                              tone: live.bonded ? .positive : .warning, showsDot: true)
-                }
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                Text("Find your resonance pace")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
                 Text("Everyone has a breathing pace (usually between 4.5 and 7 breaths a minute) where the heart's rhythm swings the most with each breath. We pace you through a few candidate paces, measure how your HRV responds, and lock the one that resonates best for you.")
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
@@ -1068,7 +979,7 @@ private struct ResonanceModeView: View {
     }
 
     private var startCard: some View {
-        StrandCard {
+        NoopCard {
             VStack(spacing: NoopMetrics.space3) {
                 NoopButton("Full sweep · ~13 min", systemImage: "waveform.path.ecg",
                            kind: .primary, fullWidth: true) {
@@ -1089,19 +1000,21 @@ private struct ResonanceModeView: View {
     }
 
     private var sweepProgressCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .firstTextBaseline) {
                     Text(controller.sweepLabel ?? String(localized: "Sweeping…"))
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
-                    StatePill("Live", tone: .accent, showsDot: true, pulsing: true)
+                    Text("\(Int((controller.sweepProgress * 100).rounded())) %")
+                        .font(StrandFont.subhead.monospacedDigit())
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
 
-                // Sweep progress as a filling liquid tube (the liquid idiom used across the redesign),
-                // Rest-tinted so it reads as one with the breathe world.
-                LiquidTube(frac: controller.sweepProgress, tint: StrandPalette.restColor, height: 10)
+                // The sweep has a real end, so its progress is a plain bar toward it.
+                ProgressView(value: min(max(controller.sweepProgress, 0), 1))
+                    .tint(StrandPalette.restColor)
                     .accessibilityLabel("Sweep progress")
                     .accessibilityValue("\(Int(controller.sweepProgress * 100)) percent")
 
@@ -1113,23 +1026,24 @@ private struct ResonanceModeView: View {
     }
 
     private func resultCard(_ result: ResonanceEngine.SweepResult) -> some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 12) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
-                    Text(result.didLock ? "Your resonance pace" : "Couldn't lock today").strandOverline()
+                    Text(result.didLock ? "Your resonance pace" : "Couldn't lock today")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     StatePill(result.didLock ? "Locked" : "Fallback",
                               tone: result.didLock ? .positive : .neutral, showsDot: true)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    CountUpText(value: result.lockedBpm,
-                                format: { String(format: "%.1f", $0) },
-                                font: StrandFont.number(40),
-                                color: StrandPalette.restBright)
+                    Text(String(format: "%.1f", result.lockedBpm))
+                        .font(StrandFont.display(40))
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Text("br/min")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(StrandFont.title2)
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
 
                 if !result.didLock {
@@ -1139,7 +1053,7 @@ private struct ResonanceModeView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                rsaCurve(result.scores)
+                rsaCurve(result.scores, locked: result.didLock ? result.lockedBpm : nil)
 
                 if let date = BiofeedbackPrefs.lockedPaceDate, result.didLock {
                     Text("Locked \(date.formatted(date: .abbreviated, time: .omitted)) · paces drift, re-measure anytime.")
@@ -1151,21 +1065,22 @@ private struct ResonanceModeView: View {
     }
 
     private func lockedCard(_ bpm: Double) -> some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 8) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                 HStack {
-                    Text("Your locked pace").strandOverline()
+                    Text("Your locked pace")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     StatePill("Locked", tone: .positive, showsDot: true)
                 }
                 HStack(alignment: .firstTextBaseline, spacing: 6) {
-                    CountUpText(value: bpm,
-                                format: { String(format: "%.1f", $0) },
-                                font: StrandFont.number(34),
-                                color: StrandPalette.restBright)
+                    Text(String(format: "%.1f", bpm))
+                        .font(StrandFont.number(28))
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Text("br/min")
                         .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
                 if let date = BiofeedbackPrefs.lockedPaceDate {
                     Text("Locked \(date.formatted(date: .abbreviated, time: .omitted)). Switch to Breathe to use it, or re-measure above.")
@@ -1177,31 +1092,47 @@ private struct ResonanceModeView: View {
         }
     }
 
-    /// A compact text + bar summary of the RSA-amplitude per pace (the resonance curve). The text summary
-    /// is the a11y win; the bars are decorative. Unscored paces read "—".
-    private func rsaCurve(_ scores: [ResonanceEngine.PaceScore]) -> some View {
-        let maxRsa = scores.compactMap(\.rsaAmplitude).max() ?? 1
-        return VStack(alignment: .leading, spacing: 6) {
-            Text("RSA response by pace").strandOverline()
-            ForEach(scores, id: \.bpm) { s in
-                HStack(spacing: 8) {
-                    Text(String(format: "%.1f", s.bpm))
-                        .font(StrandFont.captionNumber)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .frame(width: 34, alignment: .leading)
-                    // Each pace's RSA amplitude as a static liquid tube — the same horizontal vessel used
-                    // across the redesign. An unscored pace reads muted via a dimmed Rest tint.
-                    LiquidTube(frac: (s.rsaAmplitude ?? 0) / max(maxRsa, 0.0001),
-                               tint: StrandPalette.restBright.opacity(s.scored ? 1 : 0.35),
-                               height: 8, animated: false)
-                    Text(s.rsaAmplitude.map { String(format: "%.1f", $0) } ?? "—")
-                        .font(StrandFont.captionNumber)
-                        .foregroundStyle(s.scored ? StrandPalette.textSecondary : StrandPalette.textTertiary)
-                        .frame(width: 34, alignment: .trailing)
+    /// The resonance curve: RSA amplitude (the heart-rate swing per breath, in bpm) at each pace tried,
+    /// the locked pace in full colour, paces that could not be scored hatched. The text summary is the
+    /// accessibility value.
+    private func rsaCurve(_ scores: [ResonanceEngine.PaceScore], locked: Double?) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            Text("RSA response by pace").strandLabel()
+            Chart {
+                ForEach(scores, id: \.bpm) { s in
+                    let isLocked = locked.map { abs($0 - s.bpm) < 0.01 } ?? false
+                    BarMark(x: .value("Pace", String(format: "%.1f", s.bpm)),
+                            y: .value("RSA", s.scored ? (s.rsaAmplitude ?? 0) : 0),
+                            width: .ratio(0.62))
+                        .cornerRadius(NaraChartStyle.barCornerRadius)
+                        .foregroundStyle(StrandPalette.restColor.opacity(isLocked ? 1 : 0.45))
+                    if !s.scored {
+                        RuleMark(x: .value("Pace", String(format: "%.1f", s.bpm)))
+                            .lineStyle(StrokeStyle(lineWidth: 1, dash: [2, 3]))
+                            .foregroundStyle(StrandPalette.textTertiary)
+                    }
                 }
             }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 3)) { _ in
+                    AxisGridLine(stroke: NaraChartStyle.grid).foregroundStyle(NaraChartStyle.gridColor)
+                    AxisValueLabel().font(NaraChartStyle.axisFont).foregroundStyle(NaraChartStyle.axisColor)
+                }
+            }
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisValueLabel().font(NaraChartStyle.axisFont).foregroundStyle(NaraChartStyle.axisColor)
+                }
+            }
+            .chartYAxisLabel(position: .top, alignment: .leading, spacing: 4) {
+                Text("bpm").font(NaraChartStyle.unitFont).foregroundStyle(NaraChartStyle.axisColor)
+            }
+            .chartXAxisLabel(position: .bottom, alignment: .trailing) {
+                Text("br/min").font(NaraChartStyle.unitFont).foregroundStyle(NaraChartStyle.axisColor)
+            }
+            .frame(height: NoopMetrics.chartHeightCompact)
         }
-        .accessibilityElement(children: .combine)
+        .accessibilityElement(children: .ignore)
         .accessibilityLabel("RSA response by pace")
         .accessibilityValue(rsaTextSummary(scores))
     }
@@ -1214,18 +1145,8 @@ private struct ResonanceModeView: View {
     }
 
     private var connectHint: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "applewatch.radiowaves.left.and.right")
-                .foregroundStyle(StrandPalette.statusWarning)
-            Text("Connect your strap for the felt cue. The sweep paces you with one buzz on the inhale, two on the exhale.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
-        }
-        .padding(14)
-        .background(StrandPalette.statusWarning.opacity(0.08),
-                    in: RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+        InlineNotice(String(localized: "Connect your strap for the felt cue. The sweep paces you with one buzz on the inhale, two on the exhale."),
+                     tone: .neutral)
     }
 }
 
@@ -1253,10 +1174,12 @@ private struct CalmModeView: View {
     }
 
     private var explainerCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 8) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
                 HStack {
-                    Text("Calm me").strandOverline()
+                    Text("Calm me")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     StatePill(canRun ? "Ready" : "Strap needed",
                               tone: canRun ? .neutral : .warning, showsDot: true)
@@ -1277,8 +1200,8 @@ private struct CalmModeView: View {
     private var canRun: Bool { controller.canBuzz && (model.bpm.map { $0 >= 55 && $0 <= 120 } ?? false) }
 
     private var startCard: some View {
-        StrandCard {
-            VStack(spacing: NoopMetrics.rowSpacing) {
+        NoopCard {
+            VStack(spacing: NoopMetrics.space3) {
                 NoopButton("Calm me · 3 min", systemImage: "heart.fill",
                            kind: .primary, fullWidth: true) {
                     controller.startCalmMe()
@@ -1301,24 +1224,22 @@ private struct CalmModeView: View {
     }
 
     private var liveCard: some View {
-        StrandCard(tint: StrandPalette.restColor) {
-            VStack(spacing: 14) {
+        NoopCard {
+            VStack(spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
-                    Text("Settling").strandOverline()
+                    Text("Settling")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
-                    StatePill("Live", tone: .accent, showsDot: true, pulsing: true)
+                    StatePill("Live", tone: .accent, showsDot: true)
                 }
 
                 HStack(alignment: .firstTextBaseline, spacing: 10) {
-                    if let bpm = model.bpm {
-                        CountUpText(value: Double(bpm),
-                                    format: { "\(Int($0.rounded()))" },
-                                    font: StrandFont.number(48),
-                                    color: StrandPalette.metricRose)
-                    } else {
-                        Text("—")
-                            .font(StrandFont.number(48))
-                            .foregroundStyle(StrandPalette.metricRose)
+                    HStack(alignment: .firstTextBaseline, spacing: 4) {
+                        Text(model.bpm.map { "\($0)" } ?? "—")
+                            .font(StrandFont.display(40))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("bpm").font(StrandFont.title2).foregroundStyle(StrandPalette.textSecondary)
                     }
                     Image(systemName: "arrow.right")
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -1328,8 +1249,8 @@ private struct CalmModeView: View {
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                         Text(controller.calmTargetBpm.map { String(format: "%.0f", $0) } ?? "—")
-                            .font(StrandFont.number(22))
-                            .foregroundStyle(StrandPalette.restBright)
+                            .font(StrandFont.number(20))
+                            .foregroundStyle(StrandPalette.textPrimary)
                     }
                     Spacer()
                 }
@@ -1350,11 +1271,11 @@ private struct CalmModeView: View {
     }
 
     private func outcomeCard(_ line: String) -> some View {
-        StrandCard(padding: 14, tint: StrandPalette.restColor) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                HStack(spacing: NoopMetrics.space3) {
                     Image(systemName: controller.calmDidNotFall ? "minus.circle" : "checkmark.circle")
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(controller.calmDidNotFall ? StrandPalette.textTertiary : StrandPalette.statusPositive)
                         .accessibilityHidden(true)
                     Text(line)

@@ -6,8 +6,8 @@ import StrandAnalytics
 //
 // The decoded state, not one label: three independent heads (posture, locomotion, arm behaviour), each a
 // probability distribution, plus intensity, confidence and the wear and sleep context. Composite labels such
-// as "Desk sitting" are a derived view of those heads. The page that lists them is `DayStretchesSection`; this
-// file holds the words and colours it and the stretch sheet share. A wrist cannot see body height, so sitting
+// as "Desk sitting" are a derived view of those heads. The Heart rate day page shows them on its ribbon and
+// lists them one tap down; this file holds the words and colours those pages and the stretch sheet share. A wrist cannot see body height, so sitting
 // and standing are only ever "likely".
 
 // MARK: Wording
@@ -138,12 +138,15 @@ enum ActivityFamily: CaseIterable, Hashable {
         case .sitting: return StrandPalette.metricCyan
         case .standing: return StrandPalette.metricPurple
         case .stillUnsure: return StrandPalette.metricCyan.opacity(0.5)
-        case .walking: return StrandPalette.accent
+        // Moving is warm (amber walking, rose running, a lighter rose for other movement), being still is
+        // cool (cyan, violet), sleep is the sleep hue: no two neighbouring kinds share a colour.
+        case .walking: return StrandPalette.metricAmber
         case .running: return StrandPalette.metricRose
-        case .otherMovement: return StrandPalette.metricAmber
+        case .otherMovement: return StrandPalette.metricRose.opacity(0.55)
         case .changing: return StrandPalette.metricAmber.opacity(0.6)
         case .offWrist: return StrandPalette.textTertiary
-        case .unclear: return StrandPalette.surfaceInset
+        // Drawn hatched wherever it is shown, so it needs a visible colour on an inset track.
+        case .unclear: return StrandPalette.textTertiary.opacity(0.6)
         }
     }
 
@@ -172,12 +175,7 @@ enum ActivityFamily: CaseIterable, Hashable {
 /// Marks the newest stretch in a list.
 struct LatestTag: View {
     var body: some View {
-        Text("Latest")
-            .font(StrandFont.caption.weight(.semibold))
-            .foregroundStyle(StrandPalette.accent)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 2)
-            .background(Capsule().fill(StrandPalette.accent.opacity(0.14)))
+        StatePill("Latest", tone: .neutral, showsDot: false)
     }
 }
 
@@ -215,9 +213,7 @@ struct HeadBlock: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 5) {
             Text(title)
-                .font(StrandFont.caption.weight(.semibold))
-                .foregroundStyle(StrandPalette.textTertiary)
-                .textCase(.uppercase)
+                .strandLabel()
             if rows.isEmpty {
                 Text("No reading")
                     .font(StrandFont.subhead)
@@ -313,9 +309,47 @@ enum ActivityImprovementQueue {
     }
 }
 
-/// The day's "Help improve activity detection" card. Empty when the day has no stretch worth asking about
-/// or the day's five questions are used up. Drop it into the day page next to the other sections; it
-/// needs only the episodes the page already decoded (`ActivityContextEpisodes.build(document.runs)`).
+/// The day's uncertain stretches worth asking about, cached per episode set. The selector is pure over one
+/// decoupled description per episode; building those classifies every episode, so it is done once per set,
+/// not on every render (the page re-renders while scrubbing). The answered set and the day's budget are
+/// re-read on every call, so an answer removes its stretch at once.
+final class ActivityImprovementCandidates: ObservableObject {
+    private var key: String?
+    private var cachedInputs: [ActivityCandidateStretchInput] = []
+
+    func inputs(episodes: [ActivityEpisode], deviceId: String?) -> [ActivityCandidateStretchInput] {
+        let key = "\(deviceId ?? "")|\(episodes.count)|\(episodes.first?.start ?? 0)|\(episodes.last?.end ?? 0)"
+        if self.key != key {
+            cachedInputs = ActivityLabelCandidateInputs.fromEpisodes(episodes, deviceId: deviceId)
+            self.key = key
+        }
+        return cachedInputs
+    }
+
+    /// The stretches worth asking about today, capped by the day's prompt budget.
+    func candidates(episodes: [ActivityEpisode], dayStart: Date, deviceId: String?) -> [ActivityLabelCandidate] {
+        let selected = ActivityLabelCandidateSelector.select(
+            from: inputs(episodes: episodes, deviceId: deviceId),
+            answeredKeys: ActivityImprovementQueue.answeredKeys(), limit: 5)
+        let dayKey = ActivityImprovementQueue.dayKey(for: dayStart)
+        let remaining = max(0, ActivityImprovementQueue.dayLimit - ActivityImprovementQueue.dayCount(for: dayKey))
+        return Array(selected.prefix(remaining))
+    }
+
+    /// The full description of a candidate, for the answer sheet.
+    func input(for candidate: ActivityLabelCandidate, episodes: [ActivityEpisode],
+               deviceId: String?) -> ActivityCandidateStretchInput {
+        let byStart = Dictionary(inputs(episodes: episodes, deviceId: deviceId).map { ($0.startTs, $0) },
+                                 uniquingKeysWith: { a, _ in a })
+        return byStart[candidate.startTs] ?? ActivityCandidateStretchInput(
+            startTs: candidate.startTs, endTs: candidate.endTs, deviceId: candidate.deviceId,
+            predictedLabel: candidate.predictedLabel)
+    }
+}
+
+/// The day's "Help improve activity detection" list. Empty when the day has no stretch worth asking about
+/// or the day's five questions are used up. It needs only the episodes the page already decoded
+/// (`ActivityContextEpisodes.build(document.runs)`).
 struct ActivityImprovementSection: View {
     let episodes: [ActivityEpisode]
     /// The day these episodes belong to; its local date is the prompt-budget key.
@@ -324,6 +358,7 @@ struct ActivityImprovementSection: View {
 
     /// The stretch being asked about, or nil when no sheet is up.
     @State private var asking: ActivityImprovementPrompt?
+    @StateObject private var model = ActivityImprovementCandidates()
 
     init(episodes: [ActivityEpisode], dayStart: Date, deviceId: String? = nil) {
         self.episodes = episodes
@@ -338,47 +373,12 @@ struct ActivityImprovementSection: View {
 
     private var dayKey: String { ActivityImprovementQueue.dayKey(for: dayStart) }
 
-    /// The one decoupled description per episode the selector is pure over. Built once per episode set
-    /// (each input classifies its episode), not on every render: the section re-renders on each zoom/pan.
-    /// A reference box, so filling it while rendering is not a state change.
-    private final class InputsCache {
-        var key: String?
-        var inputs: [ActivityCandidateStretchInput] = []
-    }
-    @State private var cache = InputsCache()
-
-    private var inputs: [ActivityCandidateStretchInput] {
-        let key = "\(deviceId ?? "")|\(episodes.count)|\(episodes.first?.start ?? 0)|\(episodes.last?.end ?? 0)"
-        if cache.key != key {
-            cache.inputs = ActivityLabelCandidateInputs.fromEpisodes(episodes, deviceId: deviceId)
-            cache.key = key
-        }
-        return cache.inputs
-    }
-
-    /// The stretches worth asking about today, capped by the day's prompt budget. Re-reads the answered
-    /// set and the day count on every render, so an answer removes its row at once.
-    private var visibleCandidates: [ActivityLabelCandidate] {
-        let selected = ActivityLabelCandidateSelector.select(
-            from: inputs, answeredKeys: ActivityImprovementQueue.answeredKeys(), limit: 5)
-        let remaining = max(0, ActivityImprovementQueue.dayLimit - ActivityImprovementQueue.dayCount(for: dayKey))
-        return Array(selected.prefix(remaining))
-    }
-
-    private var inputByStart: [Int: ActivityCandidateStretchInput] {
-        Dictionary(inputs.map { ($0.startTs, $0) }, uniquingKeysWith: { a, _ in a })
-    }
-
     var body: some View {
-        let candidates = visibleCandidates
+        let candidates = model.candidates(episodes: episodes, dayStart: dayStart, deviceId: deviceId)
         if !candidates.isEmpty {
-            VStack(alignment: .leading, spacing: 10) {
-                header
-                ForEach(candidates) { candidate in
-                    ActivityImprovementRow(candidate: candidate) {
-                        open(candidate)
-                    }
-                }
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Help improve activity detection")
+                ActivityImprovementList(candidates: candidates) { open($0) }
             }
             .sheet(item: $asking) { prompt in
                 ActivityImprovementSheet(input: prompt.input, dayKey: dayKey)
@@ -386,28 +386,62 @@ struct ActivityImprovementSection: View {
         }
     }
 
-    private var header: some View {
-        VStack(alignment: .leading, spacing: 4) {
-            Text("Help improve activity detection")
-                .font(StrandFont.title2)
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text("A few stretches were unclear. Tell me what you were doing and the labels get better.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-        }
-        .padding(.horizontal, NoopMetrics.space1)
-    }
-
     private func open(_ candidate: ActivityLabelCandidate) {
-        let input = inputByStart[candidate.startTs] ?? ActivityCandidateStretchInput(
-            startTs: candidate.startTs, endTs: candidate.endTs, deviceId: candidate.deviceId,
-            predictedLabel: candidate.predictedLabel)
-        asking = ActivityImprovementPrompt(input: input)
+        asking = ActivityImprovementPrompt(input: model.input(for: candidate, episodes: episodes, deviceId: deviceId))
     }
 }
 
-/// One candidate in the queue: its time range, what the model guessed, and the badges that say why it is
-/// being asked (Uncertain / Disagreement / Rare). Tapping opens the one-tap answer sheet.
+/// The page behind the Heart rate page's "Check stretches" row: the day's few uncertain stretches, one tap
+/// each to say what the wearer was doing.
+struct ActivityImprovementListView: View {
+    let episodes: [ActivityEpisode]
+    let dayStart: Date
+    let deviceId: String?
+
+    @State private var asking: ActivityImprovementPrompt?
+    @StateObject private var model = ActivityImprovementCandidates()
+
+    private var dayKey: String { ActivityImprovementQueue.dayKey(for: dayStart) }
+
+    var body: some View {
+        let candidates = model.candidates(episodes: episodes, dayStart: dayStart, deviceId: deviceId)
+        ScreenScaffold(title: "Check stretches", titleDisplay: .navigationBar) {
+            Text("A few stretches were unclear. Say what you were doing and the labels get better.")
+                .font(StrandFont.body)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
+            if candidates.isEmpty {
+                ComingSoon(what: "Nothing left to check for this day.")
+            } else {
+                ActivityImprovementList(candidates: candidates) { candidate in
+                    asking = ActivityImprovementPrompt(
+                        input: model.input(for: candidate, episodes: episodes, deviceId: deviceId))
+                }
+            }
+        }
+        .sheet(item: $asking) { prompt in
+            ActivityImprovementSheet(input: prompt.input, dayKey: dayKey)
+        }
+    }
+}
+
+/// The candidates as rows of one list card.
+struct ActivityImprovementList: View {
+    let candidates: [ActivityLabelCandidate]
+    let open: (ActivityLabelCandidate) -> Void
+
+    var body: some View {
+        NoopListSection {
+            ForEach(Array(candidates.enumerated()), id: \.element.id) { index, candidate in
+                if index > 0 { NoopListDivider() }
+                ActivityImprovementRow(candidate: candidate) { open(candidate) }
+            }
+        }
+    }
+}
+
+/// One candidate in the queue: its time range, what the model guessed, and why it is being asked
+/// (Uncertain / Disagreement / Rare). Tapping opens the one-tap answer sheet.
 struct ActivityImprovementRow: View {
     let candidate: ActivityLabelCandidate
     let action: () -> Void
@@ -416,47 +450,15 @@ struct ActivityImprovementRow: View {
         let from = Date(timeIntervalSince1970: TimeInterval(candidate.startTs))
         let to = Date(timeIntervalSince1970: TimeInterval(candidate.endTs))
         let short = candidate.endTs - candidate.startTs < 300
+        let span = "\(StretchFormat.clock(from, seconds: short)) – \(StretchFormat.clock(to, seconds: short))"
+        let reasons = candidate.reasons.map { ActivityImprovementReason.presentation(for: $0).text }
         return Button(action: action) {
-            HStack(spacing: 12) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("\(StretchFormat.clock(from, seconds: short)) – \(StretchFormat.clock(to, seconds: short))")
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .monospacedDigit()
-                    Text(candidate.predictedLabel ?? ActivityContextEpisodes.unclear)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                }
-                Spacer(minLength: 8)
-                HStack(spacing: 6) {
-                    ForEach(candidate.reasons, id: \.self) { reason in
-                        reasonBadge(reason)
-                    }
-                }
-                Image(systemName: "chevron.right")
-                    .font(StrandFont.caption.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
-            .padding(NoopMetrics.space3)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NoopPanelSurface(cornerRadius: 14))
-            .contentShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+            NoopListRow(icon: nil, title: LocalizedStringKey(span),
+                        subtitle: candidate.predictedLabel ?? ActivityContextEpisodes.unclear,
+                        value: reasons.joined(separator: ", "))
         }
         .buttonStyle(.plain)
-        .accessibilityElement(children: .combine)
         .accessibilityHint("Lets you say what you were doing")
-    }
-
-    private func reasonBadge(_ reason: String) -> some View {
-        let (text, tint) = ActivityImprovementReason.presentation(for: reason)
-        return Text(text)
-            .font(StrandFont.caption.weight(.semibold))
-            .foregroundStyle(tint)
-            .padding(.horizontal, 7)
-            .padding(.vertical, 3)
-            .background(Capsule().fill(tint.opacity(0.14)))
-            .accessibilityLabel(text)
     }
 }
 
@@ -513,7 +515,7 @@ struct ActivityImprovementSheet: View {
                         answerChip(String(localized: "Unsure")) { answerUnsure() }
                         answerChip(String(localized: "Skip")) { answerSkip() }
                     }
-                    Text("One tap is all it takes. Your answer is saved with what the model saw and sent to make the activity model better.")
+                    Text("Your answer is saved with what the model saw and sent to make the activity model better.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -522,6 +524,9 @@ struct ActivityImprovementSheet: View {
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
             .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Done") { dismiss() }
@@ -538,37 +543,24 @@ struct ActivityImprovementSheet: View {
         let to = Date(timeIntervalSince1970: TimeInterval(input.endTs))
         let short = input.endTs - input.startTs < 300
         let range = "\(StretchFormat.clock(from, seconds: short)) – \(StretchFormat.clock(to, seconds: short))"
-        return VStack(alignment: .leading, spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: "sparkles")
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(StrandPalette.accent)
-                    .frame(width: 40, height: 40)
-                    .background(Circle().fill(StrandPalette.accent.opacity(0.16)))
-                Text(range)
-                    .font(StrandFont.title2)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .monospacedDigit()
-            }
-            Text("\(range) was unclear. What were you mainly doing?")
+        return VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+            Text(range)
+                .font(StrandFont.title2)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .monospacedDigit()
+            Text(input.predictedLabel ?? ActivityContextEpisodes.unclear)
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
     private func answerChip(_ title: String, action: @escaping () -> Void) -> some View {
         Button(action: action) {
             Text(title)
-                .font(StrandFont.subhead)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .padding(.horizontal, 12)
-                .frame(maxWidth: .infinity, minHeight: 38)
-                .background(Capsule().fill(StrandPalette.surfaceInset))
         }
-        .buttonStyle(.plain)
+        .buttonStyle(NoopButtonStyle(.secondary, fullWidth: true))
     }
 
     // MARK: Answers
