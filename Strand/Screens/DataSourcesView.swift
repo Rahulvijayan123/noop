@@ -288,7 +288,7 @@ struct DataSourcesView: View {
             if oura.isConnected {
                 HStack(spacing: NoopMetrics.space2) {
                     NoopButton("Import again", systemImage: "arrow.clockwise", kind: .primary) { oura.connectAndImport(repo: repo) }
-                    NoopButton("Forget Oura access", kind: .secondary) { oura.disconnect(repo: repo) }
+                    NoopButton("Forget Oura access", kind: .destructive) { oura.disconnect(repo: repo) }
                 }
                 .disabled(oura.busy)
             } else {

@@ -79,7 +79,7 @@ Not done: dark mode, a runtime macOS visual check (the Mac builds and its tests 
 4. **DST stepping in `FullDayChartView`** is not covered.
 5. **Live heart-rate trace** stays on the last value if the strap stalls, instead of showing a gap.
 6. **Alarm rows** have tap targets under 44 pt on some rows.
-7. **Oura "Forget access"** still uses the old button style.
+7. **Oura "Forget access"** has its destructive style back but still has no confirmation step (the base had none either).
 8. **Default key-metric set of 8:** users who never customised Today now see 8 tiles instead of 11. This is a product choice to confirm.
 9. **Monitor sync handler** rescoring uses `rescore(preferReadySeries: false)`. Review before shipping.
 10. **`MonitorView` legacy code** is still compiled for the old Monitor path.
