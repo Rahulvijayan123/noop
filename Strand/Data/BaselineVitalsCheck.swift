@@ -26,28 +26,19 @@ struct BaselineVitalsCheck: Equatable {
         var id: String { series.rawValue }
         var counted: Bool { state == .inRange || state == .off }
 
-        /// Same rule as the Monitor card verdict: a trusted copy and a z beyond its k band.
+        /// Same rule as the Monitor card verdict: a trusted copy and a z beyond its k band
+        /// (`LongitudinalBaseline.vitalVerdict`, which the server's metric explanations mirror).
         static func make(series: LBSeries, name: String, ev: LBEvaluation) -> Vital {
-            let unit = series.planRow.unit
-            let threshold = LongitudinalBaseline.trustHideThreshold
-            let week = ev.show7 && ev.usualTrustPct7 >= threshold ? ev.copy7 : nil
-            let long = ev.showLong && ev.usualTrustPctLong >= threshold ? ev.copyLong : nil
-            let copy = week ?? long
-            guard let today = ev.todayNative else {
-                return Vital(series: series, name: name, state: copy == nil ? .learning : .noReading,
-                             value: nil, bandLo: copy?.bandLoDisplay, bandHi: copy?.bandHiDisplay,
-                             unit: unit, fromWeek: week != nil)
+            let verdict = LongitudinalBaseline.vitalVerdict(ev)
+            let state: State
+            switch verdict.state {
+            case .inRange: state = .inRange
+            case .off: state = .off
+            case .learning: state = .learning
+            case .noReading: state = .noReading
             }
-            guard let copy else {
-                return Vital(series: series, name: name, state: .learning, value: today,
-                             bandLo: nil, bandHi: nil, unit: unit, fromWeek: false)
-            }
-            let k = ev.kBandUsed
-            let offWeek = week != nil && LongitudinalBaseline.isOffUsual(z: ev.z7, k: k)
-            let offLong = long != nil && LongitudinalBaseline.isOffUsual(z: ev.zLong, k: k)
-            return Vital(series: series, name: name, state: (offWeek || offLong) ? .off : .inRange,
-                         value: today, bandLo: copy.bandLoDisplay, bandHi: copy.bandHiDisplay,
-                         unit: unit, fromWeek: week != nil)
+            return Vital(series: series, name: name, state: state, value: verdict.value, bandLo: verdict.bandLo,
+                         bandHi: verdict.bandHi, unit: series.planRow.unit, fromWeek: verdict.fromWeek)
         }
     }
 

@@ -159,6 +159,32 @@ internal fun connectKeepsExistingLink(
 internal const val UNANSWERED_GIVE_UP_THRESHOLD = 3
 
 /**
+ * How long a CLIENT_HELLO must have been outstanding at the drop before the drop can be blamed on it. The
+ * #1635 signature is a drop locked to the write at ~3.16 s. Twin of Swift `minHelloOutstandingMsForRefusal`.
+ */
+internal const val MIN_HELLO_OUTSTANDING_MS_FOR_REFUSAL = 2_500L
+
+/**
+ * Inbound frames the link must have carried before an unanswered hello on it counts. #1635's links always
+ * carried live HR; a link at the edge of range comes up, delivers nothing and drops on the supervision
+ * timeout whether or not a hello went out. Twin of Swift `minInboundFramesForRefusal`.
+ */
+internal const val MIN_INBOUND_FRAMES_FOR_REFUSAL = 2
+
+/**
+ * Is an unanswered CLIENT_HELLO at disconnect evidence that the strap refuses the handshake? Only when the
+ * link carried traffic and the hello had waited long enough to have been timed out by the strap; otherwise
+ * the drop is the radio's and says nothing about the handshake. Counting those latched the suppression on
+ * a strap that had acknowledged the hello three times the same day (2026-10-07 log), turning a walk out of
+ * range into "history sync off". [helloOutstandingMs] is null when no hello was outstanding.
+ * Twin of Swift `helloUnansweredIsEvidence`.
+ */
+internal fun helloUnansweredIsEvidence(helloOutstandingMs: Long?, inboundFramesOnLink: Int): Boolean {
+    val ms = helloOutstandingMs ?: return false
+    return ms >= MIN_HELLO_OUTSTANDING_MS_FOR_REFUSAL && inboundFramesOnLink >= MIN_INBOUND_FRAMES_FOR_REFUSAL
+}
+
+/**
  * The give-up threshold for the refusal in hand. Keyed on the same [authRefusal] that decides whether the
  * give-up suppresses or pauses ([giveUpSuppressesHello]), so the two can never disagree about which branch
  * a refusal belongs to.

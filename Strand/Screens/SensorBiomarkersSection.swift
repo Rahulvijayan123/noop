@@ -480,6 +480,8 @@ struct SensorBiomarkersSection: View {
 
     /// Seconds between re-reads while the section is on screen, mirroring `IntradaySeriesSection`.
     private static let refreshSeconds: UInt64 = 30
+    /// Re-reads only while the app is on screen, as `IntradaySeriesSection` does.
+    @Environment(\.scenePhase) private var scenePhase
 
     init(day: String, store: SensorBiomarkerStore = .shared) {
         self.day = day
@@ -491,7 +493,8 @@ struct SensorBiomarkersSection: View {
         // renders and no route is called while the feature is off.
         if SensorBiomarkerFeature.isEnabled {
             content
-                .task(id: "\(day)|\(store.epoch)") {
+                .task(id: "\(day)|\(store.epoch)|\(scenePhase == .active)") {
+                    guard scenePhase == .active else { return }
                     await store.load(day: day)
                     while !Task.isCancelled {
                         try? await Task.sleep(nanoseconds: Self.refreshSeconds * 1_000_000_000)

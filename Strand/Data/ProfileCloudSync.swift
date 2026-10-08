@@ -13,6 +13,13 @@ struct CloudProfile: Codable, Equatable, Sendable {
     /// The DEVICE writes it (contract C2); the app never adopts a cloud value (the phone is the
     /// timezone authority), and nil means the server has not stored/returned it yet.
     var timezone: String?
+
+    /// Whether the owner has saved any profile value. The `profiles` row exists from sign-up with every
+    /// field empty except `timezone` (NOT NULL, default 'UTC'), and the route returns that row as a
+    /// profile, so "the cloud has a profile" has to be read from the fields themselves.
+    var hasSavedFields: Bool {
+        !displayName.isEmpty || dateOfBirth != nil || sex != nil || heightCm != nil || weightKg != nil
+    }
 }
 
 /// Keeps name, date of birth, sex, height, weight and the reporting timezone in the owner's cloud
@@ -71,7 +78,7 @@ final class ProfileCloudSync {
             // daybucket-repair.md) the mismatch push takes over.
             let tzChanged = profile.refreshTimezoneFromDevice()
             if profile.cloudDirty
-                || (remote == nil && profile.hasStoredCloudFields)
+                || (remote?.hasSavedFields != true && profile.hasStoredCloudFields)
                 || tzChanged
                 || (remote?.timezone != nil && remote?.timezone != profile.timezone) {
                 try await upload()

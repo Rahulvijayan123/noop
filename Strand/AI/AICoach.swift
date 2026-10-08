@@ -1253,7 +1253,7 @@ final class AICoachEngine: ObservableObject {
         let rows = await repo.workoutRows(days: 30) // newest first
         guard !rows.isEmpty else { return "Recent workouts: none recorded in the last 30 days." }
         let bodySystem = UnitSystem(
-            rawValue: UserDefaults.standard.string(forKey: UnitPrefs.systemKey) ?? "") ?? .metric
+            rawValue: UserDefaults.standard.string(forKey: UnitPrefs.systemKey) ?? "") ?? .imperial
         let distanceSystem = UnitPrefs.resolveDistance(
             system: bodySystem,
             override: UserDefaults.standard.string(forKey: UnitPrefs.distanceSystemKey) ?? "")

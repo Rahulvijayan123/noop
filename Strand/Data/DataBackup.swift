@@ -72,11 +72,11 @@ enum DataBackup {
     static func runExport(checkpoint: @escaping () async -> Bool) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't find Nara's data. \(error.localizedDescription)")) }
 
         let dbURL = URL(fileURLWithPath: dbPath)
         guard FileManager.default.fileExists(atPath: dbPath) else {
-            return .failure(String(localized: "There's no NOOP data to export yet. Import or record some first."))
+            return .failure(String(localized: "There's no data to export yet."))
         }
 
         // Flush the WAL so the single .sqlite carries everything. Required for ZIP (no sidecar
@@ -87,7 +87,7 @@ enum DataBackup {
 
         #if os(macOS)
         let panel = NSSavePanel()
-        panel.title = String(localized: "Export NOOP backup")
+        panel.title = String(localized: "Export Nara backup")
         panel.prompt = String(localized: "Export")
         panel.canCreateDirectories = true
         panel.nameFieldStringValue = defaultBackupName()
@@ -138,7 +138,7 @@ enum DataBackup {
     private struct ExportIntegrityFailure: LocalizedError {
         let complaint: String
         var errorDescription: String? {
-            String(localized: "the NOOP database failed its integrity check (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). A backup of it would not restore. Export the WHOOP-format CSV (Settings → Export data) to save what's still readable.")
+            String(localized: "Nara's data is damaged, so a backup of it would not restore. Use Export CSV in Settings to save what's still readable.")
         }
     }
 
@@ -306,11 +306,11 @@ enum DataBackup {
     static func writeBackup(checkpoint: @escaping () async -> Bool, to dest: URL) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't find Nara's data. \(error.localizedDescription)")) }
 
         let dbURL = URL(fileURLWithPath: dbPath)
         guard FileManager.default.fileExists(atPath: dbPath) else {
-            return .failure(String(localized: "There's no NOOP data to export yet."))
+            return .failure(String(localized: "There's no data to export yet."))
         }
         // Flush the WAL into the single file (same requirement as the interactive export: a single-file
         // ZIP has no sidecar fallback, so committed pages still in the WAL would otherwise be absent).
@@ -351,11 +351,11 @@ enum DataBackup {
     static func runImport(allowOversize: Bool = false) async -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't find Nara's data. \(error.localizedDescription)")) }
 
         #if os(macOS)
         let panel = NSOpenPanel()
-        panel.title = String(localized: "Import NOOP backup")
+        panel.title = String(localized: "Restore Nara backup")
         panel.prompt = String(localized: "Import")
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
@@ -395,7 +395,7 @@ enum DataBackup {
     static func restore(from pickedSource: URL) -> BackupResult {
         let dbPath: String
         do { dbPath = try StorePaths.defaultDatabasePath() }
-        catch { return .failure(String(localized: "Couldn't locate the NOOP database. \(error.localizedDescription)")) }
+        catch { return .failure(String(localized: "Couldn't find Nara's data. \(error.localizedDescription)")) }
         return restore(from: pickedSource, toDatabaseAt: dbPath)
     }
 
@@ -447,7 +447,7 @@ enum DataBackup {
 
         // Validate: must be a real SQLite database (magic header "SQLite format 3\0").
         guard isSQLiteFile(at: source) else {
-            return .failure(String(localized: "That file isn't a NOOP backup. It doesn't look like a SQLite database."))
+            return .failure(String(localized: "That file isn't a Nara backup."))
         }
 
         // Reject any backup that isn't a clean GRDB (this-app) backup. The magic check passes for ANY
@@ -459,7 +459,7 @@ enum DataBackup {
         let origin = backupOrigin(of: backupTables)
         let holdsData = backupTables.contains("device") || backupTables.contains("hrSample")
         if origin == .android || (origin == .unknown && holdsData) {
-            return .failure(String(localized: "This isn't a NOOP backup from this app. It's missing the migration bookkeeping a NOOP backup carries (it looks like an Android backup or another app's database), and restoring it would strand your store. To move your history across platforms, export the WHOOP-format CSV on the other device (Settings → Export data) and import that here, or import your original WHOOP / Apple Health export."))
+            return .failure(String(localized: "That backup can't be restored here. It wasn't made by Nara on an iPhone or Mac."))
         }
 
         // #1014 defence-in-depth: both gates above read only the FIRST pages of the file — the
@@ -476,8 +476,8 @@ enum DataBackup {
         let legacySidecarsPresent = extractedDir == nil
             && (fm.fileExists(atPath: source.path + "-wal") || fm.fileExists(atPath: source.path + "-shm"))
         if !legacySidecarsPresent,
-           let complaint = DatabaseIntegrity.quickCheckFailure(atPath: source.path) {
-            return .failure(String(localized: "This backup file is damaged and can't be restored (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). Your current data was left untouched. Try an earlier backup file."))
+           DatabaseIntegrity.quickCheckFailure(atPath: source.path) != nil {
+            return .failure(String(localized: "This backup file is damaged and can't be restored. Your current data was left untouched. Try an earlier backup file."))
         }
 
         let dbURL = URL(fileURLWithPath: dbPath)
@@ -523,15 +523,15 @@ enum DataBackup {
             // the sidecars don't need this gate. On failure, roll back to the snapshot
             // AUTOMATICALLY and say so; the snapshot file is kept either way (same policy as a
             // successful import: the user can always reach the pre-import bytes).
-            if let complaint = DatabaseIntegrity.quickCheckFailure(atPath: dbURL.path) {
+            if DatabaseIntegrity.quickCheckFailure(atPath: dbURL.path) != nil {
                 removeIfPresent(dbURL)
                 if sidecar != dbURL, fm.fileExists(atPath: sidecar.path) {
                     try? fm.copyItem(at: sidecar, to: dbURL)
-                    return .failure(String(localized: "Import failed its post-restore integrity check (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). Your previous data was rolled back automatically and is unchanged."))
+                    return .failure(String(localized: "The restored data failed a final check, so your previous data was put back unchanged."))
                 }
                 // Fresh install: there was no previous store to preserve, so removing the damaged
                 // file (done above) restores the exact pre-import state — an empty slate.
-                return .failure(String(localized: "Import failed its post-restore integrity check (SQLite reports: \(DatabaseIntegrity.readableComplaint(complaint))). The damaged file was removed; there was no previous data to roll back."))
+                return .failure(String(localized: "The restored data failed a final check and was removed."))
             }
 
             // Restore sidecars only for legacy plain-SQLite backups whose WAL wasn't
@@ -593,12 +593,12 @@ enum DataBackup {
         }
     }
 
-    /// "NOOP-backup-2026-06-07.noopbak"
+    /// "Nara-backup-2026-06-07.noopbak". The extension stays: it is the backup file type.
     private static func defaultBackupName() -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.dateFormat = "yyyy-MM-dd"
-        return "NOOP-backup-\(f.string(from: Date())).noopbak"
+        return "Nara-backup-\(f.string(from: Date())).noopbak"
     }
 
     private static func timestamp() -> String {

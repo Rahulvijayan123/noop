@@ -1,0 +1,45 @@
+[Unit]
+Description=Nara metric insight worker (explanations for key metric screens, Prime Agent)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=frwhoop-mi
+Group=frwhoop-mi
+WorkingDirectory=/opt/nara-metric-insight
+EnvironmentFile=/etc/frwhoop/metric-insight.env
+# Secrets are credentials, never environment variables: Prime Agent's model-written code runs as this uid, and
+# only this process reads them ($CREDENTIALS_DIRECTORY is not visible inside the per-job sandbox).
+LoadCredential=db_url:/etc/frwhoop/credentials/metric-insight-db-url
+LoadCredential=llm_api_key:/etc/frwhoop/credentials/metric-insight-llm-key
+Environment=HOME=/var/lib/frwhoop-mi
+Environment=PYTHONUNBUFFERED=1
+Environment=UV_PYTHON_DOWNLOADS=never
+# Refuse to start unless the per-job sandbox (bubblewrap) blocks egress, secret reads and outside writes here.
+ExecStartPre=/opt/nara-metric-insight/venv/bin/nara-metric-insight self-test
+ExecStart=/opt/nara-metric-insight/venv/bin/nara-metric-insight run
+Restart=always
+RestartSec=10
+# SIGTERM (to the worker only: KillMode=mixed) stops claiming; the job in flight, Prime included, finishes (at
+# most two model turns plus publish). Whatever is left at the timeout is killed; run dirs are purged at start.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=300
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/frwhoop-mi
+# bubblewrap needs unprivileged user namespaces: do not add RestrictNamespaces= here.
+CPUQuota=100%
+CPUWeight=40
+MemoryHigh=1536M
+MemoryMax=2G
+MemorySwapMax=0
+TasksMax=256
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

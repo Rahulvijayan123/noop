@@ -714,7 +714,7 @@ public enum AnalyticsEngine {
             deepSeconds: deepS)
         // #345: gravity-sparse computed ONCE — reused by the sleep-motion trace below AND the Rest
         // confidence guard, so the two can never diverge and isGravitySparse runs only once per day.
-        let gravitySparse = SleepStager.isGravitySparse(gravity, hr: hr)
+        let gravitySparse = SleepStager.isGravitySparse(gravity, hr: hr, wristOff: wristOff)
         // Sleep & Rest test mode (E5): emit the Rest sub-score breakdown for this night, reusing the
         // IDENTICAL inputs `restScore` consumed above so the trace can never disagree with the score.
         // `subScoreLine` itself reuses `Rest.composite` for the final value. Side-effect-only; emitted

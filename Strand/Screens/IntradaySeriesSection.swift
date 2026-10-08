@@ -31,6 +31,14 @@ struct IntradaySeriesSection: View {
     @State private var contactSamples: [(ts: Int, state: ContactEligibility)] = []
 
     private static let refreshSeconds: UInt64 = 30
+    /// The re-read loop runs only while the app is on screen: a detail page left open when the phone locked
+    /// kept reading the server every half minute for as long as the strap held the app awake.
+    @Environment(\.scenePhase) private var scenePhase
+
+    private struct RefreshKey: Hashable {
+        let dayOffset: Int
+        let onScreen: Bool
+    }
 
     init(metric: IntradayMetric, accent: Color, store: IntradaySeriesStore = .shared) {
         self.metric = metric
@@ -42,14 +50,15 @@ struct IntradaySeriesSection: View {
         TimelineView(.periodic(from: .now, by: 30)) { context in
             card(now: context.date)
         }
-        .task(id: dayOffset) {
+        .task(id: RefreshKey(dayOffset: dayOffset, onScreen: scenePhase == .active)) {
             await loadEligibilityEvidence(dayOffset)
-            await keepFresh(dayOffset)
+            await keepFresh(dayOffset, onScreen: scenePhase == .active)
         }
     }
 
-    private func keepFresh(_ offset: Int) async {
+    private func keepFresh(_ offset: Int, onScreen: Bool) async {
         await store.loadCached(IntradayRange.bounds(for: metric, dayOffset: offset, now: Date()))
+        guard onScreen else { return }
         while !Task.isCancelled {
             let bounds = IntradayRange.bounds(for: metric, dayOffset: offset, now: Date())
             await store.refresh(metric, bounds: bounds)

@@ -445,9 +445,12 @@ final class CloudPushTests: XCTestCase {
     }
 
     func testSealTargetRelaxesOffScreen() {
-        XCTAssertEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: true), 2)
-        XCTAssertGreaterThan(CloudPushRuntime.sealTargetSeconds(sceneActive: false), 2)
-        XCTAssertLessThanOrEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: false), 30)
+        // On screen: inside the worker's ~once-a-minute republish of the current day.
+        XCTAssertEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: true), 10)
+        // Off screen: one file per stream every few minutes, not a request every few seconds.
+        XCTAssertGreaterThan(CloudPushRuntime.sealTargetSeconds(sceneActive: false),
+                             CloudPushRuntime.sealTargetSeconds(sceneActive: true))
+        XCTAssertLessThanOrEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: false), 300)
     }
 
     // MARK: - capture seam

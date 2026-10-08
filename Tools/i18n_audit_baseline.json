@@ -1072,11 +1072,11 @@
     ],
     [
       "Strand/Screens/BackupSyncView.swift",
-      "Backups will be saved inside NOOP. Open the Files app → On My iPhone → NOOP → Backups to see them, or drag that folder into iCloud Drive to read it on your Mac. To use a different folder later, tap Change folder."
+      "Backups will be saved inside Nara. Open the Files app → On My iPhone → Nara → Backups to see them, or drag that folder into iCloud Drive to read it on your Mac. To use a different folder later, tap Change folder."
     ],
     [
       "Strand/Screens/BackupSyncView.swift",
-      "NOOP didn't get a folder back from the picker. If the Open button won't do anything, tap \\\"Use NOOP's own folder\\\" below to back up inside NOOP instead — you can read those backups from the Files app."
+      "Nara didn't get a folder back from the picker. If the Open button won't do anything, tap \\\"Use Nara's own folder\\\" below to back up inside Nara instead — you can read those backups from the Files app."
     ],
     [
       "Strand/Screens/BackupSyncView.swift",
@@ -1084,11 +1084,11 @@
     ],
     [
       "Strand/Screens/BackupSyncView.swift",
-      "Using NOOP's folder"
+      "Using Nara's folder"
     ],
     [
       "Strand/Screens/BackupSyncView.swift",
-      "\\(name) is larger than the \\(cap) NOOP restores without asking. You can still restore it from Settings → Backup & restore → Import, which will ask you to confirm."
+      "\\(name) is larger than the \\(cap) Nara restores without asking. You can still restore it from Settings → Backup & restore → Import, which will ask you to confirm."
     ],
     [
       "Strand/Screens/BreathingView.swift",
@@ -1375,6 +1375,10 @@
       "vs typical - "
     ],
     [
+      "Strand/Screens/PowerSavingView.swift",
+      "With cloud scoring on, a WHOOP 5.0 or MG hands Nara its history about once a minute, so steps, calories and respiratory rate stay current instead of arriving in batches every few minutes. Live heart rate is unaffected either way. Low refresh overrides this, and Power saving slows it while the strap's battery is low. Nothing is lost if you turn it off: the strap banks everything and hands it over later."
+    ],
+    [
       "Strand/Screens/RhythmView.swift",
       "More varied"
     ],
@@ -1392,7 +1396,7 @@
     ],
     [
       "Strand/Screens/ScoringGuideView.swift",
-      "Your cardiovascular load. NOOP turns every second of heart rate into a training-impulse using heart-rate-reserve zones (Karvonen), weights time in harder zones more heavily (Edwards / Banister), and places it on a logarithmic 0-100 scale, so easy days sit low and an all-out day approaches 100, which stays genuinely rare. A long walk with little cardio still counts, through a steps / active-energy floor."
+      "Your cardiovascular load. Nara turns every second of heart rate into a training-impulse using heart-rate-reserve zones (Karvonen), weights time in harder zones more heavily (Edwards / Banister), and places it on a logarithmic 0-100 scale, so easy days sit low and an all-out day approaches 100, which stays genuinely rare. A long walk with little cardio still counts, through a steps / active-energy floor."
     ],
     [
       "Strand/Screens/SettingsView.swift",
@@ -1460,7 +1464,7 @@
     ],
     [
       "Strand/Screens/SleepView.swift",
-      "Removes this recorded sleep and recomputes the day without it. NOOP won't re-detect sleep in this window. You can undo for a few seconds after."
+      "Removes this recorded sleep and recomputes the day without it. Nara won't re-detect sleep in this window. You can undo for a few seconds after."
     ],
     [
       "Strand/Screens/SleepView.swift",
@@ -1472,7 +1476,7 @@
     ],
     [
       "Strand/Screens/SleepView.swift",
-      "Sleep deleted. NOOP won't detect sleep between \\(clockTime(banner.displayStart)) and \\(clockTime(banner.windowEnd)) again."
+      "Sleep deleted. Nara won't detect sleep between \\(clockTime(banner.displayStart)) and \\(clockTime(banner.windowEnd)) again."
     ],
     [
       "Strand/Screens/SleepView.swift",
@@ -1604,7 +1608,7 @@
     ],
     [
       "Strand/Screens/TestCentreView.swift",
-      "\\(identity). Logs this to the strap log on each connect, so a Polar bug report shows the model NOOP resolved your strap to."
+      "\\(identity). Logs this to the strap log on each connect, so a Polar bug report shows the model Nara resolved your strap to."
     ],
     [
       "Strand/Screens/TestCentreView.swift",

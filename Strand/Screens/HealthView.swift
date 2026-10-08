@@ -1311,11 +1311,11 @@ private struct VitalsSection: View {
 
     // Temperature display preference (D#103). Skin temp is stored in °C (absolute or a ±deviation); the
     // toggle re-labels it to °F. Display-only — banding still runs on the stored °C value.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.skinTempDisplayKey) private var skinTempDisplayRaw = ""   // #1846
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .imperial
         return UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
     }
 
@@ -1351,7 +1351,7 @@ private struct VitalsSection: View {
                         .staggeredAppear(index: idx)
                 }
             }
-            Text("Once NOOP has 14 nights of history, in-range compares each vital to your own baseline (approximate, not medical advice); until then, typical adult ranges apply.")
+            Text("Once Nara has 14 nights of history, in-range compares each vital to your own baseline (approximate, not medical advice); until then, typical adult ranges apply.")
                 .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)

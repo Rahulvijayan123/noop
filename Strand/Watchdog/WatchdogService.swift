@@ -443,9 +443,14 @@ final class WatchdogService {
         return .empty
     }
 
+    /// What was last written for each device, so a tick that changed nothing does not encode and write it again.
+    private var persistedCarry: [String: WatchdogCarry] = [:]
+
     private func persistCarry(key: String) {
+        guard persistedCarry[key] != carry else { return }
         if let data = try? JSONEncoder().encode(carry) {
             UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: key))
+            persistedCarry[key] = carry
         }
     }
 
@@ -485,9 +490,24 @@ final class WatchdogService {
         return Self.asleepIntervals(from: samples)
     }
 
+    /// The note's last answer, reused for `noteRefreshSeconds`: reading it means decompressing and decoding the
+    /// day's document from disk, up to three times, on the main actor. The label is display only.
+    private var noteCache: (key: String, at: Int, note: String?)?
+    private static let noteRefreshSeconds = 60
+
     /// The heart-rate page already decodes today's activity context onto disk. Read that
     /// cache only. A miss does not start a decode, and the label never enters scoring.
     private func activityContextNote(model: AppModel, now: Int) async -> String? {
+        let cacheKey = model.repo.importedReadIds.joined(separator: "+")
+        if let cached = noteCache, cached.key == cacheKey, now - cached.at < Self.noteRefreshSeconds {
+            return cached.note
+        }
+        let note = await readActivityContextNote(model: model, now: now)
+        noteCache = (cacheKey, now, note)
+        return note
+    }
+
+    private func readActivityContextNote(model: AppModel, now: Int) async -> String? {
         let dayStart = Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(now)))
             .timeIntervalSince1970)
         let joined = model.repo.importedReadIds.joined(separator: "+")

@@ -1,0 +1,17 @@
+{
+  "about": "Agent learning for the metric insight worker: reviewed, user-free notes only. Never add anything about a person (no values, dates, names, notes from a person). Changes go through code review; scripts/build_curated_harness.py turns this file into Prime's harness_state.json.",
+  "prompt_notes": [
+    {"id": "evidence-first", "title": "Load evidence before writing",
+     "content": "Call get_metric_summary and get_data_quality before drafting. Quote their numbers as returned; never compute averages, percentages or differences yourself."},
+    {"id": "short-history", "title": "Short histories",
+     "content": "When get_metric_summary.assessment.basis is insufficient_history, say a usual range is not established yet instead of calling a night high or low for the person."},
+    {"id": "estimates", "title": "Estimated signals",
+     "content": "Sleep, respiratory rate, blood oxygen and movement come from models of wrist signals. Any sentence that states one of the person's values says 'estimated'."},
+    {"id": "absolute-dates", "title": "Dates",
+     "content": "Explanations are cached and read later: refer to nights by date (Oct 6), never as today, yesterday or last night."}
+  ],
+  "memories": [
+    {"id": "rhr-variation", "title": "Resting heart rate varies night to night",
+     "content": "A few bpm of night-to-night change in resting heart rate is common; a single night rarely means much on its own. Prefer the context layer's episode state when it is ready."}
+  ]
+}

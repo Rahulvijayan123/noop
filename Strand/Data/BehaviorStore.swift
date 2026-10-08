@@ -58,7 +58,7 @@ final class BehaviorStore: ObservableObject {
     @Published var strainTargetNudge: Bool { didSet { d.set(strainTargetNudge, forKey: K.strainTargetNudge) } }
 
     private let d = UserDefaults.standard
-    private enum K {
+    enum K {
         static let dtAction = "behavior.doubleTapAction"
         static let dtShortcut = "behavior.doubleTapShortcut"
         static let autoLock = "behavior.autoLockOnWristOff"
@@ -102,6 +102,29 @@ final class BehaviorStore: ObservableObject {
         batteryAlerts = d.object(forKey: K.batteryAlerts) as? Bool ?? true
         batteryPredictiveAlerts = d.object(forKey: K.batteryPredictiveAlerts) as? Bool ?? true
         strainTargetNudge = d.object(forKey: K.strainTargetNudge) as? Bool ?? false
+    }
+
+    /// Re-reads the values another writer stored (settings arriving from the account, `SettingsCloudSync`).
+    /// A fresh store is the read, so the defaults stay the ones `init` applies.
+    func reloadFromDefaults() {
+        let stored = BehaviorStore()
+        if doubleTapAction != stored.doubleTapAction { doubleTapAction = stored.doubleTapAction }
+        if doubleTapShortcut != stored.doubleTapShortcut { doubleTapShortcut = stored.doubleTapShortcut }
+        if autoLockOnWristOff != stored.autoLockOnWristOff { autoLockOnWristOff = stored.autoLockOnWristOff }
+        if wristOffShortcut != stored.wristOffShortcut { wristOffShortcut = stored.wristOffShortcut }
+        if wristOnShortcut != stored.wristOnShortcut { wristOnShortcut = stored.wristOnShortcut }
+        if zoneCoaching != stored.zoneCoaching { zoneCoaching = stored.zoneCoaching }
+        if stressCheckIn != stored.stressCheckIn { stressCheckIn = stored.stressCheckIn }
+        if stressAutoNudge != stored.stressAutoNudge { stressAutoNudge = stored.stressAutoNudge }
+        if stressQuietHours != stored.stressQuietHours { stressQuietHours = stored.stressQuietHours }
+        if stressUseResonancePace != stored.stressUseResonancePace { stressUseResonancePace = stored.stressUseResonancePace }
+        if smartAlarmEnabled != stored.smartAlarmEnabled { smartAlarmEnabled = stored.smartAlarmEnabled }
+        if smartAlarmMinutes != stored.smartAlarmMinutes { smartAlarmMinutes = stored.smartAlarmMinutes }
+        if smartAlarmWeekdays != stored.smartAlarmWeekdays { smartAlarmWeekdays = stored.smartAlarmWeekdays }
+        if illnessWatch != stored.illnessWatch { illnessWatch = stored.illnessWatch }
+        if batteryAlerts != stored.batteryAlerts { batteryAlerts = stored.batteryAlerts }
+        if batteryPredictiveAlerts != stored.batteryPredictiveAlerts { batteryPredictiveAlerts = stored.batteryPredictiveAlerts }
+        if strainTargetNudge != stored.strainTargetNudge { strainTargetNudge = stored.strainTargetNudge }
     }
 
     // MARK: Charge baseline recalibration

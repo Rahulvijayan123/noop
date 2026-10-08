@@ -441,6 +441,23 @@ targets:
       # Apple ID is unproven (an Apple limitation), so the docs steer watch users to a source build for now.
       - target: NOOPWatch
 
+  # iPhone UI tests: open Settings from Today and walk every row (StrandiOSUITests/SettingsUITests.swift).
+  # Simulator only; run with `-scheme NOOPiOSUITests`. The account phases need the local Supabase stack,
+  # see supabase/tests/e2e/run_ios_settings_ui.sh.
+  NOOPiOSUITests:
+    type: bundle.ui-testing
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - StrandiOSUITests
+    dependencies:
+      - target: NOOPiOS
+    settings:
+      base:
+        GENERATE_INFOPLIST_FILE: YES
+        PRODUCT_BUNDLE_IDENTIFIER: $(BUNDLE_ID_PREFIX).noop.uitests
+        TEST_TARGET_NAME: NOOPiOS
+
   # WidgetKit + Live Activity extension — the iOS analogue of the macOS menu-bar
   # extra. Reads a tiny snapshot the app publishes into the shared App Group.
   NOOPiOSWidgets:
@@ -610,6 +627,15 @@ schemes:
         NOOPiOS: all
     run:
       config: Debug
+  NOOPiOSUITests:
+    build:
+      targets:
+        NOOPiOS: all
+        NOOPiOSUITests: [test]
+    test:
+      config: Debug
+      targets:
+        - NOOPiOSUITests
   # `xcodebuild -scheme NOOPWatch …` compile-verifies the watchOS app + its embedded complication
   # extension (M3). Name matches the app-build CI matrix entry the verify script adds.
   NOOPWatch:

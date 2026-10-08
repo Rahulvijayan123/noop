@@ -37,6 +37,19 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
     private var scope: Scope?
     /// Parsed days, so a decode does not re-parse megabytes of JSON: UTC day → (revision, set).
     private var parsed: [String: (revision: String, set: ActivityEncoderWindowSet?)] = [:]
+    /// What each stored day is, without its windows: `revisions` and `save` only compare these, and used to decode
+    /// the whole file (0.3–1 MB) to read them, on every sync pass, on the main actor.
+    private struct Stamp: Equatable {
+        let resultRevision: String
+        let encoderId: String
+        let modelVersion: String
+        init(_ record: DayRecord) {
+            resultRevision = record.resultRevision
+            encoderId = record.encoderId
+            modelVersion = record.modelVersion
+        }
+    }
+    private var stamps: [String: Stamp] = [:]
 
     init(directory: URL? = nil, defaults: UserDefaults = .standard) {
         let fm = FileManager.default
@@ -59,6 +72,7 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         guard new != scope else { return }
         scope = new
         parsed = [:]
+        stamps = [:]
         if let new, let data = try? JSONEncoder().encode(new) { defaults.set(data, forKey: Self.scopeKey) }
         else { defaults.removeObject(forKey: Self.scopeKey) }
     }
@@ -81,8 +95,8 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         for day in days {
             if let hit = parsed[day] {
                 if !hit.revision.isEmpty { out[day] = hit.revision }
-            } else if let record = readRecord(day: day, scope: scope) {
-                out[day] = record.resultRevision
+            } else if let stamp = stamp(day: day, scope: scope) {
+                out[day] = stamp.resultRevision
             }
         }
         return out
@@ -95,15 +109,24 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard scope == expected, let url = file(day: record.day, scope: expected) else { return false }
         // The server's result revision names the content; the JSON text of the same set can differ in key order.
-        if let existing = readRecord(day: record.day, scope: expected),
-           existing.resultRevision == record.resultRevision, existing.encoderId == record.encoderId,
-           existing.modelVersion == record.modelVersion { return false }
+        if let existing = stamp(day: record.day, scope: expected), existing == Stamp(record) { return false }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(record), (try? data.write(to: url, options: .atomic)) != nil else {
+            stamps[record.day] = nil
             return false
         }
         parsed[record.day] = nil
+        stamps[record.day] = Stamp(record)
         return true
+    }
+
+    /// The stored day's stamp, read from its file once (lock held).
+    private func stamp(day: String, scope: Scope) -> Stamp? {
+        if let cached = stamps[day] { return cached }
+        guard let record = readRecord(day: day, scope: scope) else { return nil }
+        let stamp = Stamp(record)
+        stamps[day] = stamp
+        return stamp
     }
 
     /// The windows that END inside `[from, to)` (the decoder keys a window by its end second), from every

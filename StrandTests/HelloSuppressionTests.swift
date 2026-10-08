@@ -233,4 +233,71 @@ final class HelloSuppressionTests: XCTestCase {
         // spec permits it: KEPT rather than discarding a spec-valid reading on a guess.
         XCTAssertTrue(rssiReadingIsUsable(0), "0 is inside the spec's range, so it is kept")
     }
+
+    // MARK: - helloUnansweredIsEvidence
+
+    /// The #1635 shape: a link streaming live HR, dropped ~3.16 s after the write. That still counts.
+    func testTheRefusalSignatureStillCounts() {
+        XCTAssertTrue(helloUnansweredIsEvidence(helloOutstandingMs: 3_158, inboundFramesOnLink: 4))
+    }
+
+    /// The 2026-10-07 false latch: at the edge of range, links that carried nothing died 0.5-2 s after the
+    /// hello. Seven links between them died the same way with no hello at all. None of these is a refusal.
+    func testEdgeOfRangeDropsDoNotCount() {
+        XCTAssertFalse(helloUnansweredIsEvidence(helloOutstandingMs: 600, inboundFramesOnLink: 0))
+        XCTAssertFalse(helloUnansweredIsEvidence(helloOutstandingMs: 2_000, inboundFramesOnLink: 1))
+        // Long enough, but the link carried nothing: the radio, not the handshake.
+        XCTAssertFalse(helloUnansweredIsEvidence(helloOutstandingMs: 4_000, inboundFramesOnLink: 0))
+        // Traffic, but dropped too soon after the write for the strap to have timed it out.
+        XCTAssertFalse(helloUnansweredIsEvidence(helloOutstandingMs: 1_200, inboundFramesOnLink: 6))
+    }
+
+    func testNoHelloOutstandingIsNeverEvidence() {
+        XCTAssertFalse(helloUnansweredIsEvidence(helloOutstandingMs: nil, inboundFramesOnLink: 50))
+    }
+
+    func testEvidenceThresholdsAreInclusive() {
+        XCTAssertTrue(helloUnansweredIsEvidence(helloOutstandingMs: minHelloOutstandingMsForRefusal,
+                                                inboundFramesOnLink: minInboundFramesForRefusal))
+    }
+
+    // MARK: - SuppressedHelloRetry
+
+    func testRetryWaitsForAStableLink() {
+        let now = Date()
+        XCTAssertFalse(SuppressedHelloRetry.isDue(now: now, linkUpSeconds: 60, nextRetryAt: nil))
+        XCTAssertTrue(SuppressedHelloRetry.isDue(now: now, linkUpSeconds: 300, nextRetryAt: nil))
+    }
+
+    func testRetryRespectsTheSchedule() {
+        let now = Date()
+        XCTAssertFalse(SuppressedHelloRetry.isDue(now: now, linkUpSeconds: 3_600,
+                                                  nextRetryAt: now.addingTimeInterval(60)))
+        XCTAssertTrue(SuppressedHelloRetry.isDue(now: now, linkUpSeconds: 3_600,
+                                                 nextRetryAt: now.addingTimeInterval(-1)))
+    }
+
+    /// 30 min, doubling, capped at 6 h: a strap that really refuses costs at most a handful of drops a day.
+    func testRetryBackoffDoublesToACap() {
+        XCTAssertEqual(SuppressedHelloRetry.backoff(afterAttempts: 1), 30 * 60)
+        XCTAssertEqual(SuppressedHelloRetry.backoff(afterAttempts: 2), 60 * 60)
+        XCTAssertEqual(SuppressedHelloRetry.backoff(afterAttempts: 4), 4 * 60 * 60)
+        XCTAssertEqual(SuppressedHelloRetry.backoff(afterAttempts: 5), 6 * 60 * 60)
+        XCTAssertEqual(SuppressedHelloRetry.backoff(afterAttempts: 50), 6 * 60 * 60)
+    }
+
+    func testRetryScheduleIsPersistedPerStrapAndCleared() {
+        let id = "TEST-RETRY-\(UUID().uuidString)"
+        defer { SuppressedHelloRetry.clear(id) }
+        XCTAssertEqual(SuppressedHelloRetry.attempts(id), 0)
+        XCTAssertNil(SuppressedHelloRetry.nextRetryAt(id))
+        let now = Date(timeIntervalSince1970: 1_800_000_000)
+        SuppressedHelloRetry.noteAttempt(id, now: now)
+        XCTAssertEqual(SuppressedHelloRetry.attempts(id), 1)
+        XCTAssertEqual(SuppressedHelloRetry.nextRetryAt(id)?.timeIntervalSince1970,
+                       now.addingTimeInterval(30 * 60).timeIntervalSince1970)
+        SuppressedHelloRetry.clear(id)
+        XCTAssertEqual(SuppressedHelloRetry.attempts(id), 0)
+        XCTAssertNil(SuppressedHelloRetry.nextRetryAt(id))
+    }
 }

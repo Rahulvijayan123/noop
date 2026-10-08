@@ -20,7 +20,7 @@ struct BankedReadingsSection: View {
     let accent: Color
 
     @EnvironmentObject private var repo: Repository
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     /// 0 = the last 24 hours ending now; each step back is the 24 hours before that.
     @State private var dayOffset = 0
@@ -49,7 +49,7 @@ struct BankedReadingsSection: View {
     private static let fullHourOfSamples = 3_600
 
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric, override: temperatureRaw)
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial, override: temperatureRaw)
     }
 
     var body: some View {

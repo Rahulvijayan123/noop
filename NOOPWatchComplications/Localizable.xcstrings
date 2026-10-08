@@ -577,66 +577,66 @@
         }
       }
     },
-    "Charge out of date, last synced %@. Open NOOP on iPhone.": {
+    "Charge out of date, last synced %@. Open Nara on iPhone.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ladung veraltet, zuletzt synchronisiert %@. Öffne NOOP auf dem iPhone."
+            "value": "Ladung veraltet, zuletzt synchronisiert %@. Öffne Nara auf dem iPhone."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Charge out of date, last synced %@. Open NOOP on iPhone."
+            "value": "Charge out of date, last synced %@. Open Nara on iPhone."
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carga desatualizada, última sincronização %@. Abra o NOOP no iPhone."
+            "value": "Carga desatualizada, última sincronização %@. Abra o Nara no iPhone."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Заряд устарел, последняя синхронизация %@. Откройте NOOP на iPhone."
+            "value": "Заряд устарел, последняя синхронизация %@. Откройте Nara на iPhone."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carga fuera de la fecha, última sincronizada %1$@. Abrir NOOP en iPhone."
+            "value": "Carga fuera de la fecha, última sincronizada %1$@. Abrir Nara en iPhone."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Charge hors date, dernière synchronisation %1$@. Ouvrez NOOP sur iPhone."
+            "value": "Charge hors date, dernière synchronisation %1$@. Ouvrez Nara sur iPhone."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carica non aggiornata, ultima sincronizzazione %@. Apri NOOP su iPhone."
+            "value": "Carica non aggiornata, ultima sincronizzazione %@. Apri Nara su iPhone."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Energia nieaktualny, ostatnia synchronizacja %@. Otwórz NOOP na iPhonie."
+            "value": "Energia nieaktualny, ostatnia synchronizacja %@. Otwórz Nara na iPhonie."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "能量数据已过期，上次同步 %@。请在 iPhone 上打开 NOOP。"
+            "value" : "能量数据已过期，上次同步 %@。请在 iPhone 上打开 Nara。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "能量資料已過期，上次同步 %@。請在 iPhone 上開啟 NOOP。"
+            "value" : "能量資料已過期，上次同步 %@。請在 iPhone 上開啟 Nara。"
           }
         }
       }
@@ -1025,146 +1025,146 @@
         }
       }
     },
-    "NOOP Charge": {
+    "Nara Charge": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP Ladung"
+            "value": "Nara Ladung"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP Charge"
+            "value": "Nara Charge"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carga de NOOP"
+            "value": "Carga de Nara"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carica NOOP"
+            "value": "Carica Nara"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "Carga NOOP"
+            "value": "Carga Nara"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP Заряд"
+            "value": "Nara Заряд"
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP 能量"
+            "value": "Nara 能量"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP 能量"
+            "value": "Nara 能量"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Charge NOOP"
+            "value": "Charge Nara"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP Energia"
+            "value": "Nara Energia"
           }
         }
       }
     },
-    "NOOP · open on iPhone": {
+    "Nara · open on iPhone": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · auf iPhone öffnen"
+            "value": "Nara · auf iPhone öffnen"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · open on iPhone"
+            "value": "Nara · open on iPhone"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · abrir no iPhone"
+            "value": "Nara · abrir no iPhone"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · откройте на iPhone"
+            "value": "Nara · откройте на iPhone"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · abierto en iPhone"
+            "value": "Nara · abierto en iPhone"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · ouvert sur iPhone"
+            "value": "Nara · ouvert sur iPhone"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · apri su iPhone"
+            "value": "Nara · apri su iPhone"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP · otwórz na iPhonie"
+            "value": "Nara · otwórz na iPhonie"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP · 在 iPhone 上打开"
+            "value" : "Nara · 在 iPhone 上打开"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP · 在 iPhone 上開啟"
+            "value" : "Nara · 在 iPhone 上開啟"
           }
         }
       }
     },
-    "NOOP. %@, %@, %@.": {
+    "Nara. %@, %@, %@.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %@, %@, %@."
+            "value": "Nara. %@, %@, %@."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %@, %@, %@."
+            "value": "Nara. %@, %@, %@."
           }
         },
         "pt-PT": {
@@ -1176,13 +1176,13 @@
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %@, %@, %@."
+            "value": "Nara. %@, %@, %@."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %1$@, %2$@, %3$@."
+            "value": "Nara. %1$@, %2$@, %3$@."
           }
         },
         "fr": {
@@ -1194,281 +1194,281 @@
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %@, %@, %@."
+            "value": "Nara. %@, %@, %@."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. %@, %@, %@."
+            "value": "Nara. %@, %@, %@."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。%@、%@、%@。"
+            "value" : "Nara。%@、%@、%@。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。%@、%@、%@。"
+            "value" : "Nara。%@、%@、%@。"
           }
         }
       }
     },
-    "NOOP. No data yet, open NOOP on your iPhone to sync.": {
+    "Nara. No data yet, open Nara on your iPhone to sync.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Noch keine Daten, öffne NOOP auf deinem iPhone zum Synchronisieren."
+            "value": "Nara. Noch keine Daten, öffne Nara auf deinem iPhone zum Synchronisieren."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. No data yet, open NOOP on your iPhone to sync."
+            "value": "Nara. No data yet, open Nara on your iPhone to sync."
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "NÃO. Ainda não há dados, abra o NOOP no teu iPhone para tincronizar."
+            "value": "NÃO. Ainda não há dados, abra o Nara no teu iPhone para tincronizar."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Данных пока нет, откройте NOOP на iPhone для синхронизации."
+            "value": "Nara. Данных пока нет, откройте Nara на iPhone для синхронизации."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Aún no hay datos, abra NOOP en su iPhone para sincronizar."
+            "value": "Nara. Aún no hay datos, abra Nara en su iPhone para sincronizar."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "- Oui. Pas encore de données, ouvrez NOOP sur votre iPhone pour synchroniser."
+            "value": "- Oui. Pas encore de données, ouvrez Nara sur votre iPhone pour synchroniser."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Ancora nessun dato, apri NOOP sul tuo iPhone per sincronizzare."
+            "value": "Nara. Ancora nessun dato, apri Nara sul tuo iPhone per sincronizzare."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Nie ma jeszcze danych. Otwórz NOOP na swoim iPhonie, aby przeprowadzić synchronizację."
+            "value": "Nara. Nie ma jeszcze danych. Otwórz Nara na swoim iPhonie, aby przeprowadzić synchronizację."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。暂无数据，请在 iPhone 上打开 NOOP 进行同步。"
+            "value" : "Nara。暂无数据，请在 iPhone 上打开 Nara 进行同步。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。暫無資料，請在 iPhone 上開啟 NOOP 進行同步。"
+            "value" : "Nara。暫無資料，請在 iPhone 上開啟 Nara 進行同步。"
           }
         }
       }
     },
-    "NOOP. Scores out of date, last synced %@. Open NOOP on iPhone to refresh.": {
+    "Nara. Scores out of date, last synced %@. Open Nara on iPhone to refresh.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Werte veraltet, zuletzt synchronisiert %@. Öffne NOOP auf dem iPhone zum Aktualisieren."
+            "value": "Nara. Werte veraltet, zuletzt synchronisiert %@. Öffne Nara auf dem iPhone zum Aktualisieren."
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Scores out of date, last synced %@. Open NOOP on iPhone to refresh."
+            "value": "Nara. Scores out of date, last synced %@. Open Nara on iPhone to refresh."
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "NÃO. Pontuações desatualizadas, última sincronização %@. Abra o NOOP no iPhone para atualizar."
+            "value": "NÃO. Pontuações desatualizadas, última sincronização %@. Abra o Nara no iPhone para atualizar."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Показатели устарели, последняя синхронизация %@. Откройте NOOP на iPhone, чтобы обновить."
+            "value": "Nara. Показатели устарели, последняя синхронизация %@. Откройте Nara на iPhone, чтобы обновить."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Resultados fuera de la fecha, último sincronizado %1$@. Abra NOOP en iPhone para refrescarse."
+            "value": "Nara. Resultados fuera de la fecha, último sincronizado %1$@. Abra Nara en iPhone para refrescarse."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "- Oui. Les scores sont dépassés, le dernier %1$@ synchronisé. Ouvrez NOOP sur iPhone pour vous rafraîchir."
+            "value": "- Oui. Les scores sont dépassés, le dernier %1$@ synchronisé. Ouvrez Nara sur iPhone pour vous rafraîchir."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Punteggi non aggiornati, ultima sincronizzazione %@. Apri NOOP su iPhone per aggiornare."
+            "value": "Nara. Punteggi non aggiornati, ultima sincronizzazione %@. Apri Nara su iPhone per aggiornare."
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP. Wyniki nieaktualne, ostatnia synchronizacja %@. Otwórz NOOP na iPhonie, aby odświeżyć."
+            "value": "Nara. Wyniki nieaktualne, ostatnia synchronizacja %@. Otwórz Nara na iPhonie, aby odświeżyć."
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。评分已过期，上次同步 %@。请在 iPhone 上打开 NOOP 以刷新。"
+            "value" : "Nara。评分已过期，上次同步 %@。请在 iPhone 上打开 Nara 以刷新。"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "NOOP。評分已過期，上次同步 %@。請在 iPhone 上開啟 NOOP 以重新整理。"
+            "value" : "Nara。評分已過期，上次同步 %@。請在 iPhone 上開啟 Nara 以重新整理。"
           }
         }
       }
     },
-    "No data, open NOOP on iPhone": {
+    "No data, open Nara on iPhone": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Keine Daten, öffne NOOP auf dem iPhone"
+            "value": "Keine Daten, öffne Nara auf dem iPhone"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "No data, open NOOP on iPhone"
+            "value": "No data, open Nara on iPhone"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "Sem dados, abra o NOOP no iPhone"
+            "value": "Sem dados, abra o Nara no iPhone"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Нет данных, откройте NOOP на iPhone"
+            "value": "Нет данных, откройте Nara на iPhone"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "No hay datos, abra NOOP en iPhone"
+            "value": "No hay datos, abra Nara en iPhone"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Pas de données, ouvrir NOOP sur iPhone"
+            "value": "Pas de données, ouvrir Nara sur iPhone"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Nessun dato, apri NOOP su iPhone"
+            "value": "Nessun dato, apri Nara su iPhone"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Brak danych, otwórz NOOP na iPhonie"
+            "value": "Brak danych, otwórz Nara na iPhonie"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "无数据，请在 iPhone 上打开 NOOP"
+            "value" : "无数据，请在 iPhone 上打开 Nara"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "無資料，請在 iPhone 上開啟 NOOP"
+            "value" : "無資料，請在 iPhone 上開啟 Nara"
           }
         }
       }
     },
-    "Open NOOP": {
+    "Open Nara": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "NOOP öffnen"
+            "value": "Nara öffnen"
           }
         },
         "en": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open NOOP"
+            "value": "Open Nara"
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "Abrir NOOP"
+            "value": "Abrir Nara"
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Открыть NOOP"
+            "value": "Открыть Nara"
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Open NOOP"
+            "value": "Open Nara"
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Ouvrir NOOP"
+            "value": "Ouvrir Nara"
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Apri NOOP"
+            "value": "Apri Nara"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Otwórz NOOP"
+            "value": "Otwórz Nara"
           }
         },
         "zh-Hans" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "打开 NOOP"
+            "value" : "打开 Nara"
           }
         },
         "zh-Hant" : {
           "stringUnit" : {
             "state" : "translated",
-            "value" : "開啟 NOOP"
+            "value" : "開啟 Nara"
           }
         }
       }

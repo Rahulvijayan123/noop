@@ -75,8 +75,7 @@ private struct StrapConnectionPage: View, Equatable {
 
     var body: some View {
         let current = status
-        return ScreenScaffold(title: "Pair & connect",
-                              subtitle: "Connect, test and re-pair your WHOOP strap.") {
+        return ScreenScaffold(title: "Pair & connect") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
                 StrapStatusCard(status: current,
                                 link: link.inputs,
@@ -565,7 +564,7 @@ enum StrapDemoSeed {
             live.connected = true; live.bonded = true
         case "hint":
             live.connected = true; live.bonded = true
-            live.pairingHint = "NOOP can see your strap but it's refusing to pair - it's likely still bonded to the official WHOOP app, or your phone is holding an old pairing. To fix it: (1) fully close the WHOOP app, (2) on a 5.0/MG, tap the band repeatedly until the LEDs flash blue (pairing mode), (3) if your strap is listed under iPhone Settings → Bluetooth, tap it and choose Forget This Device, then reconnect in NOOP."
+            live.pairingHint = "Nara can see your strap, but it won't pair. It's probably still paired with the official WHOOP app, or held by an old Bluetooth pairing. Fully close the WHOOP app, tap the strap until its lights flash blue, and if it's listed in Bluetooth settings, forget it there. Then connect again."
         case "connecting":
             live.connected = true
         case "disconnected":

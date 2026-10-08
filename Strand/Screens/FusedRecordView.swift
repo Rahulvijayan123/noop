@@ -184,7 +184,7 @@ struct FusedRecordView: View {
 
     /// The pillar's standing non-clinical line (umbrella §4.1). Kept inline + plain — wellness only.
     private var disclaimerNote: some View {
-        Text("NOOP picks the best-sourced number and shows you where each came from. It's for wellness and curiosity. It doesn't diagnose or replace medical advice.")
+        Text("Nara picks the best-sourced number and shows you where each came from. It's for wellness and curiosity. It doesn't diagnose or replace medical advice.")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
             .fixedSize(horizontal: false, vertical: true)
@@ -204,10 +204,10 @@ private struct FusedMetricRowView: View {
 
     // Each screen resolves °C/°F for itself (TodayView, FullDayChartView, MetricExplorerView do the
     // same); the fused row used to print a hardcoded "°C" and was the last reader here ignoring it.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw)
     }
 
@@ -331,7 +331,7 @@ private struct ConflictCompareSheet: View {
     private var point: FusedMetricPoint { row.point }
 
     var body: some View {
-        ScreenScaffold(title: LocalizedStringKey(row.label), subtitle: "Your bands report different numbers. Here's every source, and the one NOOP is using.") {
+        ScreenScaffold(title: LocalizedStringKey(row.label), subtitle: "Your bands report different numbers. Here's every source, and the one Nara is using.") {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                 NoopCard {
                     VStack(spacing: 0) {
@@ -355,7 +355,7 @@ private struct ConflictCompareSheet: View {
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.accent)
                             .accessibilityHidden(true)
-                        Text("NOOP shows the \(winner.source.displayName) reading because it \(winner.reason) for this metric: a higher-trust source here, not a verdict that the others are wrong.")
+                        Text("Nara shows the \(winner.source.displayName) reading because it \(winner.reason) for this metric: a higher-trust source here, not a verdict that the others are wrong.")
                             .font(StrandFont.subhead)
                             .foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
@@ -380,10 +380,10 @@ private struct ContributorRow: View {
 
     // Each screen resolves °C/°F for itself (TodayView, FullDayChartView, MetricExplorerView do the
     // same); the fused row used to print a hardcoded "°C" and was the last reader here ignoring it.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw)
     }
 

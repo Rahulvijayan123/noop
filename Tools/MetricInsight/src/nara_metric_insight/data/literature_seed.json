@@ -1,0 +1,2011 @@
+{
+  "meta": {
+    "name": "nara_literature_seed",
+    "schema_version": 1,
+    "built_at": "2026-10-08T01:55:36+00:00",
+    "builder": "scripts/build_literature_seed.py",
+    "entry_count": 58,
+    "citation_source": "NCBI E-utilities esummary.fcgi (db=pubmed, retmode=json). title, journal (esummary 'source'), year (first 4 chars of 'pubdate'), first_author ('sortfirstauthor') and doi (articleids idtype=doi) are copied verbatim.",
+    "conventions": {
+      "direction": "Change in the listed metric associated with the factor in `topic`. 'variable' means no significant change, a mixed or cyclical pattern, or a measurement/variability fact. For topic long_term_risk the direction is the outcome risk as RHR rises.",
+      "typical_magnitude": "Uses only numbers stated in the PubMed abstract; null when the abstract gives none.",
+      "context_only": "true = background or caution material (medication, long-term risk). Do not offer it as a cause of a day-to-day change unless the user's own context makes it relevant.",
+      "keywords": "Retrieval aids for lexical search. Not part of the claim and not taken from the source.",
+      "metric": "Corpus tags (metrics.InsightMetric.literature): rhr resting heart rate during sleep, hr awake heart rate at rest, hrv heart rate variability (RMSSD and SDNN), temp wrist/skin temperature, resp respiratory rate, spo2 blood oxygen, steps daily steps and walking, energy energy expenditure.",
+      "claims": "Written from the PubMed abstract only; full texts were not reviewed. Each claim's numbers were machine-checked against the abstract text at build time, and every source is a journal article that is neither a preprint nor retracted (see verification/manifest.json)."
+    },
+    "dropped": []
+  },
+  "entries": [
+    {
+      "id": "rhr-norm-between-person",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "normal_range",
+      "claim": "In 92,457 adults with long-term wrist-tracker data, mean daily RHR was 65 bpm with a range of 40 to 109 bpm across individuals, and one person's normal RHR could differ from another's by as much as 70 bpm.",
+      "direction": "variable",
+      "typical_magnitude": "mean 65 bpm; individual range 40-109 bpm; personal norms differ by up to 70 bpm",
+      "evidence_type": "large_wearable_cohort",
+      "population": "92,457 US adults who wore a wrist-worn heart rate tracker for at least 35 weeks (2016-2018)",
+      "context_only": false,
+      "keywords": [
+        "normal",
+        "range",
+        "baseline",
+        "average",
+        "typical",
+        "population",
+        "individual",
+        "norm",
+        "wearable"
+      ],
+      "citation": {
+        "pmid": "32023264",
+        "doi": "10.1371/journal.pone.0227709",
+        "title": "Inter- and intraindividual variability in daily resting heart rate and its associations with age, sex, sleep, BMI, and time of year: Retrospective, longitudinal cohort study of 92,457 adults.",
+        "journal": "PLoS One",
+        "year": 2020,
+        "first_author": "Quer G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32023264.json"
+    },
+    {
+      "id": "rhr-variability-within-person",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "day_to_day_variability",
+      "claim": "Within individuals, daily RHR was much more consistent than between people and stayed relatively stable over the short term for most, but 20% had at least one week in which their RHR fluctuated by 10 bpm or more.",
+      "direction": "variable",
+      "typical_magnitude": "a week with >=10 bpm fluctuation in 20% of individuals (median 320 days of data each)",
+      "evidence_type": "large_wearable_cohort",
+      "population": "92,457 US adults who wore a wrist-worn heart rate tracker for at least 35 weeks (2016-2018)",
+      "context_only": false,
+      "keywords": [
+        "day-to-day",
+        "fluctuation",
+        "variability",
+        "week",
+        "stable",
+        "change",
+        "spike",
+        "outlier",
+        "noise",
+        "baseline"
+      ],
+      "citation": {
+        "pmid": "32023264",
+        "doi": "10.1371/journal.pone.0227709",
+        "title": "Inter- and intraindividual variability in daily resting heart rate and its associations with age, sex, sleep, BMI, and time of year: Retrospective, longitudinal cohort study of 92,457 adults.",
+        "journal": "PLoS One",
+        "year": 2020,
+        "first_author": "Quer G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32023264.json"
+    },
+    {
+      "id": "rhr-seasonality",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "seasonality",
+      "claim": "Daily RHR showed a small but statistically significant seasonal trend, lowest around July and highest around January in this US cohort.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "large_wearable_cohort",
+      "population": "92,457 US adults who wore a wrist-worn heart rate tracker for at least 35 weeks (2016-2018)",
+      "context_only": false,
+      "keywords": [
+        "season",
+        "seasonal",
+        "winter",
+        "summer",
+        "month",
+        "time of year",
+        "january",
+        "july"
+      ],
+      "citation": {
+        "pmid": "32023264",
+        "doi": "10.1371/journal.pone.0227709",
+        "title": "Inter- and intraindividual variability in daily resting heart rate and its associations with age, sex, sleep, BMI, and time of year: Retrospective, longitudinal cohort study of 92,457 adults.",
+        "journal": "PLoS One",
+        "year": 2020,
+        "first_author": "Quer G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32023264.json"
+    },
+    {
+      "id": "rhr-population-reference",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "normal_range",
+      "claim": "In US national survey data, seated resting pulse in adults averaged about 72 bpm and was slightly higher in women (74 bpm) than men (71 bpm); clinically defined bradycardia (<60 bpm) was reported in 15.2% of males and 6.9% of adult females.",
+      "direction": "variable",
+      "typical_magnitude": "adult mean ~72 bpm (women 74, men 71); <60 bpm in 15.2% of males, 6.9% of adult females",
+      "evidence_type": "national_survey",
+      "population": "35,302 NHANES participants (1999-2008) without conditions or medications affecting pulse; seated pulse after ~4 min rest",
+      "context_only": false,
+      "keywords": [
+        "normal",
+        "reference",
+        "population",
+        "percentile",
+        "sex",
+        "women",
+        "men",
+        "bradycardia",
+        "low",
+        "tachycardia",
+        "nhanes"
+      ],
+      "citation": {
+        "pmid": "21905522",
+        "doi": null,
+        "title": "Resting pulse rate reference data for children, adolescents, and adults: United States, 1999-2008.",
+        "journal": "Natl Health Stat Report",
+        "year": 2011,
+        "first_author": "Ostchega Y"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_21905522.json"
+    },
+    {
+      "id": "rhr-age-real-world",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "age",
+      "claim": "Among 66,788 adults taking on-demand smartphone PPG readings, increasing age was associated with lower heart rate, while female sex, higher BMI and more medical conditions were associated with higher heart rate.",
+      "direction": "decrease",
+      "typical_magnitude": "95th percentile <=110 bpm (age 18-45), <=100 bpm (45-60), <=95 bpm (>60); spot readings, not strictly resting",
+      "evidence_type": "large_digital_cohort",
+      "population": "66,788 Health eHeart Study participants; 3,144,332 smartphone PPG spot measurements (2014-2018)",
+      "context_only": false,
+      "keywords": [
+        "age",
+        "older",
+        "aging",
+        "younger",
+        "sex",
+        "female",
+        "bmi",
+        "weight",
+        "obesity",
+        "demographics"
+      ],
+      "citation": {
+        "pmid": "31304404",
+        "doi": "10.1038/s41746-019-0134-9",
+        "title": "Real-world heart rate norms in the Health eHeart study.",
+        "journal": "NPJ Digit Med",
+        "year": 2019,
+        "first_author": "Avram R"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_31304404.json"
+    },
+    {
+      "id": "rhr-fever",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "acute_illness",
+      "claim": "During acute febrile infections in 27 young men, mean heart rate was 84.0 bpm versus 66.5 bpm after recovery, rising on average 8.5 bpm per 1 degree C of temperature and staying high even during sleep.",
+      "direction": "increase",
+      "typical_magnitude": "~8.5 bpm per 1 degree C; 84.0 vs 66.5 bpm (febrile vs recovered, 24-h ECG)",
+      "evidence_type": "small_observational_study",
+      "population": "27 young men with uncomplicated acute febrile infection; 24-h ECG during fever and after recovery",
+      "context_only": false,
+      "keywords": [
+        "fever",
+        "febrile",
+        "temperature",
+        "infection",
+        "illness",
+        "sick",
+        "flu",
+        "influenza",
+        "virus",
+        "inflammation"
+      ],
+      "citation": {
+        "pmid": "2424378",
+        "doi": null,
+        "title": "Fever and cardiac rhythm.",
+        "journal": "Arch Intern Med",
+        "year": 1986,
+        "first_author": "Karjalainen J"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_2424378.json"
+    },
+    {
+      "id": "rhr-covid-presymptomatic",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "acute_illness",
+      "claim": "In smartwatch data from 32 people with COVID-19, 81% showed changes in heart rate, daily steps or time asleep, and an alert based on extreme RHR elevations relative to the personal baseline could have flagged 63% of cases before symptom onset.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "wearable_cohort",
+      "population": "32 COVID-19 cases from a cohort of nearly 5,300 smartwatch wearers",
+      "context_only": false,
+      "keywords": [
+        "covid",
+        "covid-19",
+        "infection",
+        "illness",
+        "sick",
+        "presymptomatic",
+        "early",
+        "warning",
+        "respiratory",
+        "virus"
+      ],
+      "citation": {
+        "pmid": "33208926",
+        "doi": "10.1038/s41551-020-00640-6",
+        "title": "Pre-symptomatic detection of COVID-19 from smartwatch data.",
+        "journal": "Nat Biomed Eng",
+        "year": 2020,
+        "first_author": "Mishra T"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_33208926.json"
+    },
+    {
+      "id": "rhr-vaccination",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "vaccination",
+      "claim": "After COVID-19 vaccination, RHR rose above the personal baseline in most wearers, peaking on day 2 and returning to normal by day 6, with a rise greater than one standard deviation in 47% after the second dose.",
+      "direction": "increase",
+      "typical_magnitude": "peak day 2, back to normal by day 6; >1 SD above personal norm in 47% after dose 2",
+      "evidence_type": "large_wearable_cohort",
+      "population": "5,674 smartwatch or fitness-band wearers with peri-vaccination data (most received mRNA vaccines)",
+      "context_only": false,
+      "keywords": [
+        "vaccine",
+        "vaccination",
+        "shot",
+        "booster",
+        "immune",
+        "reactogenicity",
+        "covid"
+      ],
+      "citation": {
+        "pmid": "35440684",
+        "doi": "10.1038/s41746-022-00591-z",
+        "title": "Inter-individual variation in objective measure of reactogenicity following COVID-19 vaccination via smartwatches and fitness bands.",
+        "journal": "NPJ Digit Med",
+        "year": 2022,
+        "first_author": "Quer G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_35440684.json"
+    },
+    {
+      "id": "rhr-alcohol-acute",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "alcohol",
+      "claim": "In placebo-controlled trials, a single dose of alcohol raised heart rate within six hours at low, medium and high doses (by 5.1, 4.6 and 5.8 bpm), and after high doses (>30 g) heart rate stayed elevated for up to 24 hours.",
+      "direction": "increase",
+      "typical_magnitude": "+4.6 to +5.8 bpm within 6 h; high dose: +6.2 bpm at 7-12 h and +2.7 bpm at >=13 h",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "32 RCTs, 767 adults (642 male, mostly healthy, mean age 33)",
+      "context_only": false,
+      "keywords": [
+        "alcohol",
+        "drinking",
+        "drinks",
+        "ethanol",
+        "beer",
+        "wine",
+        "hangover",
+        "night out",
+        "party"
+      ],
+      "citation": {
+        "pmid": "32609894",
+        "doi": "10.1002/14651858.CD012787.pub2",
+        "title": "Effect of alcohol on blood pressure.",
+        "journal": "Cochrane Database Syst Rev",
+        "year": 2020,
+        "first_author": "Tasnim S"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32609894.json"
+    },
+    {
+      "id": "hrv-alcohol-sleep",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "alcohol",
+      "claim": "In 4,098 employees recorded in daily life, alcohol intake was dose-dependently associated with more sympathetic and less parasympathetic regulation in the first three hours of sleep, with effects seen even at low intake.",
+      "direction": "decrease",
+      "typical_magnitude": "HRV-derived recovery state -9.3, -24.0 and -39.2 percentage units for low, moderate, high intake",
+      "evidence_type": "large_observational_cohort",
+      "population": "4,098 Finnish employees (56% women, mean age 45) with beat-to-beat recordings on days with and without alcohol",
+      "context_only": false,
+      "keywords": [
+        "alcohol",
+        "drinking",
+        "sleep",
+        "recovery",
+        "night",
+        "autonomic",
+        "hrv",
+        "parasympathetic"
+      ],
+      "citation": {
+        "pmid": "29549064",
+        "doi": "10.2196/mental.9519",
+        "title": "Acute Effect of Alcohol Intake on Cardiovascular Autonomic Regulation During the First Hours of Sleep in a Large Real-World Sample of Finnish Employees: Observational Study.",
+        "journal": "JMIR Ment Health",
+        "year": 2018,
+        "first_author": "Pietilä J"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_29549064.json"
+    },
+    {
+      "id": "rhr-overreaching",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "training_load",
+      "claim": "In a meta-analysis of competitive athletes, short-term training overload (2-week cutoff) moderately increased resting HR (SMD 0.55), longer overload did not change resting values, and the authors note such changes may fall within normal day-to-day variability.",
+      "direction": "increase",
+      "typical_magnitude": "SMD 0.55 (moderate) after short-term overload; no change after long-term overload",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "competitive athletes in increased-training-load studies",
+      "context_only": false,
+      "keywords": [
+        "overtraining",
+        "overreaching",
+        "training load",
+        "overload",
+        "strain",
+        "fatigue",
+        "athlete",
+        "hard training",
+        "recovery"
+      ],
+      "citation": {
+        "pmid": "18308872",
+        "doi": "10.1136/bjsm.2007.042200",
+        "title": "Is heart rate a convenient tool to monitor over-reaching? A systematic review of the literature.",
+        "journal": "Br J Sports Med",
+        "year": 2008,
+        "first_author": "Bosquet L"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_18308872.json"
+    },
+    {
+      "id": "rhr-evening-exercise",
+      "metric": [
+        "rhr",
+        "hrv"
+      ],
+      "topic": "training_load",
+      "claim": "In 14,689 physically active wearable users (over 4 million nights), later exercise timing and higher exercise strain were associated with higher nocturnal RHR and lower nocturnal HRV, while bouts ending at least 4 hours before sleep onset were not associated with changes in sleep.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "large_wearable_cohort",
+      "population": "14,689 physically active adults wearing a biometric device for one year; 4,084,354 person-nights",
+      "context_only": false,
+      "keywords": [
+        "evening",
+        "exercise",
+        "workout",
+        "late",
+        "training",
+        "strain",
+        "timing",
+        "bedtime",
+        "night",
+        "sleep"
+      ],
+      "citation": {
+        "pmid": "40234380",
+        "doi": "10.1038/s41467-025-58271-x",
+        "title": "Dose-response relationship between evening exercise and sleep.",
+        "journal": "Nat Commun",
+        "year": 2025,
+        "first_author": "Leota J"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_40234380.json"
+    },
+    {
+      "id": "rhr-endurance-training",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "aerobic_fitness",
+      "claim": "A meta-analysis of 191 controlled studies in healthy people found that all sport types lowered RHR, but only endurance training and yoga did so significantly in both sexes, with larger reductions in people with higher starting RHR and smaller ones in older participants.",
+      "direction": "decrease",
+      "typical_magnitude": null,
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "healthy participants in 191 controlled exercise studies (215 samples)",
+      "context_only": false,
+      "keywords": [
+        "fitness",
+        "aerobic",
+        "endurance",
+        "training",
+        "exercise",
+        "cardio",
+        "running",
+        "cycling",
+        "yoga",
+        "adaptation",
+        "fitter"
+      ],
+      "citation": {
+        "pmid": "30513777",
+        "doi": "10.3390/jcm7120503",
+        "title": "Effects of Exercise on the Resting Heart Rate: A Systematic Review and Meta-Analysis of Interventional Studies.",
+        "journal": "J Clin Med",
+        "year": 2018,
+        "first_author": "Reimers AK"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_30513777.json"
+    },
+    {
+      "id": "rhr-detraining",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "detraining",
+      "claim": "In a meta-analysis of 86 RCTs with an exercise phase followed by detraining, the training-related improvement in resting heart rate was no longer significant at any detraining follow-up, while some other cardiometabolic benefits persisted for a time.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "86 RCTs (n=5,670) with exercise training followed by a detraining phase",
+      "context_only": false,
+      "keywords": [
+        "detraining",
+        "stopping",
+        "break",
+        "time off",
+        "inactivity",
+        "sedentary",
+        "rest days",
+        "deconditioning",
+        "injury"
+      ],
+      "citation": {
+        "pmid": "42558561",
+        "doi": "10.3389/fphys.2026.1891899",
+        "title": "The effects of detraining on body composition and cardiometabolic health: a systematic review and meta-analysis of randomized controlled trials.",
+        "journal": "Front Physiol",
+        "year": 2026,
+        "first_author": "Zhang H"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_42558561.json"
+    },
+    {
+      "id": "rhr-sleep-restriction",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "sleep_restriction",
+      "claim": "In a within-person analysis of 2,596 women's wearable data, a 10% decrease in weekly sleep duration was associated with a 1.2% increase in RHR, regardless of menstrual cycle phase.",
+      "direction": "increase",
+      "typical_magnitude": "+1.2% RHR per 10% decrease in weekly sleep duration",
+      "evidence_type": "large_wearable_cohort",
+      "population": "2,596 women; 1.2 million days of wearable data (within-participant natural experiment)",
+      "context_only": false,
+      "keywords": [
+        "sleep",
+        "short sleep",
+        "sleep loss",
+        "sleep deprivation",
+        "sleep restriction",
+        "less sleep",
+        "tired",
+        "insomnia",
+        "duration"
+      ],
+      "citation": {
+        "pmid": "42185632",
+        "doi": "10.1038/s41746-026-02799-9",
+        "title": "The menstrual cycle through the lens of a wearable device: insights into physiology, sleep, and cycle variability.",
+        "journal": "NPJ Digit Med",
+        "year": 2026,
+        "first_author": "Gonzalez A"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_42185632.json"
+    },
+    {
+      "id": "rhr-menstrual-cycle-pattern",
+      "metric": [
+        "rhr",
+        "hrv"
+      ],
+      "topic": "menstrual_cycle",
+      "claim": "Across 45,811 menstrual cycles from 11,590 wrist-wearable users, RHR followed a regular within-cycle pattern, lowest around cycle day 5 and highest around day 26, with smaller fluctuations in older participants and those using birth control.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "large_wearable_cohort",
+      "population": "11,590 menstruating wrist-wearable users; 45,811 cycles",
+      "context_only": false,
+      "keywords": [
+        "menstrual",
+        "period",
+        "cycle",
+        "luteal",
+        "follicular",
+        "ovulation",
+        "hormonal",
+        "contraception",
+        "birth control",
+        "women"
+      ],
+      "citation": {
+        "pmid": "39715818",
+        "doi": "10.1038/s41746-024-01394-0",
+        "title": "A Novel method for quantifying fluctuations in wearable derived daily cardiovascular parameters across the menstrual cycle.",
+        "journal": "NPJ Digit Med",
+        "year": 2024,
+        "first_author": "Jasinski SR"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_39715818.json"
+    },
+    {
+      "id": "rhr-menstrual-luteal",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "menstrual_cycle",
+      "claim": "In 91 women tracked over 274 ovulatory cycles with a wrist sensor during sleep, pulse rate was 2.1 bpm higher in the fertile window and 3.8 bpm higher in the mid-luteal phase than during menstruation.",
+      "direction": "increase",
+      "typical_magnitude": "+2.1 bpm (fertile window) and +3.8 bpm (mid-luteal) vs menstrual phase",
+      "evidence_type": "prospective_observational",
+      "population": "91 healthy, non-pregnant women aged 22-42; 274 ovulatory cycles; wrist PPG during sleep",
+      "context_only": false,
+      "keywords": [
+        "menstrual",
+        "period",
+        "luteal",
+        "ovulation",
+        "fertile",
+        "cycle",
+        "women",
+        "pms"
+      ],
+      "citation": {
+        "pmid": "28465583",
+        "doi": "10.1038/s41598-017-01433-9",
+        "title": "Pulse Rate Measurement During Sleep Using Wearable Sensors, and its Correlation with the Menstrual Cycle Phases, A Prospective Observational Study.",
+        "journal": "Sci Rep",
+        "year": 2017,
+        "first_author": "Shilaih M"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_28465583.json"
+    },
+    {
+      "id": "rhr-altitude",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "altitude",
+      "claim": "On exposure to high altitude, heart rate rises along with cardiac output, and after a few days of acclimatization cardiac output returns to normal while heart rate remains increased, a pattern that persists with prolonged stays.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "narrative_review",
+      "population": "people exposed to high altitude, from acute to lifelong stays (review)",
+      "context_only": false,
+      "keywords": [
+        "altitude",
+        "mountain",
+        "elevation",
+        "hypoxia",
+        "high altitude",
+        "ski",
+        "hiking",
+        "acclimatization"
+      ],
+      "citation": {
+        "pmid": "20417339",
+        "doi": "10.1016/j.pcad.2010.03.004",
+        "title": "Physiological adaptation of the cardiovascular system to high altitude.",
+        "journal": "Prog Cardiovasc Dis",
+        "year": 2010,
+        "first_author": "Naeije R"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_20417339.json"
+    },
+    {
+      "id": "rhr-bedroom-heat",
+      "metric": [
+        "rhr",
+        "hrv"
+      ],
+      "topic": "heat",
+      "claim": "In 47 older adults monitored through a summer, nighttime bedroom temperatures above 24 degrees C were associated with elevated sleeping heart rate and higher odds of clinically relevant HRV reductions, with larger effects at higher temperatures.",
+      "direction": "increase",
+      "typical_magnitude": "HR elevation size not given in abstract; odds of a clinically relevant HRV drop OR 1.4 (24-26 C), 2.0 (26-28 C), 2.9 (28-32 C) vs <24 C",
+      "evidence_type": "small_observational_study",
+      "population": "47 community-dwelling adults aged 65+ in Queensland, Australia; 14,179 nighttime hours",
+      "context_only": false,
+      "keywords": [
+        "heat",
+        "hot",
+        "temperature",
+        "bedroom",
+        "warm",
+        "summer",
+        "heatwave",
+        "climate",
+        "room temperature",
+        "night"
+      ],
+      "citation": {
+        "pmid": "41462246",
+        "doi": "10.1186/s12916-025-04513-0",
+        "title": "Effect of nighttime bedroom temperature on heart rate variability in older adults: an observational study.",
+        "journal": "BMC Med",
+        "year": 2025,
+        "first_author": "O'Connor FK"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_41462246.json"
+    },
+    {
+      "id": "rhr-energy-drinks",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "caffeine",
+      "claim": "A meta-analysis of 17 RCTs in healthy adults found that acute energy-drink consumption raised blood pressure but did not significantly change resting heart rate.",
+      "direction": "variable",
+      "typical_magnitude": "no significant resting HR change (systolic BP +4.71 mmHg at 60-80 min)",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "healthy adults in 17 RCTs of acute energy-drink consumption",
+      "context_only": false,
+      "keywords": [
+        "caffeine",
+        "coffee",
+        "energy drink",
+        "stimulant",
+        "espresso",
+        "tea",
+        "pre-workout"
+      ],
+      "citation": {
+        "pmid": "37695306",
+        "doi": "10.1093/nutrit/nuad112",
+        "title": "Acute effects of energy drink consumption on cardiovascular parameters in healthy adults: a systematic review and meta-analysis of randomized clinical trials.",
+        "journal": "Nutr Rev",
+        "year": 2024,
+        "first_author": "Gualberto PIB"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_37695306.json"
+    },
+    {
+      "id": "rhr-psychological-stress",
+      "metric": [
+        "rhr",
+        "hrv"
+      ],
+      "topic": "psychological_stress",
+      "claim": "In 181,574 WHOOP wearers surveyed monthly, people reporting more perceived stress tended to have higher RHR (standardized coefficient 0.09, the largest between-person association found), and in cross-lagged models higher reported stress preceded higher RHR and lower HRV.",
+      "direction": "increase",
+      "typical_magnitude": "small: standardized coefficient 0.09 (Perceived Stress Scale vs RHR, between-person)",
+      "evidence_type": "large_wearable_cohort",
+      "population": "181,574 WHOOP wearers with monthly mental-health surveys over 13 months",
+      "context_only": false,
+      "keywords": [
+        "stress",
+        "anxiety",
+        "mental",
+        "work",
+        "exam",
+        "worry",
+        "depression",
+        "mood",
+        "pressure",
+        "burnout"
+      ],
+      "citation": {
+        "pmid": "40700646",
+        "doi": "10.2196/64955",
+        "title": "Inter- and Intrapersonal Associations Between Physiology and Mental Health: A Longitudinal Study Using Wearables and Mental Health Surveys.",
+        "journal": "J Med Internet Res",
+        "year": 2025,
+        "first_author": "Presby D"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_40700646.json"
+    },
+    {
+      "id": "rhr-beta-blockers",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "medication",
+      "claim": "In 23 placebo-controlled heart-failure trials, beta-blockers lowered resting heart rate, and the size of the heart-rate reduction rather than the dose was associated with the survival benefit (18% lower risk of death per 5 bpm reduction).",
+      "direction": "decrease",
+      "typical_magnitude": null,
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "19,209 patients with heart failure (mostly systolic dysfunction) in 23 RCTs",
+      "context_only": true,
+      "keywords": [
+        "beta-blocker",
+        "beta blocker",
+        "medication",
+        "medicine",
+        "drug",
+        "metoprolol",
+        "bisoprolol",
+        "carvedilol",
+        "propranolol",
+        "prescription"
+      ],
+      "citation": {
+        "pmid": "19487713",
+        "doi": "10.7326/0003-4819-150-11-200906020-00006",
+        "title": "Meta-analysis: beta-blocker dose, heart rate reduction, and death in patients with heart failure.",
+        "journal": "Ann Intern Med",
+        "year": 2009,
+        "first_author": "McAlister FA"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_19487713.json"
+    },
+    {
+      "id": "rhr-wearable-accuracy",
+      "metric": [
+        "rhr",
+        "hr"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "A meta-analysis of 44 validation studies covering 15 brands found that wrist-worn PPG heart rate agreed closely with ECG or chest-strap references at rest (mean difference -0.01 bpm) and during sleep (-0.40 bpm), with larger errors during resistance training (-7.26 bpm) and cycling (-4.55 bpm).",
+      "direction": "variable",
+      "typical_magnitude": "mean difference -0.01 bpm (rest), -0.40 bpm (sleep); -7.26 (resistance), -4.55 (cycling)",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "44 studies (738 effect sizes) comparing wrist-worn PPG devices with ECG or chest straps",
+      "context_only": false,
+      "keywords": [
+        "accuracy",
+        "validity",
+        "error",
+        "wearable",
+        "watch",
+        "sensor",
+        "ppg",
+        "optical",
+        "measurement",
+        "artifact",
+        "reliable"
+      ],
+      "citation": {
+        "pmid": "32552580",
+        "doi": "10.1080/02640414.2020.1767348",
+        "title": "Validity of Wrist-Worn photoplethysmography devices to measure heart rate: A systematic review and meta-analysis.",
+        "journal": "J Sports Sci",
+        "year": 2020,
+        "first_author": "Zhang Y"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32552580.json"
+    },
+    {
+      "id": "rhr-long-term-risk",
+      "metric": [
+        "rhr"
+      ],
+      "topic": "long_term_risk",
+      "claim": "In a dose-response meta-analysis of eighty-seven prospective studies, each 10 bpm higher resting heart rate was associated with higher risk of all-cause mortality (RR 1.17) and cardiovascular disease (RR 1.15).",
+      "direction": "increase",
+      "typical_magnitude": "per 10 bpm higher RHR: all-cause mortality RR 1.17 (95% CI 1.14-1.19); CVD RR 1.15 (1.11-1.18)",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "87 prospective cohort studies",
+      "context_only": true,
+      "keywords": [
+        "risk",
+        "mortality",
+        "death",
+        "longevity",
+        "cardiovascular",
+        "heart disease",
+        "long-term",
+        "prognosis",
+        "health risk"
+      ],
+      "citation": {
+        "pmid": "28552551",
+        "doi": "10.1016/j.numecd.2017.04.004",
+        "title": "Resting heart rate and the risk of cardiovascular disease, total cancer, and all-cause mortality - A systematic review and dose-response meta-analysis of prospective studies.",
+        "journal": "Nutr Metab Cardiovasc Dis",
+        "year": 2017,
+        "first_author": "Aune D"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_28552551.json"
+    },
+    {
+      "id": "hrv-age-population-wearable",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "age",
+      "claim": "In a cross-sectional study of more than 8 million Fitbit users, wrist-derived HRV metrics decreased with age, with parasympathetic function declining faster than sympathetic function, and RMSSD showed no significant difference between the sexes.",
+      "direction": "decrease",
+      "typical_magnitude": null,
+      "evidence_type": "large_wearable_cohort",
+      "population": "8 203 261 Fitbit users; interbeat intervals from one randomly selected 24 h period (Sept 1, 2018)",
+      "context_only": false,
+      "keywords": [
+        "age",
+        "older",
+        "aging",
+        "younger",
+        "population",
+        "norm",
+        "benchmark",
+        "sex",
+        "wearable",
+        "rmssd"
+      ],
+      "citation": {
+        "pmid": "33328029",
+        "doi": "10.1016/S2589-7500(20)30246-6",
+        "title": "Heart rate variability with photoplethysmography in 8 million individuals: a cross-sectional study.",
+        "journal": "Lancet Digit Health",
+        "year": 2020,
+        "first_author": "Natarajan A"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_33328029.json"
+    },
+    {
+      "id": "hrv-norms-depend-on-context",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "normal_range",
+      "claim": "A review of HRV metrics and published norms emphasizes that recording length, age and sex shape baseline HRV values, and cautions that 24 h, short-term (about 5 min) and ultra-short-term (under 5 min) normative values are not interchangeable.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "narrative_review",
+      "population": "published normative HRV values for clinical, healthy and optimal-performance populations (review)",
+      "context_only": false,
+      "keywords": [
+        "norm",
+        "normal",
+        "reference",
+        "recording length",
+        "short-term",
+        "24-hour",
+        "baseline",
+        "comparison",
+        "sdnn",
+        "rmssd"
+      ],
+      "citation": {
+        "pmid": "29034226",
+        "doi": "10.3389/fpubh.2017.00258",
+        "title": "An Overview of Heart Rate Variability Metrics and Norms.",
+        "journal": "Front Public Health",
+        "year": 2017,
+        "first_author": "Shaffer F"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_29034226.json"
+    },
+    {
+      "id": "hrv-rmssd-vs-sdnn-recording-length",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "In 3,387 adults, RMSSD agreed better than SDNN with longer reference recordings at every recording length tested; a single 10 s ECG gave a valid RMSSD, whereas for SDNN the authors recommend 30 s or several 10 s recordings.",
+      "direction": "variable",
+      "typical_magnitude": "single 10 s recordings vs 240-300 s reference: r = 0.853-0.862 for RMSSD, r = 0.758-0.764 for SDNN",
+      "evidence_type": "cross_sectional",
+      "population": "3,387 adults; 10 s, 30 s and 120 s ECG segments compared with 240-300 s recordings",
+      "context_only": false,
+      "keywords": [
+        "sdnn",
+        "rmssd",
+        "recording length",
+        "short recording",
+        "window",
+        "measurement",
+        "accuracy",
+        "ecg",
+        "validity"
+      ],
+      "citation": {
+        "pmid": "26414314",
+        "doi": "10.1371/journal.pone.0138921",
+        "title": "Validity of (Ultra-)Short Recordings for Heart Rate Variability Measurements.",
+        "journal": "PLoS One",
+        "year": 2015,
+        "first_author": "Munoz ML"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_26414314.json"
+    },
+    {
+      "id": "hrv-sleep-deprivation",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "sleep_restriction",
+      "claim": "A meta-analysis of 11 randomized controlled trials (549 participants) found that sleep deprivation was associated with a significant decrease in RMSSD, while the reduction in SDNN was not statistically significant.",
+      "direction": "decrease",
+      "typical_magnitude": null,
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "549 participants in 11 randomized controlled trials of sleep deprivation published 2010-2024",
+      "context_only": false,
+      "keywords": [
+        "sleep loss",
+        "short sleep",
+        "sleep deprivation",
+        "all-nighter",
+        "less sleep",
+        "late night",
+        "rmssd",
+        "autonomic"
+      ],
+      "citation": {
+        "pmid": "40895095",
+        "doi": "10.3389/fneur.2025.1556784",
+        "title": "Effects of sleep deprivation on heart rate variability: a systematic review and meta-analysis.",
+        "journal": "Front Neurol",
+        "year": 2025,
+        "first_author": "Zhang S"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_40895095.json"
+    },
+    {
+      "id": "hrv-marathon-next-night",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "training_load",
+      "claim": "In ten healthy, physically active men, nocturnal RMSSD fell to 87% of rest-day values after moderate endurance exercise and to 55% after a marathon, with SDNN falling to 90% and 64%; the authors interpret these changes as prolonged dose-response effects.",
+      "direction": "decrease",
+      "typical_magnitude": "RMSSD 87% (moderate exercise) and 55% (marathon) of rest-day baseline; SDNN 90% and 64%",
+      "evidence_type": "cohort",
+      "population": "ten healthy, physically active men; nocturnal R-R intervals after a rest day, a moderate endurance exercise and a marathon",
+      "context_only": false,
+      "keywords": [
+        "marathon",
+        "long run",
+        "hard workout",
+        "endurance",
+        "race",
+        "training",
+        "night after",
+        "workout",
+        "exercise load"
+      ],
+      "citation": {
+        "pmid": "20419617",
+        "doi": "10.1055/s-0030-1249625",
+        "title": "Effects of moderate and heavy endurance exercise on nocturnal HRV.",
+        "journal": "Int J Sports Med",
+        "year": 2010,
+        "first_author": "Hynynen E"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_20419617.json"
+    },
+    {
+      "id": "hrv-night-to-night-variability",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "day_to_day_variability",
+      "claim": "In about 2 million nightly HRV readings from more than 21,000 wearable users, at least five of seven nights were needed to estimate a week's HRV coefficient of variation reliably, and higher night-to-night variation was associated with more alcohol, lower physical activity and shorter, less consistent sleep.",
+      "direction": "variable",
+      "typical_magnitude": "five of seven nights gave intraclass correlation >= 0.80 with the full-week HRV-CV",
+      "evidence_type": "large_wearable_cohort",
+      "population": "more than 21,000 wearable device users; about 2 million nocturnal HRV readings",
+      "context_only": false,
+      "keywords": [
+        "night-to-night",
+        "variability",
+        "coefficient of variation",
+        "fluctuation",
+        "consistency",
+        "week",
+        "baseline",
+        "noise",
+        "swing",
+        "alcohol"
+      ],
+      "citation": {
+        "pmid": "41309064",
+        "doi": "10.1152/ajpheart.00738.2025",
+        "title": "Heart rate variability coefficient of variation during sleep as a digital biomarker that reflects behavior and varies by age and sex.",
+        "journal": "Am J Physiol Heart Circ Physiol",
+        "year": 2026,
+        "first_author": "Grosicki GJ"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_41309064.json"
+    },
+    {
+      "id": "hrv-rmssd-parasympathetic-monitoring",
+      "metric": [
+        "hrv"
+      ],
+      "topic": "day_to_day_variability",
+      "claim": "A narrative review of athlete HRV monitoring describes RMSSD as a robust, practical measure with a strong association with parasympathetic activity and reliability in short and ultra-short recordings, and favors routine near-daily measurements summarized as weekly averages and coefficient of variation over isolated readings.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "narrative_review",
+      "population": "athletes (narrative review of HRV monitoring with mobile devices)",
+      "context_only": false,
+      "keywords": [
+        "rmssd",
+        "parasympathetic",
+        "vagal",
+        "weekly average",
+        "trend",
+        "single reading",
+        "monitoring",
+        "athlete",
+        "daily measurement"
+      ],
+      "citation": {
+        "pmid": "41516438",
+        "doi": "10.3390/s26010003",
+        "title": "Monitoring Training Adaptation and Recovery Status in Athletes Using Heart Rate Variability via Mobile Devices: A Narrative Review.",
+        "journal": "Sensors (Basel)",
+        "year": 2025,
+        "first_author": "Esco MR"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_41516438.json"
+    },
+    {
+      "id": "temp-menstrual-cycle-wrist",
+      "metric": [
+        "temp"
+      ],
+      "topic": "menstrual_cycle",
+      "claim": "Across 437 menstrual cycles recorded with a wrist sensor worn during sleep, a sustained 3-day temperature shift appeared in 82% of cycles, and early-luteal wrist skin temperature averaged 0.33°C higher than in the fertile window. These cycle changes were not altered by lifestyle factors such as alcohol or eating before bed.",
+      "direction": "increase",
+      "typical_magnitude": "early-luteal phase 0.33°C above the fertile window; sustained shift in 82% of cycles",
+      "evidence_type": "cohort",
+      "population": "One hundred and thirty-six eumenorrheic, non-pregnant women wearing wrist skin temperature sensors during sleep; 437 cycles; ovulation confirmed with at-home LH tests",
+      "context_only": false,
+      "keywords": [
+        "menstrual",
+        "period",
+        "cycle",
+        "luteal",
+        "ovulation",
+        "fertile window",
+        "women",
+        "hormonal",
+        "phase"
+      ],
+      "citation": {
+        "pmid": "29175999",
+        "doi": "10.1042/BSR20171279",
+        "title": "Modern fertility awareness methods: wrist wearables capture the changes in temperature associated with the menstrual cycle.",
+        "journal": "Biosci Rep",
+        "year": 2018,
+        "first_author": "Shilaih M"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_29175999.json"
+    },
+    {
+      "id": "temp-wrist-circadian-vs-oral",
+      "metric": [
+        "temp"
+      ],
+      "topic": "circadian",
+      "claim": "In university students wearing a wrist sensor in daily life, wrist skin temperature followed a daily rhythm opposite in phase to oral temperature and about 60 minutes ahead of it, starting to rise around bedtime and dropping sharply after waking.",
+      "direction": "variable",
+      "typical_magnitude": "wrist rhythm phase-advanced by 60 min relative to oral temperature",
+      "evidence_type": "cross_sectional",
+      "population": "99 university students in normal living conditions; wireless wrist sensor compared with oral temperature and sleep diaries",
+      "context_only": false,
+      "keywords": [
+        "circadian",
+        "bedtime",
+        "daily rhythm",
+        "body clock",
+        "core temperature",
+        "oral temperature",
+        "waking",
+        "time of day",
+        "night"
+      ],
+      "citation": {
+        "pmid": "18761026",
+        "doi": "10.1016/j.physbeh.2008.08.005",
+        "title": "Circadian rhythm of wrist temperature in normal-living subjects A candidate of new index of the circadian system.",
+        "journal": "Physiol Behav",
+        "year": 2008,
+        "first_author": "Sarabia JA"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_18761026.json"
+    },
+    {
+      "id": "temp-wrist-rise-at-sleep-onset",
+      "metric": [
+        "temp"
+      ],
+      "topic": "sleep_architecture",
+      "claim": "In actigraphy recordings from people living in different climates and from night-shift workers, wrist temperature rose slightly before and significantly after sleep onset and fell slightly before and markedly after sleep offset, regardless of environmental temperature or time of day. The pattern was consistent across latitudes and seasons.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cross_sectional",
+      "population": "participants from Brazilian cities with diverse climates and night-shift workers; wrist actigraphs with skin temperature sensors",
+      "context_only": false,
+      "keywords": [
+        "sleep onset",
+        "falling asleep",
+        "waking",
+        "night shift",
+        "day sleep",
+        "nap",
+        "warming",
+        "bedtime",
+        "wake time"
+      ],
+      "citation": {
+        "pmid": "41324514",
+        "doi": "10.1080/07420528.2025.2587796",
+        "title": "Wrist temperature as a sleep marker in actigraphy.",
+        "journal": "Chronobiol Int",
+        "year": 2026,
+        "first_author": "Rodrigues Neto C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_41324514.json"
+    },
+    {
+      "id": "temp-humid-heat-during-sleep",
+      "metric": [
+        "temp"
+      ],
+      "topic": "heat",
+      "claim": "In eight healthy men sleeping under controlled conditions, a full night of humid heat (32 degrees C, 80% relative humidity) was accompanied by significantly higher mean skin and rectal temperatures and more total wakefulness than 26 degrees C and 50% humidity.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "controlled_lab_study",
+      "population": "eight healthy males sleeping under controlled air temperature and humidity",
+      "context_only": false,
+      "keywords": [
+        "heat",
+        "hot night",
+        "humid",
+        "bedroom",
+        "room temperature",
+        "summer",
+        "warm",
+        "air conditioning",
+        "humidity",
+        "heatwave"
+      ],
+      "citation": {
+        "pmid": "15578234",
+        "doi": "10.1007/s00484-004-0237-z",
+        "title": "Effects of humid heat exposure in later sleep segments on sleep stages and body temperature in humans.",
+        "journal": "Int J Biometeorol",
+        "year": 2005,
+        "first_author": "Okamoto-Mizuno K"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_15578234.json"
+    },
+    {
+      "id": "resp-night-to-night-consistency",
+      "metric": [
+        "resp"
+      ],
+      "topic": "day_to_day_variability",
+      "claim": "In a 3-month home pilot with 6 healthy adults, the nightly average respiratory rate from a bedside radar sleep monitor was consistent from night to night. In the validation part of the study, the monitor produced a respiratory rate 84% of the time, with a mean absolute error of 0.18 respirations per minute against respiratory inductance plethysmography.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cohort",
+      "population": "6 healthy adults using a bedside radar sleep monitor at home for 3 months; 37 healthy adults in full-night validation against respiratory inductance plethysmography",
+      "context_only": false,
+      "keywords": [
+        "night-to-night",
+        "consistency",
+        "stable",
+        "baseline",
+        "breathing rate",
+        "nightly average",
+        "variability",
+        "change",
+        "trend"
+      ],
+      "citation": {
+        "pmid": "38875674",
+        "doi": "10.2196/36618",
+        "title": "Noncontact Longitudinal Respiratory Rate Measurements in Healthy Adults Using Radar-Based Sleep Monitor (Somnofy): Validation Study.",
+        "journal": "JMIR Biomed Eng",
+        "year": 2022,
+        "first_author": "Toften S"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_38875674.json"
+    },
+    {
+      "id": "resp-sleep-stages",
+      "metric": [
+        "resp"
+      ],
+      "topic": "sleep_architecture",
+      "claim": "In 38 adults without obstructive sleep apnea studied with overnight polysomnography, respiratory rate was higher during wakefulness than in any sleep stage, and respiratory rate variability was greatest awake and lowest in deep N3 sleep.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cross_sectional",
+      "population": "38 adults without obstructive sleep apnea (apnea-hypopnea index <5) undergoing all-night polysomnography",
+      "context_only": false,
+      "keywords": [
+        "sleep stage",
+        "deep sleep",
+        "rem",
+        "light sleep",
+        "awake",
+        "wake",
+        "breathing rate",
+        "variability",
+        "sleep architecture"
+      ],
+      "citation": {
+        "pmid": "27597768",
+        "doi": "10.14814/phy2.12949",
+        "title": "Respiratory rate variability in sleeping adults without obstructive sleep apnea.",
+        "journal": "Physiol Rep",
+        "year": 2016,
+        "first_author": "Gutierrez G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_27597768.json"
+    },
+    {
+      "id": "resp-wearable-accuracy-psg",
+      "metric": [
+        "resp",
+        "rhr"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "Against polysomnography in 32 healthy adults, a WHOOP wearable measured respiratory rate with low bias (1.8%) and precision error (6.7%) versus inductance plethysmography, and heart rate during sleep with a bias of -0.17% and precision of 1.5% versus ECG.",
+      "direction": "variable",
+      "typical_magnitude": "respiratory rate bias 1.8%, precision 6.7%; heart rate bias -0.17%, precision 1.5%",
+      "evidence_type": "controlled_lab_study",
+      "population": "32 community-based adults without medical conditions or sleep disorders (21 women; mean age 23.8 years); one polysomnography night",
+      "context_only": false,
+      "keywords": [
+        "accuracy",
+        "validation",
+        "whoop",
+        "wearable",
+        "polysomnography",
+        "error",
+        "breathing rate",
+        "reliable",
+        "measurement"
+      ],
+      "citation": {
+        "pmid": "32043961",
+        "doi": "10.5664/jcsm.8356",
+        "title": "Effect of wearables on sleep in healthy individuals: a randomized crossover trial and validation study.",
+        "journal": "J Clin Sleep Med",
+        "year": 2020,
+        "first_author": "Berryhill S"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_32043961.json"
+    },
+    {
+      "id": "resp-altitude-sleep",
+      "metric": [
+        "resp",
+        "hrv"
+      ],
+      "topic": "altitude",
+      "claim": "In sixteen healthy servicemen sleeping at up to 3600 m over eight nights, ECG-derived respiratory rate and time-domain HRV during sleep showed no significant change, while non-linear HRV measures were more sensitive to altitude.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cohort",
+      "population": "Sixteen healthy British military servicemen (mean age 31.4 years); baseline at 800 m, then eight nights at up to 3600 m; nocturnal cardiac patch",
+      "context_only": false,
+      "keywords": [
+        "altitude",
+        "mountain",
+        "elevation",
+        "hypoxia",
+        "trek",
+        "ski trip",
+        "hiking",
+        "acclimatization",
+        "breathing rate"
+      ],
+      "citation": {
+        "pmid": "29713290",
+        "doi": "10.3389/fphys.2018.00390",
+        "title": "High Altitude Affects Nocturnal Non-linear Heart Rate Variability: PATCH-HA Study.",
+        "journal": "Front Physiol",
+        "year": 2018,
+        "first_author": "Boos CJ"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_29713290.json"
+    },
+    {
+      "id": "spo2-wearable-accuracy-umbrella",
+      "metric": [
+        "spo2"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "An umbrella review of 24 systematic reviews covering 249 validation studies found that consumer wearables measured blood oxygen saturation with a mean absolute difference of up to 2.0% against reference standards.",
+      "direction": "variable",
+      "typical_magnitude": "mean absolute difference up to 2.0%",
+      "evidence_type": "systematic_review",
+      "population": "249 validation studies of consumer wearables (430,465 participants) across 24 systematic reviews",
+      "context_only": false,
+      "keywords": [
+        "blood oxygen",
+        "oxygen saturation",
+        "accuracy",
+        "error",
+        "wearable",
+        "smartwatch",
+        "validation",
+        "reliable",
+        "pulse oximetry"
+      ],
+      "citation": {
+        "pmid": "39080098",
+        "doi": "10.1007/s40279-024-02077-2",
+        "title": "Keeping Pace with Wearables: A Living Umbrella Review of Systematic Reviews Evaluating the Accuracy of Consumer Wearable Technologies in Health Measurement.",
+        "journal": "Sports Med",
+        "year": 2024,
+        "first_author": "Doherty C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_39080098.json"
+    },
+    {
+      "id": "spo2-smartwatch-device-differences",
+      "metric": [
+        "spo2"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "Compared with a clinical-grade pulse oximeter, consumer smartwatch SpO2 accuracy differed significantly between devices, with mean absolute errors from 2.2% for the closest to 5.8% for the farthest, and on one watch only 69.5% of attempted measurements succeeded.",
+      "direction": "variable",
+      "typical_magnitude": "MAE 2.2% (Apple Watch Series 7) to 5.8% (Garmin Venu 2s); successful readings 69.5-88.9% of attempts",
+      "evidence_type": "cross_sectional",
+      "population": "49 adults aged 18-85, with and without chronic lung conditions, compared against a clinical-grade pulse oximeter",
+      "context_only": false,
+      "keywords": [
+        "smartwatch",
+        "blood oxygen",
+        "accuracy",
+        "error",
+        "missing",
+        "failed reading",
+        "device",
+        "brand",
+        "oxygen saturation"
+      ],
+      "citation": {
+        "pmid": "37437005",
+        "doi": "10.1371/journal.pdig.0000296",
+        "title": "Investigating the accuracy of blood oxygen saturation measurements in common consumer smartwatches.",
+        "journal": "PLOS Digit Health",
+        "year": 2023,
+        "first_author": "Jiang Y"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_37437005.json"
+    },
+    {
+      "id": "spo2-skin-pigmentation",
+      "metric": [
+        "spo2"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "A meta-analysis of 32 studies (6505 participants) found that pulse oximetry probably overestimates oxygen saturation in people with high skin pigmentation (pooled mean bias 1.11%) and in people described as Black/African American (1.52%), although accuracy root-mean-square stayed below 4% in all subgroups.",
+      "direction": "variable",
+      "typical_magnitude": "overestimation 1.11% (high pigmentation), 1.52% (Black/African American); Arms < 4% in all subgroups",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "32 studies (6505 participants) comparing pulse oximetry with arterial CO-oximetry",
+      "context_only": false,
+      "keywords": [
+        "skin tone",
+        "skin color",
+        "pigmentation",
+        "darker skin",
+        "ethnicity",
+        "bias",
+        "overestimate",
+        "pulse oximeter",
+        "accuracy"
+      ],
+      "citation": {
+        "pmid": "35971142",
+        "doi": "10.1186/s12916-022-02452-8",
+        "title": "The accuracy of pulse oximetry in measuring oxygen saturation by levels of skin pigmentation: a systematic review and meta-analysis.",
+        "journal": "BMC Med",
+        "year": 2022,
+        "first_author": "Shi C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_35971142.json"
+    },
+    {
+      "id": "spo2-high-altitude-sleep",
+      "metric": [
+        "spo2"
+      ],
+      "topic": "altitude",
+      "claim": "In sixteen healthy mountaineers, median nocturnal oxygen saturation fell from 96% at 490 m to 67% on the first night at 4559 m and was 71% on the third night there, while sleep quality, initially impaired, improved with acclimatization.",
+      "direction": "decrease",
+      "typical_magnitude": "median nocturnal SpO2 96% at 490 m; 67% (first night) and 71% (third night) at 4559 m",
+      "evidence_type": "cohort",
+      "population": "Sixteen healthy mountaineers; polysomnography at 490 m and on the first and third nights at 4559 m",
+      "context_only": false,
+      "keywords": [
+        "altitude",
+        "mountain",
+        "elevation",
+        "hypoxia",
+        "ski",
+        "hiking",
+        "acclimatization",
+        "blood oxygen",
+        "trek"
+      ],
+      "citation": {
+        "pmid": "22379248",
+        "doi": "10.5665/sleep.1708",
+        "title": "Effect of short-term acclimatization to high altitude on sleep and nocturnal breathing.",
+        "journal": "Sleep",
+        "year": 2012,
+        "first_author": "Nussbaumer-Ochsner Y"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_22379248.json"
+    },
+    {
+      "id": "spo2-normal-sleep-values",
+      "metric": [
+        "spo2"
+      ],
+      "topic": "normal_range",
+      "claim": "In healthy people with normal overnight sleep studies (aged 1 month to 85 years), the lowest SpO2 of the night averaged 90.4% and the median overnight SpO2 averaged 96.5%, with lower values in those older than 60.",
+      "direction": "variable",
+      "typical_magnitude": "lowest nightly value 90.4% +/- 3.1%; median 96.5% +/- 1.5%; median 95.1% in people over 60",
+      "evidence_type": "cross_sectional",
+      "population": "Three hundred fifty people with normal overnight polysomnography and no known craniofacial, neurologic or lung conditions, aged 1 month to 85 years",
+      "context_only": false,
+      "keywords": [
+        "blood oxygen",
+        "oxygen saturation",
+        "dip",
+        "lowest",
+        "night",
+        "normal",
+        "sleep",
+        "desaturation",
+        "older"
+      ],
+      "citation": {
+        "pmid": "8989066",
+        "doi": "10.1378/chest.110.6.1489",
+        "title": "Normal oxyhemoglobin saturation during sleep. How low does it go?",
+        "journal": "Chest",
+        "year": 1996,
+        "first_author": "Gries RE"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_8989066.json"
+    },
+    {
+      "id": "hr-caffeine-resting",
+      "metric": [
+        "hr"
+      ],
+      "topic": "caffeine",
+      "claim": "In a randomized, double-blind crossover trial in 16 male cyclists, 5 mg/kg of caffeine did not significantly change resting heart rate thirty-five minutes later compared with placebo.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "randomized_trial",
+      "population": "16 male cyclists (age 37 +/- 9 years) tested in an air-conditioned laboratory",
+      "context_only": false,
+      "keywords": [
+        "caffeine",
+        "coffee",
+        "espresso",
+        "pre-workout",
+        "stimulant",
+        "energy drink",
+        "tea",
+        "resting heart rate"
+      ],
+      "citation": {
+        "pmid": "39008947",
+        "doi": "10.1080/02701367.2024.2377303",
+        "title": "The Effects of Caffeine on Heart Rate and Heart Rate Variability at Rest and During Submaximal Cycling Exercise.",
+        "journal": "Res Q Exerc Sport",
+        "year": 2025,
+        "first_author": "Glaister M"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_39008947.json"
+    },
+    {
+      "id": "hr-circadian-rhythm",
+      "metric": [
+        "hr",
+        "hrv"
+      ],
+      "topic": "circadian",
+      "claim": "Under constant-routine conditions in eight healthy young men, heart rate showed a robust endogenous circadian rhythm with its fitted peak in the afternoon (16:36), while HRV measures peaked in the early morning (between 05:00 and 06:59).",
+      "direction": "variable",
+      "typical_magnitude": "heart rate fitted maximum 16:36; HRV maxima between 05:00 and 06:59",
+      "evidence_type": "controlled_lab_study",
+      "population": "Eight healthy males (age 24.4 +/- 4.4 years) assessed during 29-h constant routines",
+      "context_only": false,
+      "keywords": [
+        "time of day",
+        "afternoon",
+        "morning",
+        "circadian",
+        "body clock",
+        "daily rhythm",
+        "evening",
+        "daytime",
+        "night"
+      ],
+      "citation": {
+        "pmid": "17542944",
+        "doi": "10.1111/j.1365-2869.2007.00581.x",
+        "title": "Robust circadian rhythm in heart rate and its variability: influence of exogenous melatonin and photoperiod.",
+        "journal": "J Sleep Res",
+        "year": 2007,
+        "first_author": "Vandewalle G"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_17542944.json"
+    },
+    {
+      "id": "hr-posture-standing",
+      "metric": [
+        "hr"
+      ],
+      "topic": "posture",
+      "claim": "In 175 healthy women and 176 healthy men, heart rate was about 10 bpm higher when sitting and about 30 bpm higher when standing than when lying, with no difference between the sexes in these increases; women's heart rate was about 5 bpm higher than men's when lying down.",
+      "direction": "increase",
+      "typical_magnitude": "about +10 bpm lying to sitting, +30 bpm lying to standing; women about 5 bpm higher",
+      "evidence_type": "controlled_lab_study",
+      "population": "175 healthy females and 176 healthy males (aged 33.1 years on average); repeated supine, sitting and standing tests",
+      "context_only": false,
+      "keywords": [
+        "posture",
+        "standing",
+        "sitting",
+        "lying",
+        "position",
+        "upright",
+        "stand up",
+        "orthostatic",
+        "body position"
+      ],
+      "citation": {
+        "pmid": "31611089",
+        "doi": "10.1016/j.ijcard.2019.09.044",
+        "title": "Sex differences in heart rate responses to postural provocations.",
+        "journal": "Int J Cardiol",
+        "year": 2019,
+        "first_author": "Hnatkova K"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_31611089.json"
+    },
+    {
+      "id": "hr-elevated-after-exercise",
+      "metric": [
+        "hr"
+      ],
+      "topic": "training_load",
+      "claim": "After a single bout of constant or interval exercise in ten young men, R-R intervals were significantly shorter (heart rate higher) during early recovery, and twenty-four and 48 h later a persistently elevated heart rate was still seen in the upright posture.",
+      "direction": "increase",
+      "typical_magnitude": null,
+      "evidence_type": "controlled_lab_study",
+      "population": "ten male subjects (mean age 24.6 years) measured before and 1, 24 and 48 h after exercise, supine and upright",
+      "context_only": false,
+      "keywords": [
+        "after workout",
+        "post-exercise",
+        "hard session",
+        "interval training",
+        "elevated",
+        "next day",
+        "training",
+        "standing heart rate",
+        "exercise"
+      ],
+      "citation": {
+        "pmid": "15461995",
+        "doi": "10.1007/s00421-004-1119-0",
+        "title": "Short- and long-term effects of a single bout of exercise on heart rate variability: comparison between constant and interval training exercises.",
+        "journal": "Eur J Appl Physiol",
+        "year": 2004,
+        "first_author": "Mourot L"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_15461995.json"
+    },
+    {
+      "id": "steps-daily-normative-range",
+      "metric": [
+        "steps"
+      ],
+      "topic": "normal_range",
+      "claim": "A review of step-count evidence reports that healthy adults typically take between 4,000 and 18,000 steps per day and that 10,000 steps/day is reasonable for this population; a direct estimate of the minimal amount of moderate-to-vigorous activity in free-living behaviour is 7,000-8,000 steps/day.",
+      "direction": "variable",
+      "typical_magnitude": "typical 4,000-18,000 steps/day; 7,000-8,000 steps/day aligns with minimal MVPA",
+      "evidence_type": "narrative_review",
+      "population": "healthy adults (review of normative pedometer and accelerometer step data)",
+      "context_only": false,
+      "keywords": [
+        "steps",
+        "daily steps",
+        "step count",
+        "normal",
+        "average",
+        "typical",
+        "step goal",
+        "active",
+        "how many steps"
+      ],
+      "citation": {
+        "pmid": "21798015",
+        "doi": "10.1186/1479-5868-8-79",
+        "title": "How many steps/day are enough? For adults.",
+        "journal": "Int J Behav Nutr Phys Act",
+        "year": 2011,
+        "first_author": "Tudor-Locke C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_21798015.json"
+    },
+    {
+      "id": "steps-cadence-intensity",
+      "metric": [
+        "steps"
+      ],
+      "topic": "physical_activity",
+      "claim": "In 76 healthy adults aged 21-40 walking on a treadmill, cadences of 100 and 130 steps/min were reasonable heuristic thresholds for moderate (3 METs) and vigorous (6 METs) intensity.",
+      "direction": "variable",
+      "typical_magnitude": "100 steps/min for 3 METs (moderate); 130 steps/min for 6 METs (vigorous)",
+      "evidence_type": "cross_sectional",
+      "population": "76 healthy adults aged 21-40 (10 men and 10 women per 5-year age group) walking on a treadmill",
+      "context_only": false,
+      "keywords": [
+        "cadence",
+        "steps per minute",
+        "brisk walking",
+        "pace",
+        "intensity",
+        "moderate",
+        "vigorous",
+        "walking speed",
+        "zone"
+      ],
+      "citation": {
+        "pmid": "30654810",
+        "doi": "10.1186/s12966-019-0769-6",
+        "title": "Walking cadence (steps/min) and intensity in 21-40 year olds: CADENCE-adults.",
+        "journal": "Int J Behav Nutr Phys Act",
+        "year": 2019,
+        "first_author": "Tudor-Locke C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_30654810.json"
+    },
+    {
+      "id": "steps-walking-speed-by-age",
+      "metric": [
+        "steps"
+      ],
+      "topic": "age",
+      "claim": "A descriptive meta-analysis of healthy adults walking at a normal pace found mean gait speed ranged from 143.4 cm/second in men aged 40 to 49 years to 94.3 cm/second in women aged 80 to 99 years, and speeds were homogeneous within each age and sex stratum.",
+      "direction": "variable",
+      "typical_magnitude": "mean 143.4 cm/s (men 40-49) down to 94.3 cm/s (women 80-99)",
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "23111 apparently healthy adults from published studies, grouped by sex and decade of age",
+      "context_only": false,
+      "keywords": [
+        "walking speed",
+        "gait speed",
+        "pace",
+        "age",
+        "older",
+        "aging",
+        "walking",
+        "slow walking",
+        "brisk"
+      ],
+      "citation": {
+        "pmid": "21820535",
+        "doi": "10.1016/j.physio.2010.12.004",
+        "title": "Normal walking speed: a descriptive meta-analysis.",
+        "journal": "Physiotherapy",
+        "year": 2011,
+        "first_author": "Bohannon RW"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_21820535.json"
+    },
+    {
+      "id": "steps-wearable-accuracy",
+      "metric": [
+        "steps"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "An umbrella review of 24 systematic reviews found that consumer wearables mostly underestimated step counts, with reported mean absolute percentage errors ranging from -9% to 12%.",
+      "direction": "variable",
+      "typical_magnitude": "mean absolute percentage error -9% to 12% (mostly undercounting)",
+      "evidence_type": "systematic_review",
+      "population": "249 validation studies of consumer wearables (430,465 participants) across 24 systematic reviews",
+      "context_only": false,
+      "keywords": [
+        "accuracy",
+        "step count",
+        "undercount",
+        "error",
+        "tracker",
+        "watch",
+        "pedometer",
+        "validation",
+        "wrist"
+      ],
+      "citation": {
+        "pmid": "39080098",
+        "doi": "10.1007/s40279-024-02077-2",
+        "title": "Keeping Pace with Wearables: A Living Umbrella Review of Systematic Reviews Evaluating the Accuracy of Consumer Wearable Technologies in Health Measurement.",
+        "journal": "Sports Med",
+        "year": 2024,
+        "first_author": "Doherty C"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_39080098.json"
+    },
+    {
+      "id": "steps-weekday-vs-weekend",
+      "metric": [
+        "steps"
+      ],
+      "topic": "day_to_day_variability",
+      "claim": "In 1853 Finnish adults wearing pedometers for 7 consecutive days, total steps were higher on weekdays than on weekend days, whereas steps taken in continuous bouts of at least 10 min were higher on weekend days.",
+      "direction": "variable",
+      "typical_magnitude": "mean 7499 +/- 2908 steps/day",
+      "evidence_type": "cross_sectional",
+      "population": "1853 adults aged 30-45 years from the Cardiovascular Risk in Young Finns study (winter 2007-08)",
+      "context_only": false,
+      "keywords": [
+        "weekend",
+        "weekday",
+        "day of week",
+        "saturday",
+        "sunday",
+        "workday",
+        "routine",
+        "variation",
+        "daily steps"
+      ],
+      "citation": {
+        "pmid": "21893605",
+        "doi": "10.1177/1403494811420324",
+        "title": "Daily steps among Finnish adults: variation by age, sex, and socioeconomic position.",
+        "journal": "Scand J Public Health",
+        "year": 2011,
+        "first_author": "Hirvensalo M"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_21893605.json"
+    },
+    {
+      "id": "steps-coffee-randomized",
+      "metric": [
+        "steps"
+      ],
+      "topic": "caffeine",
+      "claim": "In a randomized case-crossover trial of 100 adults over 14 days, days assigned to caffeinated coffee were associated with 10,646 daily steps versus 9665 on caffeine-avoidance days (mean difference 1058), and with 397 versus 432 minutes of nightly sleep.",
+      "direction": "increase",
+      "typical_magnitude": "+1058 steps/day on coffee days (95% CI 441 to 1675); 36 fewer minutes of nightly sleep",
+      "evidence_type": "randomized_trial",
+      "population": "100 ambulatory adults (mean age 39 years; 51% women) with a wrist-worn accelerometer and continuously recording ECG",
+      "context_only": false,
+      "keywords": [
+        "coffee",
+        "caffeine",
+        "espresso",
+        "latte",
+        "morning coffee",
+        "steps",
+        "activity",
+        "movement",
+        "walking"
+      ],
+      "citation": {
+        "pmid": "36947466",
+        "doi": "10.1056/NEJMoa2204737",
+        "title": "Acute Effects of Coffee Consumption on Health among Ambulatory Adults.",
+        "journal": "N Engl J Med",
+        "year": 2023,
+        "first_author": "Marcus GM"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_36947466.json"
+    },
+    {
+      "id": "energy-wearable-accuracy",
+      "metric": [
+        "energy"
+      ],
+      "topic": "wearable_accuracy",
+      "claim": "A meta-analysis of 60 validation studies (104 effect sizes) in healthy adults found that energy expenditure estimates from wrist- and arm-worn monitors varied in accuracy by activity type with large heterogeneity, and devices combining heart rate or heat sensing with accelerometry had lower error in most activity types.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "systematic_review_meta_analysis",
+      "population": "healthy adults in 60 studies comparing wrist- or arm-worn monitors with indirect calorimetry, room calorimeters or doubly labelled water",
+      "context_only": false,
+      "keywords": [
+        "calories",
+        "energy",
+        "accuracy",
+        "error",
+        "calorie burn",
+        "estimate",
+        "tracker",
+        "watch",
+        "active calories",
+        "validation"
+      ],
+      "citation": {
+        "pmid": "30194221",
+        "doi": "10.1136/bjsports-2018-099643",
+        "title": "How well do activity monitors estimate energy expenditure? A systematic review and meta-analysis of the validity of current technologies.",
+        "journal": "Br J Sports Med",
+        "year": 2020,
+        "first_author": "O'Driscoll R"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_30194221.json"
+    },
+    {
+      "id": "energy-life-course-dlw",
+      "metric": [
+        "energy"
+      ],
+      "topic": "age",
+      "claim": "In a large doubly labeled water database spanning ages 8 days to 95 years, total daily energy expenditure adjusted for fat-free mass remained stable in adulthood from 20 to 60 years, even during pregnancy, and then declined in older adults.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cross_sectional",
+      "population": "males and females aged 8 days to 95 years in a large, diverse doubly labeled water database",
+      "context_only": false,
+      "keywords": [
+        "metabolism",
+        "age",
+        "older",
+        "calories",
+        "daily burn",
+        "slowing",
+        "middle age",
+        "energy needs",
+        "aging"
+      ],
+      "citation": {
+        "pmid": "34385400",
+        "doi": "10.1126/science.abe5017",
+        "title": "Daily energy expenditure through the human life course.",
+        "journal": "Science",
+        "year": 2021,
+        "first_author": "Pontzer H"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_34385400.json"
+    },
+    {
+      "id": "energy-constrained-total-expenditure",
+      "metric": [
+        "energy"
+      ],
+      "topic": "physical_activity",
+      "claim": "In 332 adults from five populations, after adjusting for body size and composition, total energy expenditure measured by doubly labeled water was positively correlated with accelerometer-measured physical activity, but the relationship was markedly stronger at lower activity levels and total expenditure plateaued in the most active.",
+      "direction": "variable",
+      "typical_magnitude": null,
+      "evidence_type": "cross_sectional",
+      "population": "332 adults living in five populations; doubly labeled water and accelerometry",
+      "context_only": false,
+      "keywords": [
+        "calories",
+        "activity",
+        "exercise",
+        "plateau",
+        "metabolism",
+        "adaptation",
+        "daily burn",
+        "more active",
+        "steps"
+      ],
+      "citation": {
+        "pmid": "26832439",
+        "doi": "10.1016/j.cub.2015.12.046",
+        "title": "Constrained Total Energy Expenditure and Metabolic Adaptation to Physical Activity in Adult Humans.",
+        "journal": "Curr Biol",
+        "year": 2016,
+        "first_author": "Pontzer H"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_26832439.json"
+    },
+    {
+      "id": "energy-resting-largest-share",
+      "metric": [
+        "energy"
+      ],
+      "topic": "normal_range",
+      "claim": "Resting energy expenditure is described as the largest component of total daily energy expenditure; in 38 healthy young adults after an overnight fast, fat-free mass was its dominant determinant (R2 = 0.90 in a model with sex and age), and no HRV-derived measure was significantly associated with it.",
+      "direction": "variable",
+      "typical_magnitude": "R2 = 0.90 for a model of fat-free mass, sex and age",
+      "evidence_type": "cross_sectional",
+      "population": "38 healthy young participants after an overnight fast; indirect calorimetry and bioimpedance",
+      "context_only": false,
+      "keywords": [
+        "resting",
+        "bmr",
+        "metabolism",
+        "baseline burn",
+        "calories",
+        "muscle mass",
+        "fat-free mass",
+        "resting energy",
+        "daily burn"
+      ],
+      "citation": {
+        "pmid": "42445885",
+        "doi": "10.3389/fendo.2026.1861379",
+        "title": "Resting energy expenditure under fasting conditions is primarily explained by fat-free mass rather than cardiac autonomic markers.",
+        "journal": "Front Endocrinol (Lausanne)",
+        "year": 2026,
+        "first_author": "Geißler A"
+      },
+      "verified": true,
+      "verification_file": "verification/esummary_42445885.json"
+    }
+  ]
+}
