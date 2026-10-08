@@ -1,5 +1,5 @@
 """activity_context.actinet_classifier — the full native ActiNet classifier, SHADOW ONLY (contract:
-Tools/ActivityContext/ACTINET_CLASSIFIER.md).
+docs/pretrained-models/ACTINET_CLASSIFIER.md).
 
 The complete upstream trained classifier, run without any training, fine-tuning or calibration. That is ActiNet's
 ``walmsley`` model ``ssl-ukb-c24-rw-30s-20260128``: the harnet30 ResNet and its 1024-512-K head, both fine-tuned

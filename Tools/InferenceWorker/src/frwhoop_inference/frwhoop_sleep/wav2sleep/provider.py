@@ -209,6 +209,19 @@ class Wav2SleepPpgProvider:
             block["artifact_digest"] = None
         return block
 
+    def loaded_identity(self) -> dict[str, str]:
+        """Spec 01's ``loaded_identity()`` hook (identity.py): a flat string map of what this process loaded.
+        Artifact digests appear only once the model is loaded here; nothing is taken from configuration."""
+        block = self.runtime_identity()
+        out = {key: str(block[key]) for key in ("provider_id", "adapter_version", "release_mode", "enabled",
+                                                "loaded", "code_commit", "weights_revision", "model_code_digest",
+                                                "preprocessing_digest_default_gates", "threads")}
+        if block["artifacts"]:
+            for name, artifact in sorted(block["artifacts"].items()):
+                out[f"{name}.sha256"] = str(artifact["sha256"])
+            out["artifact_digest"] = str(block["artifact_digest"])
+        return out
+
     def register(self, registry: dict) -> dict:
         """Dict registries in this package are keyed by metric; two providers share
         ``sleep_stage``, so this one registers under its provider id."""

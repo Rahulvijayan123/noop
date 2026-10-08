@@ -34,3 +34,6 @@ class Wav2SleepRegistryShim(RegistryShim):
 
     def runtime_identity(self) -> dict:
         return self._provider.runtime_identity()
+
+    def loaded_identity(self) -> dict:
+        return self._provider.loaded_identity()

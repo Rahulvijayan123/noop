@@ -9,6 +9,28 @@ every file below (the manifest, the provider registry, `identity.py`, the Swift 
 - **Phase B, after Spec 01's anchored PPG transport lands:** the registration line, the identity
   block, the request path and the consumer store.
 
+**Do not apply Phase B while wav2sleep's six activation gates are unmet** (WAV2SLEEP.md §11).
+
+## 0. Re-checked against Spec 01 @ `783ac84da` (2026-10-08)
+
+Spec 01's code has landed on its branch since this fragment was first written. The re-check was run on a
+throwaway local merge of both branches (`_build-scratch/spec03-spec01-merge`, branch
+`check/spec03-on-spec01-20261008`, not pushed; the merge is clean and no file is touched by both).
+
+| Item | Finding | Change made here |
+| --- | --- | --- |
+| Manifest | `test_manifest.py` now requires `source` on every artifact; readiness is gated on the entry, not the artifact; the materializer stages only wired entries with status `eligible`/`shadow_eligible`, and the test pins `staged == 7` | Fragment gains `source: {kind: url}` on both artifacts and drops the artifact-level `required_for_readiness`. Applied in memory to the merged manifest: **24/24** `test_manifest.py` tests pass; staged-root verify gives both `verified`, empty root gives both `missing`, not required. |
+| Identity | Spec 01 added an optional per-provider hook `loaded_identity() -> Mapping` (`identity.py:260-271`): flat strings, ≤ 32 keys, ≤ 200 characters | The provider and shim now implement `loaded_identity()`. §3's proposed `identity.py` hunk is **withdrawn**; it would have overwritten Spec 01's `providers` key. **Open Spec 01 gap:** the hook runs in the HTTP parent, but models load in the worker processes (`READINESS_WORKER`), and the worker `hello` does not carry loaded identity, so the parent cannot report what a worker loaded. |
+| Registry | The registry is pickled to worker processes (`server.py:943-948`) | The provider pickles (151 bytes when disabled). |
+| Golden envelope | `Tools/CloudWorker/Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sensor_biomarkers_request_envelope.json` exists | `test_the_spec01_golden_envelope_segments_parse` now reads it from the repository when present. On the merged tree the adapter parses its PPG block and **withholds `unverified_sample_clock`**, as it must. |
+| Transport today | The worker always sends `clock.packet_timing_verified: false` and `config.known: false` (`SensorBiomarkerLane.swift:175-181`) | wav2sleep's input gates cannot pass on today's transport, whatever the capture. This is a seventh practical blocker under gate 1. |
+| Request shape | `sensor.biomarkers.v1` requests carry ≤ 300 s segments split at 20 s seams | wav2sleep needs **one request per night** (§4.3). It needs its own request builder; it cannot reuse `buildRequests`. |
+| Bounds | `ExecutionConfig`: `FRWHOOP_INFERENCE_MAX_ACTIVE` 1, `FRWHOOP_INFERENCE_MATH_THREADS` default 1, 20 s request budget; the unit has `MemoryHigh=2G` | A 10-h night peaks at ~1.3 GB in one process (Mac). That fits under 2 GB only with no other heavy provider in the same worker. Not measured on the Droplet. |
+| Duplication | Spec 01 has no wav2sleep wiring or entry of its own beyond the existing `blocked_input` row | None. |
+
+The Spec 03 side of these is tested in `tests/test_wav2sleep_isolation.py` (unregistered and unreferenced, the
+six gates, no artifact identity when disabled) and in the provider and real-weight tests (`loaded_identity()`).
+
 ## 1. Manifest: update the existing `wav2sleep` entry (Phase A)
 
 [`manifest-wav2sleep.json`](manifest-wav2sleep.json) holds the complete replacement for
@@ -25,21 +47,22 @@ Changes from the current entry:
 | `revision` | `278e3046…`, described as the HF revision | `278e3046…`, kept, with `revision_kind: code_commit` | it is the GitHub code commit; `test_manifest.py` pins the prefix |
 | new | | `code_revision`, `code_content_identical_since`, `weights_revision` `18fc32f0…`, `weights_revision_note` | code commit, weights revision and digests are separate facts |
 | `artifacts[].url` | `.../resolve/main/...` | `.../resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/...` | immutable; the suggested `resolve/278e3046…` URL returns 404 |
-| `artifacts[].required_for_readiness` | absent | `false` | optional shadow lane: a missing file never gates the process |
+| `artifacts[].source` | `{kind: url}` (Spec 01) | `{kind: url}`, kept | required by Spec 01's `test_every_artifact_declares_a_machine_readable_source` |
 | `input_contract` | raw ECG/PPG epoch + hydra config | the anchored PPG transport contract | |
 | new | | `release_mode: shadow`, `label_space`, `class_order`, `vendored_code`, `loader`, `consumer`, `activation_gates`, `accuracy_label: unverified_accuracy_shadow_only` | |
 
 **Checked in memory.** `_build-scratch/spec03-physio/check_manifest_fragment.py` swapped the entry
-into the parsed manifest without writing any file. Results:
+into the parsed manifest without writing any file. Results on Spec 01 `783ac84da` (merged tree):
 
-- All 18 tests in `tests/test_manifest.py` pass against the patched manifest.
+- All 24 tests in `tests/test_manifest.py` pass against the patched manifest (18 on `dab2124f3`).
 - With the staged root, `verify_manifest` reports both artifacts `verified`.
 - With an empty root it reports both `missing` and not required for readiness.
 - `test_server.py` expects `models["wav2sleep"]["status"] == "blocked_input"`, which still holds.
 
-**Phase B delta** (with the registration in section 2): set `"wired": true`. Change
-`status` to `shadow_eligible` only after a real anchored overnight night has passed the adapter's
-gates on the Droplet.
+**Phase B delta** (with the registration in section 2): set `"wired": true`. With `blocked_input`
+the materializer still stages nothing (`artifacts.entry_stage_decision`). Change `status` to
+`shadow_eligible` only after a real anchored overnight night has passed the adapter's gates on the
+Droplet, and raise the `staged == 7` pin in `test_manifest.py` in the same change.
 
 ## 2. Registration hunk (Phase B): `Tools/InferenceWorker/src/frwhoop_inference/providers/__init__.py`
 
@@ -83,10 +106,15 @@ Tests that pin the exact provider set need these updates in the same change:
 `register_into` / `sleep_providers()` are deliberately left alone, so
 `test_register_into_appends_without_disturbing_hrv` is unaffected.
 
-## 3. Identity block hunk (Phase B): `frwhoop_inference/identity.py` (Spec 01 branch)
+## 3. Identity (Phase B): use Spec 01's `loaded_identity()` hook
 
-The provider measures what it loaded and reports it through `runtime_identity()`, on both the
-provider and its `Wav2SleepRegistryShim`. The block is plain JSON with no `identity.py` import:
+**Superseded on 2026-10-08.** Spec 01's `identity.py` already calls an optional `loaded_identity()` on each
+provider. The provider and shim implement it: a flat string map of `provider_id`, `adapter_version`,
+`release_mode`, `enabled`, `loaded`, `code_commit`, `weights_revision`, `model_code_digest`,
+`preprocessing_digest_default_gates` and `threads`, plus `state_dict.pth.sha256`, `config.yaml.sha256` and
+`artifact_digest` once the model is loaded in that process. **No `identity.py` change is needed**, and the
+hunk below must not be applied. The richer `runtime_identity()` block is kept for the adapter's own
+diagnostics. The original proposal, for the record:
 
 ```json
 {"provider_id": "wav2sleep.ppg-only.v1", "adapter_version": "wav2sleep.ppg-only.v1/1.0.0",

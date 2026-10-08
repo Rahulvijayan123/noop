@@ -1,5 +1,5 @@
 {
- "_fragment": "REPLACES the existing entries[] item with id \"wav2sleep\" in Tools/InferenceWorker/models/manifest.json (same position, no new entry). Phase A = apply now. Phase B = the delta to apply together with the registration hunk in wav2sleep.md, after Spec 01's anchored PPG transport lands. Remove this _fragment and _phase_b key when merging.",
+ "_fragment": "REPLACES the existing entries[] item with id \"wav2sleep\" in Tools/InferenceWorker/models/manifest.json (same position, no new entry). Phase A = apply now. Phase B = the delta to apply together with the registration hunk in wav2sleep.md, after Spec 01's anchored PPG transport lands. Remove this _fragment and _phase_b key when merging. Re-checked against Spec 01 783ac84da on 2026-10-08: every artifact declares source {kind: url}; artifact-level required_for_readiness removed (Spec 01 gates readiness on the entry only).",
  "id": "wav2sleep",
  "kind": "model_checkpoint",
  "name": "wav2sleep PPG-only (shadow adapter)",
@@ -24,7 +24,12 @@
  "release_mode": "shadow",
  "input_contract": "PPG only: input.ppg.segments[] absolute ADC counts at a declared native rate of 25 Hz (anchored v26) or 24 Hz, with the Spec 01 members run_id, config.identity, config.known=true, config.stable=true and clock.packet_timing_verified=true with clock.samples_per_second equal to ppg.native_rate_hz; segments joined only within one run_id and only when contiguous; each run is one recording resampled to the pinned 1024-per-30-s grid (34.133 Hz, linear interpolation, no padding) and z-scored over the run; ECG/ABD/THX absent; PPG-derived respiration/RSA refused as ABD/THX; window <= 10 h (1200 epochs), >= 4 h scored from runs >= 2 h, >= 75% coverage; output: per-30-s epoch softmax probabilities + logits (wake/light/deep/rem) with mask, mask reason and native-sample provenance, argmax label as a separate field",
  "label_space": "wav2sleep/wake-light-deep-rem",
- "class_order": ["wake", "light", "deep", "rem"],
+ "class_order": [
+  "wake",
+  "light",
+  "deep",
+  "rem"
+ ],
  "vendored_code": {
   "path": "Tools/InferenceWorker/src/frwhoop_inference/frwhoop_sleep/wav2sleep_vendored",
   "upstream": "https://github.com/joncarter1/wav2sleep",
@@ -46,21 +51,25 @@
    "name": "state_dict.pth",
    "path": "wav2sleep/278e3046/state_dict.pth",
    "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/state_dict.pth",
+   "source": {
+    "kind": "url"
+   },
    "size_bytes": 9666562,
    "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc",
    "verify_at_startup": true,
-   "required_for_readiness": false,
    "note": "torch.load(weights_only=True) after size+sha256 verification; strict state_dict load (177 float32 tensors, 2,391,172 parameters)"
   },
   {
    "name": "config.yaml",
    "path": "wav2sleep/278e3046/config.yaml",
    "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/config.yaml",
+   "source": {
+    "kind": "url"
+   },
    "size_bytes": 749,
    "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509",
    "git_blob": "f5a5bcc1eaca8c35f36eccc3f7913f9e1b801353",
    "verify_at_startup": true,
-   "required_for_readiness": false,
    "note": "yaml.safe_load + allowlisted constructor (no hydra); the same blob is checkpoints/wav2sleep/config.yaml in the code repository at 8b2a7b1c"
   }
  ],
@@ -79,7 +88,11 @@
  ],
  "_phase_b": {
   "when": "together with the registration hunk (providers/__init__.py) after Spec 01 lands",
-  "set": {"wired": true},
-  "keep": {"status": "blocked_input until a real anchored overnight night passes the gates; then shadow_eligible", "required_for_readiness": false}
+  "set": {
+   "wired": true
+  },
+  "keep": {
+   "status": "blocked_input. Spec 01's materializer stages only wired entries with status eligible or shadow_eligible (artifacts.entry_stage_decision), and test_manifest.py pins staged == 7, so wired+blocked_input stages nothing. Move to shadow_eligible only after a real anchored overnight night passes the gates, and update the staged count then."
+  }
  }
 }

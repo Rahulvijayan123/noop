@@ -83,6 +83,10 @@ def test_enabled_readiness_and_runtime_identity_report_measured_digests(provider
     assert identity["artifacts"]["state_dict.pth"]["sha256"] == C.ARTIFACTS["state_dict.pth"]["sha256"]
     assert identity["artifacts"]["config.yaml"]["size_bytes"] == 749
     assert len(identity["artifact_digest"]) == 64
+    loaded = provider.loaded_identity()
+    assert loaded["loaded"] == "True" and loaded["artifact_digest"] == identity["artifact_digest"]
+    assert {n: loaded[f"{n}.sha256"] for n in C.ARTIFACTS} == {n: s["sha256"] for n, s in C.ARTIFACTS.items()}
+    assert len(loaded) <= 32 and all(isinstance(v, str) and len(v) <= 200 for v in loaded.values())
 
 
 @pytest.mark.parametrize("name", sorted(FIXTURES))

@@ -270,6 +270,9 @@ def test_registry_shim_maps_ok_results_and_never_publishes(gap_night, stand_in):
     identity = enabled.runtime_identity()
     assert identity["provider_id"] == C.PROVIDER_ID and identity["release_mode"] == "shadow"
     assert HEX64.match(identity["model_code_digest"])
+    loaded = enabled.loaded_identity()            # Spec 01 identity.py hook: flat strings, <= 32 keys
+    assert loaded and len(loaded) <= 32 and all(isinstance(k, str) and isinstance(v, str) for k, v in loaded.items())
+    assert loaded["release_mode"] == "shadow" and loaded["provider_id"] == C.PROVIDER_ID
 
 
 def test_server_routes_an_explicit_request_to_the_registered_provider(gap_night):

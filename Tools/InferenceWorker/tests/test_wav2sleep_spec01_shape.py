@@ -102,11 +102,16 @@ def test_a_run_id_violation_is_split_and_counted_with_the_spec01_name():
     assert C.RUN_ID_DISCONTINUITY == "ppg_run_id_discontinuity"
 
 
+REPO_GOLDEN = os.path.join(HERE, "..", "..", "CloudWorker", "Tests", "frwhoop-workerTests", "Resources",
+                           "sensor_biomarkers", "sensor_biomarkers_request_envelope.json")
+
+
 def test_the_spec01_golden_envelope_segments_parse():
-    """Reads the worker's golden envelope when it exists (it did not when this was written)."""
-    path = os.environ.get(GOLDEN_ENV)
-    if not path or not os.path.isfile(path):
-        pytest.skip(f"set {GOLDEN_ENV} to sensor_biomarkers_request_envelope.json once Spec 01 writes it")
+    """Reads the worker's golden envelope: ``$FRWHOOP_SPEC01_GOLDEN_ENVELOPE``, else the repository copy (present once
+    Spec 01 is merged; it arrived on Spec 01's branch in 574394cd0)."""
+    path = os.environ.get(GOLDEN_ENV) or REPO_GOLDEN
+    if not os.path.isfile(path):
+        pytest.skip(f"no golden envelope: set {GOLDEN_ENV} or merge Spec 01")
     envelope = json.load(open(path))
     body = envelope.get("body", envelope)
     payload = dict(body["input"])
@@ -115,10 +120,16 @@ def test_the_spec01_golden_envelope_segments_parse():
     for segment in ppg["segments"]:
         assert {"run_id", "config", "clock"} <= set(segment)
         assert segment["clock"]["samples_per_second"] == ppg["native_rate_hz"]
+    # The refusal this envelope must get follows from its own values, in the contract's check order: today's worker
+    # sends clock.packet_timing_verified false and config.known false (SensorBiomarkerLane.swift), so the night is
+    # withheld at the clock gate. Only an envelope with both true may stage.
+    first = ppg["segments"][0]
+    expected = ("unverified_sample_clock" if first["clock"]["packet_timing_verified"] is not True else
+                "optical_config_unidentified" if first["config"].get("known") is not True else None)
     try:
         night = parse_night(payload, {**CTX, **context})
     except Withhold as exc:
-        # An unidentified configuration is the documented, intended refusal for this model.
-        assert exc.detail == "optical_config_unidentified", (exc.detail, exc.message)
+        assert exc.detail == expected, (exc.detail, exc.message)
         return
+    assert expected is None, f"staged although the envelope should be withheld as {expected}"
     assert night.native_rate_hz in C.SUPPORTED_NATIVE_RATES_HZ

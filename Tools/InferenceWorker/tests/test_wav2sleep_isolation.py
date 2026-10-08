@@ -44,3 +44,10 @@ def test_default_registry_has_no_wav2sleep_provider():
 
 def test_activation_gates_are_the_six_admission_gates():
     assert len(C.ACTIVATION_GATES) == 6 and len(set(C.ACTIVATION_GATES)) == 6
+
+
+def test_disabled_provider_claims_no_loaded_artifacts():
+    from frwhoop_inference.frwhoop_sleep.wav2sleep.provider import Wav2SleepPpgProvider
+    loaded = Wav2SleepPpgProvider(model_root="/nonexistent", enabled=False).loaded_identity()
+    assert loaded["enabled"] == "False" and loaded["loaded"] == "False"
+    assert "artifact_digest" not in loaded and not any(k.endswith(".sha256") for k in loaded)
