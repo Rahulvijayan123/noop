@@ -1,4 +1,5 @@
 import Foundation
+import WhoopStore
 
 // Baselines+AsOf.swift - CAUSAL ("as of the start of day D") baseline folds, plus the regime-scoped,
 // hierarchically-falling-back baseline the Charge re-score uses (D4-01 / D4-V02 / D4-04).
@@ -292,5 +293,102 @@ extension Baselines {
             byDay[d] = snapshot(hrv.byDay[d], rhr.byDay[d], resp.byDay[d], skin.before[d] ?? emptyState(skinCfg))
         }
         return (byDay, snapshot(hrv.end, rhr.end, resp.end, skin.end))
+    }
+}
+
+// MARK: - Assembling the Charge history (engine inputs -> the maps above)
+
+/// The nightly maps `chargeBaselinesAsOf` folds, assembled once so the scorer and its #1614 trace read the
+/// SAME inputs (see `assembleChargeHistory`).
+public struct ChargeHistoryMaps: Equatable, Sendable {
+    public var importedHrv: [String: Double?]
+    public var importedRhr: [String: Double?]
+    public var importedResp: [String: Double?]
+    public var computedHrv: [String: Double?]
+    public var computedRhr: [String: Double?]
+    public var computedResp: [String: Double?]
+    public var computedSkin: [String: Double?]
+    /// Each day's winning source id (brand-era regime input); days absent here take the fold's default.
+    public var sourceByDay: [String: String]
+
+    public init(importedHrv: [String: Double?] = [:], importedRhr: [String: Double?] = [:],
+                importedResp: [String: Double?] = [:], computedHrv: [String: Double?] = [:],
+                computedRhr: [String: Double?] = [:], computedResp: [String: Double?] = [:],
+                computedSkin: [String: Double?] = [:], sourceByDay: [String: String] = [:]) {
+        self.importedHrv = importedHrv
+        self.importedRhr = importedRhr
+        self.importedResp = importedResp
+        self.computedHrv = computedHrv
+        self.computedRhr = computedRhr
+        self.computedResp = computedResp
+        self.computedSkin = computedSkin
+        self.sourceByDay = sourceByDay
+    }
+}
+
+extension Baselines {
+
+    /// Assemble the Charge re-score's history maps (D4-01 / D4-04) from the engine's three inputs:
+    ///
+    /// - `imported`: the vendor-import daily rows (all history). They feed only the all-method PARENT.
+    /// - `window*`: NOOP's freshly computed nightly values for THIS pass's scan window, and
+    ///   `windowSourceByDay`, the per-day winning source already resolved by the engine (it also carries
+    ///   the import-day defaults). Window values always win their day.
+    /// - `storedComputed`: NOOP's own previously STORED nightly rows. They fill ONLY days the window does
+    ///   not cover (a day is "covered" when the window has an HRV key for it, the same one-key rule for all
+    ///   four series), so the earliest nights of a re-score still have a causal history behind them. A
+    ///   stored day with no resolved source is tagged `storedSource` (the storage id is the best available
+    ///   guess there, exactly as the engine already tags import days outside the window).
+    ///
+    /// CAVEAT (documented, not gated): stored rows carry the HRV / RHR values of the analytics version that
+    /// wrote them. No per-row version stamp exists to gate on, so a version change inside the stored span is
+    /// not separated; the 21-night re-score window refreshes the newest nights on every pass.
+    public static func assembleChargeHistory(
+        imported: [DailyMetric],
+        windowHrv: [String: Double?], windowRhr: [String: Double?],
+        windowResp: [String: Double?], windowSkin: [String: Double?],
+        windowSourceByDay: [String: String],
+        storedComputed: [DailyMetric], storedSource: String
+    ) -> ChargeHistoryMaps {
+        var maps = ChargeHistoryMaps(computedHrv: windowHrv, computedRhr: windowRhr,
+                                     computedResp: windowResp, computedSkin: windowSkin,
+                                     sourceByDay: windowSourceByDay)
+        for d in imported {
+            maps.importedHrv[d.day] = d.avgHrv
+            maps.importedRhr[d.day] = d.restingHr.map(Double.init)
+            maps.importedResp[d.day] = d.respRateBpm
+        }
+        for r in storedComputed where windowHrv[r.day] == nil {
+            maps.computedHrv[r.day] = r.avgHrv
+            maps.computedRhr[r.day] = r.restingHr.map(Double.init)
+            maps.computedResp[r.day] = r.respRateBpm
+            maps.computedSkin[r.day] = r.skinTempC
+            if maps.sourceByDay[r.day] == nil { maps.sourceByDay[r.day] = storedSource }
+        }
+        return maps
+    }
+
+    /// `chargeBaselinesAsOf` over assembled maps.
+    public static func chargeBaselinesAsOf(_ maps: ChargeHistoryMaps, defaultSource: String,
+                                           hrvEpoch: Double, recoveryEpoch: Double)
+        -> (byDay: [String: ChargeBaselineSnapshot], end: ChargeBaselineSnapshot) {
+        chargeBaselinesAsOf(
+            importedHrv: maps.importedHrv, importedRhr: maps.importedRhr, importedResp: maps.importedResp,
+            computedHrv: maps.computedHrv, computedRhr: maps.computedRhr, computedResp: maps.computedResp,
+            computedSkin: maps.computedSkin, sourceByDay: maps.sourceByDay, defaultSource: defaultSource,
+            hrvEpoch: hrvEpoch, recoveryEpoch: recoveryEpoch)
+    }
+
+    /// The #1614 HRV trace input for the SAME fold the scorer uses: the NOOP-method CHILD series (the method
+    /// every scored night uses) over the union day axis the as-of fold walks (an import-only day is a held
+    /// night for the child, exactly as in `regimeScopedAsOf`), with the epoch raised to the start of the
+    /// current brand era (`deviceEraEpoch` over the same per-day sources). Its final state is therefore the
+    /// child's end-of-history state; a night whose child was still thin is scored against that child shrunk
+    /// toward the all-method parent, which the per-night `charge` trace and `fallbackUsed` report.
+    public static func chargeHrvTraceInput(_ maps: ChargeHistoryMaps, defaultSource: String, hrvEpoch: Double)
+        -> (values: [Double?], dayKeys: [String], epoch: Double) {
+        let keys = Set(maps.importedHrv.keys).union(maps.computedHrv.keys).sorted()
+        let era = deviceEraEpoch(keys.map { (day: $0, sourceId: maps.sourceByDay[$0] ?? defaultSource) })
+        return (keys.map { maps.computedHrv[$0] ?? nil }, keys, Swift.max(hrvEpoch, era))
     }
 }

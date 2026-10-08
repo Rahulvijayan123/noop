@@ -1,5 +1,6 @@
 import XCTest
 @testable import StrandAnalytics
+import WhoopStore
 
 /// D4-01 / D4-V02 / D4-04 / run1 D4-14: causal as-of folds, regime resets, hierarchical method fallback,
 /// and `rejectHardOutliers` on the day-keyed overload.
@@ -78,9 +79,150 @@ final class BaselinesAsOfTests: XCTestCase {
         }
         let oldMean = oldDz.reduce(0, +) / Double(oldDz.count)
         let newMean = newDz.reduce(0, +) / Double(newDz.count)
-        print("D4-01 measurement: mean|dz| old=\(oldMean) max=\(oldDz.max()!) new=\(newMean) max=\(newDz.max()!)")
+        // The MEASUREMENT is the old-vs-causal drift. The as-of = 0 line is a CONSISTENCY check only: the
+        // reference is the plain fold over `vals[..<d]`, which the as-of fold reproduces by construction.
+        print("D4-01 measurement: old whole-history fold vs causal reference mean|dz|=\(oldMean) "
+              + "max=\(oldDz.max()!) (as-of consistency residual \(newMean))")
         XCTAssertGreaterThan(oldMean, 0.2, "the old whole-history fold leaks materially on this series")
         XCTAssertEqual(newMean, 0, accuracy: 1e-12)
+    }
+
+    /// The D4-04 measurement on a series where the two folds can actually differ for a regime reason: 60
+    /// nights of an Oura ring (RMSSD ~120 ms) then 40 WHOOP nights (~70 ms). The old Charge HRV fold pooled
+    /// both brands over the whole history; the reference is an INDEPENDENT plain `foldHistory` over only the
+    /// earlier same-era nights. Reported: the old pooled fold's |dz| against that reference on the newest 21
+    /// nights, and the as-of (regime-scoped) fold's.
+    func testMeasuredZDriftOnABrandSwitch() {
+        var seed: UInt64 = 11
+        func uniform() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double((seed >> 11) & ((1 << 53) - 1)) / Double(1 << 53)
+        }
+        func gauss(_ mu: Double, _ sd: Double) -> Double {
+            let u1 = max(uniform(), 1e-12), u2 = uniform()
+            return mu + sd * (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
+        }
+        let n = 100, switchAt = 60
+        let vals: [Double?] = (0..<n).map { $0 < switchAt ? gauss(120, 9) : gauss(70, 6) }
+        let keys = (0..<n).map(key)
+        var source: [String: String] = [:]
+        for i in 0..<n { source[keys[i]] = i < switchAt ? "oura-import" : "my-whoop" }
+        var map: [String: Double?] = [:]
+        for i in 0..<n { map[keys[i]] = vals[i] }
+        let cfg = Baselines.hrvCfg
+        let whole = Baselines.foldHistory(vals, cfg: cfg)
+        let asOf = Baselines.regimeScopedAsOf(merged: map, computed: nil, sourceByDay: source,
+                                              defaultSource: "my-whoop", cfg: cfg, baselineEpoch: 0).byDay
+        var oldDz: [Double] = [], newDz: [Double] = []
+        for d in (n - 21)..<n {
+            let reference = Baselines.foldHistory(Array(vals[switchAt..<d]), cfg: cfg)
+            let zr = Baselines.deviation(vals[d]!, state: reference).z
+            oldDz.append(abs(Baselines.deviation(vals[d]!, state: whole).z - zr))
+            newDz.append(abs(Baselines.deviation(vals[d]!, state: asOf[keys[d]]!.state).z - zr))
+        }
+        let oldMean = oldDz.reduce(0, +) / Double(oldDz.count)
+        let newMean = newDz.reduce(0, +) / Double(newDz.count)
+        print("D4-04 measurement (brand switch): old pooled fold mean|dz|=\(oldMean) max=\(oldDz.max()!); "
+              + "as-of regime-scoped mean|dz|=\(newMean) max=\(newDz.max()!)")
+        XCTAssertGreaterThan(oldMean, 0.2)
+        XCTAssertLessThan(newMean, 1e-9)
+    }
+
+    // MARK: Engine map assembly (review: the maps the scorer and the #1614 trace fold)
+
+    private func row(_ day: String, hrv: Double?, rhr: Int? = 50, resp: Double? = 14,
+                     skin: Double? = nil) -> DailyMetric {
+        DailyMetric(day: day, totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil, lightMin: nil,
+                    disturbances: nil, restingHr: rhr, avgHrv: hrv, recovery: nil, strain: nil,
+                    exerciseCount: nil, respRateBpm: resp, skinTempC: skin)
+    }
+
+    /// Stored pre-window rows fill ONLY days the window does not cover, window values win their day, imports
+    /// land only in the imported maps, and a stored day with no resolved source is tagged with the storage id
+    /// while an already-resolved source is kept.
+    func testAssembleChargeHistoryWindowWinsStoredFillsGapsAndTagsRegime() {
+        let maps = Baselines.assembleChargeHistory(
+            imported: [row(key(0), hrv: 110, rhr: 48, resp: 15)],
+            windowHrv: [key(5): 61, key(6): nil], windowRhr: [key(5): 51, key(6): 52],
+            windowResp: [key(5): 14.1, key(6): 14.2], windowSkin: [key(5): 33.0, key(6): nil],
+            windowSourceByDay: [key(5): "my-whoop", key(6): "my-whoop", key(0): "my-whoop", key(2): "oura-import"],
+            storedComputed: [row(key(1), hrv: 58, rhr: 49, resp: 13.9, skin: 32.8),
+                             row(key(2), hrv: 57),
+                             row(key(5), hrv: 99, rhr: 70, resp: 20, skin: 35),     // window covers day 5
+                             row(key(6), hrv: 98)],                                 // window key, nil value
+            storedSource: "my-whoop")
+        XCTAssertEqual(maps.importedHrv, [key(0): 110])
+        XCTAssertEqual(maps.importedRhr, [key(0): 48])
+        XCTAssertNil(maps.computedHrv[key(0)], "an import never enters the NOOP child")
+        XCTAssertEqual(maps.computedHrv[key(1)], .some(58))
+        XCTAssertEqual(maps.computedRhr[key(1)], .some(49))
+        XCTAssertEqual(maps.computedResp[key(1)], .some(13.9))
+        XCTAssertEqual(maps.computedSkin[key(1)], .some(32.8))
+        XCTAssertEqual(maps.computedHrv[key(5)], .some(61), "the window wins its day")
+        XCTAssertEqual(maps.computedRhr[key(5)], .some(51))
+        XCTAssertEqual(maps.computedSkin[key(5)], .some(33.0))
+        XCTAssertEqual(maps.computedHrv[key(6)], .some(nil), "a window key with a nil value is still covered")
+        XCTAssertEqual(maps.sourceByDay[key(1)], "my-whoop", "a stored day with no source takes the storage id")
+        XCTAssertEqual(maps.sourceByDay[key(2)], "oura-import", "a resolved source is never overwritten")
+        XCTAssertEqual(maps.sourceByDay[key(5)], "my-whoop")
+    }
+
+    /// The first nights of a re-score window are scored against the stored pre-window nights (without them
+    /// the window's first night has no history at all), and the pure overload equals the long form.
+    func testStoredPreWindowNightsGiveTheWindowsFirstNightAHistory() {
+        let stored = (0..<20).map { row(key($0), hrv: 60) }
+        let window: [String: Double?] = Dictionary(uniqueKeysWithValues: (20..<41).map { (key($0), 62.0) })
+        let rhr: [String: Double?] = window.mapValues { _ in 50 }
+        let resp: [String: Double?] = window.mapValues { _ in 14 }
+        let maps = Baselines.assembleChargeHistory(
+            imported: [], windowHrv: window, windowRhr: rhr, windowResp: resp, windowSkin: [:],
+            windowSourceByDay: [:], storedComputed: stored, storedSource: "my-whoop")
+        let withStored = Baselines.chargeBaselinesAsOf(maps, defaultSource: "my-whoop", hrvEpoch: 0, recoveryEpoch: 0)
+        XCTAssertEqual(withStored.byDay[key(20)]?.profile.hrv?.nValid, 20)
+        XCTAssertEqual(withStored.byDay[key(20)]?.hrvAsOfDay, key(19))
+        XCTAssertTrue(withStored.byDay[key(20)]?.profile.hrv?.usable ?? false)
+        let windowOnly = Baselines.chargeBaselinesAsOf(
+            Baselines.assembleChargeHistory(imported: [], windowHrv: window, windowRhr: rhr, windowResp: resp,
+                                            windowSkin: [:], windowSourceByDay: [:], storedComputed: [],
+                                            storedSource: "my-whoop"),
+            defaultSource: "my-whoop", hrvEpoch: 0, recoveryEpoch: 0)
+        XCTAssertFalse(windowOnly.byDay[key(20)]?.profile.hrv?.usable ?? true)
+        // Overload = long form.
+        let long = Baselines.chargeBaselinesAsOf(
+            importedHrv: maps.importedHrv, importedRhr: maps.importedRhr, importedResp: maps.importedResp,
+            computedHrv: maps.computedHrv, computedRhr: maps.computedRhr, computedResp: maps.computedResp,
+            computedSkin: maps.computedSkin, sourceByDay: maps.sourceByDay, defaultSource: "my-whoop",
+            hrvEpoch: 0, recoveryEpoch: 0)
+        XCTAssertEqual(long.end.profile.hrv, withStored.end.profile.hrv)
+        XCTAssertEqual(long.byDay[key(30)]?.profile.hrv, withStored.byDay[key(30)]?.profile.hrv)
+    }
+
+    /// #1614: the HRV trace input describes the fold the scorer uses. On a brand switch with imports, the
+    /// traced end state equals the as-of CHILD end state (the trusted NOOP fold that scores the newest
+    /// night), not the old all-history merged fold.
+    func testHrvTraceInputMatchesTheScoredChildFold() {
+        var imported: [DailyMetric] = []
+        var windowHrv: [String: Double?] = [:], rhr: [String: Double?] = [:], resp: [String: Double?] = [:]
+        var source: [String: String] = [:]
+        for i in 0..<30 { imported.append(row(key(i), hrv: 125)); source[key(i)] = "oura-import" }
+        for i in 30..<40 { imported.append(row(key(i), hrv: 72)); source[key(i)] = "my-whoop" }
+        for i in 30..<60 {
+            windowHrv[key(i)] = 64 + Double(i % 5); rhr[key(i)] = 50; resp[key(i)] = 14
+            source[key(i)] = "my-whoop"
+        }
+        let maps = Baselines.assembleChargeHistory(
+            imported: imported, windowHrv: windowHrv, windowRhr: rhr, windowResp: resp, windowSkin: [:],
+            windowSourceByDay: source, storedComputed: [], storedSource: "my-whoop")
+        let scored = Baselines.chargeBaselinesAsOf(maps, defaultSource: "my-whoop", hrvEpoch: 0, recoveryEpoch: 0)
+        let input = Baselines.chargeHrvTraceInput(maps, defaultSource: "my-whoop", hrvEpoch: 0)
+        XCTAssertEqual(input.epoch, epoch(30), "the trace starts at the current brand era")
+        let traced = Baselines.foldHistoryTrace(input.values, dayKeys: input.dayKeys, cfg: Baselines.hrvCfg,
+                                                metric: "hrv", baselineEpoch: input.epoch, tail: 14)
+        XCTAssertFalse(scored.end.fallbackUsed, "30 NOOP nights: the child is trusted and scored alone")
+        XCTAssertEqual(traced.state, scored.end.profile.hrv)
+        // A recalibration epoch later than the era start wins.
+        XCTAssertEqual(Baselines.chargeHrvTraceInput(maps, defaultSource: "my-whoop", hrvEpoch: epoch(45)).epoch,
+                       epoch(45))
     }
 
     // MARK: D4-V02 - confidence provenance
