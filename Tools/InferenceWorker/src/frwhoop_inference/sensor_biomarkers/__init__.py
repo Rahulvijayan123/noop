@@ -70,6 +70,12 @@ DETAIL_REASONS: tuple[str, ...] = (
     "preprocessing_unverified",
     "artifact_unavailable",
     "not_enough_valid_data",
+    # Optional-family dispatch (docs/model-integration/sensor-families.md): the
+    # sidecar flag is off / the isolated runtime is missing / the adapter could
+    # not be imported, does not match the interface or raised.
+    "family_disabled",
+    "runtime_unavailable",
+    "adapter_broken",
 )
 
 
@@ -105,12 +111,22 @@ def collect_providers() -> list["Provider"]:
 
 
 def collect_optional_providers() -> list["Provider"]:
-    """Heavy research/shadow providers; a broken import yields nothing (fail-closed)."""
+    """Heavy research/shadow providers; a broken import registers nothing (fail-closed).
+
+    These standalone providers serve explicit ``provider_id`` requests. The
+    route the worker calls is ``sensor.biomarkers.v1``, which reaches the same
+    family implementations through ``optional.py`` and reports a broken adapter
+    there as ``adapter_broken``; the failure is also written to stderr here.
+    """
+    import importlib
+    import sys
+
     providers: list["Provider"] = []
     for module_name in ("paradigma", "rhythm"):
         try:
-            module = __import__(f"{__name__}.{module_name}", fromlist=["make_providers"])
+            module = importlib.import_module(f"{__name__}.{module_name}")
             providers.extend(module.make_providers())
-        except Exception:  # noqa: BLE001 - fail-closed: optional lane, never startup-fatal
-            continue
+        except Exception as exc:  # noqa: BLE001 - optional lane, never startup-fatal
+            sys.stderr.write(f"frwhoop-inference: optional provider {module_name} not "
+                             f"registered: {type(exc).__name__}: {exc}\n")
     return providers

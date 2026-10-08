@@ -64,12 +64,13 @@ to this model.
 from __future__ import annotations
 
 import os
+import time
 from typing import Any
 
 import numpy as np
 
-from ._common import (DEFAULT_ARTIFACT_ROOT, artifact_root, is_flat, iter_windows,
-                      min_max01, score_vector, sha256_file, verify_file_sha256)
+from ._common import (artifact_root, cached_sha256, is_flat, iter_windows, min_max01,
+                      score_vector, verify_file_sha256)
 
 #: Pinned artifact metadata (recorded from the actual cloned bytes).
 UPSTREAM_REPO = "https://github.com/AshleyLab/deepbeat"
@@ -121,7 +122,7 @@ class DeepBeatAdapter:
         if not self.artifact_present:
             return False, "artifact_unavailable"
         try:
-            actual = sha256_file(self.checkpoint_path)
+            actual = cached_sha256(self.checkpoint_path)
         except OSError as exc:
             return False, f"artifact_unavailable: {exc}"
         if actual.lower() != self.expected_sha256.lower():
@@ -168,14 +169,15 @@ class DeepBeatAdapter:
         return normalized.reshape(INPUT_SAMPLES, 1).astype(np.float32)
 
     # -- inference ------------------------------------------------------------
-    def infer(self, ppg: dict[str, Any]) -> dict[str, Any]:
-        """Run the compatibility experiment over the PPG payload.
+    def infer(self, ppg: dict[str, Any], *, deadline: float | None = None) -> dict[str, Any]:
+        """Run the compatibility experiment over the PPG payload's runs.
 
         Returns ``{"status", "reason", "windows", "quality", "rhythm"}`` where
         ``quality``/``rhythm`` are score-vector measurement dicts (None when no
         window ran). ``status`` is ``"preprocessing_unverified"`` whenever any
         window ran (it always does for this adapter) and ``"error"`` with a
-        machine-readable reason otherwise.
+        machine-readable reason otherwise. ``deadline`` (``time.monotonic()``)
+        bounds the inference loop; past it nothing partial is returned.
         """
         native = float(ppg["native_rate_hz"])
         windows = list(iter_windows(ppg, window_seconds=SEGMENT_SECONDS,
@@ -198,6 +200,9 @@ class DeepBeatAdapter:
         qa_rows: list[list[float]] = []
         rhythm_rows: list[list[float]] = []
         for x in prepared:
+            if deadline is not None and time.monotonic() > deadline:
+                return {"status": "error", "reason": "timeout",
+                        "windows": 0, "quality": None, "rhythm": None}
             batch = x[None, ...]  # (1, 800, 1)
             qa, rhythm = model.predict(batch, verbose=0)
             qa_rows.append([float(v) for v in qa[0]])
@@ -206,18 +211,21 @@ class DeepBeatAdapter:
         method = (f"{PROVIDER_REVISION} shadow inference, compatibility preprocessing "
                   f"(FFT resample {native:g}->{INPUT_RATE_HZ:g} Hz + min-max; no bandpass; "
                   f"not the published pipeline)")
+        provenance = [{"run": w["run"], "start_unix": w["start_unix"]} for w in windows]
         quality = score_vector(
             key="deepbeat_quality_scores", scores=qa_rows, classes=QUALITY_CLASSES,
             count=n, method=method, native_rate_hz=native,
             segment_seconds=SEGMENT_SECONDS, samples_per_segment=INPUT_SAMPLES,
             preprocessing_status="preprocessing_unverified", publishable=False,
-            domain="ppg_waveform", domain_status="tensor_compatibility_resample")
+            domain="ppg_waveform", domain_status="tensor_compatibility_resample",
+            model_input_rate_hz=INPUT_RATE_HZ, windows=provenance)
         rhythm = score_vector(
             key="deepbeat_rhythm_scores", scores=rhythm_rows, classes=RHYTHM_CLASSES,
             count=n, method=method, native_rate_hz=native,
             segment_seconds=SEGMENT_SECONDS, samples_per_segment=INPUT_SAMPLES,
             preprocessing_status="preprocessing_unverified", publishable=False,
-            domain="ppg_waveform", domain_status="tensor_compatibility_resample")
+            domain="ppg_waveform", domain_status="tensor_compatibility_resample",
+            model_input_rate_hz=INPUT_RATE_HZ, windows=provenance)
         return {"status": "preprocessing_unverified", "reason": "preprocessing_unverified",
                 "windows": n, "quality": quality, "rhythm": rhythm}
 
