@@ -7,8 +7,8 @@ extension Repository {
     /// resting rate (median of recent nights) and maximum, each used only when plausible. The Heart rate
     /// page and the persisted context both decode with it, so a day is the same day wherever it is read.
     ///
-    /// ElderNet's gait evidence joins once the server has sent any (pinned to `GaitWindowStore.Pins`). A day without
-    /// its windows decodes exactly as without the entry (`ActivityContextTrackBuilder.effectiveConfig`).
+    /// No expert evidence (ElderNet, motion heads) is part of it: which stored expert rows may shape a day is decided
+    /// per day by the shared policy (`ActivityPhoneEvidence`), from the release each row recorded.
     ///
     /// The wearer's personal profile joins once a fit from their guided calibration runs beat the defaults on
     /// held-out runs (`ActivityPersonalProfileStore`); its tag is part of `cacheTag`, so cached days re-decode.
@@ -20,20 +20,9 @@ extension Repository {
 
     /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
     var activityBaseDecoderConfig: ActivityDecoderConfig {
-        var config = ActivityDecoderConfig.personalized(
+        ActivityDecoderConfig.personalized(
             restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: days.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)
-        if let model = GaitWindowStore.shared.latestModel {
-            let evidence = GaitWindowStore.evidenceConfig(model: model)
-            if evidence.evidenceRefusal == nil { config.gaitQuality = evidence }
-        }
-        return config
-    }
-
-    /// The cache key carries the heart-rate reference: a decoder resumed from state built against another
-    /// reference would carry that reference's reading of effort into the new one.
-    var activityContextSourceKey: String {
-        "\(importedReadIds.joined(separator: "+"))@\(activityDecoderConfig.cacheTag)"
     }
 
     var dayStateSourceKey: String { importedReadIds.joined(separator: "+") }
@@ -42,10 +31,19 @@ extension Repository {
     /// moment it opens, then brings it up to date. nil when the day has never been decoded, or was decoded by
     /// an older decoder.
     func cachedActivityContext(dayStart: Date) async -> ActivityContextDayDocument? {
-        let source = activityContextSourceKey
+        let reads = importedReadIds.joined(separator: "+")
+        let base = activityDecoderConfig
         let start = Int(dayStart.timeIntervalSince1970)
+        let end = Int((Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400))
+            .timeIntervalSince1970)
         return await Task.detached(priority: .userInitiated) {
-            ActivityContextFileStore.shared.load(source: source, dayStart: start).flatMap { $0.isCurrent ? $0 : nil }
+            // Keyed like `activityContext(from:)`: by the config the day's canonical decode runs with, heart-rate
+            // reference included (a decoder resumed from state built against another reference would carry that
+            // reference's reading of effort into the new one).
+            let config = ActivityPhoneEvidence.canonical(ActivityContextTrackInput(dayStart: start, dayEnd: end),
+                                                         base: base).config
+            return ActivityContextFileStore.shared.load(source: "\(reads)@\(config.cacheTag)", dayStart: start)
+                .flatMap { $0.isCurrent ? $0 : nil }
         }.value
     }
 
@@ -83,25 +81,69 @@ extension Repository {
             workouts: s.workouts, offWrist: s.offWrist)
         // HART's verdicts on the raw motion this phone uploaded, when the server has produced any for the
         // day. They arrive minutes after the strap's own streams; the day builder re-decodes when they do.
-        if let encoder = ActivityEncoderWindowStore.shared.windows(from: s.start, to: s.end) {
-            input.encoderWindows = encoder.windows
-            input.imuWindows = encoder.features
-            input.encoderId = encoder.encoderId
-            input.encoderVersion = encoder.encoderVersion
-            // The experts stored beside the windows, so the phone decodes the same evidence as the
-            // server's stream day (ActivityContextDays.buildStreamDay).
-            input.transitionWindows = encoder.transitions
-            input.gaitWindows = encoder.gaitWindows
-        }
-        let config = activityDecoderConfig
-        // ElderNet's gait windows for the same seconds: walking or not, and how (cadence, speed), at 5 s steps.
-        if let gait = config.gaitQuality,
-           let windows = GaitWindowStore.shared.trackInput(from: s.start, to: s.end, model: gait.model) {
-            input.gaitQuality = windows
-        }
+        input = ActivityPhoneEvidence.attachingEncoderWindows(input)
+        // Expert evidence (ElderNet's gait windows) only as the shared policy allows for the canonical decode: a
+        // shadow or candidate row leaves the day exactly as without it.
+        let decode = ActivityPhoneEvidence.canonical(input, base: activityDecoderConfig)
         return await ActivityContextWorker.shared.document(
-            source: "\(s.sourceKey)@\(config.cacheTag)", input: input, config: config,
+            source: "\(s.sourceKey)@\(decode.config.cacheTag)", input: decode.input, config: decode.config,
             lane: lane, progress: progress)
+    }
+}
+
+/// The phone's own decode of a day under the shared expert-authority policy (`ActivityExpertSelection`,
+/// docs/model-integration/activity-authority.md): the stored expert rows become the policy's sources with the release,
+/// pins, prior and input revision each recorded, and the decode the wearer sees is the policy's canonical one. So it
+/// uses the same selected evidence and config as the server's published document, and a shadow or candidate row
+/// (every row today) decodes exactly as no row. There is no experimental preview on the phone; a candidate arm would
+/// have to be decoded and stored apart from this.
+///
+/// Motion heads have no phone readback: their rows are shadow/candidate only, so the canonical decode could not use
+/// them (`motionHeads` is always empty here).
+enum ActivityPhoneEvidence {
+    struct Decode {
+        var input: ActivityContextTrackInput
+        var config: ActivityDecoderConfig
+        var selection: ActivityExpertSelection
+    }
+
+    /// `input` with HART's stored windows for its span attached, and the expert outputs stored beside them (the
+    /// transition expert's and the HART-embedded ElderNet windows), as the server's stream day reads them
+    /// (`ActivityContextDays.buildStreamDay`). The embedded gait windows are evidence only if the policy admits them.
+    static func attachingEncoderWindows(_ input: ActivityContextTrackInput,
+                                        store: ActivityEncoderWindowStore = .shared) -> ActivityContextTrackInput {
+        guard let encoder = store.windows(from: input.dayStart, to: input.dayEnd) else { return input }
+        var out = input
+        out.encoderWindows = encoder.windows
+        out.imuWindows = encoder.features
+        out.encoderId = encoder.encoderId
+        out.encoderVersion = encoder.encoderVersion
+        out.transitionWindows = encoder.transitions
+        out.gaitWindows = encoder.gaitWindows
+        return out
+    }
+
+    /// The policy's selection over what the stores hold for `input`'s span, and its canonical decode.
+    static func canonical(_ input: ActivityContextTrackInput, base: ActivityDecoderConfig,
+                          encoders: ActivityEncoderWindowStore = .shared,
+                          gait: GaitWindowStore = .shared) -> Decode {
+        canonical(input, base: base,
+                  revisions: encoders.inputRevisions(from: input.dayStart, to: input.dayEnd),
+                  gaitQuality: gait.sources(from: input.dayStart, to: input.dayEnd),
+                  embeddedGaitRelease: encoders.embeddedGaitRelease(from: input.dayStart, to: input.dayEnd))
+    }
+
+    /// The same with the sources given: `input.gaitWindows` (the HART-embedded ElderNet route) is offered at
+    /// `embeddedGaitRelease`, every other expert entry `input` or `base` carries is replaced by what the policy admits
+    /// for the canonical decode.
+    static func canonical(_ input: ActivityContextTrackInput, base: ActivityDecoderConfig,
+                          revisions: [String: Int64], gaitQuality: [GaitQualitySource],
+                          embeddedGaitRelease: ActivityReleaseMode = .shadow) -> Decode {
+        let selection = ActivityExpertSelection.select(
+            revisions: revisions, gaitQuality: gaitQuality, motionHeads: [],
+            embeddedGait: EmbeddedGaitSource(windows: input.gaitWindows, releaseMode: embeddedGaitRelease))
+        let decode = selection.canonical(input, base: base)
+        return Decode(input: decode.input, config: decode.config, selection: selection)
     }
 }
 

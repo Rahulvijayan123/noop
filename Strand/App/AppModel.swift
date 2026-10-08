@@ -278,8 +278,8 @@ final class AppModel: ObservableObject {
     private var hostedRefreshTask: Task<Void, Never>?
     private var historySeedTask: Task<Void, Never>?
     private var hostedSyncInFlight = false
-    /// When the HART windows were last asked for (`syncActivityWindows`).
-    private var activityWindowsSyncedAt: Date?
+    /// When the HART and gait windows were last asked for, and whether a pass is in flight (`syncActivityWindows`).
+    private let activityWindowsSync = ActivityWindowsSync(minimumInterval: AppModel.activityWindowsRefreshSeconds)
     /// Result revision last written per day, so an unchanged server result is not rewritten.
     private var hostedWrittenRevision: [String: String] = [:]
     /// When each day last got an answer from the server, so yesterday and today are read again only when the
@@ -479,7 +479,7 @@ final class AppModel: ObservableObject {
         MetricInsightStore.shared.reset()   // metric explanations read with the ended account's credential
         ActivityEncoderWindowStore.shared.reset()
         SensorBiomarkerStore.shared.reset()
-        activityWindowsSyncedAt = nil
+        activityWindowsSync.reset()
         applyPowerSaving()
     }
 
@@ -688,9 +688,11 @@ final class AppModel: ObservableObject {
     /// been uploaded, and every new set re-decodes the day on the phone, so asking more often buys nothing.
     static let activityWindowsRefreshSeconds: TimeInterval = 300
 
-    /// Fetch HART's per-window output for yesterday and today (local), so the activity decoder on this phone
-    /// uses it. Only for the account that owns this phone's strap data: the windows describe its uploads.
-    /// Returns true when any stored day changed (the caller refreshes the pages that decode).
+    /// Fetch HART's per-window output and ElderNet's gait windows for yesterday and today (local), so the activity
+    /// decoder on this phone uses them as the shared policy allows. Only for the account that owns this phone's strap
+    /// data: the windows describe its uploads. The two fetches are independent (`ActivityWindowsSync`): either may
+    /// fail without the other being skipped. Returns true when any stored day changed (the caller refreshes the pages
+    /// that decode).
     @discardableResult
     func syncActivityWindows(now: Date = Date()) async -> Bool {
         guard cloudScoringIsAuthoritative, let account = CloudPushRuntime.shared.runningScope,
@@ -700,56 +702,68 @@ final class AppModel: ObservableObject {
             store.setScope(nil)
             return false
         }
-        if let last = activityWindowsSyncedAt, now.timeIntervalSince(last) < Self.activityWindowsRefreshSeconds {
-            return false
-        }
-        activityWindowsSyncedAt = now
         let scope = ActivityEncoderWindowStore.Scope(ownerId: account.ownerId, deviceId: device)
-        store.setScope(scope)
         let yesterday = Calendar.current.date(byAdding: .day, value: -1, to: Calendar.current.startOfDay(for: now))
             ?? now.addingTimeInterval(-86_400)
         let days = ActivityEncoderWindowStore.utcDays(from: Int(yesterday.timeIntervalSince1970),
                                                       to: Int(now.timeIntervalSince1970) + 1)
-        do {
-            let fetched = try await scores.activityWindows(days: days, deviceId: device,
-                                                           known: store.revisions(days: days))
-            guard CloudPushRuntime.shared.runningScope == account else { return false }
-            var changed = false
-            for day in fetched {
-                guard let json = day.windowsJSON else { continue }
-                let record = ActivityEncoderWindowStore.DayRecord(
-                    day: day.day, resultRevision: day.resultRevision, encoderId: day.encoderId,
-                    modelVersion: day.modelVersion, windowsJSON: json)
-                if store.save(record, scope: scope) { changed = true }
-            }
-            if await syncGaitWindows(days: days, device: device, scope: scope, account: account) { changed = true }
-            if changed {
-                activityContext.requestMaterialization()
-                // HART reaches a calibration run minutes after it ends; the fit picks its windows up then.
-                Task { await refitActivityPersonalProfile() }
-            }
-            return changed
-        } catch {
-            // A server without the route yet (404) or a transient failure: the decoder simply runs without
-            // HART until the next pass.
-            return false
-        }
+        // A server without a route yet (404) or a transient failure leaves that store as it is until the next pass.
+        guard let outcome = await activityWindowsSync.run(
+            now: now,
+            hart: {
+                store.setScope(scope)
+                return try await self.syncHartWindows(days: days, device: device, scope: scope, account: account,
+                                                      scores: scores)
+            },
+            gait: {
+                store.setScope(scope)
+                return try await self.syncGaitWindows(days: days, device: device, scope: scope, account: account,
+                                                      scores: scores)
+            }) else { return false }
+        guard CloudPushRuntime.shared.runningScope == account, outcome.changed else { return false }
+        activityContext.requestMaterialization()
+        // HART reaches a calibration run minutes after it ends; the fit picks its windows up then.
+        Task { await refitActivityPersonalProfile() }
+        return true
     }
 
-    /// ElderNet's windows for the same days, for the decoder's gait evidence. Only days the server sent with a
-    /// model whose weights digest checks out are stored. A failure leaves the decoder on HART alone.
-    private func syncGaitWindows(days: [String], device: String, scope: ActivityEncoderWindowStore.Scope,
-                                 account: CloudDataScope) async -> Bool {
-        guard let scores = CloudPushRuntime.shared.scoreRepository() else { return false }
-        let store = GaitWindowStore.shared
-        guard let fetched = try? await scores.gaitWindows(days: days, deviceId: device,
-                                                          known: store.revisions(days: days)),
-              CloudPushRuntime.shared.runningScope == account else { return false }
+    /// HART's windows for `days`. Throws when the fetch failed.
+    private func syncHartWindows(days: [String], device: String, scope: ActivityEncoderWindowStore.Scope,
+                                 account: CloudDataScope, scores: ServerScoreRepository) async throws -> Bool {
+        let store = ActivityEncoderWindowStore.shared
+        let fetched = try await scores.activityWindows(days: days, deviceId: device, known: store.revisions(days: days))
+        guard CloudPushRuntime.shared.runningScope == account else { return false }
         var changed = false
         for day in fetched {
-            guard let model = day.model, let json = day.windowsJSON else { continue }
-            let record = GaitWindowStore.DayRecord(day: day.day, resultRevision: day.resultRevision, mode: day.mode,
-                                                   model: model, windowsJSON: json)
+            guard let json = day.windowsJSON else { continue }
+            let record = ActivityEncoderWindowStore.DayRecord(
+                day: day.day, resultRevision: day.resultRevision, encoderId: day.encoderId,
+                modelVersion: day.modelVersion, windowsJSON: json, inputRevision: day.inputRevision,
+                releaseMode: day.releaseMode, embeddedGaitReleaseMode: day.embeddedGaitReleaseMode)
+            if store.save(record, scope: scope) { changed = true }
+        }
+        return changed
+    }
+
+    /// ElderNet's windows for the same days. Only days the server sent with a model whose weights digest checks out
+    /// are stored, each with the release, pins, prior and input revision its row recorded; what they may shape is
+    /// decided from those by the shared policy when a day is decoded. Throws when the fetch failed.
+    private func syncGaitWindows(days: [String], device: String, scope: ActivityEncoderWindowStore.Scope,
+                                 account: CloudDataScope, scores: ServerScoreRepository) async throws -> Bool {
+        let store = GaitWindowStore.shared
+        let fetched = try await scores.gaitWindows(days: days, deviceId: device, known: store.revisions(days: days))
+        guard CloudPushRuntime.shared.runningScope == account else { return false }
+        var changed = false
+        for day in fetched {
+            if day.unchanged {
+                // The same windows, possibly demoted since they were stored: lower the stored release, never raise.
+                if day.releaseMode != nil,
+                   store.lowerRelease(day: day.day, to: ActivityReleaseMode(recorded: day.releaseMode), scope: scope) {
+                    changed = true
+                }
+                continue
+            }
+            guard let record = GaitWindowStore.DayRecord(day) else { continue }
             if store.save(record, scope: scope) { changed = true }
         }
         return changed

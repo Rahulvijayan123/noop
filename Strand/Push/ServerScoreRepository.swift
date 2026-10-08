@@ -323,6 +323,12 @@ public actor ServerScoreRepository {
         /// The `hart-windows-1` object re-serialized as JSON text; nil when `unchanged`.
         public var windowsJSON: String?
         public var unchanged: Bool { windowsJSON == nil }
+        /// The raw-IMU input revision the windows were computed from; nil from a server without the field.
+        public var inputRevision: Int64? = nil
+        /// HART's release (`release_mode`) and that of the ElderNet windows embedded in the set
+        /// (`embedded_gait_release_mode`), as the route sent them; nil when absent.
+        public var releaseMode: String? = nil
+        public var embeddedGaitReleaseMode: String? = nil
     }
 
     /// HART's per-window output for up to three UTC days, skipping the windows of any day whose revision the
@@ -358,8 +364,21 @@ public actor ServerScoreRepository {
             return ActivityWindowsDay(day: day, resultRevision: revision,
                                       encoderId: entry["encoder_id"] as? String ?? "hart",
                                       modelVersion: entry["model_version"] as? String ?? "unknown",
-                                      windowsJSON: json)
+                                      windowsJSON: json,
+                                      inputRevision: revisionNumber(entry["input_revision"]),
+                                      releaseMode: entry["release_mode"] as? String,
+                                      embeddedGaitReleaseMode: entry["embedded_gait_release_mode"] as? String)
         }
+    }
+
+    /// An int64 the route sends as a string (or, from an older encoder, a number); nil when absent or malformed.
+    static func revisionNumber(_ value: Any?) -> Int64? {
+        if let text = value as? String { return Int64(text) }
+        if let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() {
+            let n = number.int64Value
+            return number.doubleValue == Double(n) ? n : nil
+        }
+        return nil
     }
 
     // MARK: - gait windows
@@ -378,6 +397,20 @@ public actor ServerScoreRepository {
         public var model: GaitQualityModelInfo? = nil
         /// The `gait-windows-1` object as it arrived, for the on-disk store.
         public var windowsJSON: String? = nil
+        /// The release-authority fields (docs/model-integration/activity-authority.md), nil from an older server.
+        /// `releaseMode` is the weaker of the row's `release_mode` and its authority block's; `mode` stays the
+        /// worker mode the row was written under. A consumer derives the release from these, never above `mode`.
+        public var releaseMode: String? = nil
+        public var inputRevision: Int64? = nil
+        /// The authority block's pins and prior (`pinned_model_version`, `pinned_weights_digest`, `gait_prior`).
+        public var pinnedModelVersion: String? = nil
+        public var pinnedWeightsDigest: String? = nil
+        public var gaitPrior: Double? = nil
+        /// The producer's own decision for the row (`authority.use` / `.reason`); informational.
+        public var producerUse: String? = nil
+        public var producerReason: String? = nil
+        /// The row's model identity (`identity`), when sent.
+        public var identity: [String: String]? = nil
     }
 
     /// ElderNet's per-window output for up to three UTC days (same `known` rule as `activityWindows`).
@@ -407,14 +440,41 @@ public actor ServerScoreRepository {
             let windowsJSON = unchanged ? nil : (entry["windows"] as? [String: Any]).flatMap { object in
                 (try? JSONSerialization.data(withJSONObject: object)).map { String(decoding: $0, as: UTF8.self) }
             }
+            let authority = entry["authority"] as? [String: Any]
+            let identity = (entry["identity"] as? [String: Any])?.compactMapValues { $0 as? String }
+            var model = unchanged ? nil : gaitModel(entry["model"])
+            // The identity names the same model as `model` or the windows are not trusted.
+            if let m = model, let identity,
+               (identity["model_version"] ?? m.modelVersion) != m.modelVersion
+                || (identity["weights_digest"] ?? m.weightsDigest) != m.weightsDigest { model = nil }
             return GaitWindowsDay(day: day, resultRevision: revision,
                                   mode: entry["mode"] as? String ?? "shadow",
                                   modelVersion: entry["model_version"] as? String ?? "unknown",
                                   windows: unchanged ? nil : GaitWindowColumns(entry["windows"]),
                                   unchanged: unchanged,
-                                  model: unchanged ? nil : gaitModel(entry["model"]),
-                                  windowsJSON: windowsJSON)
+                                  model: model,
+                                  windowsJSON: windowsJSON,
+                                  releaseMode: weakerRelease(entry["release_mode"], authority?["release_mode"]),
+                                  inputRevision: revisionNumber(entry["input_revision"])
+                                    ?? revisionNumber(authority?["input_revision"]),
+                                  pinnedModelVersion: authority?["pinned_model_version"] as? String,
+                                  pinnedWeightsDigest: authority?["pinned_weights_digest"] as? String,
+                                  gaitPrior: (authority?["gait_prior"] as? NSNumber).flatMap { n in
+                                      CFGetTypeID(n) == CFBooleanGetTypeID() || !n.doubleValue.isFinite
+                                          ? nil : n.doubleValue
+                                  },
+                                  producerUse: authority?["use"] as? String,
+                                  producerReason: authority?["reason"] as? String,
+                                  identity: identity)
         }
+    }
+
+    /// The weaker of two recorded releases, as text; nil when neither was sent. A value that is present but not a
+    /// release name reads as shadow (`ActivityReleaseMode(recorded:)`), so it can only lower.
+    static func weakerRelease(_ a: Any?, _ b: Any?) -> String? {
+        let sent = [a, b].compactMap { $0 }.filter { !($0 is NSNull) }
+        guard !sent.isEmpty else { return nil }
+        return sent.map { ActivityReleaseMode(recorded: $0 as? String) }.min()?.rawValue
     }
 
     /// The route's `model` object as the decoder's model info. Its `weights_digest` is not part of the model's
