@@ -369,7 +369,7 @@ def build_ppg_runs(segments: list[dict[str, Any]]) -> tuple[list[PpgRun], dict[s
             if touching and _join_key(seg) == _join_key(prev):
                 group.append(seg)
                 continue
-            counts["ppg_run_id_discontinuity"] = counts.get("ppg_run_id_discontinuity", 0) + 1
+        # A split shared run_id is counted once, when its second run is made.
         if group:
             runs.append(_make_run(group, used, counts))
         group = [seg]

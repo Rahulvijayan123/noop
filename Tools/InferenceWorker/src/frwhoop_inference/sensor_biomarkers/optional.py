@@ -180,7 +180,7 @@ def evaluate_state(adapter: LoadedAdapter) -> dict[str, Any]:
 def state_documents(families: Iterable[str], state: Mapping[str, Any]) -> list[dict[str, Any]]:
     """One document per family for an adapter that cannot run, carrying the state's reason."""
     status, reason = STATE_REASONS[state["state"]]
-    detail_code = state.get("detail_code") or state["state"]
+    detail_code = state.get("detail_code") or reason
     adapter_block = {"name": state.get("adapter"), "state": state["state"]}
     if state.get("detail"):
         adapter_block["detail"] = state["detail"]
