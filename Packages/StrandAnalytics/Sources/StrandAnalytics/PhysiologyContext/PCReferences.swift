@@ -1323,7 +1323,7 @@ extension PhysiologyContext {
                     let idx = HistoryIndex(p.dailyValues, before: t, config: config)
                     let latest = idx.points.values.compactMap { $0.last?.dayNum }.max() ?? Int.min
                     let (ok, notes) = Self.assess(lineage.device, p, ownQuality: ownQuality,
-                                                  theirQuality: Self.quality(idx, today: [], t: t), config: config)
+                                                  theirQuality: Self.ownLastQuality(idx), config: config)
                     assessed.append((p, idx, latest, ok, notes))
                 }
                 let byRecency = assessed.sorted { a, b in
@@ -1345,6 +1345,18 @@ extension PhysiologyContext {
                 }
                 xs += today.filter { $0.seriesKey == opticalValidShareSeries }.map(\.value)
                 return RobustStats.median(xs)
+            }
+
+            /// Median optical valid share over the predecessor's OWN last 14 days of quality values (all strictly
+            /// before the scored day: the index holds nothing later). After a strap change those days lie before
+            /// the change, so the scored day's trailing window would usually find none (review R8).
+            static func ownLastQuality(_ index: HistoryIndex) -> Double? {
+                var pts: [RefPoint] = []
+                for mode in ProcessingMode.allCases {
+                    pts += index.points[HistoryIndex.key(mode, opticalValidShareSeries, "coverage")] ?? []
+                }
+                guard let last = pts.map(\.dayNum).max() else { return nil }
+                return RobustStats.median(pts.filter { $0.dayNum > last - 14 }.map(\.value))
             }
 
             /// Whether a predecessor's regime is comparable with the current device's.

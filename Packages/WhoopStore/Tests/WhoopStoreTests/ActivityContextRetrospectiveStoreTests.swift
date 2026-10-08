@@ -93,10 +93,10 @@ final class ActivityContextRetrospectiveStoreTests: XCTestCase {
         XCTAssertTrue(retro.isEmpty)
         let ledger1 = try await store.activityContextDay(deviceId: dev, day: "2025-10-09")
         XCTAssertNil(ledger1?.retrospectiveVersion)
-        // A rewrite without retrospective rows leaves none and records no smoother.
+        // A rewrite without retrospective rows and without a smoother version leaves none and records none.
         try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, finality: "final", retro: "ctx-retro-1"),
                                                intervals: causal, retrospective: retrospective)
-        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, finality: "final", retro: "ctx-retro-1"),
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, finality: "final"),
                                                intervals: causal)
         let none = try await store.activityContextIntervals(deviceId: dev, from: day0, to: day0 + 86_400,
                                                             reading: .retrospective)
@@ -111,5 +111,27 @@ final class ActivityContextRetrospectiveStoreTests: XCTestCase {
                                                                reading: .retrospective)
         XCTAssertTrue(cleared.isEmpty)
         XCTAssertTrue(DeviceRegistryStore.deviceScopedTables.contains("activityContextIntervalRetrospective"))
+    }
+
+    func testAnEmptySmoothedResultWithAVersionIsRecordedOnlyForAFinalDay() async throws {
+        let store = try await WhoopStore.inMemory()
+        // Smoothed, nothing to store: the version is recorded so the day is not planned again.
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0, finality: "final", retro: "ctx-retro-2"),
+                                               intervals: causal, retrospective: [])
+        let stamped = try await store.activityContextDay(deviceId: dev, day: "2025-10-09")
+        XCTAssertEqual(stamped?.retrospectiveVersion, "ctx-retro-2")
+        let none = try await store.activityContextIntervals(deviceId: dev, from: day0, to: day0 + 86_400,
+                                                            reading: .retrospective)
+        XCTAssertTrue(none.isEmpty)
+        // A day stamped but empty holds no retrospective rows, so the causal rows serve its historical read.
+        let history = try await store.activityContextIntervals(deviceId: dev, from: day0, to: day0 + 86_400,
+                                                               reading: .historical)
+        XCTAssertEqual(history.map(\.activityClass), ["walking", "standing", "stationary", "sitting"])
+        // A provisional day never records a smoother, version or not.
+        try await store.replaceActivityContext(deviceId: dev,
+                                               day: ledger(day0, finality: "provisional", retro: "ctx-retro-2"),
+                                               intervals: causal)
+        let provisional = try await store.activityContextDay(deviceId: dev, day: "2025-10-09")
+        XCTAssertNil(provisional?.retrospectiveVersion)
     }
 }
