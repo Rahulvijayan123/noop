@@ -18,7 +18,7 @@ from ._helpers import (T0, Serve, constant_columns, request_for, seconds_from_co
 
 PING_KEYS = {"id", "op", "ok", "model_available", "model_status", "model_error", "encoder_id", "encoder_kind",
              "encoder_version", "heads_version", "bundle_sha256", "checkpoint_sha256", "preprocessing_version",
-             "evidence_tier_max", "package_version"}
+             "evidence_tier_max", "package_version", "loaded", "loaded_digest"}
 INFER_KEYS = {"id", "op", "ok", "schema", "encoder_id", "encoder_kind", "encoder_version", "checkpoint_sha256",
               "heads_version", "bundle_sha256", "preprocessing_version", "evidence_tier_max", "window_s", "hop_s",
               "bundle", "windows", "n_dropped_nonfinite", "duration_ms"}
@@ -59,6 +59,12 @@ def test_ping_and_infer_shapes_over_the_wire(serve, req):
     assert set(ping) == PING_KEYS and ping["ok"] and ping["model_available"]
     assert ping["model_status"] == "standin_shadow" and ping["encoder_kind"] == "standin"
     assert ping["evidence_tier_max"] == "shadow" and ping["preprocessing_version"] == "inertia-prep-1"
+    # What was loaded, measured: the bundle digest, its encoder, the code; and the digest over exactly that map.
+    loaded = ping["loaded"]
+    assert loaded["bundle_sha256"] == ping["bundle_sha256"] and loaded["encoder_kind"] == "standin"
+    assert len(loaded["code_sha256"]) == 64 and loaded["schema"] == "activity-loaded-1"
+    from activity_context.loaded import loaded_digest
+    assert ping["loaded_digest"] == loaded_digest(loaded)
     resp = serve.send(req)
     assert set(resp) == INFER_KEYS and resp["ok"] and resp["schema"] == "motion-heads-1"
     assert resp["window_s"] == 30 and resp["hop_s"] == 5 and resp["n_dropped_nonfinite"] == 0
@@ -97,6 +103,7 @@ def test_model_missing_keeps_answering(tmp_path, req):
         assert set(ping) == PING_KEYS and ping["ok"] is True and ping["model_available"] is False
         assert ping["model_status"] == "inertia_unavailable" and ping["model_error"].startswith("model_missing")
         assert ping["encoder_kind"] is None
+        assert "bundle_sha256" not in ping["loaded"], "nothing loaded, nothing reported as loaded"
         resp = s.send(req)
         assert resp == {"id": "r1", "ok": False, "error": resp["error"], "kind": "model_missing"}
     finally:

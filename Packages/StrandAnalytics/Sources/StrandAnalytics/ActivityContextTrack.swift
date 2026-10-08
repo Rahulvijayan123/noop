@@ -136,6 +136,7 @@ public enum ActivityContextTrackBuilder {
     public static func acceptsGaitQuality(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> Bool {
         guard let gait = config.gaitQuality, gait.evidenceRefusal == nil, let g = input.gaitQuality else { return false }
         return g.model == gait.model
+            && releaseRefusal(configMode: gait.mode == .production ? .production : .candidate, track: g.releaseMode) == nil
     }
 
     /// Whether `config`'s Inertia evidence is actually accepted for `input`: the config accepts its bundle and
@@ -143,6 +144,15 @@ public enum ActivityContextTrackBuilder {
     public static func acceptsMotionHeads(for input: ActivityContextTrackInput, config: ActivityDecoderConfig) -> Bool {
         guard let heads = config.motionHeads, heads.evidenceRefusal == nil, let mh = input.motionHeads else { return false }
         return mh.bundle.bundleSha256 == heads.bundle.bundleSha256 && mh.bundle == heads.bundle
+            && releaseRefusal(configMode: heads.mode == .production ? .production : .candidate, track: mh.releaseMode) == nil
+    }
+
+    /// Why windows recorded under `track` may not feed a config running at `configMode`, or nil when they may: a
+    /// production decode needs windows released at production, and shadow windows feed nothing. An unrecorded
+    /// release (windows built in memory) is enough for a candidate decode only.
+    static func releaseRefusal(configMode: ActivityReleaseMode, track: ActivityReleaseMode?) -> String? {
+        guard let track else { return configMode == .production ? "release_mode_unrecorded" : nil }
+        return track < configMode ? "release_mode_\(track.rawValue)" : nil
     }
 
     /// The config a decode of `input` actually runs with: `config` itself when it has no motion-heads entry or
@@ -232,7 +242,10 @@ public enum ActivityContextTrackBuilder {
                         report.stamp = heads.provenanceStamp
                         attachMotionHeads(mh.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
                     } else {
-                        report.refusal = "bundle_mismatch"
+                        let sameBundle = mh.bundle.bundleSha256 == heads.bundle.bundleSha256 && mh.bundle == heads.bundle
+                        report.refusal = (sameBundle
+                            ? releaseRefusal(configMode: heads.mode == .production ? .production : .candidate,
+                                             track: mh.releaseMode) : nil) ?? "bundle_mismatch"
                     }
                 }
             } else if report.refusal == nil {
@@ -250,7 +263,9 @@ public enum ActivityContextTrackBuilder {
                         report.stamp = gait.provenanceStamp
                         attachGaitQuality(g.windows, to: &out, lo: input.dayStart, hi: input.dayEnd, report: &report)
                     } else {
-                        report.refusal = "model_mismatch"
+                        report.refusal = (g.model == gait.model
+                            ? releaseRefusal(configMode: gait.mode == .production ? .production : .candidate,
+                                             track: g.releaseMode) : nil) ?? "model_mismatch"
                     }
                 }
             } else if report.refusal == nil {

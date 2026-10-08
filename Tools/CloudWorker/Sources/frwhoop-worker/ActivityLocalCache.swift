@@ -14,8 +14,12 @@ import StrandAnalytics
 ///    run, so only the run that grew (normally the newest) produces a request the cache has not seen.
 ///
 /// Nothing here is authoritative. A missing, unreadable or corrupt entry is a miss; the cache can be deleted
-/// at any time (and should be after a model redeploy that keeps the same version string). Entries older
-/// than `maxAgeSeconds` are pruned.
+/// at any time. Entries older than `maxAgeSeconds` are pruned.
+///
+/// Answers are keyed by what the answering process measured it loaded (its ping `loaded` map: checkpoint,
+/// manifest, config and transition-artifact sha256, its code digest and thread settings), never by version labels
+/// alone, so new weight bytes under a reused label are a new key and prior answers are not reused. A child that
+/// reports no measured identity (a serve.py older than this worker) gets no cache key at all.
 struct ActivityLocalCache {
     let directory: URL
     var maxAgeSeconds: TimeInterval = 3 * 86_400
@@ -58,19 +62,21 @@ struct ActivityLocalCache {
 
     // MARK: Inference
 
-    /// Digest of everything a serve answer depends on: the model, preprocessing, transition-expert and
-    /// gait-expert versions and the exact request body (range, seconds, head and tail context).
-    /// `activity-infer-3`: answers now carry HART's `fine` distribution, which older entries lack.
-    static func inferenceKey(request: ActivityPythonService.RunRequest, modelVersion: String,
-                             preprocessingVersion: String, transitionVersion: String = "none",
-                             gaitVersion: String? = nil) -> String {
+    /// The key schema. `activity-infer-4`: keyed by the measured `loaded` identity (digests of the bytes loaded),
+    /// so entries written under version labels alone (`activity-infer-3`) are never read again.
+    static let keySchema = "activity-infer-4"
+
+    /// Digest of everything a serve answer depends on: what the answering process measured it loaded
+    /// (`identity`, its ping `loaded` map), the versions it reports, and the exact request body (range, seconds,
+    /// head and tail context). nil when `identity` is empty: an answer whose bytes cannot be named is not cached.
+    static func inferenceKey(request: ActivityPythonService.RunRequest, identity: [String: String],
+                             versions: [String: String] = [:]) -> String? {
+        guard !identity.isEmpty else { return nil }
         var data = Data()
         func add(_ text: String) { data.append(contentsOf: Array(text.utf8)); data.append(0x0A) }
-        add("activity-infer-3")
-        add(modelVersion)
-        add(preprocessingVersion)
-        add(transitionVersion)
-        if let gaitVersion { add("g:" + gaitVersion) }
+        add(keySchema)
+        for key in identity.keys.sorted() { add("i:\(key)=\(identity[key]!)") }
+        for key in versions.keys.sorted() { add("v:\(key)=\(versions[key]!)") }
         add("\(request.startTs)-\(request.endTs)")
         add("h\(request.headB64.count)"); request.headB64.forEach(add)
         add("c\(request.columnsB64.count)"); request.columnsB64.forEach(add)

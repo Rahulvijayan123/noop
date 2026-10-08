@@ -770,6 +770,10 @@ extension MotionHeadsResponse {
 public struct MotionHeadsTrackInput: Equatable, Sendable {
     public var bundle: MotionHeadsBundleInfo
     public var windows: [MotionHeadsWindow]
+    /// The release the stored windows carry (`ActivityExpertSelection` sets it from the row): a production config
+    /// accepts only production windows, and no config accepts windows recorded as shadow; nil (windows built in
+    /// memory, a replay) is accepted by a candidate config only.
+    public var releaseMode: ActivityReleaseMode? = nil
 
     public init(bundle: MotionHeadsBundleInfo, windows: [MotionHeadsWindow]) {
         self.bundle = bundle; self.windows = windows

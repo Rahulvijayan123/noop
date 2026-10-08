@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
 
 from .. import __version__
+from ..loaded import base_loaded, code_sha256, file_sha256, loaded_digest
 from ..preprocess import (MAX_HEAD_SECONDS, MAX_RUN_SECONDS, MAX_TAIL_SECONDS, PreprocessError,
                           decode_columns_b64, validate_request_units)
 from . import (ALLOWED_HOP_S, DEFAULT_HOP_S, ERROR_KINDS, MODEL_ID, MODEL_VERSION, PREPROCESSING_VERSION,
@@ -48,10 +49,38 @@ class ElderNetRuntime:
     default_hop_s: int = DEFAULT_HOP_S
     max_output_bytes: int = MAX_OUTPUT_BYTES
     load_seconds: float = 0.0
+    # sha256 of each head file as read at load (empty for injected test heads), the calibration file's sha256, and
+    # the torch threads the heads run with: the ``loaded`` identity ping reports.
+    measured_weights: Optional[Dict[str, str]] = None
+    calibration_sha256: Optional[str] = None
+    threads: Optional[int] = None
 
     @property
     def available(self) -> bool:
         return self.error is None and self.heads is not None
+
+    @property
+    def weights_digest(self) -> Optional[str]:
+        """The §5 deployment digest of the weights this runtime loaded (measured), or None when nothing loaded."""
+        if not self.available or not self.measured_weights:
+            return None
+        return weights_digest(self.measured_weights)
+
+    def loaded(self) -> Dict[str, str]:
+        """Only what this process holds: the measured weights digest, the verified upstream source and the
+        calibration it applies (loaded.py). Empty-but-for-the-code-digest when nothing loaded."""
+        out = base_loaded(self.threads if self.available else None)
+        if not self.available:
+            return out
+        if self.weights_digest:
+            out["weights_digest"] = self.weights_digest
+        # The upstream files were compiled from bytes verified equal to these digests (upstream.read_verified).
+        out["upstream_digest"] = weights_digest(source_hashes())
+        out["model_version"] = MODEL_VERSION
+        out["calibration_sha256"] = self.calibration_sha256 or "none"
+        out["hop_s"] = str(self.default_hop_s)
+        out["gait_threshold"] = repr(float(self.gait_threshold))
+        return out
 
     @property
     def gait_threshold(self) -> float:
@@ -72,14 +101,19 @@ def build_runtime(weights_dir: Optional[str] = None, *, threads: Optional[int] =
     upstream architecture source (``upstream_dir`` / $ELDERNET_UPSTREAM_DIR). ``heads`` injects pre-built heads
     (tests)."""
     t0 = time.perf_counter()
+    code_sha256()  # hashed once now, so a ping (under the request timeout) never pays for it
     try:
         cal = load_calibration(calibration)
+        measured: Dict[str, str] = {}
         if heads is None:
             from .model import load_heads
-            from .weights import resolve
-            heads = load_heads(resolve(weights_dir), threads=threads, max_batch=max_batch, upstream_dir=upstream_dir)
+            from .weights import resolve_measured
+            paths, measured = resolve_measured(weights_dir)
+            heads = load_heads(paths, threads=threads, max_batch=max_batch, upstream_dir=upstream_dir)
         return ElderNetRuntime(heads=heads, status="eldernet_loaded", calibration=cal, default_hop_s=default_hop_s,
-                               load_seconds=time.perf_counter() - t0)
+                               load_seconds=time.perf_counter() - t0, measured_weights=measured,
+                               calibration_sha256=file_sha256(calibration) if calibration else None,
+                               threads=threads)
     except WeightsError as exc:
         err = exc
     except Exception as exc:  # noqa: BLE001 - never crash the lane on load
@@ -186,6 +220,7 @@ def handle_infer(rt: ElderNetRuntime, req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_ping(rt: ElderNetRuntime) -> Dict[str, Any]:
+    loaded = rt.loaded()
     return {
         "ok": True, "model_available": rt.available, "model_status": rt.status,
         "model_error": f"{rt.error.kind}: {rt.error.message}" if rt.error is not None else None,
@@ -196,6 +231,7 @@ def handle_ping(rt: ElderNetRuntime) -> Dict[str, Any]:
         "hop_s": rt.default_hop_s, "gait_threshold": rt.gait_threshold,
         "calibration": rt.calibration.wire() if rt.calibration is not None else None,
         "preprocessing": PREPROCESSING,
+        "loaded": loaded, "loaded_digest": loaded_digest(loaded),
     }
 
 

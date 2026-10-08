@@ -89,10 +89,12 @@ def _load_model_and_verify(checkpoint_dir: str, num_classes: int,
                            manifest_seed: int = 0, manifest=None):
     """from_pretrained with upstream overrides + strict verify-on-load.
 
-    Returns (model, torch). Raises ModelError unless exactly the expected
-    head tensors are newly initialized with zero shape mismatches, all
-    overlapping tensors are bit-identical to the checkpoint, and (when a
-    manifest is given) the checkpoint sha256 matches the pinned digest.
+    Returns (model, torch, checkpoint_sha256). Raises ModelError unless exactly
+    the expected head tensors are newly initialized with zero shape
+    mismatches, all overlapping tensors are bit-identical to the checkpoint,
+    and (when a manifest is given) the checkpoint sha256 matches the pinned
+    digest. The digest is measured from the file every time, pinned or not:
+    it is what the serve process reports as loaded.
     """
     torch = _import_torch()
     try:
@@ -111,16 +113,15 @@ def _load_model_and_verify(checkpoint_dir: str, num_classes: int,
     safetensors = os.path.join(checkpoint_dir, "model.safetensors")
     if not os.path.isfile(safetensors):
         raise ModelError(f"checkpoint file missing: {safetensors}")
+    actual = _file_sha256(safetensors)
     if manifest is not None:
         files = (manifest.checkpoint or {}).get("files", {})
         info = files.get("model.safetensors")
         expected = (info or {}).get("sha256") if isinstance(info, dict) else None
-        if expected:
-            actual = _file_sha256(safetensors)
-            if actual != expected:
-                raise ModelError(
-                    "checkpoint corrupt: model.safetensors sha256 mismatch "
-                    f"({actual[:16]}... != {expected[:16]}...)")
+        if expected and actual != expected:
+            raise ModelError(
+                "checkpoint corrupt: model.safetensors sha256 mismatch "
+                f"({actual[:16]}... != {expected[:16]}...)")
 
     # Upstream config overrides, finetuning_HART/finetune.py:300-316. mask_ratio
     # and channel_virtual_expand_scale matter: they decide whether the
@@ -196,7 +197,7 @@ def _load_model_and_verify(checkpoint_dir: str, num_classes: int,
     model = model.to("cpu")
     torch.set_num_threads(1)
     torch.manual_seed(manifest_seed)
-    return model, torch
+    return model, torch, actual
 
 
 def apply_freeze_policy(model, torch) -> Dict[str, int]:
@@ -250,8 +251,11 @@ class HARTModel:
         self.manifest = manifest
         self.checkpoint_dir = checkpoint_dir
         num_classes = len(manifest.class_map)
-        self.model, self.torch = _load_model_and_verify(
+        self.model, self.torch, self.checkpoint_sha256 = _load_model_and_verify(
             checkpoint_dir, num_classes, manifest.seed, manifest=manifest)
+        # from_pretrained read the architecture from config.json beside the weights: part of what was loaded.
+        config = os.path.join(checkpoint_dir, "config.json")
+        self.config_sha256: Optional[str] = _file_sha256(config) if os.path.isfile(config) else None
         self.class_ids = list(manifest.class_map)          # WISDM letters 0..17
         sc = manifest.scaler
         self.mean = np.asarray(sc["mean"], dtype=np.float64)
