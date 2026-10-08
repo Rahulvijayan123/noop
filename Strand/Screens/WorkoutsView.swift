@@ -823,7 +823,9 @@ struct WorkoutsView: View {
 
     /// Stable task identity: changing the range/filter/rows or HRmax cancels and rebuilds the trend.
     private func recoveryTrendInputKey(rows: [WorkoutRow]) -> String {
-        "\(repo.refreshSeq)|\(profile.hrMax)|" + rows.map { "\($0.startTs):\($0.endTs)" }.joined(separator: ",")
+        // `loaded` is part of the identity so the pass that runs on the real rows is the one that counts
+        // (`recoveryLoaded`), not the first one over the still-empty list.
+        "\(repo.refreshSeq)|\(profile.hrMax)|\(loaded)|" + rows.map { "\($0.startTs):\($0.endTs)" }.joined(separator: ",")
     }
 
     private func loadRecoveryTrend(rows: [WorkoutRow]) async {
@@ -839,9 +841,9 @@ struct WorkoutsView: View {
         }
         guard !Task.isCancelled else { return }
         recoveryTrend = built
-        recoveryLoaded = true
+        if loaded { recoveryLoaded = true }
         #if DEBUG
-        if DemoPage.requested == .recovery, demoOpen == nil { demoOpen = .recovery }
+        if DemoPage.requested == .recovery, recoveryLoaded, demoOpen == nil { demoOpen = .recovery }
         #endif
     }
 

@@ -457,7 +457,7 @@ struct StretchDetailSheet: View {
             }
             persist()
         } label: {
-            Label(title, systemImage: symbol)
+            Text(title)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
@@ -602,14 +602,18 @@ private struct SliceBars: View {
         let picked = selection.flatMap { s in bars.first { $0.from <= s && s < $0.to } }
         Chart {
             ForEach(bars, id: \.id) { b in
-                BarMark(xStart: .value("From", b.from), xEnd: .value("To", b.to), y: .value("Value", b.v))
+                // A rectangle from zero, not `BarMark(xStart:xEnd:y:)`, which draws a thin horizontal bar AT
+                // the value (an interval along x) instead of a column up to it.
+                RectangleMark(xStart: .value("From", b.from), xEnd: .value("To", b.to),
+                              yStart: .value("Zero", 0), yEnd: .value("Value", b.v))
+                    .cornerRadius(NaraChartStyle.barCornerRadius)
                     .foregroundStyle(tint.opacity(picked == nil || picked?.id == b.id ? 1 : NaraChartStyle.dimmedOpacity))
             }
             SelectionRule(selection, unit: nil)
         }
         .naraChartAxes(x: ChartAxis.layout(window, style: .hours, target: 4), y: yLayout)
         .chartScrub(xs: bars.map(\.mid), selection: $selection)
-        .frame(height: 72)
+        .frame(height: 88)
         .accessibilityLabel(Text("Readings over the stretch"))
     }
 

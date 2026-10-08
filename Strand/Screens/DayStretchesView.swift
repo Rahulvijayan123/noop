@@ -364,7 +364,7 @@ struct FamilyTile: View {
         HStack(spacing: NoopMetrics.space3) {
             Image(systemName: family.symbol)
                 .font(StrandFont.icon(.row))
-                .foregroundStyle(family.color)
+                .foregroundStyle(family.iconColor)
                 .frame(width: 28)
                 .accessibilityHidden(true)
             VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
@@ -418,7 +418,7 @@ struct StretchRow: View {
             HStack(spacing: NoopMetrics.space3) {
                 Image(systemName: family.symbol)
                     .font(StrandFont.icon(.row))
-                    .foregroundStyle(family.color)
+                    .foregroundStyle(family.iconColor)
                     .frame(width: 28)
                     .accessibilityHidden(true)
                 VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
@@ -454,6 +454,12 @@ struct StretchRow: View {
         .accessibilityElement(children: .combine)
         .accessibilityHint("Shows this stretch up close and lets you say whether it is right")
     }
+}
+
+extension ActivityFamily {
+    /// The family's colour for a row's icon. "Unclear" is drawn in the inset colour on the lane, which an
+    /// icon on a card would all but lose, so its icon takes the tertiary ink instead.
+    var iconColor: Color { self == .unclear ? StrandPalette.textTertiary : color }
 }
 
 /// Three stretch rows at their final size, for the loading state.

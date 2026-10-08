@@ -64,7 +64,7 @@ struct StretchFeedbackLinkRow: View {
     }
 
     private var row: some View {
-        NoopListRow(icon: "checkmark.bubble", title: "Your answers about stretches", value: detail,
+        NoopListRow(icon: "checkmark.bubble", title: "Your answers", value: detail,
                     valueTone: center.waitingToUpload > 0 ? .warning : .neutral)
     }
 

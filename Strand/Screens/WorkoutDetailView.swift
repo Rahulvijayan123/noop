@@ -245,9 +245,10 @@ struct WorkoutDetailView: View {
             SectionHeader("Heart rate")
             ValueReadout(content, isScrubbing: hrSelection != nil, isLoading: !loaded && row.avgHr == nil)
             NoopCard {
+                // No average rule: the readout above carries the average, and a rule's label would sit on
+                // the zone labels at the trailing edge.
                 IntradayChart(samples: samples, bucketSeconds: bucketSeconds,
                               valueBands: zoneBands,
-                              references: avg.map { [ChartReference($0, label: String(localized: "Avg \(Int($0.rounded()))"))] } ?? [],
                               legend: [], state: state, window: sessionWindow,
                               y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 40)),
                               selection: $hrSelection,
