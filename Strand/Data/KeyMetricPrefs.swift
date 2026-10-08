@@ -67,7 +67,7 @@ enum KeyMetric: String, CaseIterable, Identifiable {
     /// in the editor. Display-only: nothing is computed differently for a hidden tile. The Android twin
     /// (`KeyMetric.DEFAULT_ENABLED`) should match this list when it adopts it.
     static let defaultEnabled: [KeyMetric] = [
-        .charge, .effort, .hrv, .restingHr, .respiratory, .skinTemp, .steps, .calories,
+        .charge, .effort, .hrv, .restingHr, .skinTemp, .respiratory, .steps, .calories,
     ]
 }
 
