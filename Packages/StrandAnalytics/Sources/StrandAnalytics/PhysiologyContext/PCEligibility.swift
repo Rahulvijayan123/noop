@@ -36,7 +36,7 @@ extension PhysiologyContext {
     }
 
     public struct EligibilityConfig: Codable, Equatable, Sendable {
-        public var version = "pc-eligibility-3"
+        public var version = "pc-eligibility-4"
         public var motion = MotionEvidenceConfig()
         /// Heart-rate free posture strata (reference stratification only; never a gate).
         public var posture = PostureConfig()
@@ -253,7 +253,10 @@ extension PhysiologyContext {
 
     public enum Eligibility {
 
-        public static let version = "pc-eligibility-3"
+        /// pc-eligibility-4: a decoder transition event counts over its onset-to-detection span `[onsetTs, ts]`
+        /// (INT-C), not at its detection second only, so the postural-settling gate can move. Documents decided
+        /// under pc-eligibility-3 are told apart by `PolicyVersions.eligibility` and the policy fingerprint.
+        public static let version = "pc-eligibility-4"
         public static let topExclusionReasons = 10
 
         // MARK: Reason codes — positive

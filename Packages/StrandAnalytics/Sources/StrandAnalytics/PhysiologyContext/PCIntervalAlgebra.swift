@@ -111,7 +111,9 @@ extension PhysiologyContext {
 
     public enum IntervalAlgebra {
 
-        public static let version = "pc-join-2"
+        /// pc-join-3: transition events annotate a composition when their onset-to-detection span overlaps the
+        /// support (INT-C); pc-join-2 placed them at the detection second.
+        public static let version = "pc-join-3"
 
         // MARK: Reason codes
         public static let invalidInterval: ReasonCode = "invalid_interval"

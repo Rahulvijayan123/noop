@@ -410,15 +410,22 @@ extension PhysiologyContext {
         /// Producing decoder (`decoder_version`, e.g. `hsmm-1.7`) and document algorithm (`streams-activity-1`).
         public var decoderVersion: String? = nil
         public var algorithmVersion: String? = nil
+        /// `causal` (nil: the decoder's runs, which are causal) or `retrospective` (smoothed after the day was final,
+        /// `ActivityContextDerivation`). A causal document never reads a retrospective record (`Engine.causalView`).
+        public var derivation: String? = nil
         public init(interval: Interval, activityClass: String, confidence: Double, locomotion: String? = nil,
                     posture: String? = nil, sleep: String? = nil, wear: String? = nil, revision: Int,
                     availableAt: Int? = nil, inBed: Bool? = nil, decoderVersion: String? = nil,
-                    algorithmVersion: String? = nil) {
+                    algorithmVersion: String? = nil, derivation: String? = nil) {
             self.interval = interval; self.activityClass = activityClass; self.confidence = confidence
             self.locomotion = locomotion; self.posture = posture; self.sleep = sleep; self.wear = wear
             self.revision = revision; self.availableAt = availableAt; self.inBed = inBed
             self.decoderVersion = decoderVersion; self.algorithmVersion = algorithmVersion
+            self.derivation = derivation
         }
+
+        /// Smoothed with later seconds of its day: never an input to a causal decision.
+        public var isRetrospective: Bool { derivation == ActivityContextDerivation.retrospective.rawValue }
 
         /// `algorithm/decoder` (provenance key), nil when neither is known.
         public var provenance: String? {
@@ -509,6 +516,35 @@ extension PhysiologyContext {
             self.vendor = vendor; self.deviceFamily = deviceFamily; self.sourceKind = sourceKind
             self.firmware = firmware; self.decoderVersion = decoderVersion
             self.scoringAlgorithmVersion = scoringAlgorithmVersion; self.seriesAlgorithmVersion = seriesAlgorithmVersion
+        }
+    }
+
+    /// Daily values of another device of the same user (D4-09): the regime the wearer measured in before a strap
+    /// change. Used only as a shrinkage prior / fallback for the new device's references, with its own provenance
+    /// and inflated uncertainty, when the two are comparable (same vendor and source, same hardware family, no
+    /// known firmware change, similar signal quality; per series the same regime key: method, algorithm, window,
+    /// units, placement). Never pooled into the new device's own statistics, frozen references or episodes.
+    public struct PredecessorRegimeHistory: Codable, Equatable, Sendable {
+        /// The predecessor's device scope (its device id).
+        public var deviceScope: String
+        public var vendor: String
+        public var sourceKind: String?
+        /// Canonical hardware family of the predecessor and of the scored (successor) device (`whoop4`, `whoop5`),
+        /// each positively identified from its device row, or nil when the row does not say (a bare "WHOOP"
+        /// label). Kept here, not on `DeviceRegimeInput`: a hardware family is a device-level fact for this
+        /// comparison only, so it never enters the regime key or a day's own regime (review RC-13). Unknown on
+        /// either side makes the predecessor incompatible.
+        public var hardwareFamily: String?
+        public var successorHardwareFamily: String?
+        public var firmware: String?
+        /// Its daily values (same mode), strictly before the scored day; anything later is ignored.
+        public var dailyValues: [DailyValue]
+        public init(deviceScope: String, vendor: String = "whoop", sourceKind: String? = nil,
+                    hardwareFamily: String? = nil, successorHardwareFamily: String? = nil, firmware: String? = nil,
+                    dailyValues: [DailyValue]) {
+            self.deviceScope = deviceScope; self.vendor = vendor; self.sourceKind = sourceKind
+            self.hardwareFamily = hardwareFamily; self.successorHardwareFamily = successorHardwareFamily
+            self.firmware = firmware; self.dailyValues = dailyValues
         }
     }
 }
@@ -709,12 +745,37 @@ extension PhysiologyContext {
         public var frozenReferences: [FrozenReference]
         /// Sleep sessions of earlier days (for recent sleep loss and timing change; 14 nights by default).
         public var priorSleep: [SleepSessionInput]
+        /// The user's other devices' daily values (D4-09), for the predecessor-regime fallback after a strap
+        /// change. Empty when none were read.
+        public var predecessors: [PredecessorRegimeHistory] = []
         public init(dailyValues: [DailyValue] = [], bouts: [ExertionBout] = [],
-                    frozenReferences: [FrozenReference] = [], priorSleep: [SleepSessionInput] = []) {
+                    frozenReferences: [FrozenReference] = [], priorSleep: [SleepSessionInput] = [],
+                    predecessors: [PredecessorRegimeHistory] = []) {
             self.dailyValues = dailyValues; self.bouts = bouts; self.frozenReferences = frozenReferences
-            self.priorSleep = priorSleep
+            self.priorSleep = priorSleep; self.predecessors = predecessors
         }
         public static let empty = HistoryInput()
+
+        enum CodingKeys: String, CodingKey { case dailyValues, bouts, frozenReferences, priorSleep, predecessors }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            dailyValues = try c.decode([DailyValue].self, forKey: .dailyValues)
+            bouts = try c.decode([ExertionBout].self, forKey: .bouts)
+            frozenReferences = try c.decode([FrozenReference].self, forKey: .frozenReferences)
+            priorSleep = try c.decode([SleepSessionInput].self, forKey: .priorSleep)
+            predecessors = try c.decodeIfPresent([PredecessorRegimeHistory].self, forKey: .predecessors) ?? []
+        }
+
+        /// `predecessors` only when there are any, so a history without them encodes (and fingerprints) as before.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(dailyValues, forKey: .dailyValues)
+            try c.encode(bouts, forKey: .bouts)
+            try c.encode(frozenReferences, forKey: .frozenReferences)
+            try c.encode(priorSleep, forKey: .priorSleep)
+            if !predecessors.isEmpty { try c.encode(predecessors, forKey: .predecessors) }
+        }
     }
 }
 
@@ -1088,7 +1149,7 @@ extension PhysiologyContext {
 
     /// Join tunables (owned by the lead, implemented in PCIntervalAlgebra.swift).
     public struct JoinConfig: Codable, Equatable, Sendable {
-        public var version = "pc-join-2"
+        public var version = "pc-join-3"
         /// Seconds of history before a measurement that the preceding-history window inspects.
         public var precedingLookbackS = 1800
         /// A label is "mixed" when a second supported label holds at least this share of the interval.

@@ -25,7 +25,9 @@ extension PhysiologyContext {
     }
 
     public struct ReferenceConfig: Codable, Equatable, Sendable {
-        public var version = "pc-reference-3"
+        /// pc-reference-4: context strata (`<series>.ctx_<seated|recumbent_awake|upright_stationary>`) and the
+        /// predecessor-regime fallback after a strap change (D4-09).
+        public var version = "pc-reference-4"
 
         // Daily values (contracts §5).
         /// Minimum independent stable-awake windows behind a daily value (and behind a time-band stratum value).
@@ -46,6 +48,28 @@ extension PhysiologyContext {
         /// conditioned view, shrunk toward the all-day parent like the time bands. Windows of unknown posture stay
         /// in the parent only; sitting and standing are never separated.
         public var stratifyStableAwakeByPosture = true
+        /// Context strata (`<series>.ctx_seated` / `.ctx_recumbent_awake` / `.ctx_upright_stationary`) for the
+        /// conditioned view: a window keys one only when its posture context was decided by confident, heart-rate
+        /// free posture evidence (`PostureEvidence.withContext`); `unknown` windows stay in the parent. Each needs
+        /// `stableAwakeMinWindows` windows on the day and is shrunk toward the all-day parent (n/(n+k)), so a
+        /// sparse stratum leans on the pooled reference instead of fragmenting it.
+        public var stratifyStableAwakeByContext = true
+
+        // Predecessor regime (D4-09): after a strap change the new device's history starts at zero.
+        /// Use a compatible predecessor device's history as a shrinkage prior while the device's own rolling
+        /// support is below `rollingReadyDays`.
+        public var predecessorFallback = true
+        /// k in the own-history weight n / (n + k) against the predecessor (days).
+        public var predecessorShrinkageDays = 7.0
+        /// The predecessor's scale is inflated by this factor (a different strap of the same family still
+        /// reads with its own offset and noise), and an offset uncertainty of `predecessorOffsetScaleShare` of
+        /// that inflated scale is added to the center's uncertainty.
+        public var predecessorScaleInflation = 1.5
+        public var predecessorOffsetScaleShare = 0.5
+        /// The predecessor's newest value must be within this many days of the scored day.
+        public var predecessorMaxAgeDays = 56
+        /// Signal quality (`coverage.optical_valid_share`, median of the last 14 days) may differ by at most this.
+        public var predecessorMaxQualityDifference = 0.25
         /// A stable-awake parent comparison whose day pools a recumbent-likely share (of the windows of known
         /// posture) that differs from its history's mean share by at least this gets
         /// `posture_mix_differs_from_history`: its distance mixes a posture regime change with physiology.
@@ -255,8 +279,12 @@ extension PhysiologyContext {
         public var centerUncertaintyMethod: String
         /// `median_mad` | `winsorized_mean_sd` | `pooled_median_mad` | `frozen_median_mad`.
         public var estimator: String
-        /// Parent-level supported days (conditioned view), else 0.
+        /// Parent-level supported days (conditioned view), else 0. With a predecessor regime: the predecessor's
+        /// supported days behind the borrowed part.
         public var parentSupportDays: Int
+        /// The predecessor device whose history this reference borrows after a strap change (D4-09), with
+        /// `pooledContribution` its share; nil when the reference is the device's own.
+        public var predecessorScope: String? = nil
 
         public init(day: String, seriesKey: String, regimeKey: String, view: ReferenceView, referenceId: String?,
                     status: ReferenceStatus, supportDays: Int, fromDay: String?, toDay: String?, value: Double,
@@ -279,7 +307,7 @@ extension PhysiologyContext {
             case day, seriesKey, regimeKey, view, referenceId, status, supportDays, fromDay, toDay, value, center
             case scale, scaleFloored, signedDifference, transformedDifference, robustZ, centerUncertainty
             case transform, pooledContribution, reasons, transformedCenter, centerUncertaintyMethod, estimator
-            case parentSupportDays
+            case parentSupportDays, predecessorScope
         }
 
         public init(from decoder: Decoder) throws {
@@ -308,12 +336,13 @@ extension PhysiologyContext {
             centerUncertaintyMethod = try c.decodeIfPresent(String.self, forKey: .centerUncertaintyMethod) ?? ""
             estimator = try c.decodeIfPresent(String.self, forKey: .estimator) ?? ""
             parentSupportDays = try c.decodeIfPresent(Int.self, forKey: .parentSupportDays) ?? 0
+            predecessorScope = try c.decodeIfPresent(String.self, forKey: .predecessorScope)
         }
     }
 
     public enum ContextReferences {
 
-        public static let version = "pc-reference-3"
+        public static let version = "pc-reference-4"
 
         // MARK: Reason codes
         // Daily values.
@@ -372,6 +401,28 @@ extension PhysiologyContext {
         public static let postureRegimesPooled: ReasonCode = "posture_regimes_pooled"
         /// A stable-awake parent comparison: today's recumbent-likely share differs materially from the history's.
         public static let postureMixDiffersFromHistory: ReasonCode = "posture_mix_differs_from_history"
+        /// A context stratum value / comparison (`<series>.ctx_*`).
+        public static let contextStratum: ReasonCode = "context_stratum"
+        // Predecessor regime (D4-09).
+        /// The reference borrows a predecessor device's history (a strap change): never pooled into this
+        /// regime's own statistics, shrunk away as the device's own support grows, with wider uncertainty.
+        public static let predecessorRegime: ReasonCode = "predecessor_regime"
+        /// No own history yet: the reference is the predecessor's alone (inflated).
+        public static let predecessorRegimeOnly: ReasonCode = "predecessor_regime_only"
+        public static let pooledTowardPredecessor: ReasonCode = "pooled_toward_predecessor"
+        /// A predecessor exists but is not comparable: no fallback (the reasons below say why).
+        public static let predecessorIncompatible: ReasonCode = "predecessor_regime_incompatible"
+        public static let predecessorFamilyDiffers: ReasonCode = "predecessor_family_differs"
+        public static let predecessorFamilyUnknown: ReasonCode = "predecessor_family_unknown"
+        public static let predecessorSourceDiffers: ReasonCode = "predecessor_source_differs"
+        public static let predecessorFirmwareDiffers: ReasonCode = "predecessor_firmware_differs"
+        public static let predecessorFirmwareUnknown: ReasonCode = "predecessor_firmware_unknown"
+        public static let predecessorSignalQualityDiffers: ReasonCode = "predecessor_signal_quality_differs"
+        public static let predecessorSignalQualityUnknown: ReasonCode = "predecessor_signal_quality_unknown"
+        /// A compatible predecessor exists but holds too few values of this series and regime (method, placement).
+        public static let predecessorInsufficient: ReasonCode = "predecessor_regime_insufficient"
+        /// A compatible predecessor's newest value is older than `predecessorMaxAgeDays`.
+        public static let predecessorStale: ReasonCode = "predecessor_regime_stale"
 
         public static let reasonCodes: [ReasonCode] = [
             nightlySnapshot, stableAwakeWindows, timeBandStratum, degradedValidityIncluded, multipleNightlyValues,
@@ -383,13 +434,21 @@ extension PhysiologyContext {
             frozenRegisteredThisRun, frozenNotRegistered, frozenRegistersInOtherMode, frozenScaleRefloored,
             pooledTowardParent, contextUnsupportedParentOnly, parentInsufficientChildOnly, noPopulationPrior,
             frozenWindowNotCompleteForDay, frozenCreatedAfterDayIgnored, scaleFloorDefault, partialDayComposition,
-            postureStratum, postureRegimesPooled, postureMixDiffersFromHistory,
+            postureStratum, postureRegimesPooled, postureMixDiffersFromHistory, contextStratum,
+            predecessorRegime, predecessorRegimeOnly, pooledTowardPredecessor, predecessorIncompatible,
+            predecessorFamilyDiffers, predecessorFamilyUnknown, predecessorSourceDiffers, predecessorFirmwareDiffers,
+            predecessorFirmwareUnknown, predecessorSignalQualityDiffers, predecessorSignalQualityUnknown,
+            predecessorInsufficient, predecessorStale,
         ]
 
         /// Marker between a parent series key and its local-time-band stratum (`<parent>.band_06_12`).
         public static let stratumMarker = ".band_"
         /// Marker between a parent series key and its posture stratum (`<parent>.posture_recumbent_likely`).
         public static let postureStratumMarker = ".posture_"
+        /// Marker between a parent series key and its context stratum (`<parent>.ctx_seated`).
+        public static let contextStratumMarker = ".ctx_"
+        /// The engine's per-day optical signal-quality series (excluded from comparisons: `coverage.`).
+        public static let opticalValidShareSeries = "coverage.optical_valid_share"
 
         // MARK: - Daily values
 
@@ -476,6 +535,22 @@ extension PhysiologyContext {
                     if hrDependentLeftOut { extra.append(PostureEvidence.heartRateDependentStratumNotUsed) }
                     dv.reasons = (dv.reasons + extra).sorted()
                     out.append(dv)
+                }
+                if config.stratifyStableAwakeByContext {
+                    var byContext: [ContextStratum: [MeasurementEnvelope]] = [:]
+                    for e in es {
+                        guard let c = e.posture?.context, c != .unknown else { continue }
+                        byContext[c, default: []].append(e)
+                    }
+                    for c in ContextStratum.allCases where c != .unknown {
+                        guard let group = byContext[c] else { continue }
+                        if let dv = windowValue(group, day: identity.day, seriesKey: contextSeries(parts[0], c),
+                                                regimeKey: parts[1], mode: mode, finality: finality,
+                                                extraReasons: [contextStratum, PostureEvidence.likelihoodNotConfirmed],
+                                                config: config) {
+                            out.append(dv)
+                        }
+                    }
                 }
                 if config.stratifyStableAwakeByPosture {
                     for p in [PostureStratum.recumbentLikely, .uprightLikely] {
@@ -568,16 +643,24 @@ extension PhysiologyContext {
             parent + postureStratumMarker + stratum.rawValue
         }
 
-        /// A time-band or posture stratum (scored by the conditioned view against its parent).
+        /// `<parent>.ctx_<stratum>` of a context stratum.
+        public static func contextSeries(_ parent: String, _ stratum: ContextStratum) -> String {
+            parent + contextStratumMarker + stratum.rawValue
+        }
+
+        /// A time-band, posture or context stratum (scored by the conditioned view against its parent).
         public static func isStratum(_ seriesKey: String) -> Bool {
             seriesKey.contains(stratumMarker) || seriesKey.contains(postureStratumMarker)
+                || seriesKey.contains(contextStratumMarker)
         }
 
         public static func isPostureStratum(_ seriesKey: String) -> Bool { seriesKey.contains(postureStratumMarker) }
+        public static func isContextStratum(_ seriesKey: String) -> Bool { seriesKey.contains(contextStratumMarker) }
 
         /// The all-day parent of a stratum (the series itself when it is not a stratum).
         public static func parentSeries(of seriesKey: String) -> String {
-            let cuts = [stratumMarker, postureStratumMarker].compactMap { seriesKey.range(of: $0)?.lowerBound }
+            let cuts = [stratumMarker, postureStratumMarker, contextStratumMarker]
+                .compactMap { seriesKey.range(of: $0)?.lowerBound }
             guard let cut = cuts.min() else { return seriesKey }
             return String(seriesKey[..<cut])
         }
@@ -597,10 +680,15 @@ extension PhysiologyContext {
         /// day-accumulating series (`causalPartialDaySeriesMarkers`) carry no distance.
         public static func compare(_ values: [DailyValue], history: [DailyValue], frozen: [FrozenReference],
                                    day: String, policyFingerprint: String,
-                                   config: ReferenceConfig) -> (comparisons: [ReferenceComparison],
-                                                                newFrozen: [FrozenReference]) {
+                                   config: ReferenceConfig,
+                                   lineage: RegimeLineage? = nil) -> (comparisons: [ReferenceComparison],
+                                                                      newFrozen: [FrozenReference]) {
             guard let t = dayNumber(day) else { return ([], []) }
             let index = HistoryIndex(history, before: t, config: config)
+            let predecessor = config.predecessorFallback
+                ? lineage.flatMap { PredecessorChoice($0, today: values.filter { $0.day == day }, own: index, t: t,
+                                                      config: config) }
+                : nil
 
             // One value per (mode, series, regime); only today's values.
             var todays: [DailyValue] = []
@@ -621,7 +709,7 @@ extension PhysiologyContext {
             var newFrozen: [FrozenReference] = []
             for v in todays {
                 if isStratum(v.seriesKey) {
-                    let c = conditioned(v, t: t, index: index, config: config)
+                    let c = conditioned(v, t: t, index: index, config: config, predecessor: predecessor)
                     comparisons.append(isCausalPartialDay(v.seriesKey, mode: v.mode, config: config)
                                        ? withoutDistance(c) : c)
                     continue
@@ -629,8 +717,10 @@ extension PhysiologyContext {
                 let rolling = rollingComparison(v, t: t, index: index, config: config)
                 let f = frozenComparison(v, t: t, day: day, index: index, frozen: frozen,
                                          policyFingerprint: policyFingerprint, config: config)
+                let rollingView = withPredecessor(rolling.comparison, v, t: t, own: rolling.stats,
+                                                  predecessor: predecessor, config: config)
                 var views = [recentComparison(v, t: t, index: index, rolling: rolling.stats, config: config),
-                             rolling.comparison, f.comparison]
+                             rollingView, f.comparison]
                 views = views.map { postureMixReasons($0, v, t: t, index: index, config: config) }
                 if isCausalPartialDay(v.seriesKey, mode: v.mode, config: config) {
                     views = views.map(withoutDistance)
@@ -1110,15 +1200,33 @@ extension PhysiologyContext {
         /// the all-day parent rolling reference with child weight `n / (n + k)`. A stratum without enough support
         /// falls back to the parent (`context_unsupported_parent_only`, `pooledContribution` 1). No population
         /// level exists.
-        static func conditioned(_ v: DailyValue, t: Int, index: HistoryIndex, config: ReferenceConfig) -> ReferenceComparison {
+        static func conditioned(_ v: DailyValue, t: Int, index: HistoryIndex, config: ReferenceConfig,
+                                predecessor: PredecessorChoice? = nil) -> ReferenceComparison {
             let parentKey = parentSeries(of: v.seriesKey)
             let child = index.window(v.mode, v.seriesKey, v.regimeKey, from: t - config.conditionedWindowDays, to: t - 1)
             let parentPts = index.points[HistoryIndex.key(v.mode, parentKey, v.regimeKey)] ?? []
             let cs = stats(child, seriesKey: v.seriesKey, estimator: "median_mad", config: config)
-            let ps = rollingStats(parentPts, t: t, seriesKey: parentKey, config: config)
-            let nc = cs.n, np = ps.n
+            var ps = rollingStats(parentPts, t: t, seriesKey: parentKey, config: config)
             var reasons: [ReasonCode] = [noPopulationPrior] + historyReasons(index, v)
+            // After a strap change the parent may borrow a compatible predecessor's history (never the child: a
+            // stratum is the device's own); its share and provenance are carried on the comparison.
+            // Only a parent below its own minimum borrows; a parent with its own minimum support is the device's.
+            var borrowed: PredecessorStats? = nil
+            if ps.n < config.rollingMinDays, let predecessor {
+                switch predecessor.stats(mode: v.mode, series: parentKey, regime: v.regimeKey, own: ps, t: t,
+                                         config: config) {
+                case let .borrowed(b):
+                    borrowed = b
+                    ps = b.stats
+                    reasons += b.reasons
+                case let .refused(r): reasons += r
+                }
+            }
+            let nc = cs.n
+            // A borrowed parent counts as usable (its support is the predecessor's) but is never ready.
+            let np = borrowed != nil ? max(ps.n, config.rollingMinDays) : ps.n
             if isPostureStratum(v.seriesKey) { reasons += [postureStratum, PostureEvidence.likelihoodNotConfirmed] }
+            if isContextStratum(v.seriesKey) { reasons += [contextStratum, PostureEvidence.likelihoodNotConfirmed] }
             let other = index.hasOtherRegime(v.mode, v.seriesKey, v.regimeKey)
                 || index.hasOtherRegime(v.mode, parentKey, v.regimeKey)
             if nc == 0 && np == 0 {
@@ -1159,8 +1267,186 @@ extension PhysiologyContext {
                 w = 0
             }
             s.constant = cs.constant && (nc > 1)
-            return build(v, view: .conditioned, stats: s, status: status, reasons: reasons, pooled: 1 - w,
-                         parentSupportDays: np, config: config)
+            if borrowed != nil, status == .ready { status = .provisional; reasons.append(provisionalSupport) }
+            var out = build(v, view: .conditioned, stats: s, status: status, reasons: reasons, pooled: 1 - w,
+                            parentSupportDays: borrowed?.predecessorDays ?? np, config: config)
+            if let b = borrowed, status == .ready || status == .provisional { out.predecessorScope = b.scope }
+            return out
+        }
+
+        // MARK: - Predecessor regime (D4-09)
+
+        /// What the references know about the device's measurement lineage: the current device's attributes and
+        /// its user's other devices' history.
+        public struct RegimeLineage: Sendable {
+            public var device: DeviceRegimeInput
+            public var predecessors: [PredecessorRegimeHistory]
+            public init(device: DeviceRegimeInput, predecessors: [PredecessorRegimeHistory]) {
+                self.device = device; self.predecessors = predecessors
+            }
+        }
+
+        /// A predecessor's contribution to one reference.
+        struct PredecessorStats {
+            /// Pooled statistics (own and predecessor), on the transformed scale.
+            var stats: RefStats
+            /// The own-history weight n / (n + k).
+            var ownWeight: Double
+            var predecessorDays: Int
+            var scope: String
+            var reasons: [ReasonCode]
+        }
+
+        enum PredecessorOutcome {
+            case borrowed(PredecessorStats)
+            case refused([ReasonCode])
+        }
+
+        /// The predecessor chosen for one scored day: the newest compatible one (ties by device scope), or the
+        /// reasons the newest one is not comparable. Built once per `compare`.
+        struct PredecessorChoice {
+            var scope: String?
+            var index: HistoryIndex?
+            /// Compatible: notes carried on every borrowed reference. Incompatible: why (on every comparison that
+            /// would have borrowed).
+            var notes: [ReasonCode]
+            var compatible: Bool
+
+            init?(_ lineage: RegimeLineage, today: [DailyValue], own: HistoryIndex, t: Int, config: ReferenceConfig) {
+                let candidates = lineage.predecessors.filter { $0.deviceScope != "" }
+                    .sorted { $0.deviceScope < $1.deviceScope }
+                guard !candidates.isEmpty else { return nil }
+                let ownQuality = Self.quality(own, today: today, t: t)
+                var assessed: [(p: PredecessorRegimeHistory, index: HistoryIndex, latest: Int, ok: Bool,
+                                notes: [ReasonCode])] = []
+                for p in candidates {
+                    let idx = HistoryIndex(p.dailyValues, before: t, config: config)
+                    let latest = idx.points.values.compactMap { $0.last?.dayNum }.max() ?? Int.min
+                    let (ok, notes) = Self.assess(lineage.device, p, ownQuality: ownQuality,
+                                                  theirQuality: Self.quality(idx, today: [], t: t), config: config)
+                    assessed.append((p, idx, latest, ok, notes))
+                }
+                let byRecency = assessed.sorted { a, b in
+                    a.latest != b.latest ? a.latest > b.latest : a.p.deviceScope < b.p.deviceScope
+                }
+                if let best = byRecency.first(where: { $0.ok }) {
+                    scope = best.p.deviceScope; index = best.index; notes = best.notes; compatible = true
+                } else {
+                    scope = nil; index = nil; compatible = false
+                    notes = [predecessorIncompatible] + (byRecency.first?.notes ?? [])
+                }
+            }
+
+            /// Median optical valid share over the last 14 days before `t` (plus today's, when given).
+            static func quality(_ index: HistoryIndex, today: [DailyValue], t: Int) -> Double? {
+                var xs: [Double] = []
+                for mode in ProcessingMode.allCases {
+                    xs += index.window(mode, opticalValidShareSeries, "coverage", from: t - 14, to: t - 1).map(\.value)
+                }
+                xs += today.filter { $0.seriesKey == opticalValidShareSeries }.map(\.value)
+                return RobustStats.median(xs)
+            }
+
+            /// Whether a predecessor's regime is comparable with the current device's.
+            static func assess(_ current: DeviceRegimeInput, _ p: PredecessorRegimeHistory, ownQuality: Double?,
+                               theirQuality: Double?, config: ReferenceConfig) -> (Bool, [ReasonCode]) {
+                func norm(_ s: String?) -> String? {
+                    s.map { $0.trimmingCharacters(in: .whitespaces).lowercased() }.flatMap { $0.isEmpty ? nil : $0 }
+                }
+                var notes: [ReasonCode] = []
+                var ok = true
+                if norm(current.vendor) != norm(p.vendor) || norm(current.sourceKind) != norm(p.sourceKind) {
+                    ok = false; notes.append(predecessorSourceDiffers)
+                }
+                switch (norm(p.successorHardwareFamily), norm(p.hardwareFamily)) {
+                case let (a?, b?) where a == b: break
+                case (_?, _?): ok = false; notes.append(predecessorFamilyDiffers)
+                default: ok = false; notes.append(predecessorFamilyUnknown)
+                }
+                switch (norm(current.firmware), norm(p.firmware)) {
+                case let (a?, b?) where a != b: ok = false; notes.append(predecessorFirmwareDiffers)
+                case (_?, _?): break
+                // No effective-dated firmware source exists (the worker leaves it unknown): a firmware change that
+                // altered the method cannot be ruled out, and the reference says so.
+                default: notes.append(predecessorFirmwareUnknown)
+                }
+                if let a = ownQuality, let b = theirQuality {
+                    if abs(a - b) > config.predecessorMaxQualityDifference {
+                        ok = false; notes.append(predecessorSignalQualityDiffers)
+                    }
+                } else {
+                    notes.append(predecessorSignalQualityUnknown)
+                }
+                return (ok, notes.sorted())
+            }
+
+            /// The predecessor-backed statistics of one (mode, series, regime) given the device's own `own`
+            /// statistics over the rolling window.
+            func stats(mode: ProcessingMode, series: String, regime: String, own: RefStats, t: Int,
+                       config: ReferenceConfig) -> PredecessorOutcome {
+                guard compatible, let index, let scope else { return .refused(notes) }
+                let pts = index.points[HistoryIndex.key(mode, series, regime)] ?? []
+                guard let latest = pts.last?.dayNum else { return .refused([predecessorInsufficient]) }
+                guard t - latest <= config.predecessorMaxAgeDays else { return .refused([predecessorStale]) }
+                let window = pts.filter { $0.dayNum > latest - config.rollingWindowDays && $0.dayNum < t }
+                let ps = ContextReferences.stats(window, seriesKey: series, estimator: "median_mad", config: config)
+                guard ps.n >= config.rollingMinDays, let pc = ps.center, let sp = ps.scale else {
+                    return .refused([predecessorInsufficient])
+                }
+                let n = own.n
+                let k = max(0, config.predecessorShrinkageDays)
+                let w = n == 0 ? 0 : Double(n) / (Double(n) + k)
+                let inflated = sp * max(1, config.predecessorScaleInflation)
+                let center = w * (own.center ?? pc) + (1 - w) * pc
+                let ownScale = n >= config.rollingMinDays ? own.scale : nil
+                let raw = ownScale.map { (w * $0 * $0 + (1 - w) * inflated * inflated).squareRoot() } ?? inflated
+                let floor = scaleFloor(series, center: center, config: config)
+                var s = RefStats()
+                s.estimator = "predecessor_pooled_median_mad"
+                s.n = n
+                s.fromDay = own.fromDay ?? ps.fromDay
+                s.toDay = own.toDay ?? ps.toDay
+                s.latestDayNum = own.latestDayNum ?? ps.latestDayNum
+                s.center = center
+                s.floored = !(raw > floor)
+                s.scale = max(raw, floor)
+                let seOwn = n > 0 ? (own.standardError ?? RobustStats.medianStandardError(sigma: s.scale!, n: n) ?? 0) : 0
+                let sePred = RobustStats.medianStandardError(sigma: inflated, n: ps.n) ?? inflated
+                let offset = max(0, config.predecessorOffsetScaleShare) * inflated
+                s.standardError = ((w * seOwn) * (w * seOwn) + ((1 - w) * sePred) * ((1 - w) * sePred)
+                                   + ((1 - w) * offset) * ((1 - w) * offset)).squareRoot()
+                let reasons = [predecessorRegime, n == 0 ? predecessorRegimeOnly : pooledTowardPredecessor] + notes
+                return .borrowed(PredecessorStats(stats: s, ownWeight: w, predecessorDays: ps.n, scope: scope,
+                                                  reasons: reasons))
+            }
+        }
+
+        /// The rolling comparison with the predecessor regime applied: unchanged when the device's own support is
+        /// ready (or no predecessor exists); flagged when a predecessor exists but is not comparable or holds too
+        /// little; otherwise a provisional reference pooled toward the predecessor with weight
+        /// `1 - n / (n + k)`, wider uncertainty and the predecessor named (`predecessorScope`).
+        static func withPredecessor(_ c: ReferenceComparison, _ v: DailyValue, t: Int, own: RefStats,
+                                    predecessor: PredecessorChoice?, config: ReferenceConfig) -> ReferenceComparison {
+            guard let predecessor, own.n < config.rollingReadyDays else { return c }
+            switch predecessor.stats(mode: v.mode, series: v.seriesKey, regime: v.regimeKey, own: own, t: t,
+                                     config: config) {
+            case let .refused(r):
+                var c = c
+                c.reasons = Array(Set(c.reasons + r)).sorted()
+                return c
+            case let .borrowed(b):
+                // The device's own history keeps every reason it had except the support verdicts this replaces.
+                let replaced: Set<ReasonCode> = [noHistory, insufficientHistory, provisionalSupport,
+                                                 historyInOtherRegimeOnly]
+                let kept = c.reasons.filter { !replaced.contains($0) && $0 != logTransform && $0 != scaleFloored
+                    && $0 != scaleFloorDefault && $0 != smallSampleScaleCorrection && $0 != centerUncertaintyApproximate
+                    && $0 != constantHistory }
+                var out = build(v, view: .rolling, stats: b.stats, status: .provisional,
+                                reasons: kept + b.reasons + [provisionalSupport], pooled: 1 - b.ownWeight,
+                                parentSupportDays: b.predecessorDays, config: config)
+                out.predecessorScope = b.scope
+                return out
+            }
         }
 
         // MARK: - Calendar days (pure, zone-free arithmetic on `yyyy-MM-dd` keys)

@@ -1233,6 +1233,14 @@ extension WhoopStore {
         // The `*Ctx` views are rebuilt: a sample now joins the interval of its day's OWNER (the ledger), not
         // only intervals stored under the sample's own id, and carries the day's decoder version and whether
         // the context is still provisional. iOS-only, like v48.
+        //
+        // Retrospective intervals (D8-10): `activityContextIntervalRetrospective` holds, for a FINAL day only, the
+        // intervals re-shaped by the retrospective smoother (it reads later seconds of the same day), beside the
+        // causal rows in `activityContextInterval`, which are never replaced by them. Same columns, same rules,
+        // same key; every row says `derivation` (`causal` in the live table, `retrospective` here) and the ledger's
+        // `retrospectiveVersion` names the smoother that wrote the day's rows (NULL: none). The `*Ctx` views and
+        // `activityContextDayClass` join the causal table only, so a causal consumer can never read a smoothed
+        // label; historical readers ask `activityContextIntervals(..., reading: .historical)`.
         migrator.registerMigration("v50-activity-context-provenance") { db in
             try db.alter(table: "activityContextDay") { t in
                 t.add(column: "featureSchema", .text)
@@ -1245,6 +1253,7 @@ extension WhoopStore {
                 t.add(column: "finality", .text).notNull().defaults(to: "provisional")
                 t.add(column: "decodeMode", .text).notNull().defaults(to: "causal")
                 t.add(column: "sleepKnownOutsideSessions", .integer)
+                t.add(column: "retrospectiveVersion", .text)      // smoother of the day's retrospective rows
             }
             // The views find a sample's day owner by time alone.
             try db.create(index: "idx_activityContextDay_start", on: "activityContextDay",
@@ -1267,6 +1276,56 @@ extension WhoopStore {
                 t.add(column: "rmssdSettled", .double)
                 t.add(column: "rrDiffSqSumMs2Settled", .double)
                 t.add(column: "rrDiffCountSettled", .integer)
+                t.add(column: "derivation", .text).notNull().defaults(to: "causal")
+            }
+            // Same columns, in the same order, as `activityContextInterval` after the alter above.
+            try db.create(table: "activityContextIntervalRetrospective", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("startTs", .integer).notNull()
+                t.column("endTs", .integer).notNull()
+                t.column("activityClass", .text).notNull()
+                t.column("confidence", .double).notNull()
+                t.column("runnerUp", .text)
+                t.column("runnerUpConfidence", .double).notNull().defaults(to: 0)
+                t.column("evidenceQuality", .double).notNull().defaults(to: 0)
+                t.column("posture", .text)
+                t.column("locomotion", .text)
+                t.column("armBehavior", .text)
+                t.column("sleepState", .text).notNull()
+                t.column("wearState", .text).notNull()
+                t.column("intensity", .double)
+                t.column("stepTicks", .integer).notNull().defaults(to: 0)
+                t.column("cadenceSpm", .double)
+                t.column("hrSamples", .integer).notNull().defaults(to: 0)
+                t.column("hrMean", .double)
+                t.column("hrMin", .integer)
+                t.column("hrMax", .integer)
+                t.column("hrSlope", .double)
+                t.column("rmssd", .double)
+                t.column("rrBeats", .integer).notNull().defaults(to: 0)
+                t.column("respRateBpm", .double)
+                t.column("respBreaths", .integer).notNull().defaults(to: 0)
+                t.column("rrDiffSqSumMs2", .double).notNull().defaults(to: 0)
+                t.column("rrDiffCount", .integer).notNull().defaults(to: 0)
+                t.column("inBed", .integer)
+                t.column("uncertainty", .double)
+                t.column("experts", .text)
+                t.column("transitionCount", .integer)
+                t.column("absorbedSeconds", .integer)
+                t.column("precededByGapS", .integer)
+                t.column("settlingSeconds", .integer)
+                t.column("absorbedClasses", .text)
+                t.column("detail", .text)
+                t.column("detailConfidence", .double)
+                t.column("precedingClass", .text)
+                t.column("settledFromTs", .integer)
+                t.column("hrMeanSettled", .double)
+                t.column("hrSamplesSettled", .integer)
+                t.column("rmssdSettled", .double)
+                t.column("rrDiffSqSumMs2Settled", .double)
+                t.column("rrDiffCountSettled", .integer)
+                t.column("derivation", .text).notNull().defaults(to: "retrospective")
+                t.primaryKey(["deviceId", "startTs"])
             }
             try db.create(table: "activityContextTransition", options: [.ifNotExists]) { t in
                 t.column("deviceId", .text).notNull()

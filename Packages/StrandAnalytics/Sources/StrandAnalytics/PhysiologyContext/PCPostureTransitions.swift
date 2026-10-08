@@ -32,8 +32,21 @@ extension PhysiologyContext {
         case unknown
     }
 
+    /// The posture context of a stable-awake measurement, finer than the recumbency likelihood (D4-09): seated,
+    /// lying awake or standing still. Decided only by posture evidence the decoder stands behind (class confidence
+    /// at least `PostureConfig.contextMinConfidence`, a decoder whose posture head reads no heart rate, outside the
+    /// heart-rate confirmed in-bed window) and never against the forearm's own gravity reading. Everything else is
+    /// `unknown` and stays in the pooled parent reference.
+    public enum ContextStratum: String, Codable, CaseIterable, Sendable {
+        case seated
+        case recumbentAwake = "recumbent_awake"
+        case uprightStationary = "upright_stationary"
+        case unknown
+    }
+
     public struct PostureConfig: Codable, Equatable, Sendable {
-        public var version = "pc-posture-1"
+        /// pc-posture-2: adds the context stratum (`ContextStratum`); the recumbency stratum is unchanged.
+        public var version = "pc-posture-2"
         /// A gravity sample is forearm-flat when `|x| / |g|` is below this (x is the strap's forearm axis).
         public var forearmFlatMaxAbsX = 0.35
         /// Gravity samples whose norm is outside this range (g) are not orientation evidence.
@@ -51,7 +64,51 @@ extension PhysiologyContext {
         public var uprightMaxInBedShare = 0.0
         /// Use the decoder runs' in-bed window (heart-rate confirmed sleep detector) as recumbency evidence.
         public var useInBedWindow = true
+
+        // Context stratum (D4-09).
+        /// tau: the least class confidence a decoder posture claim needs to key a context stratum. Above the
+        /// wrist-only sit / stand cap (`ActivityClassifier.wristOnlyPostureConfidenceCap`, 0.75), so a sitting or
+        /// standing claim qualifies only when a learned posture source backed it; a lying claim needs a strong one.
+        public var contextMinConfidence = 0.8
+        /// Share of the support one qualifying posture must cover (the rest: another posture, a claim below tau,
+        /// in bed, movement or nothing decoded).
+        public var contextMinShare = 0.9
+        /// Oldest decoder whose posture head reads no heart rate: from hsmm-1.8 heart rate has one level across bed
+        /// rest, seated and upright and separates stationary from exertion only (posture comes from posture
+        /// evidence). Older decoders' posture claims leaned on heart rate and never key a stratum.
+        public var contextMinDecoderVersion = "hsmm-1.8"
         public init() {}
+
+        enum CodingKeys: String, CodingKey {
+            case version, forearmFlatMaxAbsX, gravityNormMin, gravityNormMax, minGravityCoverageShare
+            case recumbentMinFlatShare, uprightMaxFlatShare, inBedRecumbentMinShare, uprightMaxInBedShare
+            case useInBedWindow, contextMinConfidence, contextMinShare, contextMinDecoderVersion
+        }
+
+        /// Configs written before the context stratum existed decode with its defaults.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            let d = PostureConfig()
+            version = try c.decodeIfPresent(String.self, forKey: .version) ?? d.version
+            forearmFlatMaxAbsX = try c.decodeIfPresent(Double.self, forKey: .forearmFlatMaxAbsX) ?? d.forearmFlatMaxAbsX
+            gravityNormMin = try c.decodeIfPresent(Double.self, forKey: .gravityNormMin) ?? d.gravityNormMin
+            gravityNormMax = try c.decodeIfPresent(Double.self, forKey: .gravityNormMax) ?? d.gravityNormMax
+            minGravityCoverageShare = try c.decodeIfPresent(Double.self, forKey: .minGravityCoverageShare)
+                ?? d.minGravityCoverageShare
+            recumbentMinFlatShare = try c.decodeIfPresent(Double.self, forKey: .recumbentMinFlatShare)
+                ?? d.recumbentMinFlatShare
+            uprightMaxFlatShare = try c.decodeIfPresent(Double.self, forKey: .uprightMaxFlatShare) ?? d.uprightMaxFlatShare
+            inBedRecumbentMinShare = try c.decodeIfPresent(Double.self, forKey: .inBedRecumbentMinShare)
+                ?? d.inBedRecumbentMinShare
+            uprightMaxInBedShare = try c.decodeIfPresent(Double.self, forKey: .uprightMaxInBedShare)
+                ?? d.uprightMaxInBedShare
+            useInBedWindow = try c.decodeIfPresent(Bool.self, forKey: .useInBedWindow) ?? d.useInBedWindow
+            contextMinConfidence = try c.decodeIfPresent(Double.self, forKey: .contextMinConfidence)
+                ?? d.contextMinConfidence
+            contextMinShare = try c.decodeIfPresent(Double.self, forKey: .contextMinShare) ?? d.contextMinShare
+            contextMinDecoderVersion = try c.decodeIfPresent(String.self, forKey: .contextMinDecoderVersion)
+                ?? d.contextMinDecoderVersion
+        }
     }
 
     /// Heart-rate free recumbency likelihood over a measurement's whole support.
@@ -69,6 +126,14 @@ extension PhysiologyContext {
         /// True when the in-bed window (heart-rate confirmed sleep detector) decided the stratum.
         public var heartRateDependent: Bool
         public var reasons: [ReasonCode]
+        /// The context stratum (pc-posture-2); nil on envelopes written before it existed. Never heart-rate
+        /// dependent: the evidence that would make it so is refused (`contextReasons` says why it is unknown).
+        public var context: ContextStratum? = nil
+        /// What decided `context`: `decoder_posture`, plus `forearm_gravity` when the forearm agrees.
+        public var contextBasis: [String]? = nil
+        /// Seconds-weighted class confidence behind `context` (nil when unknown).
+        public var contextConfidence: Double? = nil
+        public var contextReasons: [ReasonCode]? = nil
         public init(version: String, stratum: PostureStratum, basis: [String], gravityS: Int,
                     forearmFlatShare: Double?, inBedS: Int?, heartRateDependent: Bool, reasons: [ReasonCode]) {
             self.version = version; self.stratum = stratum; self.basis = basis; self.gravityS = gravityS
@@ -100,10 +165,127 @@ extension PhysiologyContext {
         /// (it stays in the parent).
         public static let heartRateDependentStratumNotUsed: ReasonCode = "posture_stratum_heart_rate_dependent_not_used"
 
+        // Context stratum (D4-09).
+        public static let basisDecoderPosture = "decoder_posture"
+        /// No decoder record covers enough of the support with a posture claim.
+        public static let contextNoPostureClaim: ReasonCode = "context_no_posture_claim"
+        /// The posture claims are below tau (`contextMinConfidence`).
+        public static let contextBelowConfidenceFloor: ReasonCode = "context_confidence_below_floor"
+        /// The claims come from a decoder whose posture head read heart rate (older than `contextMinDecoderVersion`).
+        public static let contextDecoderReadsHeartRate: ReasonCode = "context_decoder_posture_reads_heart_rate"
+        /// Seconds inside the heart-rate confirmed in-bed window are not context evidence.
+        public static let contextInBedNotUsed: ReasonCode = "context_in_bed_window_not_used"
+        /// Qualifying claims of more than one posture, none covering `contextMinShare`.
+        public static let contextMixed: ReasonCode = "context_postures_mixed"
+        /// The decoder's posture and the forearm's gravity disagree (lying vs upright).
+        public static let contextConflictsWithGravity: ReasonCode = "context_conflicts_with_forearm_gravity"
+
         public static let reasonCodes: [ReasonCode] = [
             likelihoodNotConfirmed, sittingStandingNotSeparated, inBedFromSleepDetector, insufficientGravity,
             ambiguous, partlyInBed, inBedNotUsedForHeartRateTarget, heartRateDependentStratumNotUsed,
+            contextNoPostureClaim, contextBelowConfidenceFloor, contextDecoderReadsHeartRate, contextInBedNotUsed,
+            contextMixed, contextConflictsWithGravity,
         ]
+
+        /// The context stratum a decoder class names (nil: not a posture claim).
+        public static func contextStratum(forClass c: String?) -> ContextStratum? {
+            switch c {
+            case "sitting", "sitting_desk": return .seated
+            case "standing": return .uprightStationary
+            case "lying_down": return .recumbentAwake
+            default: return nil
+            }
+        }
+
+        /// The decoder version of a resolved span's provenance (`algorithm/decoder` or `decoder`).
+        static func decoderVersion(of provenance: String?) -> String? {
+            guard let p = provenance, !p.isEmpty else { return nil }
+            return p.split(separator: "/").last.map(String.init)
+        }
+
+        /// `version >= minimum` for `<name>-<major>.<minor>[...]` codes of the same name; false otherwise.
+        static func atLeast(_ version: String?, _ minimum: String) -> Bool {
+            func parts(_ v: String) -> (String, [Int])? {
+                guard let dash = v.lastIndex(of: "-") else { return nil }
+                let nums = v[v.index(after: dash)...].split(separator: ".").map { Int($0) }
+                guard !nums.isEmpty, nums.allSatisfy({ $0 != nil }) else { return nil }
+                return (String(v[..<dash]), nums.map { $0! })
+            }
+            guard let v = version, let a = parts(v), let b = parts(minimum), a.0 == b.0 else { return false }
+            for i in 0..<max(a.1.count, b.1.count) {
+                let x = i < a.1.count ? a.1[i] : 0, y = i < b.1.count ? b.1[i] : 0
+                if x != y { return x > y }
+            }
+            return true
+        }
+
+        /// The context stratum of `support` (D4-09), written onto `posture`.
+        ///
+        /// `decoder` is the resolved decoder track (class, confidence, provenance per span), `inBed` the in-bed
+        /// track. A second counts for a posture only when a span claims it at confidence >= tau, from a decoder
+        /// whose posture head reads no heart rate, outside the in-bed window. One posture must cover
+        /// `contextMinShare` of the support, and the forearm's gravity reading (`posture.stratum`) must not say
+        /// the opposite (recumbent vs upright).
+        public static func withContext(_ posture: PostureContext, over support: Interval, decoder: ResolvedTrack,
+                                       inBed: ResolvedTrack, config: PostureConfig) -> PostureContext {
+            var out = posture
+            var reasons: [ReasonCode] = []
+            func finish(_ s: ContextStratum, basis: [String] = [], confidence: Double? = nil) -> PostureContext {
+                out.context = s
+                out.contextBasis = basis.sorted()
+                out.contextConfidence = confidence.map { ($0 * 10_000).rounded() / 10_000 }
+                out.contextReasons = Array(Set(reasons + (s == .unknown ? [] : [likelihoodNotConfirmed]))).sorted()
+                return out
+            }
+            guard support.isValid else { reasons.append(contextNoPostureClaim); return finish(.unknown) }
+            let bed = IntervalAlgebra.overlapping(inBed.spans, support).filter { $0.label == inBedLabel }.map(\.interval)
+            var seconds: [ContextStratum: Int] = [:]
+            var confidenceSum: [ContextStratum: Double] = [:]
+            var claimed = 0
+            for span in IntervalAlgebra.overlapping(decoder.spans, support) {
+                guard let stratum = contextStratum(forClass: span.label) else { continue }
+                let piece = span.interval.intersection(support)
+                guard let piece, piece.duration > 0 else { continue }
+                let inBedS = bed.reduce(0) { $0 + $1.overlapSeconds(with: piece) }
+                let usable = piece.duration - inBedS
+                claimed += piece.duration
+                if inBedS > 0 { reasons.append(contextInBedNotUsed) }
+                guard usable > 0 else { continue }
+                guard atLeast(decoderVersion(of: span.provenance), config.contextMinDecoderVersion) else {
+                    reasons.append(contextDecoderReadsHeartRate); continue
+                }
+                guard let c = span.confidence, c >= config.contextMinConfidence else {
+                    reasons.append(contextBelowConfidenceFloor); continue
+                }
+                seconds[stratum, default: 0] += usable
+                confidenceSum[stratum, default: 0] += c * Double(usable)
+            }
+            if claimed == 0 { reasons.append(contextNoPostureClaim) }
+            let need = config.contextMinShare * Double(support.duration)
+            guard let best = ContextStratum.allCases.compactMap({ s in seconds[s].map { (s, $0) } })
+                    .max(by: { $0.1 < $1.1 }), Double(best.1) >= need else {
+                if seconds.count > 1 { reasons.append(contextMixed) }
+                return finish(.unknown)
+            }
+            let (stratum, s) = best
+            switch (stratum, posture.stratum) {
+            case (.recumbentAwake, .uprightLikely), (.seated, .recumbentLikely), (.uprightStationary, .recumbentLikely):
+                reasons.append(contextConflictsWithGravity)
+                return finish(.unknown)
+            default: break
+            }
+            var basis = [basisDecoderPosture]
+            let gravityAgrees = posture.basis.contains(basisForearmGravity)
+                && ((stratum == .recumbentAwake && posture.stratum == .recumbentLikely)
+                    || (stratum != .recumbentAwake && posture.stratum == .uprightLikely))
+            if gravityAgrees { basis.append(basisForearmGravity) }
+            if stratum != .recumbentAwake { reasons.append(sittingStandingNotSeparatedByWrist) }
+            return finish(stratum, basis: basis, confidence: (confidenceSum[stratum] ?? 0) / Double(max(1, s)))
+        }
+
+        /// A seated / standing context stratum: the claim is a learned-source-backed likelihood (tau is above the
+        /// wrist-only cap), still not a measurement of body height.
+        public static let sittingStandingNotSeparatedByWrist: ReasonCode = "sit_stand_from_learned_posture_claim"
 
         /// The in-bed track of the decoder runs (`in_bed` / `not_in_bed`, resolved by revision); runs that did not
         /// say are left out (uncovered).

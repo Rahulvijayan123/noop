@@ -72,6 +72,13 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
     public var rmssdSettled: Double?
     public var rrDiffSqSumMs2Settled: Double?
     public var rrDiffCountSettled: Int?
+    /// `causal` (the decoder's forward filter only; the live rows in `activityContextInterval`) or `retrospective`
+    /// (smoothed after the day was final; `activityContextIntervalRetrospective`). Set by the table a row is read
+    /// from; a row written before the column existed is causal.
+    public var derivation: String
+
+    public static let causal = "causal"
+    public static let retrospective = "retrospective"
 
     public init(startTs: Int, endTs: Int, activityClass: String, confidence: Double,
                 runnerUp: String? = nil, runnerUpConfidence: Double = 0, evidenceQuality: Double = 0,
@@ -87,7 +94,8 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
                 settlingSeconds: Int? = nil, absorbedClasses: String? = nil, detail: String? = nil,
                 detailConfidence: Double? = nil, precedingClass: String? = nil, settledFromTs: Int? = nil,
                 hrMeanSettled: Double? = nil, hrSamplesSettled: Int? = nil, rmssdSettled: Double? = nil,
-                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil) {
+                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil,
+                derivation: String = ActivityContextIntervalRow.causal) {
         self.startTs = startTs
         self.endTs = endTs
         self.activityClass = activityClass
@@ -131,6 +139,7 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
         self.rmssdSettled = rmssdSettled
         self.rrDiffSqSumMs2Settled = rrDiffSqSumMs2Settled
         self.rrDiffCountSettled = rrDiffCountSettled
+        self.derivation = derivation
     }
 
     public var durationSeconds: Int { endTs - startTs }
@@ -173,6 +182,10 @@ public struct ActivityContextDayRow: Equatable, Sendable {
     public var decodeMode: String
     /// Whether time outside logged sleep was read as awake (a finished day) or unknown (a live one).
     public var sleepKnownOutsideSessions: Bool?
+    /// The retrospective smoother version (`ActivityContextRetrospective.version`) whose rows this day holds in
+    /// `activityContextIntervalRetrospective`; nil when it holds none (a provisional day, or one written before
+    /// retrospective smoothing existed). Historical readers prefer those rows for a final day.
+    public var retrospectiveVersion: String?
 
     public static let provisional = "provisional"
     public static let final = "final"
@@ -186,7 +199,8 @@ public struct ActivityContextDayRow: Equatable, Sendable {
                 featureSchema: String? = nil, encoderId: String? = nil, encoderVersion: String? = nil,
                 motionHeads: String? = nil, gaitQuality: String? = nil, configTag: String? = nil,
                 inputFingerprint: String? = nil, finality: String = ActivityContextDayRow.provisional,
-                decodeMode: String = ActivityContextDayRow.causal, sleepKnownOutsideSessions: Bool? = nil) {
+                decodeMode: String = ActivityContextDayRow.causal, sleepKnownOutsideSessions: Bool? = nil,
+                retrospectiveVersion: String? = nil) {
         self.day = day
         self.dayStart = dayStart
         self.dayEnd = dayEnd
@@ -208,6 +222,7 @@ public struct ActivityContextDayRow: Equatable, Sendable {
         self.finality = finality
         self.decodeMode = decodeMode
         self.sleepKnownOutsideSessions = sleepKnownOutsideSessions
+        self.retrospectiveVersion = retrospectiveVersion
     }
 }
 
@@ -252,6 +267,10 @@ public enum ActivityContextStoreError: Error, Equatable, CustomStringConvertible
     case intervalsOverlap(startTs: Int)
     case invalidDay(String)
     case transitionOutsideDay(ts: Int)
+    /// Retrospective rows use later seconds of the day: they are written only for a final day.
+    case retrospectiveOnProvisionalDay(String)
+    /// A retrospective row outside the day being replaced.
+    case retrospectiveOutsideDay(startTs: Int)
 
     public var description: String {
         switch self {
@@ -263,6 +282,10 @@ public enum ActivityContextStoreError: Error, Equatable, CustomStringConvertible
             return "activity context day range is empty or inverted for \(day)"
         case let .transitionOutsideDay(ts):
             return "activity context transition at \(ts) lies outside the day being replaced"
+        case let .retrospectiveOnProvisionalDay(day):
+            return "retrospective activity context for \(day) can only be written once the day is final"
+        case let .retrospectiveOutsideDay(start):
+            return "retrospective activity context interval at \(start) lies outside the day being replaced"
         }
     }
 }
@@ -271,6 +294,18 @@ public enum ActivityContextStore {
     /// Longest interval the store accepts. The range reads bound their scan by this, so it is a stored
     /// invariant and not a builder preference; the builder's own cap (900 s) sits well inside it.
     public static let maxIntervalSeconds = 3_600
+}
+
+/// Which derivation of a device's intervals a range read returns (D8-10).
+public enum ActivityContextIntervalReading: String, Sendable, CaseIterable {
+    /// The decoder's forward filter only (`activityContextInterval`). Live and causal consumers (causal / as-of
+    /// baselines, live decisions) read this, and only this.
+    case causal
+    /// Only the retrospective rows of final days (`activityContextIntervalRetrospective`).
+    case retrospective
+    /// Historical queries: for every day whose ledger is final and holds retrospective rows, those rows; the causal
+    /// rows everywhere else. Deterministic: a day is served wholly by one derivation.
+    case historical
 }
 
 // MARK: - Store
@@ -297,25 +332,27 @@ extension WhoopStore {
                                        day: ActivityContextDayRow,
                                        intervals: [ActivityContextIntervalRow],
                                        transitions: [ActivityContextTransitionRow] = [],
-                                       clearingOtherIds otherIds: [String] = []) async throws {
+                                       clearingOtherIds otherIds: [String] = [],
+                                       retrospective: [ActivityContextIntervalRow] = []) async throws {
         guard day.dayEnd > day.dayStart else { throw ActivityContextStoreError.invalidDay(day.day) }
-        var previousEnd = Int.min
-        for row in intervals {
-            guard row.endTs > row.startTs, row.endTs - row.startTs <= ActivityContextStore.maxIntervalSeconds else {
-                throw ActivityContextStoreError.invalidInterval(startTs: row.startTs, endTs: row.endTs)
-            }
-            guard row.startTs >= previousEnd else {
-                throw ActivityContextStoreError.intervalsOverlap(startTs: row.startTs)
-            }
-            previousEnd = row.endTs
-        }
+        try Self.validate(intervals)
+        try Self.validate(retrospective)
         let clearFrom = min(day.dayStart, intervals.first?.startTs ?? day.dayStart)
         let clearTo = max(day.dayEnd, (intervals.last?.startTs).map { $0 + 1 } ?? day.dayEnd)
         for event in transitions where event.ts < clearFrom || event.ts >= clearTo {
             throw ActivityContextStoreError.transitionOutsideDay(ts: event.ts)
         }
+        if !retrospective.isEmpty {
+            guard day.isFinal else { throw ActivityContextStoreError.retrospectiveOnProvisionalDay(day.day) }
+            for row in retrospective where row.startTs < clearFrom || row.startTs >= clearTo {
+                throw ActivityContextStoreError.retrospectiveOutsideDay(startTs: row.startTs)
+            }
+        }
         var ledger = day
         ledger.intervalCount = intervals.count
+        // The ledger names a smoother version only when it holds that smoother's rows.
+        if retrospective.isEmpty { ledger.retrospectiveVersion = nil }
+        else if ledger.retrospectiveVersion == nil { ledger.retrospectiveVersion = "unversioned" }
         let others = otherIds.filter { $0 != deviceId }
 
         try syncWrite { db in
@@ -327,6 +364,10 @@ extension WhoopStore {
                 WHERE deviceId = ? AND startTs >= ? AND startTs < ?
                 """, arguments: [deviceId, clearFrom, clearTo])
             try db.execute(sql: """
+                DELETE FROM activityContextIntervalRetrospective
+                WHERE deviceId = ? AND startTs >= ? AND startTs < ?
+                """, arguments: [deviceId, clearFrom, clearTo])
+            try db.execute(sql: """
                 DELETE FROM activityContextTransition
                 WHERE deviceId = ? AND ts >= ? AND ts < ?
                 """, arguments: [deviceId, clearFrom, clearTo])
@@ -335,7 +376,16 @@ extension WhoopStore {
                 WHERE deviceId = ? AND dayStart != ? AND dayStart < ? AND dayEnd > ?
                 """, arguments: [deviceId, ledger.dayStart, ledger.dayEnd, ledger.dayStart])
             for row in intervals {
-                try db.execute(sql: Self.insertIntervalSQL, arguments: Self.arguments(deviceId: deviceId, row: row))
+                var row = row
+                row.derivation = ActivityContextIntervalRow.causal
+                try db.execute(sql: Self.insertIntervalSQL(table: "activityContextInterval"),
+                               arguments: Self.arguments(deviceId: deviceId, row: row))
+            }
+            for row in retrospective {
+                var row = row
+                row.derivation = ActivityContextIntervalRow.retrospective
+                try db.execute(sql: Self.insertIntervalSQL(table: "activityContextIntervalRetrospective"),
+                               arguments: Self.arguments(deviceId: deviceId, row: row))
             }
             for event in transitions {
                 try db.execute(sql: """
@@ -350,8 +400,8 @@ extension WhoopStore {
                     (deviceId, dayStart, day, dayEnd, taxonomyVersion, decoderVersion, ontologyVersion,
                      intervalVersion, dataThrough, observedSeconds, intervalCount, computedAt,
                      featureSchema, encoderId, encoderVersion, motionHeads, gaitQuality, configTag,
-                     inputFingerprint, finality, decodeMode, sleepKnownOutsideSessions)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                     inputFingerprint, finality, decodeMode, sleepKnownOutsideSessions, retrospectiveVersion)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(deviceId, dayStart) DO UPDATE SET
                     day = excluded.day, dayEnd = excluded.dayEnd,
                     taxonomyVersion = excluded.taxonomyVersion, decoderVersion = excluded.decoderVersion,
@@ -362,14 +412,30 @@ extension WhoopStore {
                     encoderVersion = excluded.encoderVersion, motionHeads = excluded.motionHeads,
                     gaitQuality = excluded.gaitQuality, configTag = excluded.configTag,
                     inputFingerprint = excluded.inputFingerprint, finality = excluded.finality,
-                    decodeMode = excluded.decodeMode, sleepKnownOutsideSessions = excluded.sleepKnownOutsideSessions
+                    decodeMode = excluded.decodeMode, sleepKnownOutsideSessions = excluded.sleepKnownOutsideSessions,
+                    retrospectiveVersion = excluded.retrospectiveVersion
                 """, arguments: [deviceId, ledger.dayStart, ledger.day, ledger.dayEnd, ledger.taxonomyVersion,
                                  ledger.decoderVersion, ledger.ontologyVersion, ledger.intervalVersion,
                                  ledger.dataThrough, ledger.observedSeconds, ledger.intervalCount,
                                  ledger.computedAt, ledger.featureSchema, ledger.encoderId,
                                  ledger.encoderVersion, ledger.motionHeads, ledger.gaitQuality,
                                  ledger.configTag, ledger.inputFingerprint, ledger.finality,
-                                 ledger.decodeMode, ledger.sleepKnownOutsideSessions])
+                                 ledger.decodeMode, ledger.sleepKnownOutsideSessions,
+                                 ledger.retrospectiveVersion])
+        }
+    }
+
+    /// Sorted by `startTs`, non-overlapping, each `1...maxIntervalSeconds` long.
+    private static func validate(_ rows: [ActivityContextIntervalRow]) throws {
+        var previousEnd = Int.min
+        for row in rows {
+            guard row.endTs > row.startTs, row.endTs - row.startTs <= ActivityContextStore.maxIntervalSeconds else {
+                throw ActivityContextStoreError.invalidInterval(startTs: row.startTs, endTs: row.endTs)
+            }
+            guard row.startTs >= previousEnd else {
+                throw ActivityContextStoreError.intervalsOverlap(startTs: row.startTs)
+            }
+            previousEnd = row.endTs
         }
     }
 
@@ -384,7 +450,19 @@ extension WhoopStore {
                 UPDATE activityContextDay SET inputFingerprint = ?, finality = ?
                 WHERE deviceId = ? AND dayStart = ?
                 """, arguments: [inputFingerprint, finality, deviceId, dayStart])
-            return db.changesCount > 0
+            let changed = db.changesCount > 0
+            if changed && finality != ActivityContextDayRow.final {
+                // Retrospective rows exist only for a final day.
+                if let end = try Int.fetchOne(db, sql: "SELECT dayEnd FROM activityContextDay WHERE deviceId = ? AND dayStart = ?",
+                                              arguments: [deviceId, dayStart]) {
+                    try db.execute(sql: """
+                        DELETE FROM activityContextIntervalRetrospective WHERE deviceId = ? AND startTs >= ? AND startTs < ?
+                        """, arguments: [deviceId, dayStart, end])
+                }
+                try db.execute(sql: "UPDATE activityContextDay SET retrospectiveVersion = NULL WHERE deviceId = ? AND dayStart = ?",
+                               arguments: [deviceId, dayStart])
+            }
+            return changed
         }
     }
 
@@ -400,6 +478,53 @@ extension WhoopStore {
                 """, arguments: [deviceId, from - ActivityContextStore.maxIntervalSeconds, to, from])
                 .map(Self.intervalRow(from:))
         }
+    }
+
+    /// Intervals that overlap `[from, to)` in the requested derivation, oldest first (D8-10).
+    ///
+    /// `.causal` is exactly `activityContextIntervals(deviceId:from:to:)`. `.historical` serves every day whose
+    /// ledger is final and records retrospective rows from those rows, and every other second from the causal rows,
+    /// so one day is never described by both. A live or causal consumer must read `.causal`.
+    public func activityContextIntervals(deviceId: String, from: Int, to: Int,
+                                         reading: ActivityContextIntervalReading) async throws -> [ActivityContextIntervalRow] {
+        guard to > from else { return [] }
+        switch reading {
+        case .causal:
+            return try await activityContextIntervals(deviceId: deviceId, from: from, to: to)
+        case .retrospective:
+            return try syncRead { db in try Self.rangeRows(db, table: "activityContextIntervalRetrospective",
+                                                           deviceId: deviceId, from: from, to: to) }
+        case .historical:
+            return try syncRead { db in
+                // Day ranges served retrospectively: final ledgers that hold retrospective rows.
+                let days = try Row.fetchAll(db, sql: """
+                    SELECT dayStart, dayEnd FROM activityContextDay
+                    WHERE deviceId = ? AND finality = 'final' AND retrospectiveVersion IS NOT NULL
+                      AND dayStart < ? AND dayEnd > ?
+                    ORDER BY dayStart
+                    """, arguments: [deviceId, to + ActivityContextStore.maxIntervalSeconds,
+                                     from - ActivityContextStore.maxIntervalSeconds])
+                    .map { (start: $0["dayStart"] as Int, end: $0["dayEnd"] as Int) }
+                func retro(_ ts: Int) -> Bool { days.contains { ts >= $0.start && ts < $0.end } }
+                let causal = try Self.rangeRows(db, table: "activityContextInterval", deviceId: deviceId,
+                                                from: from, to: to).filter { !retro($0.startTs) }
+                let smoothed = try Self.rangeRows(db, table: "activityContextIntervalRetrospective",
+                                                  deviceId: deviceId, from: from, to: to).filter { retro($0.startTs) }
+                return (causal + smoothed).sorted {
+                    ($0.startTs, $0.derivation) < ($1.startTs, $1.derivation)
+                }
+            }
+        }
+    }
+
+    private static func rangeRows(_ db: Database, table: String, deviceId: String, from: Int,
+                                  to: Int) throws -> [ActivityContextIntervalRow] {
+        try Row.fetchAll(db, sql: """
+            SELECT \(intervalColumns) FROM \(table)
+            WHERE deviceId = ? AND startTs >= ? AND startTs < ? AND endTs > ?
+            ORDER BY startTs
+            """, arguments: [deviceId, from - ActivityContextStore.maxIntervalSeconds, to, from])
+            .map(intervalRow(from:))
     }
 
     /// The interval covering `ts`, or nil when `ts` falls in a gap or on a day not yet materialized.
@@ -472,6 +597,8 @@ extension WhoopStore {
             let floor = fromDayStart ?? Int.min
             try db.execute(sql: "DELETE FROM activityContextInterval WHERE deviceId = ? AND startTs >= ?",
                            arguments: [deviceId, floor])
+            try db.execute(sql: "DELETE FROM activityContextIntervalRetrospective WHERE deviceId = ? AND startTs >= ?",
+                           arguments: [deviceId, floor])
             try db.execute(sql: "DELETE FROM activityContextTransition WHERE deviceId = ? AND ts >= ?",
                            arguments: [deviceId, floor])
             try db.execute(sql: "DELETE FROM activityContextDay WHERE deviceId = ? AND dayStart >= ?",
@@ -498,6 +625,9 @@ extension WhoopStore {
     private static func clear(_ db: Database, deviceId: String, from: Int, to: Int) throws {
         try db.execute(sql: "DELETE FROM activityContextInterval WHERE deviceId = ? AND startTs >= ? AND startTs < ?",
                        arguments: [deviceId, from, to])
+        try db.execute(sql: """
+            DELETE FROM activityContextIntervalRetrospective WHERE deviceId = ? AND startTs >= ? AND startTs < ?
+            """, arguments: [deviceId, from, to])
         try db.execute(sql: "DELETE FROM activityContextTransition WHERE deviceId = ? AND ts >= ? AND ts < ?",
                        arguments: [deviceId, from, to])
         try db.execute(sql: "DELETE FROM activityContextDay WHERE deviceId = ? AND dayStart < ? AND dayEnd > ?",
@@ -632,26 +762,29 @@ extension WhoopStore {
         hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount, respRateBpm, respBreaths, \
         inBed, uncertainty, experts, transitionCount, absorbedSeconds, precededByGapS, settlingSeconds, \
         absorbedClasses, detail, detailConfidence, precedingClass, settledFromTs, hrMeanSettled, hrSamplesSettled, \
-        rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled
+        rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled, derivation
         """
 
     private static let dayColumns = """
         day, dayStart, dayEnd, taxonomyVersion, decoderVersion, ontologyVersion, intervalVersion, \
         dataThrough, observedSeconds, intervalCount, computedAt, featureSchema, encoderId, encoderVersion, \
-        motionHeads, gaitQuality, configTag, inputFingerprint, finality, decodeMode, sleepKnownOutsideSessions
+        motionHeads, gaitQuality, configTag, inputFingerprint, finality, decodeMode, sleepKnownOutsideSessions,
+        retrospectiveVersion
         """
 
-    private static let insertIntervalSQL = """
-        INSERT INTO activityContextInterval
+    private static func insertIntervalSQL(table: String) -> String { """
+        INSERT INTO \(table)
             (deviceId, startTs, endTs, activityClass, confidence, runnerUp, runnerUpConfidence, evidenceQuality,
              posture, locomotion, armBehavior, sleepState, wearState, intensity, stepTicks, cadenceSpm,
              hrSamples, hrMean, hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount,
              respRateBpm, respBreaths, inBed, uncertainty, experts, transitionCount, absorbedSeconds,
              precededByGapS, settlingSeconds, absorbedClasses, detail, detailConfidence, precedingClass,
-             settledFromTs, hrMeanSettled, hrSamplesSettled, rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled)
+             settledFromTs, hrMeanSettled, hrSamplesSettled, rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled,
+             derivation)
         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
+    }
 
     private static func arguments(deviceId: String, row r: ActivityContextIntervalRow) -> StatementArguments {
         [deviceId, r.startTs, r.endTs, r.activityClass, r.confidence, r.runnerUp, r.runnerUpConfidence,
@@ -660,7 +793,7 @@ extension WhoopStore {
          r.rrDiffSqSumMs2, r.rrDiffCount, r.respRateBpm, r.respBreaths, r.inBed, r.uncertainty, r.experts,
          r.transitionCount, r.absorbedSeconds, r.precededByGapS, r.settlingSeconds, r.absorbedClasses, r.detail,
          r.detailConfidence, r.precedingClass, r.settledFromTs, r.hrMeanSettled, r.hrSamplesSettled, r.rmssdSettled,
-         r.rrDiffSqSumMs2Settled, r.rrDiffCountSettled]
+         r.rrDiffSqSumMs2Settled, r.rrDiffCountSettled, r.derivation]
     }
 
     private static func intervalRow(from row: Row) -> ActivityContextIntervalRow {
@@ -682,7 +815,8 @@ extension WhoopStore {
             precedingClass: row["precedingClass"], settledFromTs: row["settledFromTs"],
             hrMeanSettled: row["hrMeanSettled"], hrSamplesSettled: row["hrSamplesSettled"],
             rmssdSettled: row["rmssdSettled"], rrDiffSqSumMs2Settled: row["rrDiffSqSumMs2Settled"],
-            rrDiffCountSettled: row["rrDiffCountSettled"])
+            rrDiffCountSettled: row["rrDiffCountSettled"],
+            derivation: row["derivation"] ?? ActivityContextIntervalRow.causal)
     }
 
     private static func dayRow(from row: Row) -> ActivityContextDayRow {
@@ -698,6 +832,7 @@ extension WhoopStore {
             inputFingerprint: row["inputFingerprint"],
             finality: row["finality"] ?? ActivityContextDayRow.provisional,
             decodeMode: row["decodeMode"] ?? ActivityContextDayRow.causal,
-            sleepKnownOutsideSessions: row["sleepKnownOutsideSessions"])
+            sleepKnownOutsideSessions: row["sleepKnownOutsideSessions"],
+            retrospectiveVersion: row["retrospectiveVersion"])
     }
 }

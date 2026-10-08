@@ -26,6 +26,9 @@ import WhoopStore
 //      windows for a day re-derive it on the next pass, recent or not.
 //   6. A ledger still `provisional` once the day has been closed for `sleepSettleS`, which this process has not
 //      looked at since -> derive (or confirm) once, so the day becomes `final`.
+//   7. When the caller writes retrospective rows (`Candidate.retrospectiveVersion`), a final ledger that does not
+//      record that smoother version, which this process has not looked at since the day settled -> derive once,
+//      so the day gains its retrospective intervals (D8-10).
 // Days that are not recent are limited to `maxBacklogPerPass` per pass, newest first, so a first run over months
 // of history spreads across passes instead of stalling one.
 
@@ -76,17 +79,24 @@ public enum ActivityContextMaterialization {
         /// The decoder config tag the caller decodes with now. When set, a ledger derived under another tag is
         /// not current (rule 1). nil: the config is not compared.
         public var configTag: String?
+        /// The retrospective smoother version the caller writes for final days (`ActivityContextRetrospective.
+        /// version`). When set, a final ledger that does not record it is derived once more so the day gains its
+        /// retrospective rows (rule 7). nil: the caller writes none, and the rule is off (it must stay off for a
+        /// caller that does not write them, or the day would be planned again on every pass).
+        public var retrospectiveVersion: String?
 
         /// `storedInputFingerprint` defaults to the ledger's own record (v50), so a caller that passes the
         /// ledger gets rule 5 across launches without threading it through.
         public init(day: Day, ledger: ActivityContextDayRow? = nil, newestHeartRateTs: Int? = nil,
                     lastCheck: Check? = nil, inputFingerprint: String? = nil,
-                    storedInputFingerprint: String? = nil, configTag: String? = nil) {
+                    storedInputFingerprint: String? = nil, configTag: String? = nil,
+                    retrospectiveVersion: String? = nil) {
             self.day = day; self.ledger = ledger
             self.newestHeartRateTs = newestHeartRateTs; self.lastCheck = lastCheck
             self.inputFingerprint = inputFingerprint
             self.storedInputFingerprint = storedInputFingerprint ?? ledger?.inputFingerprint
             self.configTag = configTag
+            self.retrospectiveVersion = retrospectiveVersion
         }
     }
 
@@ -163,6 +173,11 @@ public enum ActivityContextMaterialization {
 
         let settledAt = ledger.dayEnd + ActivityContextPersistence.sleepSettleS
         if !ledger.isFinal, now >= settledAt, (c.lastCheck?.at ?? ledger.computedAt) < settledAt { return true }
+
+        // 7. A final day without the retrospective rows of the smoother the caller writes (never smoothed, or by
+        // another version): derive it once more, unless this process already looked since it became final.
+        if let wanted = c.retrospectiveVersion, ledger.isFinal, ledger.retrospectiveVersion != wanted,
+           c.lastCheck.map({ $0.at < settledAt }) ?? true { return true }
         return false
     }
 

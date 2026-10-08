@@ -174,6 +174,8 @@ public struct DeviceRegistryStore: Sendable {
         // v50-activity-context-provenance: the decoder's transition events and the timestamped spot HRV
         // readings are deviceId-keyed too, and as personal as the context they sit beside.
         "activityContextTransition", "spotHrvReading",
+        // The retrospective (smoothed, final-day) intervals beside the causal ones: the same personal context.
+        "activityContextIntervalRetrospective",
     ]
 
     /// Permanently delete every recorded sample/derived row belonging to one device, across all

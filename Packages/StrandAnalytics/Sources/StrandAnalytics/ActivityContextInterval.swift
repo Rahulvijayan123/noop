@@ -41,6 +41,19 @@ import WhoopProtocol
 // boundaries are only as sharp as its evidence window (~10-30 s). Statistics over an interval are exact
 // for the interval as drawn; the interval is drawn with that lag.
 
+/// How an interval was derived (D8-10).
+///
+/// - `causal`: from the decoder's forward filter only, every second from its past (the live path, and every row
+///   written before retrospective smoothing existed). Causal consumers (live decisions, causal / as-of baselines)
+///   read only these.
+/// - `retrospective`: re-shaped after the day was final by `ActivityContextRetrospective` (a fixed-interval
+///   smoother over the stored runs, which uses later seconds of the same day). For historical display and
+///   next-day analysis only; never an input to a causal decision or a causal baseline.
+public enum ActivityContextDerivation: String, Codable, CaseIterable, Sendable {
+    case causal
+    case retrospective
+}
+
 /// One stretch of constant behavioural context and the physiology measured inside it.
 public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// Unix seconds, inclusive.
@@ -161,6 +174,10 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// the wearer's own correction overrode these seconds (applied at read time by `ActivityContextCorrections`,
     /// never written to the store). nil for decoder output.
     public var provenance: String?
+    /// Causal (forward filter only) or retrospective (smoothed after the day was final). Every interval the builder
+    /// makes is causal; `ActivityContextRetrospective` stamps its own. A stored row or document without the field
+    /// reads causal: nothing retrospective existed before it.
+    public var derivation: ActivityContextDerivation = .causal
 
     public var durationSeconds: Int { end - start }
     /// Whether the row is a ride in a vehicle (`detail == .inVehicle`).
@@ -181,7 +198,8 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 settlingSeconds: Int? = nil, detail: ActivityDetail? = nil, detailConfidence: Double? = nil,
                 precedingClass: ActivityClass? = nil, settledFrom: Int? = nil,
                 hrMeanSettled: Double? = nil, hrSamplesSettled: Int? = nil, rmssdSettled: Double? = nil,
-                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil, provenance: String? = nil) {
+                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil, provenance: String? = nil,
+                derivation: ActivityContextDerivation = .causal) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -205,6 +223,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.rmssdSettled = rmssdSettled
         self.rrDiffSqSumMs2Settled = rrDiffSqSumMs2Settled; self.rrDiffCountSettled = rrDiffCountSettled
         self.provenance = provenance
+        self.derivation = derivation
     }
 
     public init(from decoder: Decoder) throws {
@@ -255,6 +274,13 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         rrDiffSqSumMs2Settled = try c.decodeIfPresent(Double.self, forKey: .rrDiffSqSumMs2Settled)
         rrDiffCountSettled = try c.decodeIfPresent(Int.self, forKey: .rrDiffCountSettled)
         provenance = try c.decodeIfPresent(String.self, forKey: .provenance)
+        // A derivation code from a newer build reads causal only if absent; an unknown code is not causal evidence,
+        // so it reads retrospective (never fed to a causal consumer).
+        if let raw = try c.decodeIfPresent(String.self, forKey: .derivation) {
+            derivation = ActivityContextDerivation(rawValue: raw) ?? .retrospective
+        } else {
+            derivation = .causal
+        }
     }
 
     /// Whether `ts` falls inside the interval.
@@ -306,6 +332,13 @@ public enum ActivityContextIntervalBuilder {
         public var settlingS = 120
         /// Shortest settled remainder (`[settledFrom, end)`) that gets settled heart rate / RMSSD.
         public var minSettledS = 60
+        /// Keep a short committed-posture fragment (sitting, standing, lying down) inside a still stretch as its own
+        /// row instead of absorbing it, when a change of position flagged at `PositionChanges.minimumProbability`
+        /// or more explains it (its onset-to-detection span reaches within `evidencedFragmentToleranceS` of the
+        /// fragment). Off for the causal build (its output is unchanged); the retrospective build turns it on so a
+        /// 10 s stand with event evidence survives as a short interval as well as an event (D8-10).
+        public var keepEvidencedPostureFragments = false
+        public var evidencedFragmentToleranceS = 5
         public init() {}
     }
 
@@ -319,7 +352,7 @@ public enum ActivityContextIntervalBuilder {
     public static func build(runs: [ActivityContextRun], events: [ActivityTransitionEvent] = [],
                              hr: [HRSample] = [], steps: [StepSample] = [], rr: [RRInterval] = [],
                              config: Config = Config()) -> [ActivityContextInterval] {
-        let shaped = split(fold(merge(pieces(runs), config: config), config: config), config: config)
+        let shaped = split(fold(merge(pieces(runs), config: config), events: events, config: config), config: config)
         guard !shaped.isEmpty else { return [] }
         let context = Context(shaped, events: events, config: config)
 
@@ -577,11 +610,18 @@ public enum ActivityContextIntervalBuilder {
         return out
     }
 
-    static func fold(_ merged: [Accumulation], config: Config) -> [Accumulation] {
+    static func fold(_ merged: [Accumulation], events: [ActivityTransitionEvent] = [],
+                     config: Config) -> [Accumulation] {
+        // Changes of position strong enough to explain a short posture fragment, as [onset, detection] spans.
+        let evidence: [(Int, Int)] = config.keepEvidencedPostureFragments
+            ? events.filter { $0.isPostural && $0.probability >= PositionChanges.minimumProbability }
+                .map { (min($0.onsetTs ?? $0.ts, $0.ts), $0.ts) }
+            : []
         var out: [Accumulation] = []
         var i = 0
         while i < merged.count {
-            if let prev = out.last, let close = foldClose(merged, from: i, after: prev, config: config) {
+            if let prev = out.last,
+               let close = foldClose(merged, from: i, after: prev, evidence: evidence, config: config) {
                 var joined = prev
                 for f in merged[i..<close] { joined.absorb(f, as: f.activityClass) }
                 joined.absorb(merged[close])
@@ -611,7 +651,8 @@ public enum ActivityContextIntervalBuilder {
     /// Several fragments in a row are absorbed together when their seconds stay under the same bound. Everything
     /// absorbed is recorded on the row (`absorbedClasses`, `absorbedSeconds`), and the changes themselves are
     /// kept as events (`transitionCount`).
-    static func foldClose(_ merged: [Accumulation], from i: Int, after prev: Accumulation, config: Config) -> Int? {
+    static func foldClose(_ merged: [Accumulation], from i: Int, after prev: Accumulation,
+                          evidence: [(Int, Int)] = [], config: Config) -> Int? {
         let still = prev.activityClass.isStationaryAwake || prev.activityClass.isRest
         let bound = still ? max(config.foldFragmentS, config.stillDwellS) : config.foldFragmentS
         var total = 0
@@ -627,6 +668,10 @@ public enum ActivityContextIntervalBuilder {
             let c = f.activityClass
             let limit: Int
             if c.isGait || c == .offWrist || c == .cycling || c == .vigorousActivity {
+                return nil
+            } else if config.keepEvidencedPostureFragments, Self.committedPosture(c), c != prev.activityClass,
+                      Self.evidenced(f, evidence, toleranceS: config.evidencedFragmentToleranceS) {
+                // A real, flagged change of position: a short interval of its own, not a hedge to absorb.
                 return nil
             } else if c == .unknown {
                 guard f.wear == .onWrist else { return nil }
@@ -644,6 +689,17 @@ public enum ActivityContextIntervalBuilder {
             j += 1
         }
         return nil
+    }
+
+    /// A posture the class commits to (a fragment of it is a claim, not the posture head hedging).
+    static func committedPosture(_ c: ActivityClass) -> Bool {
+        c == .sitting || c == .sittingDesk || c == .standing || c == .lyingDown
+    }
+
+    /// Whether a flagged change of position (an `[onset, detection]` span) reaches within `toleranceS` of `f`.
+    static func evidenced(_ f: Accumulation, _ evidence: [(Int, Int)], toleranceS: Int) -> Bool {
+        let lo = f.start - max(0, toleranceS), hi = f.end + max(0, toleranceS)
+        return evidence.contains { $0.0 <= hi && $0.1 >= lo }
     }
 
     static func split(_ stretches: [Accumulation], config: Config) -> [Accumulation] {
