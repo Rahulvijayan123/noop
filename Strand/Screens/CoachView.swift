@@ -515,6 +515,11 @@ struct CoachView: View {
             Text("Ask your first question")
                 .font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.textPrimary)
+            // What leaves the device is disclosed where the question is asked, not only in settings.
+            Text("Sana reads a summary of your last two weeks plus 30-day averages and recent workouts, then answers in plain language.")
+                .font(StrandFont.subhead)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
         }
         .frame(maxWidth: .infinity, minHeight: 180, alignment: .topLeading)
     }

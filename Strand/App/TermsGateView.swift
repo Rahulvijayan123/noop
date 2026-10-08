@@ -45,7 +45,7 @@ struct TermsGateView: View {
                         }
                     }
 
-                    NoopListSection("Please confirm each of these:", footer: "This summarises Nara's terms of use. It is not legal advice.") {
+                    NoopListSection("Please confirm each of these:", footer: "The full terms are in TERMS.md, shipped with the app. This summary is not legal advice.") {
                         ForEach(Array(Terms.attestations.enumerated()), id: \.offset) { idx, line in
                             if idx > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
                             attestationRow(idx, line)
