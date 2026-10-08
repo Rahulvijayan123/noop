@@ -114,7 +114,10 @@ public struct ActivityPersonalValidation: Codable, Equatable, Sendable {
 }
 
 public struct ActivityPersonalProfile: Codable, Equatable, Sendable {
-    public static let currentVersion = "personal-profile-1"
+    /// 2: stationary modes never adapt a heart-rate level (D9-02), stationary modes carry the wearer's held
+    /// forearm-orientation rows, and validation scores the published class with a wrong-claim guard. The app's
+    /// refit fingerprint includes this, so profiles fitted under 1 are refit (and re-validated) once.
+    public static let currentVersion = "personal-profile-2"
     /// The modes a profile may adapt, by key: lying, sitting, standing, walking, brisk walking.
     public static let modeKeys = ["bedRest", "seated", "upright", "walk", "briskWalk"]
     static let adaptableModes: [BodyMode] = [.bedRest, .seated, .upright, .walk, .briskWalk]

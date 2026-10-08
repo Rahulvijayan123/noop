@@ -267,6 +267,7 @@ final class ActivityPersonalProfileTests: XCTestCase {
                                                         hrRel: 0.2)
         let profile = ActivityPersonalProfile(fittedAt: 1, sessionIds: ["b", "a"], modes: ["upright": adjustment])
         XCTAssertEqual(profile.sessionIds, ["a", "b"])
+        XCTAssertEqual(profile.version, "personal-profile-2", "bumped with the INT-B fitter rules: an older profile is refit")
         var config = ActivityDecoderConfig()
         config.personalProfile = profile
         XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag + "-pp\(profile.tag)")
