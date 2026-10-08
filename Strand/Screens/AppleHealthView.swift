@@ -72,30 +72,6 @@ struct AppleHealthView: View {
     // Raw series (day, value) keyed by metric — ALL history, ascending by day.
     @State private var series: [String: [(day: String, value: Double)]] = [:]
 
-    // The active range window. The data goes back years — never hard-cap.
-    @State private var range: RangeWindow = .quarter
-
-    /// Memoized per-metric resolved window. Resolving a key (effective range +
-    /// trimmed rows) re-slices the full multi-year series and, on auto-widen, slices
-    /// it once per candidate range. The view body asks for the same key many times
-    /// per render (every StatTile, every ChartCard, plus rangeNote/rangeSummary), and
-    /// SwiftUI re-evaluates the body on hover / animation / 1Hz HR ticks. The inputs
-    /// (`series`, `range`) only change on load or pill tap, so we compute once and
-    /// cache, recomputing via .onChangeCompat(of:) when an input actually changes.
-    @State private var windowCache: [String: ResolvedSeries] = [:]
-
-    /// Memoized per-day rows trimmed to the active window. Read by both
-    /// `rangeSummaryCaption` and `spanSubtitle` every render; depends only on
-    /// `appleRows` + `range`, so it's cached alongside `windowCache`.
-    @State private var windowedRowsCache: [AppleDaily] = []
-
-    /// A key's resolved (possibly auto-widened) window: the effective range plus the
-    /// rows trimmed to it.
-    private struct ResolvedSeries {
-        var effective: RangeWindow
-        var rows: [(day: String, value: Double)]
-    }
-
     // The series keys this page pulls from the apple-health source.
     private static let seriesKeys = [
         "steps", "active_kcal", "vo2max",
@@ -103,153 +79,26 @@ struct AppleHealthView: View {
         "weight", "body_fat", "lean_mass", "bmi"
     ]
 
-    // yyyy-MM-dd → Date (en_US_POSIX / UTC), per the project's date contract.
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-
-    private static let spanFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "d MMM yyyy"
-        return f
-    }()
-
-    private static let asOfFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "d MMM"
-        return f
-    }()
-
-    /// Thousands-grouped integer formatter (steps / calories). Static so it isn't reallocated
-    /// per tile on every render. (perf plan Q3)
-    private static let groupedIntFmt: NumberFormatter = {
-        let f = NumberFormatter()
-        f.numberStyle = .decimal
-        f.maximumFractionDigits = 0
-        return f
-    }()
-
-    private func date(_ day: String) -> Date? { Self.dayParser.date(from: day) }
-
-    // MARK: - Range control (W / M / 3M / 6M / 1Y / ALL) — the ONE pill control.
-
-    enum RangeWindow: String, CaseIterable, Identifiable {
-        case week, month, quarter, half, year, all
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .week:    return String(localized: "W")
-            case .month:   return String(localized: "M")
-            case .quarter: return String(localized: "3M")
-            case .half:    return String(localized: "6M")
-            case .year:    return String(localized: "1Y")
-            case .all:     return String(localized: "ALL")
-            }
-        }
-        /// Number of trailing days; nil = everything.
-        var days: Int? {
-            switch self {
-            case .week:    return 7
-            case .month:   return 30
-            case .quarter: return 90
-            case .half:    return 180
-            case .year:    return 365
-            case .all:     return nil
-            }
-        }
-        var caption: String {
-            switch self {
-            case .week:    return String(localized: "7 DAYS")
-            case .month:   return String(localized: "30 DAYS")
-            case .quarter: return String(localized: "90 DAYS")
-            case .half:    return String(localized: "180 DAYS")
-            case .year:    return String(localized: "365 DAYS")
-            case .all:     return String(localized: "All time")
-            }
-        }
-        var name: String {
-            switch self {
-            case .week:    return String(localized: "week")
-            case .month:   return String(localized: "month")
-            case .quarter: return String(localized: "3 months")
-            case .half:    return String(localized: "6 months")
-            case .year:    return String(localized: "year")
-            case .all:     return String(localized: "all history")
-            }
-        }
-        /// This range plus every LARGER range, ascending — the auto-expand search
-        /// order when the selected window holds zero points.
-        var widening: [RangeWindow] {
-            let order: [RangeWindow] = [.week, .month, .quarter, .half, .year, .all]
-            guard let i = order.firstIndex(of: self) else { return [.all] }
-            return Array(order[i...])
-        }
-    }
+    private static let source = "apple-health"
 
     var body: some View {
-        ScreenScaffold(title: "Apple Health", subtitle: spanSubtitle.map { "\($0)" },
-                       onRefresh: { await repo.refresh() },
-                       // PERF: chart-heavy column (the tile grid plus the heart / activity / body / sleep
-                       // sections, each carrying its own sparklines + metric charts). The LazyVStack path
-                       // is byte-identical layout. NOTE: the populated branch wraps its sections in an
-                       // inner VStack(spacing: sectionGap=22) to preserve the 22pt inter-section spacing
-                       // (the scaffold stack is 20pt), so the lazy win is partial until those sections are
-                       // promoted to direct children — kept as one node here to stay pixel-identical.
-                       lazy: true) {
-            if loaded && !hasAnyData {
+        MorePaneNavigation {
+            ScreenScaffold(title: "Apple Health", dateLine: spanLine, titleDisplay: .navigationBar,
+                           onRefresh: { await repo.refresh() }) {
                 #if os(iOS)
-                // No data yet, but iOS can grant live access right here — keep the Enable card above
-                // the (now live-aware) empty-state copy so the richer path isn't hidden behind a
-                // manual .zip export.
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                    liveSyncCard
-                    // #348 — when the build can't carry the HealthKit entitlement there's no "Enable"
-                    // button to tap, so the empty-state copy must point at the file/Shortcuts path
-                    // instead of telling the user to tap a control that isn't shown.
-                    ComingSoon(what: health.auth == .entitlementMissing
-                               ? "Nothing here yet. This sideloaded install can't read Apple Health directly. Import a Health export .zip in Data Sources, or turn on Shortcuts Export to bring your strap data into Health."
-                               : "Nothing here yet. Tap Enable Apple Health above to read your data live, or import a Health export .zip in Data Sources.")
-                }
-                #else
-                ComingSoon(what: "Nothing imported yet. On an iPhone: Health app, tap your photo, Export All Health Data, then import the .zip here in Data Sources.")
+                liveSyncCard
                 #endif
-            } else if !loaded {
-                loadingState
-            } else {
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                    #if os(iOS)
-                    liveSyncCard
-                    #endif
-                    rangeControl
-                    tileGrid
-                    heartSection
-                    activitySection
-                    bodySection
-                    sleepSection
+                if loaded && !hasAnyData {
+                    emptyNote
+                } else {
+                    latestSections
+                        .loadingRedaction(!loaded)
+                        .background { if !loaded { LoadingAccessibilityElement() } }
                 }
+                AboutDisclosure("About Apple Health", paragraphs: aboutParagraphs)
             }
         }
         .task(id: AppleHealthLoadKey(seq: repo.refreshSeq, dayKey: Repository.localDayKey(Date()))) { await load(allowCache: true) }
-        .onChangeCompat(of: range) { _ in rebuildWindowCache() }
-    }
-
-    /// Rebuild the per-metric resolved-window cache from scratch. Called once after
-    /// load and again whenever `range` changes — never inside the render path.
-    private func rebuildWindowCache() {
-        var cache: [String: ResolvedSeries] = [:]
-        cache.reserveCapacity(Self.seriesKeys.count)
-        for key in Self.seriesKeys {
-            let eff = computeEffectiveRange(key)
-            cache[key] = ResolvedSeries(effective: eff, rows: slice(key, eff))
-        }
-        windowCache = cache
-        windowedRowsCache = computeWindowedRows()
     }
 
     /// True if ANY series or per-day row holds data (drives the empty state).
@@ -267,7 +116,6 @@ struct AppleHealthView: View {
             appleRows = pd.rows.sorted { $0.day < $1.day }
             workoutCount = pd.workoutCount
             series = pd.series
-            rebuildWindowCache()
             loaded = true
             return
         }
@@ -282,82 +130,159 @@ struct AppleHealthView: View {
         appleRows = snapshot.appleRows
         workoutCount = snapshot.workoutCount
         series = snapshot.series
-        rebuildWindowCache()
         loaded = true
     }
 
-    // MARK: - Range control + header span
+    /// The span the imported days cover ("12 Mar 2019 – 6 Oct 2026"), data only.
+    private var spanLine: String? {
+        guard loaded else { return nil }
+        let days = (appleRows.map(\.day) + series.values.flatMap { $0.map(\.day) })
+        guard let first = days.min(), let last = days.max(),
+              let lo = ChartDay.date(forKey: first), let hi = ChartDay.date(forKey: last) else { return nil }
+        let a = lo.formatted(.dateTime.day().month(.abbreviated).year())
+        let b = hi.formatted(.dateTime.day().month(.abbreviated).year())
+        return a == b ? a : "\(a) – \(b)"
+    }
 
-    private var rangeControl: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                SegmentedPillControl(RangeWindow.allCases, selection: $range) { $0.label }
-                Spacer()
-                Text(range.caption).strandOverline()
+    // MARK: - Latest values
+
+    /// One row per series: the latest reading and its date. A row opens that metric's own page, which draws the
+    /// chart that suits it (bars for daily totals, points on a fixed scale for blood oxygen, sparse points for
+    /// body composition).
+    private var latestSections: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            NoopListSection("Heart") {
+                seriesRow("resting_hr", icon: "heart", color: StrandPalette.metricRose, title: "Resting heart rate",
+                          value: { "\(Int($0.rounded())) bpm" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("hrv", icon: "waveform.path.ecg", color: StrandPalette.metricPurple, title: "HRV (SDNN)",
+                          value: { "\(Int($0.rounded())) ms" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("spo2", icon: "drop", color: StrandPalette.metricCyan, title: "Blood oxygen",
+                          value: { "\(MoreFormat.oneDecimal($0)) %" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("resp_rate", icon: "lungs", color: StrandPalette.metricCyan, title: "Respiratory rate",
+                          value: { "\(MoreFormat.oneDecimal($0)) rpm" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("vo2max", icon: "lungs.fill", color: StrandPalette.chargeColor, title: "VO₂ max",
+                          value: { "\(MoreFormat.oneDecimal($0)) ml/kg/min" })
             }
-            Text(rangeSummaryCaption)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .accessibilityLabel(rangeSummaryCaption)
-        }
-    }
-
-    /// Window-level caption near the control: how many days the per-day rows span in
-    /// the selected range, plus a flag if any tracked series had to auto-widen.
-    private var rangeSummaryCaption: String {
-        let n = windowedRows.count
-        let anyWidened = Self.seriesKeys.contains { !raw($0).isEmpty && effectiveRange($0) != range }
-        // Whole-phrase variants per count so translators see complete sentences (never a stitched plural).
-        if anyWidened {
-            return n == 1
-                ? String(localized: "1 day · \(range.name) · some sparse series widened")
-                : String(localized: "\(n) days · \(range.name) · some sparse series widened")
-        }
-        return n == 1
-            ? String(localized: "1 day · \(range.name)")
-            : String(localized: "\(n) days · \(range.name)")
-    }
-
-    /// Header subtitle reflects the windowed (visible) per-day span.
-    private var spanSubtitle: String? {
-        let rows = loaded ? windowedRows : appleRows
-        guard let first = rows.first?.day, let last = rows.last?.day,
-              let lo = date(first), let hi = date(last) else {
-            return String(localized: "Steps, heart, sleep, body composition and VO₂ max, read locally on \(Platform.deviceNounPhrase).")
-        }
-        let loS = Self.spanFormatter.string(from: lo)
-        let hiS = Self.spanFormatter.string(from: hi)
-        let span = loS == hiS ? loS : "\(loS) → \(hiS)"
-        return String(localized: "\(rows.count) days · \(span)")
-    }
-
-    /// AppleDaily rows trimmed to the active window (for the span readout), taken
-    /// RELATIVE TO THE LATEST recorded day rather than "now". Served from the
-    /// per-render cache; recomputed only when `appleRows`/`range` change.
-    private var windowedRows: [AppleDaily] {
-        loaded ? windowedRowsCache : computeWindowedRows()
-    }
-
-    /// The actual windowing of the per-day rows. Called only from
-    /// rebuildWindowCache and the not-yet-loaded fallback — never per render.
-    private func computeWindowedRows() -> [AppleDaily] {
-        guard let n = range.days else { return appleRows }
-        guard let lastDay = appleRows.last?.day, let last = date(lastDay) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(n - 1) * 86_400)
-        return appleRows.filter { row in
-            guard let d = date(row.day) else { return false }
-            return d >= cutoff
-        }
-    }
-
-    private var loadingState: some View {
-        NoopCard(tint: StrandPalette.metricCyan) {
-            HStack(spacing: 10) {
-                ConnectionDot(tone: .accent, pulsing: true)
-                Text("Reading your Apple Health history…")
-                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+            NoopListSection("Activity") {
+                seriesRow("steps", icon: "figure.walk", color: StrandPalette.metricCyan, title: "Steps",
+                          value: { "\(MoreFormat.integer($0)) steps" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("active_kcal", icon: "flame", color: StrandPalette.metricAmber, title: "Active energy",
+                          value: { "\(MoreFormat.integer($0)) kcal" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                NoopListRow(icon: "figure.run", iconColor: StrandPalette.effortColor, title: "Workouts",
+                            value: loaded ? "\(workoutCount)" : "00", showsChevron: false)
+            }
+            NoopListSection("Body") {
+                seriesRow("weight", icon: "scalemass", color: StrandPalette.metricPurple, title: "Weight",
+                          value: { massLabel($0) })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("body_fat", icon: "percent", color: StrandPalette.metricAmber, title: "Body fat",
+                          value: { "\(MoreFormat.oneDecimal($0)) %" })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("lean_mass", icon: "figure.arms.open", color: StrandPalette.metricPurple, title: "Lean body mass",
+                          value: { massLabel($0) })
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                seriesRow("bmi", icon: "figure", color: StrandPalette.metricPurple, title: "BMI",
+                          value: { MoreFormat.oneDecimal($0) })
+            }
+            NoopListSection("Sleep") {
+                seriesRow("asleep_min", icon: "moon.zzz", color: StrandPalette.restColor, title: "Asleep",
+                          value: { MoreFormat.duration(minutes: $0) })
             }
         }
+        .buttonStyle(.plain)
+    }
+
+    @ViewBuilder
+    private func seriesRow(_ key: String, icon: String, color: Color, title: LocalizedStringKey,
+                           value: @escaping (Double) -> String) -> some View {
+        let rows = series[key] ?? []
+        if let latest = rows.last {
+            NavigationLink {
+                destination(key)
+            } label: {
+                NoopListRow(icon: icon, iconColor: color, title: title, subtitle: MoreFormat.day(latest.day),
+                            value: value(latest.value))
+            }
+        } else {
+            NoopListRow(icon: icon, iconColor: color, title: title, subtitle: loaded ? nil : "Mon 00 Sep",
+                        value: loaded ? "—" : "000", showsChevron: false)
+        }
+    }
+
+    /// Catalogued Apple Health metrics open the shared metric page; the five the catalog has no Apple Health
+    /// entry for open the per-source page, with the chart chosen for each.
+    @ViewBuilder
+    private func destination(_ key: String) -> some View {
+        if let metric = MetricCatalog.metric(key: key, source: Self.source) {
+            MetricDetailView(metric: metric)
+        } else if let presentation = Self.sourcePresentation(key) {
+            SourceSeriesDetailView(presentation: presentation, rows: series[key] ?? [], sourceName: "Apple Health")
+        }
+    }
+
+    static func sourcePresentation(_ key: String) -> SourceSeriesPresentation? {
+        switch key {
+        case "resting_hr":
+            return SourceSeriesPresentation(
+                title: String(localized: "Resting heart rate"), unit: "bpm", color: StrandPalette.metricRose,
+                chart: .vital(minSpan: 10, decimals: 0), format: { "\(Int($0.rounded()))" },
+                about: [String(localized: "The resting heart rate Apple Health records each day, usually from your watch's readings while you are still. Nara's own resting heart rate from your strap is measured during sleep, so the two can differ by a few beats.")])
+        case "hrv":
+            return SourceSeriesPresentation(
+                title: String(localized: "HRV (SDNN)"), unit: "ms", color: StrandPalette.metricPurple,
+                chart: .vital(minSpan: 20, decimals: 0), format: { "\(Int($0.rounded()))" },
+                about: [String(localized: "Apple Health stores heart rate variability as SDNN: the spread of the time between beats, from short readings taken through the day. Nara's HRV from your strap is RMSSD, measured during sleep, so the two are not directly comparable.")])
+        case "spo2":
+            return SourceSeriesPresentation(
+                title: String(localized: "Blood oxygen"), unit: "%", color: StrandPalette.metricCyan,
+                chart: .percent(domain: 85...100, reference: 95), format: { MoreFormat.oneDecimal($0) },
+                about: [String(localized: "Blood oxygen saturation as Apple Health records it, usually from your watch's spot readings. Most healthy readings sit between 95 and 100 %. This is a wellness reading, not a medical measurement.")])
+        case "resp_rate":
+            return SourceSeriesPresentation(
+                title: String(localized: "Respiratory rate"), unit: "rpm", color: StrandPalette.metricCyan,
+                chart: .vital(minSpan: 3, decimals: 1), format: { MoreFormat.oneDecimal($0) },
+                about: [String(localized: "Breaths per minute as Apple Health records it, usually measured while you sleep.")])
+        case "asleep_min":
+            return SourceSeriesPresentation(
+                title: String(localized: "Asleep"), unit: nil, color: StrandPalette.restColor,
+                chart: .duration, format: { MoreFormat.duration(minutes: $0) },
+                about: [String(localized: "Time asleep each night as Apple Health records it, from your watch or another app that writes sleep to Health.")],
+                nightly: true)
+        default:
+            return nil
+        }
+    }
+
+    @ViewBuilder
+    private var emptyNote: some View {
+        #if os(iOS)
+        // #348 — when the build can't carry the HealthKit entitlement there's no "Enable" button to tap, so the
+        // empty-state copy points at the file path instead of a control that isn't shown.
+        ComingSoon(what: health.auth == .entitlementMissing
+                   ? "Nothing here yet. Import a Health export in Data sources to bring your Apple Health history in."
+                   : "Nothing here yet. Turn on live sync above, or import a Health export in Data sources.")
+        #else
+        ComingSoon(what: "Nothing imported yet. On an iPhone: Health app, tap your photo, Export All Health Data, then import the .zip in Data sources.")
+        #endif
+    }
+
+    private var aboutParagraphs: [String] {
+        var out = [
+            String(localized: "Everything on this page comes from Apple Health, read on \(Platform.deviceNounPhrase): live sync or an imported export. Each value is the latest reading and its date; open a row for its history."),
+        ]
+        #if os(iOS)
+        out.append(String(localized: "With live sync on, Nara also writes your strap's data back to Health: sleep with its stages, continuous heart rate, workouts and nightly vitals."))
+        if health.auth == .entitlementMissing {
+            out.append(String(localized: "This install can't connect to Apple Health directly. It was signed with a profile that doesn't include Apple's Health permission, so there is nothing to enable and Nara won't appear under Settings › Health. Import a Health export in Data sources instead, or turn on Shortcuts Export to feed your strap data into Health. A build from the App Store or signed with a paid developer account connects directly."))
+        }
+        #endif
+        return out
     }
 
     // MARK: - Live Apple Health (iOS only)
@@ -368,25 +293,24 @@ struct AppleHealthView: View {
     // runs the first read + write-back and refreshes this screen. Once authorized, a "Sync now"
     // control and last-synced/status line take its place.
     #if os(iOS)
+    private var liveSyncWord: (LocalizedStringKey, StrandTone) {
+        switch health.auth {
+        case .authorized: return (health.syncing ? "Syncing" : "Connected", .positive)
+        case .unknown, .denied: return ("Off", .neutral)
+        case .entitlementMissing, .unavailable: return ("Unavailable", .neutral)
+        }
+    }
+
     @ViewBuilder
     private var liveSyncCard: some View {
-        StrandCard(padding: 20, tint: StrandPalette.metricCyan) {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack(spacing: 10) {
-                    Image(systemName: "heart.text.square.fill")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(StrandPalette.metricCyan)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.metricCyan.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .accessibilityHidden(true)
-                    Text("Apple Health (Live)")
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(spacing: NoopMetrics.space3) {
+                    Text("Live sync")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer()
-                    if health.auth == .authorized {
-                        StatePill(health.syncing ? "Syncing" : "Connected",
-                                  tone: .positive, pulsing: health.syncing)
-                    }
+                    Spacer(minLength: NoopMetrics.space2)
+                    StatePill(liveSyncWord.0, tone: liveSyncWord.1)
                 }
 
                 switch health.auth {
@@ -397,26 +321,19 @@ struct AppleHealthView: View {
                         .fixedSize(horizontal: false, vertical: true)
 
                 case .entitlementMissing:
-                    // #348 / #930: the sideload was re-signed WITHOUT the HealthKit entitlement (free
-                    // Apple IDs always lack it; some paid reseller certs do too), so "Enable Apple Health"
-                    // can never work and the app can never appear under Settings › Health › Data Access
-                    // & Devices. Give the honest path instead of impossible Settings instructions: bring
-                    // data in via a file import or the HealthKit-free Shortcuts export.
-                    Text("This install can't connect to Apple Health directly. It was signed with a profile that doesn't include Apple's Health permission, so there's nothing to enable, and NOOP won't appear under Settings › Health.")
+                    // #348 / #930: the sideload was re-signed WITHOUT the HealthKit entitlement, so "Enable Apple
+                    // Health" can never work. One line here; the why and the way around it are in About.
+                    Text("This install can't connect to Apple Health directly.")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Text("To get your Apple Health data in anyway: import a Health export .zip in Data Sources, or turn on Shortcuts Export to feed your strap data into Health without the entitlement. (A build installed from the App Store or signed with a paid Apple Developer account connects directly.)")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
 
                 case .unknown, .denied:
-                    Text("Read your heart rate, HRV, blood oxygen, respiratory rate, sleep, steps and energy straight from Apple Health, and write NOOP's strap data back: sleep with full stages, continuous heart rate, workouts, and nightly vitals. Everything stays on \(Platform.deviceNounPhrase).")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                    Text("Read your health data from Apple Health and write your strap's data back.")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
-                    Button {
+                    NoopButton("Enable Apple Health", systemImage: "heart", kind: .primary) {
                         Task {
                             await health.requestAuthorization()
                             await HealthSyncRefreshCoordinator.run(
@@ -428,45 +345,36 @@ struct AppleHealthView: View {
                             )
                             await load()
                         }
-                    } label: {
-                        Label("Enable Apple Health", systemImage: "heart.fill")
                     }
-                    .buttonStyle(.borderedProminent)
-                    .tint(StrandPalette.metricCyan)
                     if health.auth == .denied {
-                        Text("If you don't see the prompt, enable NOOP under Settings › Health › Data Access & Devices.")
+                        Text("If you don't see the prompt, turn on Nara in Settings › Health › Data Access & Devices.")
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
 
                 case .authorized:
-                    if let last = health.lastSync {
-                        Text("Last synced \(relativeAgo(last.timeIntervalSince1970)).")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    } else {
-                        Text("Connected. New strap data is written automatically, with periodic background refresh when iOS allows it.")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                    }
-                    Button {
-                        Task {
-                            await HealthSyncRefreshCoordinator.run(
-                                sync: { await health.sync() },
-                                refresh: {
-                                    await model.refreshAfterAppleHealthSync(
-                                        authorized: health.auth == .authorized)
-                                }
-                            )
-                            await load()
+                    HStack(spacing: NoopMetrics.space3) {
+                        if let last = health.lastSync {
+                            Text("Last synced \(relativeAgo(last.timeIntervalSince1970))")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textSecondary)
                         }
-                    } label: {
-                        Label("Sync now", systemImage: "arrow.triangle.2.circlepath")
+                        Spacer(minLength: NoopMetrics.space2)
+                        NoopButton("Sync now", systemImage: "arrow.triangle.2.circlepath", kind: .secondary) {
+                            Task {
+                                await HealthSyncRefreshCoordinator.run(
+                                    sync: { await health.sync() },
+                                    refresh: {
+                                        await model.refreshAfterAppleHealthSync(
+                                            authorized: health.auth == .authorized)
+                                    }
+                                )
+                                await load()
+                            }
+                        }
+                        .disabled(health.syncing)
                     }
-                    .buttonStyle(.bordered)
-                    .tint(StrandPalette.metricCyan)
-                    .disabled(health.syncing)
                 }
 
                 if let err = health.lastError {
@@ -479,335 +387,6 @@ struct AppleHealthView: View {
         }
     }
     #endif
-
-    // MARK: - Metric tiles (uniform 104pt StatTiles in an adaptive grid)
-
-    private var tileGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
-            alignment: .leading,
-            spacing: NoopMetrics.gap
-        ) {
-            statTile(key: "steps", label: "Steps",
-                     accent: StrandPalette.metricCyan, fmt: { intString($0) })
-            statTile(key: "resting_hr", label: "Resting HR",
-                     accent: StrandPalette.metricRose, unit: "bpm",
-                     fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "hrv", label: "HRV",
-                     accent: StrandPalette.metricPurple, unit: "ms",
-                     fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "vo2max", label: "VO₂ Max",
-                     accent: StrandPalette.accent, unit: "ml/kg",
-                     fmt: { String(format: "%.1f", $0) })
-            statTile(key: "weight", label: "Weight",
-                     accent: StrandPalette.accent,
-                     fmt: { massLabel($0) })
-            statTile(key: "body_fat", label: "Body Fat",
-                     accent: StrandPalette.metricAmber, unit: "%",
-                     fmt: { String(format: "%.1f", $0) })
-            statTile(key: "lean_mass", label: "Lean Mass",
-                     accent: StrandPalette.accent,
-                     fmt: { massLabel($0) })
-            statTile(key: "asleep_min", label: "Asleep avg",
-                     accent: StrandPalette.metricPurple,
-                     aggregate: .mean, fmt: { durationString($0) })
-            workoutsTile
-        }
-    }
-
-    /// How a tile's hero value is derived from its window.
-    private enum Aggregate { case latest, mean }
-
-    /// A StatTile for one metric. Sparse-safe: the window auto-falls-back to ALL,
-    /// the hero is the LATEST point ("as of <date>") unless a mean is requested,
-    /// and the sparkline + caption track the same resolved window.
-    private func statTile(key: String, label: LocalizedStringKey,
-                          accent: Color, unit: String = "",
-                          aggregate: Aggregate = .latest,
-                          fmt: @escaping (Double) -> String) -> some View {
-        let rows = resolvedWindow(key)
-        let values = rows.map(\.value)
-        let value: String
-        let caption: String?
-        if values.isEmpty {
-            value = "—"
-            caption = nil
-        } else {
-            switch aggregate {
-            case .latest:
-                let v = values.last ?? 0
-                value = unit.isEmpty ? fmt(v) : "\(fmt(v)) \(unit)"
-                caption = rows.last.flatMap { date($0.day) }.map { String(localized: "as of \(Self.asOfFormatter.string(from: $0))") }
-            case .mean:
-                let m = mean(values) ?? 0
-                value = unit.isEmpty ? fmt(m) : "\(fmt(m)) \(unit)"
-                caption = String(localized: "avg · \(values.count)d")
-            }
-        }
-        return StatTile(
-            label: label,
-            value: value,
-            caption: caption,
-            accent: values.isEmpty ? StrandPalette.textTertiary : accent,
-            sparkline: values.count > 1 ? sparkValues(values) : nil,
-            sparkColor: accent
-        )
-    }
-
-    /// Workouts is a count, not a series — its own fixed-height StatTile.
-    private var workoutsTile: some View {
-        StatTile(
-            label: "Workouts",
-            value: "\(workoutCount)",
-            caption: workoutCount > 0 ? String(localized: "Apple-logged") : nil,
-            accent: workoutCount > 0 ? StrandPalette.strainColor(57) : StrandPalette.textTertiary
-        )
-    }
-
-    // MARK: - Chart sections (uniform ChartCard, same height per page)
-
-    private var heartSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Heart & Vitals", overline: "Cardiac",
-                          trailing: range.caption)
-            chartCard(title: "Resting heart rate", key: "resting_hr",
-                      gradient: roseGradient, fallback: 40...80,
-                      fmt: { "\(Int($0.rounded())) bpm" })
-            chartCard(title: "Heart rate variability", key: "hrv",
-                      gradient: purpleGradient, fallback: 20...120,
-                      fmt: { "\(Int($0.rounded())) ms" })
-            chartCard(title: "Blood oxygen", key: "spo2",
-                      gradient: cyanGradient, fallback: 90...100,
-                      fmt: { String(format: "%.1f%%", $0) })
-            chartCard(title: "Respiratory rate", key: "resp_rate",
-                      gradient: accentGradient, fallback: 10...22,
-                      fmt: { String(format: "%.1f rpm", $0) })
-        }
-    }
-
-    private var activitySection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Activity & Energy", overline: "Movement",
-                          trailing: range.caption)
-            chartCard(title: "Steps", key: "steps",
-                      gradient: cyanGradient, fallback: 0...12000,
-                      fmt: { intString($0) })
-            chartCard(title: "Active energy", key: "active_kcal",
-                      gradient: amberGradient, fallback: 0...1000,
-                      fmt: { "\(intString($0)) kcal" })
-        }
-    }
-
-    private var bodySection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Body Composition", overline: "Slow threads",
-                          trailing: range.caption)
-            chartCard(title: "Weight", key: "weight",
-                      gradient: accentGradient, fallback: 50...100,
-                      fmt: { massLabel($0) })
-            chartCard(title: "Body fat", key: "body_fat",
-                      gradient: amberGradient, fallback: 8...35,
-                      fmt: { String(format: "%.1f%%", $0) })
-            chartCard(title: "Lean body mass", key: "lean_mass",
-                      gradient: accentGradient, fallback: 40...80,
-                      fmt: { massLabel($0) })
-            chartCard(title: "BMI", key: "bmi",
-                      gradient: purpleGradient, fallback: 16...35,
-                      fmt: { String(format: "%.1f", $0) })
-        }
-    }
-
-    private var sleepSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sleep", overline: "Rest",
-                          trailing: range.caption)
-            chartCard(title: "Asleep", key: "asleep_min",
-                      gradient: purpleGradient, fallback: 240...600,
-                      fmt: { durationString($0) })
-        }
-    }
-
-    /// One uniform ChartCard for a metric series: header + TrendChart body (same
-    /// height) + avg/min/max ChartFooter. Sparse-safe via resolvedWindow.
-    @ViewBuilder
-    private func chartCard(title: LocalizedStringKey, key: String, gradient: Gradient,
-                           fallback: ClosedRange<Double>,
-                           fmt: @escaping (Double) -> String) -> some View {
-        let rows = resolvedWindow(key)
-        let pts = trendPoints(rows)
-        let vals = rows.map(\.value)
-        let trailing = mean(vals).map { fmt($0) }
-        // One concrete footer type (ChartFooter) keeps every card uniform — avg /
-        // min / max / point-count, with dashes only in the defensive no-data case.
-        let footerItems: [(LocalizedStringKey, String)] = {
-            guard let avg = mean(vals), let lo = vals.min(), let hi = vals.max() else {
-                return [("Avg", "—"), ("Min", "—"), ("Max", "—"), ("Points", "0")]
-            }
-            return [("Avg", fmt(avg)), ("Min", fmt(lo)), ("Max", fmt(hi)), ("Points", "\(vals.count)")]
-        }()
-        ChartCard(
-            title: title,
-            subtitle: rangeNote(forKey: key),
-            trailing: trailing,
-            chart: {
-                if pts.count >= 2 {
-                    TrendChart(
-                        points: pts,
-                        gradient: gradient,
-                        valueRange: valueRange(pts, fallback: fallback),
-                        showsArea: true,
-                        height: NoopMetrics.chartHeight,
-                        valueFormat: fmt
-                    )
-                } else if let only = vals.last {
-                    // A single point is not a line — present the lone reading,
-                    // never an "empty" state when the series has data.
-                    singlePoint(only, fmt: fmt, accent: StrandPalette.sample(stops: gradient.stops, at: 0.85))
-                } else {
-                    emptyChart
-                }
-            },
-            footer: { ChartFooter(footerItems) }
-        )
-    }
-
-    /// Lone-reading body for series with exactly one point in range.
-    private func singlePoint(_ value: Double, fmt: (Double) -> String, accent: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Latest reading").strandOverline()
-            Text(fmt(value)).font(StrandFont.number(34)).foregroundStyle(accent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-    }
-
-    private var emptyChart: some View {
-        Text("No readings recorded.")
-            .font(StrandFont.subhead)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-    }
-
-    // MARK: - Per-metric gradients (colour communicates category only)
-
-    private var accentGradient: Gradient {
-        Gradient(colors: [StrandPalette.accentMuted, StrandPalette.accent, StrandPalette.accentHover])
-    }
-    private var roseGradient: Gradient {
-        Gradient(colors: [StrandPalette.statusWarning, StrandPalette.statusCritical])
-    }
-    private var cyanGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricCyan.opacity(0.55), StrandPalette.metricCyan])
-    }
-    private var amberGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricAmber.opacity(0.55), StrandPalette.metricAmber])
-    }
-    private var purpleGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricPurple.opacity(0.55), StrandPalette.metricPurple])
-    }
-
-    // MARK: - Series helpers (sparse-data fallback to ALL)
-
-    /// All-history rows for a key (ascending by day).
-    private func raw(_ key: String) -> [(day: String, value: Double)] { series[key] ?? [] }
-
-    /// The latest recorded day for a key (anchors its windows).
-    private func latestDate(_ key: String) -> Date? {
-        guard let d = raw(key).last?.day else { return nil }
-        return date(d)
-    }
-
-    /// Rows for a key over a given range, taken RELATIVE TO THE LATEST data point
-    /// (not "now"); `.all` returns everything.
-    private func slice(_ key: String, _ r: RangeWindow) -> [(day: String, value: Double)] {
-        let all = raw(key)
-        guard let n = r.days else { return all }
-        guard let last = latestDate(key) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(n - 1) * 86_400)
-        return all.filter { row in
-            guard let d = date(row.day) else { return false }
-            return d >= cutoff
-        }
-    }
-
-    /// The range actually shown for a key: the SELECTED range whenever its window
-    /// holds ≥1 point, otherwise the smallest LARGER range that does — so switching
-    /// ranges stays visibly distinct and only sparse windows widen. Served from the
-    /// per-render cache; falls back to a fresh compute on a cache miss.
-    private func effectiveRange(_ key: String) -> RangeWindow {
-        windowCache[key]?.effective ?? computeEffectiveRange(key)
-    }
-
-    /// The actual effective-range computation (re-slices the series, once per widening
-    /// candidate). Called only from rebuildWindowCache and the cache-miss fallback —
-    /// never repeatedly within a single render.
-    private func computeEffectiveRange(_ key: String) -> RangeWindow {
-        guard !raw(key).isEmpty else { return range }
-        for r in range.widening where !slice(key, r).isEmpty { return r }
-        return .all
-    }
-
-    /// Rows for a key trimmed to its resolved (possibly widened) window. Served from
-    /// the per-render cache; falls back to a fresh compute on a cache miss.
-    private func resolvedWindow(_ key: String) -> [(day: String, value: Double)] {
-        if let cached = windowCache[key]?.rows { return cached }
-        return slice(key, computeEffectiveRange(key))
-    }
-
-    /// Card subtitle: "N readings · <range>", flagging an auto-widen when it happened.
-    private func rangeNote(forKey key: String) -> String {
-        let rows = resolvedWindow(key)
-        let eff = effectiveRange(key)
-        let n = rows.count
-        // Whole-phrase variants per count so translators see complete sentences (never a stitched plural).
-        if eff != range {
-            return n == 1
-                ? String(localized: "1 reading · sparse, widened to \(eff.name)")
-                : String(localized: "\(n) readings · sparse, widened to \(eff.name)")
-        }
-        return n == 1
-            ? String(localized: "1 reading · \(range.name)")
-            : String(localized: "\(n) readings · \(range.name)")
-    }
-
-    private func trendPoints(_ rows: [(day: String, value: Double)]) -> [TrendPoint] {
-        rows.compactMap { row in
-            guard let dt = date(row.day) else { return nil }
-            return TrendPoint(date: dt, value: row.value)
-        }
-    }
-
-    /// Sparklines need a non-degenerate series; cap to the last ~40 samples.
-    private func sparkValues(_ values: [Double]) -> [Double] {
-        guard values.count > 1 else { return [values.first ?? 0, values.first ?? 0] }
-        return Array(values.suffix(40))
-    }
-
-    private func mean(_ values: [Double]) -> Double? {
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +) / Double(values.count)
-    }
-
-    private func valueRange(_ pts: [TrendPoint], fallback: ClosedRange<Double>, pad: Double = 0.12) -> ClosedRange<Double> {
-        let v = pts.map(\.value)
-        guard let lo = v.min(), let hi = v.max() else { return fallback }
-        if hi <= lo { return (lo - 1)...(hi + 1) }
-        let span = hi - lo
-        return (lo - span * pad)...(hi + span * pad)
-    }
-
-    private func intString(_ v: Double) -> String {
-        let n = Int(v.rounded())
-        if abs(n) >= 1000 {
-            return Self.groupedIntFmt.string(from: NSNumber(value: n)) ?? "\(n)"
-        }
-        return "\(n)"
-    }
-
-    private func durationString(_ minutes: Double) -> String {
-        let total = Int(minutes.rounded())
-        let h = total / 60, m = total % 60
-        return h > 0 ? "\(h)h \(m)m" : "\(m)m"
-    }
 }
 
 // MARK: - Preview seam
@@ -822,6 +401,29 @@ extension AppleHealthView {
 }
 
 #if DEBUG
+/// `--demo-screen applehealthrhr` (or `applehealthsleep`): the per-source page for an Apple Health series with
+/// no catalog entry, on the seeded history (`--demo-sources`).
+struct AppleHealthSeriesDemoScreen: View {
+    let key: String
+    @EnvironmentObject private var repo: Repository
+    @State private var rows: [(day: String, value: Double)] = []
+    @State private var loaded = false
+
+    var body: some View {
+        Group {
+            if loaded, let presentation = AppleHealthView.sourcePresentation(key) {
+                SourceSeriesDetailView(presentation: presentation, rows: rows, sourceName: "Apple Health")
+            } else {
+                Color.clear
+            }
+        }
+        .task {
+            rows = await repo.series(key: key, source: "apple-health", days: 4000, fullHistory: true)
+            loaded = true
+        }
+    }
+}
+
 @MainActor
 private func appleHealthPreviewData() -> AppleHealthView.PreviewData {
     let cal = Calendar(identifier: .gregorian)
