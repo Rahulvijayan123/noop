@@ -307,6 +307,12 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertTrue(ActivityContextPersistence.clipped([a, b, c], from: t0 + 400, to: t0 + 900).isEmpty,
                       "an interval ending exactly at `from` is outside")
         XCTAssertTrue(ActivityContextPersistence.clipped([a], from: t0 + 50, to: t0 + 50).isEmpty)
+        // A settled start the cut passes stays inside the row.
+        var settled = c; settled.settledFrom = t0 + 330
+        XCTAssertEqual(ActivityContextPersistence.clipped([settled], from: t0, to: t0 + 320).first?.settledFrom, t0 + 320)
+        var early = a; early.settledFrom = t0 + 20
+        XCTAssertEqual(ActivityContextPersistence.clipped([early], from: t0 + 40, to: t0 + 400).first?.settledFrom, t0 + 40)
+        XCTAssertEqual(ActivityContextPersistence.clipped([early], from: t0, to: t0 + 400).first?.settledFrom, t0 + 20)
     }
 
     func testContextFromSeveralOwnersMergesIntoOneNonOverlappingTimeline() {

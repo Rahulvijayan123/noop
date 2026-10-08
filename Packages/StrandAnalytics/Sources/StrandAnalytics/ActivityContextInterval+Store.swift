@@ -168,6 +168,8 @@ public enum ActivityContextPersistence {
             var cut = iv
             cut.start = max(iv.start, from)
             cut.end = min(iv.end, to)
+            // The settled part's start stays a second of the row (its statistics are kept as measured).
+            cut.settledFrom = iv.settledFrom.map { min(max($0, cut.start), cut.end) }
             return cut
         }
     }
