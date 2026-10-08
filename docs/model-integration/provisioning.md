@@ -183,6 +183,32 @@ Sidecar, macOS (`cd Tools/InferenceWorker`):
 
 Linux release build: see "Linux release build" below.
 
+### Final runs (macOS, this branch at `ebcbc5a53`; the machine was shared, load average up to 640)
+
+- Worker: `cd Tools/CloudWorker && DEVELOPER_DIR=…/Xcode.app/Contents/Developer xcrun swift test`
+  (libpq `PKG_CONFIG_PATH`): **Executed 685 tests, 65 skipped, 21 failures**, exit 1, 1106 s. All
+  failures are activity test cases: the four that also fail on Linux plus
+  `ActivityElderNetStageTests.testATimeoutCostsOneChunkAndACrashStopsElderNetForTheJob` and
+  `ActivityInertiaStageTests.testNaNAndAnInternalErrorCostOneChunkEach` (timing-sensitive child
+  timeouts; they passed on the unloaded Linux VM). No failure in `RuntimeIdentityTests` or any
+  deploy-owned suite.
+- Sidecar: `cd Tools/InferenceWorker && uv run --frozen pytest -q -rfE`: 5 failed, about 576 passed
+  and 44 skipped (counted from the progress output; the doubled `-q` suppressed pytest's summary
+  line). The failures: three `tests/sensor_biomarkers/test_worker_envelope_http.py` tests
+  (`assert 429 == 200`, sidecar admission under load) and two in `tests/test_features_integration.py`
+  (a socket `TimeoutError`, and the full-night budget `2.17s < 0.75`). Re-run alone, the five
+  became 4 passed and 1 failed (the CPU budget test, `1.28s < 0.75`, which times a direct
+  `compute()` call and touches no deploy code). An earlier full run during the concurrent worker
+  build was cut off by my outer 50-minute limit and is not counted.
+- Deploy area files: `uv run --frozen pytest -q -o addopts="" tests/test_provisioning.py
+  tests/test_identity.py tests/test_release_packaging.py tests/test_manifest.py` at `ebcbc5a53`:
+  **63 passed, 1 failed** in 1212 s at load average ~700;
+  the failure, `test_the_provisioner_model_section_is_idempotent_from_another_cwd` (it runs the real
+  probe, which imports torch/keras, inside the 300 s per-test limit), passed on an immediate re-run
+  together with `…runs_relative_and_unprivileged` (**2 passed**, 410 s). The same 64 tests ran
+  63 passed + 1 deselected on Linux from the release tarball (above), and 63 passed (before the
+  HTTP identity test existed) at 49bb94039.
+
 ## Read-only runtime checklist (droplet)
 
 The full command list is in [deploy/OPERATIONS.md](../../deploy/OPERATIONS.md#runtime-identity-checklist).
@@ -248,7 +274,47 @@ never becomes required:
 
 ## Linux release build
 
-(filled in below)
+From the packaged tarball, never the worktree, in colima VM `nara-sh` (arm64), image
+`nara-sh-worker-toolchain:swift6.0.3-sqlite3530400` (Ubuntu 24.04, Swift 6.0.3, Python 3.12.3),
+container/volume `nara-s01-deploy-*`, sources streamed in with `tar`. Scripts and logs:
+`_build-scratch/spec01/deploy/{scripts,logs}/`.
+
+1. `deploy/package-release.sh --out …/linux-release-r2` at the clean committed HEAD `633ddf9a8`
+   (tarball sha256 `c9ce81df…783a59b8`, 1547 files, closure StrandAnalytics, WhoopProtocol,
+   WhoopStore, OuraProtocol). `scripts/linux-release-build.sh`: `release-host.sh install` (checksum
+   and `RELEASE.files` verified) exit 0; `release-host.sh build`: `swift build -c release` succeeded
+   (no Linux build error, no change needed to any Core ML guard), then `swift test`:
+   **Executed 685 tests, 65 skipped, 12 failures**, exit 1, so `build` refused the release (no
+   `BUILD.json`), as designed. All 12 failures are in four activity test cases (activity area, not
+   Linux-specific, see request 4): `ActivityElderNetStageTests.testTheElderNetChildIsItsOwnProcessAndItsTimeoutFitsTheLease`
+   (code now passes `--threads 1` by default, the test expects no `--threads`),
+   `…testACachedHartChunkStillGetsItsElderNetCall`, `…testAPinnedStageAnswersARepeatedChunkWithoutCallingTheChild`
+   and `ActivityInertiaStageTests.testACachedHartChunkIsStillInferredByInertia` (HART is re-inferred
+   instead of answered from the on-host cache: `windowsInferred` 3, expected 0).
+2. To finish the identity path on the same installed tree (`scripts/linux-release-identity.sh`,
+   evidence only; a release whose tests fail is not shippable): `release-host.sh build <id>
+   --skip-tests` exit 0 (incremental release build, `BUILD.json` with `tests: skipped`),
+   `--print-identity` inside `build` reported `matches_release: true`;
+   `sha256sum` of `.build/aarch64-unknown-linux-gnu/release/frwhoop-worker` =
+   **`dd8547cdf3992324db18d623ca631364d4095102646aaf64572cd3b8b805afbf`**, equal to the
+   `executable.sha256` that `/work/noop/current/…/frwhoop-worker --print-identity` measured after
+   `switch` (exit 0); `status` exit 0; the release directory is sealed `dr-x------`.
+3. Sidecar from the tarball of the final code commit `ebcbc5a53` (`scripts/linux-sidecar-tests.sh`):
+   tarball checksum and `RELEASE.files` verified, release tree made read-only, pinned uv 0.9.5
+   (aarch64 tarball sha256 `9db0c2f6…94ff3`), `uv sync --frozen` with `UV_PYTHON_DOWNLOADS=never
+   --python-preference only-system` into a venv outside the tree, as an unprivileged user: exit 0;
+   no file in the release tree was written. `pytest tests/test_provisioning.py tests/test_identity.py
+   tests/test_manifest.py tests/test_release_packaging.py` as that user: **63 passed, 1 deselected**
+   (`test_this_repository_packages_the_worker_with_all_four_local_packages` needs the repository's
+   git history, which a release does not carry by design). The first run at `633ddf9a8` found two
+   test-only defects (a test assumed no release stamp beside the code; a same-size stamp rewrite
+   within one Linux timestamp tick hit the digest cache), fixed in `ebcbc5a53`.
+
+Commits after `633ddf9a8` change no Swift or sidecar source (`git diff --stat 633ddf9a8..ebcbc5a53`:
+`tests/test_identity.py` and the three docs), so the Swift evidence applies to the final tree. The
+VM is arm64; the droplet is x86_64, so its binary digest will differ and only its own `BUILD.json`
+and process digest identify it. Digest caching note: `identity.py` keys digests by (path, mtime,
+size), which is sound because stamps, build records and revisions are immutable once written.
 
 ## Requests to parent
 
@@ -264,3 +330,7 @@ never becomes required:
    DeepBeat/SiamAF digests when loaded). Not done here: those files belong to other areas.
 3. **Shared README "Runtime identity"**: mention `providers[].loaded_source` and
    `worker_loaded_identity` (additive).
+4. **Activity area: four worker test cases fail (12 assertions) at the integration merge**, on Linux
+   (above) and macOS (see "Final runs"): `ActivityElderNetStageTests` (`--threads` default vs the
+   expected `serveArgs`; cached-HART reuse) and `ActivityInertiaStageTests` (cached-HART reuse). A
+   release cannot be built with tests until they pass; `release-host.sh build` refuses it.
