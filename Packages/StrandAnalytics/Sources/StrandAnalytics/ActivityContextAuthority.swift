@@ -440,3 +440,109 @@ public struct ActivityExpertSelection: Equatable, Sendable {
         return nil
     }
 }
+
+// MARK: - Row authority block
+
+/// What a producer stores with an expert row (inside its `summary.authority`, copied into the row's `authority`
+/// column) and the scores route returns with it: the policy inputs the row was produced under and the producer's own
+/// decision for it. A consumer rebuilds the policy's source from it (`gaitSource` / `motionSource`) and re-runs the
+/// policy; `use` and `reason` are the producer's view, for inspection only. Decoding is lenient: an unknown release
+/// reads as shadow, never as production.
+public struct ActivityExpertAuthority: Codable, Equatable, Sendable {
+    public var policy: String
+    public var channel: ActivityExpertSelection.Channel
+    public var route: String
+    /// The mode the producer ran under.
+    public var mode: ActivityReleaseMode
+    /// The release after the policy's lowering.
+    public var releaseMode: ActivityReleaseMode
+    public var use: ActivityExpertSelection.Use
+    public var reason: String?
+    /// The raw-IMU input revision of the job (a decimal string on the wire: int64 does not survive JSON numbers).
+    public var inputRevision: Int64?
+    public var pinnedModelVersion: String?
+    public var pinnedWeightsDigest: String?
+    public var gaitPrior: Double?
+    public var pinnedBundleSHA256: String?
+
+    enum CodingKeys: String, CodingKey {
+        case policy, channel, route, mode, releaseMode = "release_mode", use, reason, inputRevision = "input_revision"
+        case pinnedModelVersion = "pinned_model_version", pinnedWeightsDigest = "pinned_weights_digest"
+        case gaitPrior = "gait_prior", pinnedBundleSHA256 = "pinned_bundle_sha256"
+    }
+
+    public init(decision: ActivityExpertSelection.Decision, mode: ActivityReleaseMode,
+                pinnedModelVersion: String? = nil, pinnedWeightsDigest: String? = nil, gaitPrior: Double? = nil,
+                pinnedBundleSHA256: String? = nil) {
+        policy = ActivityExpertSelection.policy
+        channel = decision.channel; route = decision.route; self.mode = mode
+        releaseMode = decision.releaseMode.lowered(to: mode); use = decision.use; reason = decision.reason
+        inputRevision = decision.inputRevision
+        self.pinnedModelVersion = pinnedModelVersion; self.pinnedWeightsDigest = pinnedWeightsDigest
+        self.gaitPrior = gaitPrior; self.pinnedBundleSHA256 = pinnedBundleSHA256
+    }
+
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        policy = try c.decode(String.self, forKey: .policy)
+        channel = try c.decode(ActivityExpertSelection.Channel.self, forKey: .channel)
+        route = try c.decodeIfPresent(String.self, forKey: .route) ?? ElderNetRoute.standalone.rawValue
+        let recordedMode = ActivityReleaseMode(recorded: try c.decodeIfPresent(String.self, forKey: .mode))
+        mode = recordedMode
+        releaseMode = ActivityReleaseMode(recorded: try c.decodeIfPresent(String.self, forKey: .releaseMode))
+            .lowered(to: recordedMode)
+        use = (try? c.decodeIfPresent(ActivityExpertSelection.Use.self, forKey: .use)) ?? ActivityExpertSelection.Use.none
+        reason = try c.decodeIfPresent(String.self, forKey: .reason)
+        if let text = try? c.decodeIfPresent(String.self, forKey: .inputRevision) { inputRevision = Int64(text) }
+        else { inputRevision = try? c.decodeIfPresent(Int64.self, forKey: .inputRevision) }
+        pinnedModelVersion = try c.decodeIfPresent(String.self, forKey: .pinnedModelVersion)
+        pinnedWeightsDigest = try c.decodeIfPresent(String.self, forKey: .pinnedWeightsDigest)
+        gaitPrior = try c.decodeIfPresent(Double.self, forKey: .gaitPrior)
+        pinnedBundleSHA256 = try c.decodeIfPresent(String.self, forKey: .pinnedBundleSHA256)
+    }
+
+    /// Every key, nil ones as JSON null (the documented wire shape).
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(policy, forKey: .policy); try c.encode(channel, forKey: .channel)
+        try c.encode(route, forKey: .route); try c.encode(mode, forKey: .mode)
+        try c.encode(releaseMode, forKey: .releaseMode); try c.encode(use, forKey: .use)
+        try c.encode(reason, forKey: .reason)
+        try c.encode(inputRevision.map(String.init), forKey: .inputRevision)
+        if channel == .motionHeads {
+            try c.encode(pinnedBundleSHA256, forKey: .pinnedBundleSHA256)
+        } else {
+            try c.encode(pinnedModelVersion, forKey: .pinnedModelVersion)
+            try c.encode(pinnedWeightsDigest, forKey: .pinnedWeightsDigest)
+            try c.encode(gaitPrior, forKey: .gaitPrior)
+        }
+    }
+
+    /// The policy source for a stored gait row: its recorded release (the row's `release_mode`), never above this
+    /// block's, with the pins and π the producer ran with. Without a block (an older row) pass nil: the row then has
+    /// no pins and the policy reads it as shadow.
+    public static func gaitSource(_ authority: Self?, track: GaitQualityTrackInput, recordedRelease: ActivityReleaseMode,
+                                  inputRevision: Int64?, day: String?) -> GaitQualitySource {
+        GaitQualitySource(track: track,
+                          releaseMode: authority.map { recordedRelease.lowered(to: $0.releaseMode) } ?? recordedRelease,
+                          route: authority.flatMap { ElderNetRoute(rawValue: $0.route) } ?? .standalone,
+                          expectedModelVersion: authority?.pinnedModelVersion,
+                          expectedWeightsDigest: authority?.pinnedWeightsDigest,
+                          gaitPrior: authority?.gaitPrior, inputRevision: inputRevision ?? authority?.inputRevision,
+                          day: day)
+    }
+
+    /// The policy source for a stored motion-heads row, the same way (no block: no pinned bundle, so shadow).
+    public static func motionSource(_ authority: Self?, track: MotionHeadsTrackInput, recordedRelease: ActivityReleaseMode,
+                                    inputRevision: Int64?, day: String?) -> MotionHeadsSource {
+        MotionHeadsSource(track: track,
+                          mode: authority.map { recordedRelease.lowered(to: $0.releaseMode) } ?? recordedRelease,
+                          expectedBundleSHA256: authority?.pinnedBundleSHA256,
+                          inputRevision: inputRevision ?? authority?.inputRevision, day: day)
+    }
+}
+
+extension ActivityExpertSelection {
+    /// The first decision for `channel` (nil when the selection had no source for it).
+    public func decision(for channel: Channel) -> Decision? { decisions.first { $0.channel == channel } }
+}

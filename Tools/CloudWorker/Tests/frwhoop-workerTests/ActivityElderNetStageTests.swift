@@ -25,11 +25,11 @@ final class ActivityElderNetStageTests: XCTestCase {
         return nil
     }
 
-    private func hartService() throws -> ActivityPythonService {
+    private func hartService(_ extraArgs: [String] = []) throws -> ActivityPythonService {
         guard let path = stub("stub_activity_service.py") else { throw XCTSkip("stub_activity_service.py not found") }
         let s = ActivityPythonService(config: ActivityPythonService.Config(
             pythonBin: "/usr/bin/python3", activityHome: FileManager.default.currentDirectoryPath, modelDir: nil,
-            serveArgs: [path], requestTimeoutSeconds: 5, maxRequestBytes: 64 * 1024 * 1024,
+            serveArgs: [path] + extraArgs, requestTimeoutSeconds: 5, maxRequestBytes: 64 * 1024 * 1024,
             maxResponseLineBytes: 16 * 1024 * 1024, restartCap: 8, restartCooldownSeconds: 30))
         services.append(s)
         return s
@@ -265,7 +265,7 @@ final class ActivityElderNetStageTests: XCTestCase {
             "FRWHOOP_ELDERNET_PYTHON": "/opt/venv/bin/python", "FRWHOOP_ELDERNET_TIMEOUT_SECONDS": "45"])
         let c = try XCTUnwrap(s.serviceConfig(activityHome: "/srv/Tools/ActivityContext"))
         XCTAssertEqual(c.serveArgs, ["-m", "activity_context.eldernet.serve", "--weights-dir", "/opt/eldernet/weights",
-                                     "--upstream-dir", "/opt/eldernet/upstream", "--timeout", "40"])
+                                     "--upstream-dir", "/opt/eldernet/upstream", "--timeout", "40", "--threads", "1"])
         XCTAssertEqual(c.pythonBin, "/opt/venv/bin/python")
         XCTAssertEqual(c.requestTimeoutSeconds, 45)
         XCTAssertTrue(c.keepsRawLines)
@@ -525,11 +525,67 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertEqual(calls, 4, "the readiness check and the three HART calls; no ElderNet call")
         XCTAssertEqual(again.gaitQuality.responses, filled.gaitQuality.responses)
         XCTAssertEqual(again.gaitQuality.trackInput, filled.gaitQuality.trackInput)
-        // Unpinned, the answer could come from any model: nothing is kept.
+        // Unpinned, the answers are still named by what the child measured it loaded, so they are kept.
         let unpinned = try eldernet("ok")
         var stats = ActivityLane.Stats()
         _ = try infer(unpinned, stats: &stats)
-        XCTAssertEqual(unpinned.responses.count, 0)
+        XCTAssertEqual(unpinned.responses.count, 3)
+        // A child that reports no measured identity (a serve older than loaded.py): its answers cannot be named by
+        // their bytes, so nothing is kept, pinned or not.
+        let unmeasured = try eldernet("ok", pinVersion: .some(version), pinDigest: .some(try digest()),
+                                      extraArgs: ["--no-loaded"])
+        var bare = ActivityLane.Stats()
+        _ = try infer(unmeasured, stats: &bare)
+        _ = try infer(unmeasured, stats: &bare)
+        XCTAssertEqual(unmeasured.responses.count, 0)
+        XCTAssertEqual(bare.eldernetChunksReused, 0)
+    }
+
+    /// A HART child without a measured identity gets no answer cache: the same chunks are inferred again.
+    func testAHartChildWithoutAMeasuredIdentityIsNeverCached() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = try XCTUnwrap(ActivityLocalCache(path: directory.path))
+        let hart = try hartService(["--no-loaded"])
+        _ = try hart.ping()
+        XCTAssertNil(hart.cacheIdentity)
+        for _ in 0..<2 {
+            var stats = ActivityLane.Stats()
+            _ = try ActivityLane.inferChunks(requests(), service: hart, inertia: nil, versions: versions(hart),
+                                             cache: cache, stats: &stats, renew: { true })
+            XCTAssertEqual(stats.windowsInferred, 3)
+            XCTAssertEqual(stats.windowsReused, 0)
+        }
+    }
+
+    /// Changed checkpoint bytes under the same version labels: the measured identity moves, so no answer computed
+    /// with the old bytes is reused.
+    func testChangedCheckpointBytesUnderTheSameLabelsAreNotReused() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = try XCTUnwrap(ActivityLocalCache(path: directory.path))
+        let old = try hartService(["--checkpoint-seed", "a"])
+        _ = try old.ping()
+        var first = ActivityLane.Stats()
+        _ = try ActivityLane.inferChunks(requests(), service: old, inertia: nil, versions: versions(old),
+                                         cache: cache, stats: &first, renew: { true })
+        XCTAssertEqual(first.windowsInferred, 3)
+        let same = try hartService(["--checkpoint-seed", "a"])
+        _ = try same.ping()
+        var reused = ActivityLane.Stats()
+        _ = try ActivityLane.inferChunks(requests(), service: same, inertia: nil, versions: versions(same),
+                                         cache: cache, stats: &reused, renew: { true })
+        XCTAssertEqual(reused.windowsReused, 3, "the same bytes: reused")
+        let changed = try hartService(["--checkpoint-seed", "b"])
+        _ = try changed.ping()
+        XCTAssertEqual(changed.reportedModelVersion, old.reportedModelVersion, "the label is reused")
+        var fresh = ActivityLane.Stats()
+        _ = try ActivityLane.inferChunks(requests(), service: changed, inertia: nil, versions: versions(changed),
+                                         cache: cache, stats: &fresh, renew: { true })
+        XCTAssertEqual(fresh.windowsReused, 0, "changed bytes under a reused label: nothing reused")
+        XCTAssertEqual(fresh.windowsInferred, 3)
     }
 
     func testTheResponseCacheDropsTheOldestPastItsCapacity() {

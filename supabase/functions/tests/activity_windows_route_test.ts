@@ -35,7 +35,8 @@ function fakeRest(rows: Array<{ day: string; result_revision: number }>, reads: 
         ? selected.map((r) => ({ day: r.day, result_revision: r.result_revision, windows: DOC }))
         : selected.map((r) => ({ day: r.day, encoder_id: 'hart', model_version: 'hart-wisdm-v0',
           preprocessing_version: '1.0.0', feature_schema: 'imu-feat-1', window_count: 1, first_ts: 1791158400,
-          last_ts: 1791158404, result_revision: r.result_revision, computed_at: '2026-10-05T12:00:00Z' }));
+          last_ts: 1791158404, input_revision: 5, result_revision: r.result_revision,
+          computed_at: '2026-10-05T12:00:00Z' }));
     }
     return [];
   };
@@ -87,4 +88,15 @@ Deno.test('activity windows: query parser', () => {
   const q = parseActivityWindowsQuery(new URLSearchParams('days=2026-10-04,2026-10-05&known=2026-10-05:99'));
   assertEquals(q.days, ['2026-10-04', '2026-10-05']);
   assertEquals(q.known.get('2026-10-05'), '99');
+});
+
+Deno.test('activity windows: every row says its input revision and release (HART production, embedded gait shadow)', async () => {
+  const rest = fakeRest([{ day: '2026-10-04', result_revision: 7 }, { day: '2026-10-05', result_revision: 12 }], []);
+  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05&known=2026-10-04:7'), { rest, cfg });
+  const byDay = Object.fromEntries((await res.json()).days.map((d: any) => [d.day, d]));
+  for (const day of ['2026-10-04', '2026-10-05']) {
+    assertEquals(byDay[day].input_revision, '5', day);
+    assertEquals(byDay[day].release_mode, 'production', day);
+    assertEquals(byDay[day].embedded_gait_release_mode, 'shadow', day);
+  }
 });
