@@ -85,6 +85,9 @@ public enum SleepMetricStatus: String, Codable, Equatable, Sendable {
     case notRun = "not_run"
     case timeout
     case error
+    /// spec-02 §5.4: a phase that was evaluated and found undefined (`phase_status`:
+    /// zero amplitude, unstable phase, mixed devices, insufficient days / daytime data).
+    case unavailable
     case unknown
 }
 

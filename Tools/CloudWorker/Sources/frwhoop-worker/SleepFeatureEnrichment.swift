@@ -80,6 +80,9 @@ enum SleepFeatureEnrichment {
         let beats: [RRInterval]
         let breathTrack: RespBreathTrack
         let history: SleepFeatureHistory?
+        /// spec-02: the bounded multi-day `rhythm_history` (CONTRACT §5.1), assembled by
+        /// `SleepFeatureRhythmHistory.assemble`; nil sends no key.
+        var rhythmHistory: [String: Any]? = nil
     }
 
     /// What the sidecar reads around a night: the thermal baseline starts 90 min
@@ -168,6 +171,9 @@ enum SleepFeatureEnrichment {
                 c["history_revision_digest"] = sha256Hex(Data(digest.utf8))
                 request["context"] = c
             }
+        }
+        if let rhythm = input.rhythmHistory {
+            request["rhythm_history"] = rhythm
         }
         return request
     }
