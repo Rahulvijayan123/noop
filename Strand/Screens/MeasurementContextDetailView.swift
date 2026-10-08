@@ -344,9 +344,9 @@ struct MeasurementContextDetailModel: Equatable {
         }
         var rows = [
             side("awake", String(localized: "Awake median"), median: dn.awakeMedianBpm, samples: dn.awakeSamples,
-                 eligibleS: dn.awakeEligibleS, coverage: dn.awakeCoverage, missing: "awake_hr_insufficient"),
+                 eligibleS: dn.awakeEligibleS, coverage: dn.awakeCoverage, missing: PhysiologyContext.SleepRhythm.awakeHrInsufficient),
             side("asleep", String(localized: "Asleep median"), median: dn.sleepMedianBpm, samples: dn.sleepSamples,
-                 eligibleS: dn.sleepEligibleS, coverage: dn.sleepCoverage, missing: "sleep_hr_insufficient"),
+                 eligibleS: dn.sleepEligibleS, coverage: dn.sleepCoverage, missing: PhysiologyContext.SleepRhythm.sleepHrInsufficient),
         ]
         if let diff = dn.differenceBpm {
             rows.append(ContextDetailRow("difference", String(localized: "Awake minus asleep"),
@@ -357,7 +357,7 @@ struct MeasurementContextDetailModel: Equatable {
                                          note: String(localized: "Awake minus asleep, as a percentage of the awake median")))
         }
         var notes = [String(localized: "Sleep was found partly from heart rate, so this comparison is not independent of it.")]
-        if let r = W.reasonList(dn.reasons.filter { $0.rawValue != "percent_dip_definition" }) { notes.append(r) }
+        if let r = W.reasonList(dn.reasons.filter { $0 != PhysiologyContext.SleepRhythm.percentDipDefinition }) { notes.append(r) }
         return ContextDetailSection(id: "dayNightHeartRate", title: String(localized: "Awake and asleep heart rate"),
                                     rows: rows, footnote: notes.joined(separator: " "))
     }
