@@ -728,10 +728,10 @@ final class CandidateStageTests: XCTestCase {
         let elapsed = Date().timeIntervalSince(started)
         XCTAssertLessThan(elapsed, 6.0, "the drain cap must bound the stage (took \(elapsed)s)")
         XCTAssertEqual(subject.stats.calls, 1, "the cap must prevent a second attempt")
-        // The attempt that DID start settles as a withheld timeout row.
-        let record = try XCTUnwrap(store.recorded.first)
-        XCTAssertEqual(record.status, "withheld")
-        XCTAssertEqual(record.withheldReason, "timeout")
+        // The attempt the cap cut short is not the provider's outcome: no withheld timeout row
+        // (it would block a later real result for the same inputs), counted as a deadline skip.
+        XCTAssertTrue(store.recorded.isEmpty)
+        XCTAssertEqual(subject.stats.skippedDeadline, 1)
     }
 
     func testTransientRetryBacksOff() {

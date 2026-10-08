@@ -322,6 +322,52 @@ final class SleepFeatureEnrichmentTests: XCTestCase {
         XCTAssertLessThan(Date().timeIntervalSince(started), 10.0, "must settle within its budget")
     }
 
+    func testBusyKeepsThePublishedDocumentOrOmitsTheKey() throws {
+        // 429 busy is not a result: never a blank document over a good one.
+        let server = StubHTTPServer { _ in
+            var response = StubHTTPServer.Response.json(
+                #"{"status":"error","error":{"code":"busy","message":"full","lane":"sleep_features"}}"#,
+                status: 429)
+            response.headers["Retry-After"] = "2"
+            return response
+        }
+        defer { server.stop() }
+        let client = InferenceClient(baseURL: URL(string: server.baseURL)!, timeoutMS: 5_000)
+        let n0 = 1789000000
+        let request = SleepFeatureEnrichment.buildRequest(makeInput(
+            nights: [makeNight(start: n0, end: n0 + 3600)]))
+        let published: [String: Any] = ["schema_version": 1, "status": "available", "nights": [] as [Any]]
+        let kept = SleepFeatureEnrichment.enrich(request: request, client: client, previous: { published })
+        XCTAssertEqual(kept?["status"] as? String, "available", "the published document is carried over")
+        XCTAssertNil(SleepFeatureEnrichment.enrich(request: request, client: client),
+                     "no published document: the key is omitted, as with the sidecar off")
+        let oldBusy: [String: Any] = ["status": "busy", "status_reasons": ["sidecar_busy"]]
+        XCTAssertNil(SleepFeatureEnrichment.enrich(request: request, client: client, previous: { oldBusy }),
+                     "an earlier worker's busy placeholder is not carried over")
+        XCTAssertEqual(server.requestCount, 3)
+    }
+
+    func testLoadPublishedDocumentReadsTheNewestSnapshotsSleepFeatures() throws {
+        final class OneRowDB: PostgresClientProtocol {
+            var lastSQL = ""
+            var lastParams: [String] = []
+            let rows: [[String: String]]
+            init(_ rows: [[String: String]]) { self.rows = rows }
+            func query(_ sql: String, _ params: [String]) throws -> [[String: String]] {
+                lastSQL = sql; lastParams = params; return rows
+            }
+        }
+        let db = OneRowDB([["doc": #"{"status":"available","schema_version":1}"#]])
+        let doc = try SleepFeatureEnrichment.loadPublishedDocument(
+            db: db, userId: "u", deviceId: "d", day: "2026-09-10", algorithmVersion: "frwhoop-server-1")
+        XCTAssertEqual(doc?["status"] as? String, "available")
+        XCTAssertTrue(db.lastSQL.contains("scoring_snapshots_v2") && db.lastSQL.contains("result_revision desc"))
+        XCTAssertEqual(db.lastParams, ["u", "d", "2026-09-10", "frwhoop-server-1"])
+        XCTAssertNil(try SleepFeatureEnrichment.loadPublishedDocument(
+            db: OneRowDB([["doc": ""]]), userId: "u", deviceId: "d", day: "2026-09-10",
+            algorithmVersion: "frwhoop-server-1"))
+    }
+
     func testEnrichRefusedConnectionReturnsNil() throws {
         // Nothing listening (a real refused port, not a mock): nil, no throw.
         let client = InferenceClient(baseURL: URL(string: "http://127.0.0.1:1")!,

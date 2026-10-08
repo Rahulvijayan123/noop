@@ -129,6 +129,12 @@ class ExecutionConfig:
     http_backlog: int
     #: Idle keep-alive / slow-client read timeout per connection.
     http_idle_timeout_s: int
+    #: Consecutive budget overruns after which a provider is quarantined (0 = never): its
+    #: requests are answered withheld ``timeout`` (``provider_quarantined``) without dispatch,
+    #: so one always-overrunning provider cannot keep killing the shared worker.
+    quarantine_after: int = 3
+    #: How long a quarantine lasts; the first request after it is a real trial.
+    quarantine_seconds: int = 600
 
     @classmethod
     def from_env(cls, env: Mapping[str, str] | None = None) -> "ExecutionConfig":
@@ -162,7 +168,9 @@ class ExecutionConfig:
             math_threads=_env_int(env, "FRWHOOP_INFERENCE_MATH_THREADS", 1, 1, 4),
             http_threads=_env_int(env, "FRWHOOP_INFERENCE_HTTP_THREADS", 12, 2, 64),
             http_backlog=_env_int(env, "FRWHOOP_INFERENCE_HTTP_BACKLOG", 16, 0, 256),
-            http_idle_timeout_s=_env_int(env, "FRWHOOP_INFERENCE_HTTP_IDLE_TIMEOUT_S", 60, 1, 600))
+            http_idle_timeout_s=_env_int(env, "FRWHOOP_INFERENCE_HTTP_IDLE_TIMEOUT_S", 60, 1, 600),
+            quarantine_after=_env_int(env, "FRWHOOP_INFERENCE_QUARANTINE_AFTER", 3, 0, 20),
+            quarantine_seconds=_env_int(env, "FRWHOOP_INFERENCE_QUARANTINE_SECONDS", 600, 10, 86_400))
 
     def to_wire(self) -> dict[str, Any]:
         return {
@@ -170,6 +178,8 @@ class ExecutionConfig:
             "http": {"threads": self.http_threads, "backlog": self.http_backlog,
                      "idle_timeout_s": self.http_idle_timeout_s},
             "sleep_features_budget_ms": self.sleep_features_budget_ms,
+            "quarantine": {"after_timeouts": self.quarantine_after,
+                           "seconds": self.quarantine_seconds},
         }
 
 
@@ -544,16 +554,17 @@ class WorkerLane:
             worker.stop_requested_at = time.monotonic()
             worker.job_deadline = None
             proc = worker.proc
+            # Counted here, before the supervisor is woken: the process may be gone by the time
+            # it looks, and it must not count the same stop a second time.
+            if proc is not None and proc.poll() is None:
+                worker.term_sent = True
+                self.counters["terminations"] += 1
             self._cond.notify_all()
         if proc is not None and proc.poll() is None:
             try:
                 proc.send_signal(signal.SIGTERM)
             except OSError:
                 pass
-            # Counted here: the process may be gone before the supervisor looks at it.
-            with self._cond:
-                worker.term_sent = True
-                self.counters["terminations"] += 1
 
     # -- supervision ----------------------------------------------------------------
 

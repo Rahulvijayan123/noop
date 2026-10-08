@@ -25,11 +25,12 @@
 //     `sleep_features.status = "timeout"` — never an error, never a hang; the
 //     ordinary next eligible scoring pass retries.
 //   * Backpressure: a sidecar that cannot admit the request answers 429 `busy`
-//     at once. The core snapshot publishes as usual with a worker-built
-//     `sleep_features.status = "busy"` document (every block withheld,
-//     reason `sidecar_busy`); the next scoring pass of the day replaces it.
-//     Phones decode an unknown document status as `.unknown`, so old clients
-//     tolerate it (docs/model-integration/runtime-bounds.md).
+//     at once. Busy is not a result: the core snapshot publishes as usual and
+//     carries the day's previously published `sleep_features` document over
+//     unchanged (the snapshot replaces the whole payload, so leaving the key
+//     out would erase it); a day with none publishes without the key, exactly
+//     as with the sidecar off. The next scoring pass of the day asks again
+//     (docs/model-integration/runtime-bounds.md).
 //   * One enrichment request per claimed day, inside the payload build (a
 //     plain loopback JSON call, not the waveform download / model inference
 //     the spec keeps out of the repeatable-read transaction).
@@ -82,9 +83,9 @@ enum SleepFeatureEnrichment {
         return min(30_000, max(500, value))
     }
 
-    /// The document status the worker attaches when the sidecar answered `busy`.
+    /// The document status an earlier worker attached when the sidecar answered `busy`. Such a
+    /// document is never carried over: it says nothing about the night.
     static let busyStatus = "busy"
-    static let busyReason = "sidecar_busy"
 
     // MARK: - Request assembly (pure; unit-tested)
 
@@ -233,9 +234,11 @@ enum SleepFeatureEnrichment {
     /// caller then publishes the snapshot without the key — or, for a
     /// `timeout`/`error` status body, attaches the degraded status document
     /// so the client can say "unavailable right now" instead of nothing).
-    /// A `busy` answer returns `busyDocument`: nothing was computed, and the
-    /// core publish never waits for the enrichment.
-    static func enrich(request: [String: Any], client: InferenceClient) -> [String: Any]? {
+    /// A `busy` answer is not a result: nothing was computed, so it returns
+    /// `previous()` (the day's already published document, or nil to publish
+    /// without the key) and the core publish never waits for the enrichment.
+    static func enrich(request: [String: Any], client: InferenceClient,
+                       previous: () -> [String: Any]? = { nil }) -> [String: Any]? {
         do {
             guard JSONSerialization.isValidJSONObject(request),
                   let body = try? JSONSerialization.data(withJSONObject: request) else {
@@ -244,41 +247,28 @@ enum SleepFeatureEnrichment {
             let raw = try client.sleepFeatures(body: body, timeoutMSOverride: budgetMS)
             return validateResponse(raw)
         } catch let error as InferenceClientError where error.isBusy {
-            return busyDocument(for: request, retryAfterSeconds: error.retryAfterSeconds)
+            guard let kept = previous(), (kept["status"] as? String) != busyStatus else { return nil }
+            return kept
         } catch {
             return nil
         }
     }
 
-    /// The document attached when the sidecar could not admit the request: the
-    /// sidecar's degraded-document shape (the same keys as its `timeout` body),
-    /// built from the request's own nights, every block withheld `sidecar_busy`.
-    static func busyDocument(for request: [String: Any], retryAfterSeconds: Int?) -> [String: Any] {
-        let withheld: [String: Any] = ["status": "withheld", "reasons": [busyReason]]
-        let stageVersion = (request["context"] as? [String: Any])?["stage_algorithm_version"]
-        let nights: [[String: Any]] = ((request["nights"] as? [[String: Any]]) ?? []).map { night in
-            var entry: [String: Any] = [
-                "stage_source": "sleep-v2",
-                "continuity": withheld, "architecture": withheld, "stage_physiology": withheld,
-                "settling": withheld, "thermal": withheld, "respiratory_variability": withheld,
-                "metric_status": ["night_gate": withheld, "module_errors": [] as [String]] as [String: Any],
-                "coverage": [:] as [String: Any],
-            ]
-            for key in ["night_id", "start_utc", "end_utc", "is_nap", "user_edited"] {
-                if let value = night[key] { entry[key] = value }
-            }
-            if let stageVersion { entry["stage_algorithm_version"] = stageVersion }
-            return entry
-        }
-        var doc: [String: Any] = [
-            "schema_version": schemaVersion,
-            "algorithm_version": algorithmVersion,
-            "status": busyStatus,
-            "status_reasons": [busyReason],
-            "nights": nights,
-            "regularity": withheld,
-        ]
-        if let retryAfterSeconds { doc["retry_after_s"] = retryAfterSeconds }
+    /// The `daily.sleep_features` document of the day's newest published snapshot under the
+    /// claimed algorithm, or nil. One bounded query; on the v2 path it reads the same snapshot
+    /// the claim does.
+    static func loadPublishedDocument(db: PostgresClientProtocol, userId: String, deviceId: String,
+                                      day: String, algorithmVersion: String) throws -> [String: Any]? {
+        let rows = try db.query("""
+            select (payload->'daily'->'sleep_features')::text as doc
+              from public.scoring_snapshots_v2
+             where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+               and algorithm_version = $4::text
+             order by result_revision desc
+             limit 1
+            """, [userId, deviceId, day, algorithmVersion])
+        guard let text = rows.first?["doc"], !text.isEmpty, let data = text.data(using: .utf8),
+              let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
         return doc
     }
 

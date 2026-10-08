@@ -143,7 +143,11 @@ indirect enum JSONValue: Codable, Equatable {
     init(any: Any) {
         switch any {
         case let v as JSONValue: self = v
-        case let v as Bool: self = .bool(v)
+        // A native Swift Bool (its dynamic type is exactly Bool; a JSONSerialization number never is).
+        case let v as Bool where type(of: any) == Bool.self: self = .bool(v)
+        // JSONSerialization numbers. On Darwin `as Bool` would also match NSNumber 0 and 1, so a
+        // histogram edge or a count of 0/1 used to become a boolean; classify the NSNumber itself.
+        case let n as NSNumber: self = JSONValue.number(n)
         case let v as Int: self = .int(v)
         case let v as Int64: self = .int(Int(v))
         case let v as Double: self = .double(v)
@@ -157,6 +161,32 @@ indirect enum JSONValue: Codable, Equatable {
         case is NSNull: self = .null
         default: self = .null
         }
+    }
+
+    /// An NSNumber as the JSON value it was parsed from: a boolean only when it really is one,
+    /// an integer when it is integral and fits, a double otherwise.
+    static func number(_ n: NSNumber) -> JSONValue {
+        if isBoolean(n) { return .bool(n.boolValue) }
+        let type = String(cString: n.objCType)
+        if ["q", "l", "i", "s", "c", "Q", "L", "I", "S", "C"].contains(type) {
+            if type == "Q" || type == "L", n.uint64Value > UInt64(Int.max) { return .double(n.doubleValue) }
+            return .int(n.intValue)
+        }
+        let d = n.doubleValue
+        // Integral doubles stay integers, as the `as Int` cast this replaces made them.
+        if d.isFinite, d == d.rounded(), abs(d) <= 9_007_199_254_740_992 { return .int(Int(d)) }
+        return .double(d)
+    }
+
+    private static func isBoolean(_ n: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        return CFGetTypeID(n) == CFBooleanGetTypeID()
+        #else
+        // swift-corelibs-foundation: JSONSerialization makes true/false as NSNumber(value: Bool),
+        // whose objCType is "c" (JSON numbers never parse to a char); "B" is the C99 bool code.
+        let type = String(cString: n.objCType)
+        return type == "c" || type == "B"
+        #endif
     }
 
     /// The `Any` form, for JSONSerialization-based helpers and tests.

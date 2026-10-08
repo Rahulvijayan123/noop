@@ -36,6 +36,20 @@ lane and the heartbeat, and fixed three defects found while testing (below).
   never waits for the replacement.
 - **Crash.** A process that dies is reaped and respawned with backoff; the request it was running gets
   a `provider_error` answer (sleep features: the degraded `error` document, `worker_crashed: ...`).
+- **Quarantine.** All `infer` providers share one worker, and every budget overrun costs that worker
+  a kill and a warm restart (about 60 s here) during which every other provider is answered 429.
+  After `FRWHOOP_INFERENCE_QUARANTINE_AFTER` (3) consecutive overruns a provider is quarantined for
+  `FRWHOOP_INFERENCE_QUARANTINE_SECONDS` (600): its requests are answered at once, without dispatch,
+  `withheld` `timeout` with `diagnostics.withheld_detail = "provider_quarantined"`,
+  `worker_terminated: false`, `consecutive_timeouts`, `until_utc` and `retry_after_s`. After the
+  cool-off the next request is a real trial: another overrun re-arms the quarantine at once, a result
+  resets the count. So an always-overrunning provider cannot keep the others out.
+- **Loaded identity.** The warm worker's `hello` reports what it measured it loaded; `/healthz`
+  reports it only while the worker that sent it is alive (it disappears when that worker is reaped,
+  and a replacement's report takes its place).
+- **Readiness.** Readiness is adopted once, from the first warm worker. A replacement whose report
+  differs is logged (`a replacement worker's readiness differs ...`) and listed in
+  `execution.provider_readiness.disagreements`; the adopted readiness is kept.
 - **Math threads.** Each process starts with `OMP/OPENBLAS/MKL/NUMEXPR/VECLIB/BLIS/NUMBA/TF_*` thread
   variables set to `FRWHOOP_INFERENCE_MATH_THREADS` before the interpreter imports anything; torch is
   capped after warm-up. `pin_model_root(os.environ)` runs first in `main()`, so children inherit it.
@@ -104,6 +118,8 @@ of the same order, but that is not measured. With one process per lane the sidec
 | `FRWHOOP_INFERENCE_HTTP_IDLE_TIMEOUT_S` | 60 | 1–600 | keep-alive / slow-client read timeout |
 | `FRWHOOP_REQUEST_TIMEOUT_MS` | 20000 (unchanged) | | `infer` budget |
 | `FRWHOOP_INFERENCE_READINESS` | `worker` | `worker` \| `parent` | who computes provider readiness |
+| `FRWHOOP_INFERENCE_QUARANTINE_AFTER` | 3 | 0–20 | consecutive overruns before a provider is quarantined (0 = never) |
+| `FRWHOOP_INFERENCE_QUARANTINE_SECONDS` | 600 | 10–86400 | quarantine length |
 
 Out-of-range values are clamped. Unset means the default.
 
@@ -126,9 +142,12 @@ All existing keys are unchanged. Added: `execution` (schema `sidecar-execution/1
 
 ```
 execution: {
-  schema, limits: {math_threads, http: {threads, backlog, idle_timeout_s}, sleep_features_budget_ms},
+  schema, limits: {math_threads, http: {threads, backlog, idle_timeout_s}, sleep_features_budget_ms,
+                   quarantine: {after_timeouts, seconds}},
   http: {threads, busy, ...},                     # handler pool state
-  provider_readiness: {source, reported_at_utc},
+  provider_readiness: {source, reported_at_utc, disagreements: [{at_utc, providers: {id:
+                       {adopted_ready, reported_ready, reported_reason}}}]},
+  quarantine: {<provider_id>: {consecutive_timeouts, quarantined, until_utc, quarantines}},
   lanes: { infer | sleep_features: {
     capacity, ready, idle, active, starting, stopping, waiting, max_waiting,
     queue_wait_ms, start_wait_ms, kill_grace_ms, budget_ms, started, closed,
@@ -149,11 +168,17 @@ execution: {
 - Candidate stage: never recorded. The item stays pending with reason `busy`, due again after
   `Retry-After`, the attempt is not counted, and the drain makes no further sidecar call.
   In-memory path: nothing is written and the drain stops calling.
-- Sleep-feature enrichment: the core snapshot is published as before with a
-  `daily.sleep_features` document whose `status` is `busy` and whose blocks are withheld with reason
-  `sidecar_busy`; the next scoring pass of the day replaces it. The phone decodes an unknown
-  document status as `.unknown` (`SleepFeatureDocument.swift`, `SleepMetricStatus`, tolerant
-  decoding), and the withheld blocks render as unavailable, so no phone change is needed.
+- Sleep-feature enrichment: busy is not a result. The core snapshot is published as before and
+  carries the day's newest published `daily.sleep_features` over unchanged
+  (`SleepFeatureEnrichment.loadPublishedDocument`, same device and algorithm, read inside the v2
+  transaction). A day with no published document publishes without the key, exactly as with the
+  sidecar off. Leaving the key out on a day that has a document is not an option:
+  `publish_scoring_snapshot_v2` stores a new full payload per revision, so an omitted key erases the
+  old value. The next ordinary scoring pass of the day asks again. No extra pass is scheduled: a
+  re-enqueue would bump the input revision (superseding candidate work) and, under sustained busy,
+  repeat whole-day re-scores. Round 2 published a `status: "busy"` document with every block
+  withheld `sidecar_busy`; that placeholder is never carried over. The phone decodes it as
+  `.unknown` if one was ever published.
 - Sensor biomarkers lane: uses the same client; owned by the sensor area.
 
 Compatibility: an old sidecar never answers 429, so a new worker behaves as before. An old worker
@@ -190,15 +215,21 @@ functions when it is not the owner, as in the other candidate functions.
 
 Claim order is `pending_since`, then day, then the metric order
 (`hrv, sleep_boundary, sleep_stage, respiration`), then owner. `pending_since` is set when a row
-becomes pending and is kept when a newer revision re-arms a row that is still pending. So a metric
+becomes pending and is kept when a newer revision re-arms a row that has not run: one still
+pending, or one the claim superseded only because its revision went stale before the re-score's
+enqueue arrived. A row that ran (`done`, `withheld`) goes to the back when re-armed. So a metric
 the budget skipped keeps its place while the day is re-scored, and the metrics that just ran go
 behind it. With budget B and k runnable metrics on a day that is re-scored before every drain, every
 metric runs within ceil(k / B) drains (`CandidatePendingSchedulerTests`, the contract's "fair
 order" step). Days that are not re-scored are drained on idle scoring drains
-(`CandidateStage.drainBacklog`, at most once per 15 s unless the last look found work), with their
+(`CandidateStage.drainBacklog`, at most once per 15 s unless the last look made progress: a call,
+a final settle or an assembly; re-queuing the head for budget or deadline is not progress), with their
 inputs re-assembled read-only by `ScoringCandidateAssembler` (DayScorer's own
 `scoreAndBuildPayloads` in a rolled-back REPEATABLE READ transaction, no series, no attestation, no
-sleep-feature call, at most `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET` per drain).
+sleep-feature call, at most `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET` per drain). Re-assembled inputs
+are kept for the next drains (the two most recent days), so a re-assembly that uses up the drain's
+cap is followed by a call in the next drain rather than by the same re-assembly again; a stale-debt
+answer drops them.
 
 Outcomes per item:
 
@@ -212,6 +243,8 @@ Outcomes per item:
 | client timeout / refused / not_ready, or sidecar `timeout` | `retry <reason>` with backoff 30 s x 2^n (cap 1 h); the last attempt records a withheld row and settles `withheld attempts_exhausted:<reason>` | yes |
 | store error, write failure, re-assembly failure | `retry <reason>` (backoff) | yes; bounded by the SQL |
 | busy | `retry busy` after `Retry-After` | no |
+| sidecar answered `provider_quarantined` (nothing ran) | `retry provider_quarantined` after its `retry_after_s` | no |
+| client timeout of an attempt the drain cap cut below the client's full timeout | `retry deadline` (in memory: nothing recorded) | no |
 | run budget spent | `retry budget` (due at once, keeps its place) | no |
 | drain deadline | `retry deadline` | no |
 | needs a re-assembly this drain cannot afford | `retry awaiting_input_assembly` | no |
@@ -227,7 +260,13 @@ overwrite a newer revision in either table.
 
 Without the migration (`to_regprocedure('public.physiology_candidate_pending_claim(text,integer)')`
 is NULL; re-probed every 5 minutes, a failed probe is not cached) the stage runs the in-memory pass:
-nothing is persisted, metrics run least-recently-run first, a budget skip is a counter.
+nothing is persisted, metrics run least-recently-run first (a metric moves back only when its call
+reached a result, not when it was answered busy), a budget skip is a counter.
+
+**Behaviour change on apply (intended).** Applying `20261008110000` switches a running worker of
+this branch from in-memory to persisted scheduling within 5 minutes (the probe's negative cache),
+with no flag set. `FRWHOOP_CANDIDATE_SCHEDULER=memory` keeps the in-memory pass. While every metric
+is `off` (the shipped default) neither path does anything.
 
 ## Active mode visibility
 
@@ -250,6 +289,7 @@ of the substituted value in the snapshot, and a rollback path. None of that is i
 ## Heartbeat additions
 
 Scoring lane counters (only when the candidate lane is on): `candidate_busy`,
+`candidate_provider_quarantined`,
 `candidate_skipped_demoted`, `candidate_pending_{enqueued,claimed,done,withheld,superseded,retried,settle_refused}`,
 `candidate_reassembled`, `candidate_reassembly_failures`, and from the queue stats (read at most
 once a minute) `candidate_pending_queue`, `candidate_pending_due`, `candidate_pending_oldest_age_s`.
@@ -364,6 +404,28 @@ All runs on this machine, 2026-10-08, against throwaway local state only.
   gets a 10 s infer budget instead of 300 ms (it measured the host, not the lanes).
 - Not verified: `ScoringCandidateAssembler` against a real database (needs the full scoring schema
   and stream data); anything on the Droplet (no access was used).
+
+## Review fixes (round 3)
+
+| Item | Fix | Test |
+|---|---|---|
+| 4 deadline-cut timeout became `attempts_exhausted:timeout` | cut attempt's timeout settles `retry deadline` uncounted; in memory nothing is recorded | `testADeadlineCutTimeoutIsNeverCountedAsAnAttempt`, `testStalledSidecarIsCappedByTheDrainDeadline` |
+| 8 idle drains could repeat a whole-day re-assembly forever | assemblies kept across drains; throttle skipped only after progress | `testASlowReassemblyIsKeptForTheNextDrain`, `testAnIdleDrainWithoutProgressKeepsTheThrottle` |
+| 9 one always-overrunning provider kept the shared worker restarting | per-provider consecutive-timeout quarantine in the sidecar; worker treats it as not an attempt | `test_an_always_overrunning_provider_is_quarantined_and_others_keep_running` (real processes), `testAQuarantinedProviderAnswerIsNotAnAttempt` |
+| 6 busy replaced a good sleep_features document with a blank | carry the published document over, or omit the key | `testBusyKeepsThePublishedDocumentOrOmitsTheKey`, `testLoadPublishedDocumentReadsTheNewestSnapshotsSleepFeatures` |
+| 11 a dead worker's loaded identity stayed in /healthz | report kept with its pid, served only while that pid is a live lane worker | `test_a_dead_workers_loaded_identity_is_not_reported` |
+| 12 a replacement's differing readiness was ignored silently | logged and listed in `provider_readiness.disagreements` | `test_worker_reported_readiness_is_adopted_once` |
+| 15 re-arm after a stale-revision supersede went to the back | keeps `pending_since` | contract "stale revision" step |
+| 16 in-memory busy metric lost its turn | `lastRunAt` set only after a result | `testABusyMetricKeepsItsTurnInTheInMemoryOrder` |
+
+Also: the `terminations` counter is taken before the supervisor is woken (an earlier fix could count
+one stop twice).
+
+Round 3 runs (2026-10-08, load average 300-900): contract SQL 9/9 on a fresh throwaway cluster
+(plus a mutant without the item-15 rule failing at the new step); worker
+`--filter "CandidatePendingSchedulerTests|CandidatePendingDatabaseTests|CandidateStageTests|InferenceClientTests|SleepFeatureEnrichmentTests|DayScoringCandidateInputTests"`
+with `FRWHOOP_TEST_DB_URL`: 141 tests, 0 failures, 0 skipped; sidecar `tests/test_execution.py` 20 passed;
+`tests/test_server.py tests/test_identity.py tests/test_contract.py` 97 passed.
 
 ## Requests to parent
 

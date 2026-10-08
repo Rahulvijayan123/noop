@@ -227,7 +227,9 @@ def test_an_unpicklable_registry_is_refused_at_startup():
 
 def test_repeated_timeouts_never_grow_processes_or_threads(bounded):
     """The acceptance case: a provider that computes past its budget, five times over."""
-    server = bounded([SpinningProvider(seconds=30)], timeout_ms=200)
+    # Quarantine off: this case is about the process bound, not about giving up on a provider.
+    server = bounded([SpinningProvider(seconds=30)], timeout_ms=200,
+                     env={"FRWHOOP_INFERENCE_QUARANTINE_AFTER": "0"})
     assert server.wait_ready()
     threads_before = threading.active_count()
     seen_pids: list[int] = []
@@ -382,6 +384,10 @@ def test_worker_reported_readiness_is_adopted_once(bounded):
     assert server.server.app.adopt_worker_readiness({"production.runs.v1": [False, "x"]}) is False
     status, _, body = server.post("/v1/infer", _infer_body())
     assert status == 200 and body["status"] == "ok"
+    # The disagreeing later report is kept visible, not silently dropped.
+    disagreements = server.health()["execution"]["provider_readiness"]["disagreements"]
+    assert disagreements and disagreements[-1]["providers"]["production.runs.v1"] == {
+        "adopted_ready": True, "reported_ready": False, "reported_reason": "x"}
 
 
 def test_healthz_reports_what_the_warm_worker_loaded(bounded):
@@ -400,6 +406,77 @@ def test_healthz_reports_what_the_warm_worker_loaded(bounded):
     assert entry["loaded"]["checkpoint_sha256"] == "ab" * 32
     assert int(entry["loaded"]["measured_in_pid"]) in workers
     assert int(entry["loaded"]["measured_in_pid"]) != os.getpid()
+
+
+def test_a_dead_workers_loaded_identity_is_not_reported(bounded):
+    server = bounded([LoadedIdentityProvider()], timeout_ms=5_000)
+    assert server.wait_ready()
+    app = server.server.app
+
+    def worker_entry():
+        return server.health()["identity"]["providers"]["loaded.runs.v1"]
+
+    deadline = time.monotonic() + 10
+    while worker_entry().get("loaded_source") != "worker":
+        assert time.monotonic() < deadline
+        time.sleep(0.05)
+    old_pid = server.lane("infer")["workers"][0]["pid"]
+    assert int(worker_entry()["loaded"]["measured_in_pid"]) == old_pid
+    os.kill(old_pid, signal.SIGKILL)
+    lane = server.wait_lane("infer", lambda l: l["ready"] == 1 and l["workers"][0]["pid"] != old_pid)
+    # Only the replacement's report: the killed worker's is never served once it is reaped.
+    assert int(worker_entry()["loaded"]["measured_in_pid"]) == lane["workers"][0]["pid"]
+    # A report whose worker is gone (crashed, restart failing) is withdrawn, not kept.
+    app.report_worker_loaded(old_pid, {"loaded.runs.v1": {"checkpoint_sha256": "cd" * 32}})
+    assert app.worker_loaded_identity is None
+    assert worker_entry().get("loaded_source") != "worker"
+
+
+def test_an_always_overrunning_provider_is_quarantined_and_others_keep_running(bounded):
+    server = bounded([SpinningProvider(seconds=30), HrvProductionProvider()], timeout_ms=3_000,
+                     env={"FRWHOOP_INFERENCE_QUARANTINE_AFTER": "2",
+                          "FRWHOOP_INFERENCE_QUARANTINE_SECONDS": "60"})
+    assert server.wait_ready()
+    for _ in range(2):
+        server.wait_lane("infer", lambda l: l["ready"] == 1)
+        status, _, body = server.post("/v1/infer", _infer_body(provider_id="spin.runs.v1"))
+        assert status == 200 and body["withheld_reason"] == "timeout"
+        assert body["diagnostics"]["worker_terminated"] is True
+    lane = server.wait_lane("infer", lambda l: l["ready"] == 1)
+    pid, terminations = lane["workers"][0]["pid"], lane["counters"]["terminations"]
+    # Quarantined: answered at once, nothing dispatched, the worker is not killed again.
+    started = time.monotonic()
+    status, _, body = server.post("/v1/infer", _infer_body(provider_id="spin.runs.v1"))
+    assert time.monotonic() - started < 1.0
+    assert status == 200 and body["status"] == "withheld" and body["withheld_reason"] == "timeout"
+    assert body["diagnostics"]["withheld_detail"] == "provider_quarantined"
+    assert body["diagnostics"]["worker_terminated"] is False
+    assert body["diagnostics"]["retry_after_s"] >= 1
+    lane = server.lane("infer")
+    assert lane["workers"][0]["pid"] == pid and lane["counters"]["terminations"] == terminations
+    # The other provider on the same lane is still served.
+    status, _, body = server.post("/v1/infer", _infer_body(provider_id="production.runs.v1"))
+    assert status == 200 and body["status"] == "ok"
+    health = server.health()
+    entry = health["execution"]["quarantine"]["spin.runs.v1"]
+    assert entry["quarantined"] is True and entry["consecutive_timeouts"] == 2 and entry["until_utc"]
+    assert health["execution"]["limits"]["quarantine"] == {"after_timeouts": 2, "seconds": 60}
+    # Cool-off over: one real trial; it overruns again and re-arms the quarantine at once.
+    app = server.server.app
+    app._quarantine["spin.runs.v1"]["until"] = time.monotonic() - 1
+    status, _, body = server.post("/v1/infer", _infer_body(provider_id="spin.runs.v1"))
+    assert body["diagnostics"]["worker_terminated"] is True, "the trial was dispatched"
+    assert server.health()["execution"]["quarantine"]["spin.runs.v1"]["quarantined"] is True
+    # A result resets the count.
+    app.quarantine_record("spin.runs.v1", timed_out=False)
+    assert app.quarantine_snapshot()["spin.runs.v1"]["consecutive_timeouts"] == 0
+
+
+def test_quarantine_configuration():
+    assert ExecutionConfig.from_env({}).quarantine_after == 3
+    assert ExecutionConfig.from_env({}).quarantine_seconds == 600
+    assert ExecutionConfig.from_env({"FRWHOOP_INFERENCE_QUARANTINE_AFTER": "0"}).quarantine_after == 0
+    assert ExecutionConfig.from_env({"FRWHOOP_INFERENCE_QUARANTINE_SECONDS": "1"}).quarantine_seconds == 10
 
 
 # -- /v1/sleep-features -----------------------------------------------------

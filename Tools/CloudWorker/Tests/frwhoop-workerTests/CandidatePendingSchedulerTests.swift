@@ -55,7 +55,9 @@ final class CandidatePendingSchedulerTests: XCTestCase {
                 let state = entry.hasInput ? "pending" : "withheld"
                 if var row = rows[key] {
                     guard row.revision < inputRevision || row.providerId != entry.providerId else { continue }
-                    let keepPlace = row.state == "pending" && state == "pending"
+                    let neverRan = row.state == "pending"
+                        || (row.state == "superseded" && row.lastReason == "stale_input_revision")
+                    let keepPlace = neverRan && state == "pending"
                     row.revision = inputRevision
                     row.providerId = entry.providerId
                     row.state = state
@@ -183,10 +185,13 @@ final class CandidatePendingSchedulerTests: XCTestCase {
     final class FakeAssembler: CandidateInputAssembling {
         var make: (String, Int64) -> DayScorer.CandidateInputs
         var calls = 0
+        /// How long one re-assembly takes (a whole-day load and analysis in production).
+        var delaySeconds: TimeInterval = 0
         init(make: @escaping (String, Int64) -> DayScorer.CandidateInputs) { self.make = make }
         func assemble(userId: String, deviceId: String, day: String,
                       inputRevision: Int64) throws -> CandidateAssembly {
             calls += 1
+            if delaySeconds > 0 { Thread.sleep(forTimeInterval: delaySeconds) }
             return CandidateAssembly(inputs: make(day, inputRevision), timezoneId: "UTC")
         }
     }
@@ -489,6 +494,151 @@ final class CandidatePendingSchedulerTests: XCTestCase {
         XCTAssertEqual(server.requestCount, 0)
         XCTAssertEqual(pending.row("2026-10-01", "hrv")?.state, "withheld")
         XCTAssertEqual(pending.row("2026-10-01", "hrv")?.lastReason, "attempts_exhausted:lease_expired")
+    }
+
+    // MARK: - Review round 3
+
+    /// A drain whose cap cuts the attempt below the client's timeout: the timeout is the drain's,
+    /// not the provider's, so it never counts and never becomes `attempts_exhausted:timeout`.
+    func testADeadlineCutTimeoutIsNeverCountedAsAnAttempt() throws {
+        let server = StubHTTPServer { _ in
+            var response = StubHTTPServer.Response()
+            response.neverRespond = true
+            return response
+        }
+        defer { server.stop() }
+        let store = CandidateStageTests.FakeCandidateStore()
+        store.selection["hrv"] = selection()
+        let pending = FakePendingStore()
+        let client = InferenceClient(baseURL: URL(string: server.baseURL)!, timeoutMS: 5_000)
+        var stage = CandidateStage(client: client, store: store, pending: pending)
+        stage.pendingMaxAttempts = 2
+        stage.maxDrainSeconds = 0.5                 // always less than the 5 s client timeout
+        let assembler = FakeAssembler { day, rev in Self.inputs(day: day, revision: rev, enabled: ["hrv"]) }
+        stage.beginDrain(budget: 1)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv"]), assembler: assembler)
+        for round in 1...3 {
+            stage.beginDrain(budget: 1)
+            stage.drainBacklog(assembler: assembler, now: Date().addingTimeInterval(Double(round) * 3_600))
+        }
+        XCTAssertEqual(stage.stats.calls, 4, "every drain started its attempt")
+        let row = try XCTUnwrap(pending.row("2026-10-01", "hrv"))
+        XCTAssertEqual(row.state, "pending")
+        XCTAssertEqual(row.lastReason, "deadline")
+        XCTAssertEqual(row.attempts, 0)
+        XCTAssertTrue(store.recorded.isEmpty, "no withheld timeout row for a cut attempt")
+    }
+
+    /// A re-assembly that uses up the drain's cap: the next drain calls with the kept inputs
+    /// instead of re-assembling the same day again.
+    func testASlowReassemblyIsKeptForTheNextDrain() throws {
+        let server = Self.echoServer()
+        defer { server.stop() }
+        let store = CandidateStageTests.FakeCandidateStore()
+        store.selection["hrv"] = selection()
+        let pending = FakePendingStore()
+        var stage = makeStage(server: server, store: store, pending: pending)
+        stage.backlogIntervalSeconds = 0
+        let assembler = FakeAssembler { day, rev in Self.inputs(day: day, revision: rev, enabled: ["hrv"]) }
+        // Scored with no budget left: the day waits in the queue.
+        stage.beginDrain(budget: 0)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv"]))
+        // Idle drain: the re-assembly outlasts the cap, so no call can start.
+        assembler.delaySeconds = 0.4
+        stage.maxDrainSeconds = 0.3
+        stage.beginDrain(budget: 1)
+        stage.drainBacklog(assembler: assembler)
+        XCTAssertEqual(assembler.calls, 1)
+        XCTAssertEqual(server.requestCount, 0)
+        XCTAssertEqual(pending.row("2026-10-01", "hrv")?.lastReason, "deadline")
+        // Next drain: the kept inputs are used; nothing is assembled again.
+        stage.maxDrainSeconds = 20
+        stage.beginDrain(budget: 1)
+        stage.drainBacklog(assembler: assembler)
+        XCTAssertEqual(assembler.calls, 1, "the same day is not re-assembled")
+        XCTAssertEqual(server.requestCount, 1)
+        XCTAssertEqual(pending.row("2026-10-01", "hrv")?.state, "done")
+    }
+
+    /// An idle drain that only re-queues its head (no call, nothing settled, nothing assembled)
+    /// does not skip the idle throttle.
+    func testAnIdleDrainWithoutProgressKeepsTheThrottle() {
+        let server = Self.echoServer()
+        defer { server.stop() }
+        let store = CandidateStageTests.FakeCandidateStore()
+        store.selection["hrv"] = selection()
+        let pending = FakePendingStore()
+        var stage = makeStage(server: server, store: store, pending: pending)
+        stage.beginDrain(budget: 0)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv"]))
+        let now = Date()
+        stage.beginDrain(budget: 0)
+        stage.drainBacklog(assembler: nil, now: now)
+        let claimed = stage.stats.pendingClaimed
+        stage.beginDrain(budget: 0)
+        stage.drainBacklog(assembler: nil, now: now.addingTimeInterval(1))
+        XCTAssertEqual(stage.stats.pendingClaimed, claimed, "throttled: the last look made no progress")
+        stage.drainBacklog(assembler: nil, now: now.addingTimeInterval(stage.backlogIntervalSeconds + 1))
+        XCTAssertEqual(stage.stats.pendingClaimed, claimed + 1)
+    }
+
+    /// The sidecar answered without dispatching because the provider is quarantined: the item
+    /// waits out the quarantine and the answer is not an attempt.
+    func testAQuarantinedProviderAnswerIsNotAnAttempt() throws {
+        let server = StubHTTPServer { _ in .json("""
+            {"status":"withheld","metric":"hrv","provider_id":"prov.v1","withheld_reason":"timeout",
+             "diagnostics":{"withheld_detail":"provider_quarantined","retry_after_s":120,
+                            "worker_terminated":false}}
+            """) }
+        defer { server.stop() }
+        let store = CandidateStageTests.FakeCandidateStore()
+        store.selection["hrv"] = selection()
+        let pending = FakePendingStore()
+        var stage = makeStage(server: server, store: store, pending: pending)
+        stage.beginDrain(budget: 1)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv"]))
+        let row = try XCTUnwrap(pending.row("2026-10-01", "hrv"))
+        XCTAssertEqual(row.state, "pending")
+        XCTAssertEqual(row.lastReason, "provider_quarantined")
+        XCTAssertEqual(row.attempts, 0)
+        XCTAssertGreaterThanOrEqual(row.nextAttemptAt - pending.clock, 100, "due after the quarantine")
+        XCTAssertTrue(store.recorded.isEmpty)
+        XCTAssertEqual(stage.heartbeatCounters()["candidate_provider_quarantined"], 1)
+    }
+
+    /// In-memory scheduling: a metric whose call was answered busy keeps its turn.
+    func testABusyMetricKeepsItsTurnInTheInMemoryOrder() throws {
+        let lock = NSLock()
+        var served = 0
+        let server = StubHTTPServer { request in
+            lock.lock(); served += 1; let n = served; lock.unlock()
+            if n == 1 {
+                var response = StubHTTPServer.Response.json(
+                    #"{"status":"error","error":{"code":"busy","message":"full"}}"#, status: 429)
+                response.headers["Retry-After"] = "1"
+                return response
+            }
+            let body = (try? JSONSerialization.jsonObject(with: request.body)) as? [String: Any] ?? [:]
+            let metric = body["metric"] as? String ?? "hrv"
+            return .json("""
+                {"status":"withheld","metric":"\(metric)","provider_id":"prov.v1",
+                 "withheld_reason":"insufficient_coverage"}
+                """)
+        }
+        defer { server.stop() }
+        let store = CandidateStageTests.FakeCandidateStore()
+        store.selection["hrv"] = selection()
+        store.selection["sleep_stage"] = selection()
+        let client = InferenceClient(baseURL: URL(string: server.baseURL)!, timeoutMS: 5_000)
+        var stage = CandidateStage(client: client, store: store)
+        stage.beginDrain(budget: 2)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv", "sleep_stage"]))
+        XCTAssertEqual(stage.stats.busy, 1)
+        stage.beginDrain(budget: 1)
+        stage.run(claim: Self.claim(), inputs: Self.inputs(enabled: ["hrv", "sleep_stage"]))
+        let second = try XCTUnwrap(server.servedRequests.dropFirst().first)
+        let body = try XCTUnwrap(try JSONSerialization.jsonObject(with: second.body) as? [String: Any])
+        XCTAssertEqual(body["metric"] as? String, "hrv", "busy did not use up hrv's turn")
     }
 
     // MARK: - Fallback, configuration and heartbeat

@@ -269,6 +269,25 @@ select pg_temp.check((select state='superseded' and last_reason='stale_input_rev
 -- A late stale enqueue cannot resurrect it either.
 select pg_temp.check(pg_temp.enqueue(pg_temp.ua(),pg_temp.da(),'2026-09-07',2,pg_temp.entries(array['sleep_stage']))=0,
   'stale enqueue after supersede refused');
+-- The revision-3 pass lands: the row never ran, so it is re-armed in its old place in line, ahead
+-- of work that became pending after it.
+create temp table since_stale as select pending_since from pg_temp.row_of(pg_temp.ua(),'2026-09-07','sleep_stage');
+select pg_temp.job(pg_temp.ub(),pg_temp.db(),'2026-09-07',1);
+select pg_temp.enqueue(pg_temp.ub(),pg_temp.db(),'2026-09-07',1,pg_temp.entries(array['hrv']));
+select pg_temp.check(pg_temp.enqueue(pg_temp.ua(),pg_temp.da(),'2026-09-07',3,pg_temp.entries(array['sleep_stage']))=1,
+  're-armed at revision 3');
+select pg_temp.check((select r.state='pending' and r.input_revision=3 and r.pending_since=s.pending_since
+  from pg_temp.row_of(pg_temp.ua(),'2026-09-07','sleep_stage') r, since_stale s),
+  'a row superseded by a newer revision keeps its place when re-armed');
+select pg_temp.check((select it->>'metric'='sleep_stage' and (it->>'user_id')::uuid=pg_temp.ua()
+  from (select pg_temp.claim() it) c), 'and is claimed before the newer work');
+-- A row that ran (done) goes to the back when its day is re-scored.
+select pg_temp.check((pg_temp.settle(it,'done','recorded')->>'settled')::boolean, 'B hrv runs')
+  from (select pg_temp.claim() it) c;
+select pg_temp.job(pg_temp.ub(),pg_temp.db(),'2026-09-07',2);
+select pg_temp.enqueue(pg_temp.ub(),pg_temp.db(),'2026-09-07',2,pg_temp.entries(array['hrv']));
+select pg_temp.check((select r.pending_since>s.pending_since from pg_temp.row_of(pg_temp.ub(),'2026-09-07','hrv') r,
+  since_stale s), 'a row that ran is re-armed at the back');
 select pg_temp.ok('stale revision');
 
 -- 6. Attempts are bounded; busy, budget and deadline are not attempts.
