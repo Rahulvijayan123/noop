@@ -35,7 +35,8 @@ def seed(pg, user: str, device: str, values: list[float | None], end: date = ANC
 @pytest.fixture()
 def db(pg):
     pg.psql("truncate public.server_daily_scores, public.metric_insight_jobs, public.metric_insights,"
-            " public.coach_memory_items cascade")
+            " public.coach_memory_items, public.physiology_context_days, public.activity_gait_windows_days,"
+            " public.scoring_snapshots_v2, public.scoring_jobs_v2 cascade")
     database = Database(connect(pg.url))
     yield database
     database.conn.close()
@@ -207,3 +208,67 @@ def test_a_rejected_analysis_fails_the_job_and_keeps_it_retryable(pg, db, secret
     assert job["consecutive_failures"] == 1 and job["last_error"] == "validation:grounding,wording"
     assert job["lease_token"] is None and job["dead_letter"] is False
     assert request(pg, USER_A)["status"] == "pending"  # the app keeps showing its chart; the card waits
+
+
+def _jobs(pg) -> dict[str, dict]:
+    rows = json.loads(pg.psql("select coalesce(json_agg(row_to_json(q)), '[]') from public.metric_insight_jobs q"))
+    return {f"{r['user_id']}:{r['metric']}": r for r in rows}
+
+
+def _no_model(monkeypatch) -> None:
+    def refuse(*args, **kwargs):
+        raise AssertionError("Prime must not run for an insufficient-data job")
+    monkeypatch.setattr(worker_module, "PrimeSession", refuse)
+
+
+def test_the_sweep_pregenerates_once_per_new_day_and_never_ahead_of_a_person(pg, db, secret_file, tmp_path,
+                                                                           monkeypatch):
+    _no_model(monkeypatch)
+    today = date.today()
+    seed(pg, USER_A, DEVICE_A, [52, 50], end=today - timedelta(days=1))
+    seed(pg, USER_B, DEVICE_B, [60, 61], end=today - timedelta(days=10))  # nothing recent: not pre-generated
+
+    assert db.sweep(60) == 2  # resting heart rate and HRV are the only metrics with measured values
+    jobs = _jobs(pg)
+    assert sorted(k.split(":")[1] for k in jobs) == ["hrv_rmssd", "resting_hr"]
+    assert all(k.startswith(USER_A) and j["background"] for k, j in jobs.items())
+    assert db.sweep(60) == 0  # already queued: asking again changes nothing
+
+    # A person opens the resting-heart-rate card while both background jobs wait: theirs goes first, although the
+    # other was queued earlier in the same sweep and sorts ahead of it by name.
+    assert request(pg, USER_A)["status"] == "pending"
+    assert _jobs(pg)[f"{USER_A}:resting_hr"]["background"] is False
+    assert db.claim("pytest-worker", 300)["metric"] == "resting_hr"
+    pg.psql("update public.metric_insight_jobs set lease_token = null, lease_until = null where metric = 'resting_hr'")
+
+    work = Worker(config(pg, secret_file, tmp_path))
+    work.db = db
+    assert [work.once(), work.once(), work.once()] == ["published", "published", None]
+    assert request(pg, USER_A)["status"] == "ready"
+    assert db.sweep(60) == 0  # every metric with data has its explanation
+
+    # New inputs for the same day (a re-score) are not pre-generated: the card regenerates when it is opened.
+    seed(pg, USER_A, DEVICE_A, [52, 53], end=today - timedelta(days=1))
+    assert db.sweep(60) == 0
+    # A new measured day is.
+    seed(pg, USER_A, DEVICE_A, [53], end=today)
+    assert db.sweep(60) == 2
+    assert all(j["background"] for k, j in _jobs(pg).items() if j["completed_revision"] < j["input_revision"])
+    assert db.sweep(1) == 0
+
+
+def test_the_sweep_respects_the_batch_limit_the_daily_bound_and_failed_inputs(pg, db):
+    today = date.today()
+    seed(pg, USER_A, DEVICE_A, [52, 50], end=today)
+    assert db.sweep(1) == 1
+    assert db.sweep(1) == 1  # the next call queues the next missing one
+    assert db.sweep(1) == 0
+    # Resting heart rate stays queued. HRV ran out of runs today without publishing: not queued again until tomorrow.
+    pg.psql("update public.metric_insight_jobs set completed_revision = input_revision, runs_day = (now() at time zone 'UTC')::date,"
+            " runs_count = 8 where metric = 'hrv_rmssd'")
+    assert db.sweep(60) == 0
+    pg.psql("update public.metric_insight_jobs set runs_count = 0, input_revision = input_revision + 1,"
+            " dead_letter = true where metric = 'hrv_rmssd'")
+    assert db.sweep(60) == 0  # failed three times on exactly these inputs
+    with pytest.raises(psycopg.errors.InvalidParameterValue):
+        db.sweep(0)

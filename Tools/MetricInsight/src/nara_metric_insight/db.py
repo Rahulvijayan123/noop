@@ -77,6 +77,13 @@ class Database:
             return cur.fetchone()
         return self.service(go)
 
+    def sweep(self, limit: int) -> int:
+        """Queue the background explanations that are missing (20261008010000_metric_insight_background_sweep.sql)."""
+        def go(cur: psycopg.Cursor) -> int:
+            cur.execute("select public.metric_insight_sweep_v1(%s) as n", (limit,))
+            return int(cur.fetchone()["n"])
+        return self.service(go, timeout_ms=60000)
+
     def renew(self, token: str, lease_seconds: int) -> bool:
         def go(cur: psycopg.Cursor) -> bool:
             cur.execute("select public.metric_insight_renew_v1(%s, %s) as ok", (token, lease_seconds))

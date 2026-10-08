@@ -71,6 +71,10 @@ class Config:
     literature_cache: str | None = None
     lease_seconds: int = 300
     poll_seconds: float = 5.0
+    # Background pre-generation: how often an idle worker asks the database to queue the explanations that are
+    # missing (0 turns it off) and how many it may queue per ask.
+    sweep_seconds: float = 600.0
+    sweep_limit: int = 60
     turn_timeout_s: float = 120.0
     max_turns: int = 16
     max_llm_requests: int = 24
@@ -109,6 +113,8 @@ class Config:
             or str(Path(required["NARA_WORK_ROOT"]).resolve().parent / "litsearch.sqlite3"),
             lease_seconds=int(env.get("NARA_LEASE_SECONDS", "300")),
             poll_seconds=float(env.get("NARA_POLL_SECONDS", "5")),
+            sweep_seconds=float(env.get("NARA_SWEEP_SECONDS", "600")),
+            sweep_limit=int(env.get("NARA_SWEEP_LIMIT", "60")),
             turn_timeout_s=float(env.get("NARA_TURN_TIMEOUT_S", "120")),
             max_turns=int(env.get("NARA_MAX_TURNS", "16")),
             max_llm_requests=int(env.get("NARA_MAX_LLM_REQUESTS", "24")),

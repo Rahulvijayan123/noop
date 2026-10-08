@@ -121,6 +121,17 @@ Cached analyses are keyed by their inputs, not by this code. When the prompt, th
 validator change what would be published, bump `internal.metric_insight_version()` in a new migration: every
 cached analysis then counts as changed and is redone on the next visit (within the daily bound).
 
+## Pre-generation
+
+Explanations are made ahead of time, so opening a metric screen finds one ready instead of waiting for a model
+run. When the queue is idle, the worker calls `public.metric_insight_sweep_v1` (every `NARA_SWEEP_SECONDS`, 10 min
+by default), which queues, for every account with scores in the last 3 days and every metric, the explanation of
+the newest measured day when none exists for it yet. Such jobs are `background`: the claim hands out every job a
+person asked for first, and a person opening a card that is still queued promotes it. A re-score or a new gait
+result does not queue a background run (the card regenerates when opened, showing the previous text meanwhile),
+which keeps the model cost to about one run per account, metric and new day. The daily bound of 8 runs and the
+dead-letter rule still apply. Migration `20261008010000_metric_insight_background_sweep.sql`.
+
 ## Configuration
 
 See `deploy/metric-insight.env.example` (names only). Secrets come from files / systemd credentials, never the

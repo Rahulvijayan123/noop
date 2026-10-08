@@ -272,12 +272,33 @@ class Worker:
         job = self._database().claim(self.cfg.worker_id, self.cfg.lease_seconds)
         return self.process(job) if job else None
 
+    def sweep_if_due(self, last: float | None) -> float | None:
+        """Ask the database to queue the explanations nobody has asked for yet, at most every `sweep_seconds`.
+        Returns the time of the latest attempt (a failure also counts: it is retried at the next interval)."""
+        if self.cfg.sweep_seconds <= 0:
+            return last
+        now = time.monotonic()
+        if last is not None and now - last < self.cfg.sweep_seconds:
+            return last
+        try:
+            queued = self._database().sweep(self.cfg.sweep_limit)
+            log.info("background sweep queued %d explanation(s)", queued)
+        except psycopg.OperationalError:
+            self.db = None
+            raise
+        except Exception as exc:  # noqa: BLE001 - pre-generation must never stop the on-demand queue
+            log.warning("background sweep failed: %s", type(exc).__name__)
+        return now
+
     def run_forever(self) -> None:
         signal.signal(signal.SIGTERM, lambda *_: self.stopping.set())
         backoff = 1.0
+        last_sweep: float | None = None
         while not self.stopping.is_set():
             try:
                 outcome = self.once()
+                if outcome is None:  # idle: the only moment pre-generation is worth queueing
+                    last_sweep = self.sweep_if_due(last_sweep)
                 backoff = 1.0
             except psycopg.OperationalError:
                 log.warning("database unavailable; retrying in %.0fs", backoff)
