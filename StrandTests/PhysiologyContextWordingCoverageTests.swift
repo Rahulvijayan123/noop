@@ -19,6 +19,22 @@ enum PhysiologyContextReasonRegistries {
         ("ContextReferences", PC.ContextReferences.reasonCodes),
         ("ChangeDetection", PC.ChangeDetection.reasonCodes),
         ("Functional", PC.Functional.reasonCodes),
+        ("PulseEpisodes", PC.PulseEpisodes.reasonCodes),
+        ("Spec02Reserved", spec02Reserved),
+    ]
+
+    /// Spec-02 codes reserved in docs/spec-02/CONTRACT.md §6 whose registries live on the producer branches
+    /// (day/night heart rate: `SleepRhythm.reasonCodes`; respiratory: `ExertionBouts` / `ContextReferences`). Listed
+    /// here so the wording table is checked before those branches merge; after they merge these entries are
+    /// redundant (`codes` is a set) and the lead can drop this list. A producer code not listed here must be added
+    /// to `PhysiologyContextWording.reasonPhrases` (or `diagnosticsOnlyReasons`) and to Localizable.xcstrings.
+    static let spec02Reserved: [PC.ReasonCode] = [
+        "percent_dip_definition", "awake_hr_insufficient", "sleep_hr_insufficient",
+        "respiratory_reference_unavailable", "respiratory_observations_resumed",
+        "respiratory_returned_by_first_observation", "respiratory_not_returned_in_follow_up",
+        "respiratory_follow_up_unobserved", "stable_awake_respiration_window",
+        // Seen on the producer branches while this branch was built (not yet in CONTRACT §6).
+        "episode_censored_window", "respiratory_return_unconfirmed",
     ]
 
     /// Every registered code, once.

@@ -356,6 +356,14 @@ struct SleepAnalyticsDisplayModel {
         details.append(Self.transitionsDetail(dynamics))
         details.append(Self.thermalTrendDetail(thermal))
         details.append(Self.prvDetail(prv))
+        // Spec-02 groups (docs/spec-02/CONTRACT.md §4.3–4.4): shown only when the document carries them, so an
+        // older document renders exactly as before (absent ≠ unavailable; nothing is invented for it).
+        if let morning = document.morningResponse {
+            details.append(Self.morningResponseDetail(morning, timezone: document.timezone))
+        }
+        if let stageMovement = movement.stageMovement {
+            details.append(Self.stageMovementDetail(stageMovement, note: movement.stageMovementNote))
+        }
         details.append(Self.coverageDetail(document))
 
         self.rows = rows
@@ -691,16 +699,18 @@ struct SleepAnalyticsDisplayModel {
         }
         let pre = slopeText(thermal.preOnsetSlopeCPerHour)
         let post = slopeText(thermal.postWakeSlopeCPerHour)
-        let summaryParts = [pre, post].filter { !isUnavailable($0) }
+        let summaryParts = [pre, post].filter { !isUnavailable($0) && !$0.hasPrefix("Unavailable") }
         let summary = summaryParts.isEmpty ? "Temperature trend before/after sleep"
-            : "Pre-onset \(pre) · post \(post)"
+            : "Before onset \(pre) · after window end \(post)"
+        // Spec-02 §4.2: the pre-onset slope fits [onset − 60 min, onset); the post-wake slope fits
+        // [estimated window end, + 30 min) — labelled after the estimated window END, never "after waking".
         return DetailGroup(id: "thermalTrend", title: "Temperature trend", icon: "thermometer.medium",
                            summary: summary,
                            rows: [
-                            DetailRow("Pre-sleep slope", pre),
-                            DetailRow("After estimated window end", post),
+                            DetailRow("Hour before sleep onset", pre),
+                            DetailRow("30 min after estimated window end", post),
                            ],
-                           accessibilityLabel: "Temperature trend. Pre sleep slope \(pre). After estimated window end \(post).")
+                           accessibilityLabel: "Temperature trend. Hour before sleep onset \(pre). Thirty minutes after the estimated end of the sleep window \(post).")
     }
 
     static func prvDetail(_ prv: SleepAnalyticsPrvDiagnosticsGroup) -> DetailGroup {
@@ -713,9 +723,13 @@ struct SleepAnalyticsDisplayModel {
         let rejected = display(prv.rejectionFraction,
                                format: { SleepAnalyticsFormat.fractionPercent($0) }, coverage: nil)
 
+        // pNN50 (spec-02 §4.1): shown only when the document carries it (an older document has no key).
+        let pnn50 = prv.nightlyPnn50Pct.map { Self.pnn50Display($0, prv: prv) }
+
         var summaryParts: [String] = []
         if !isUnavailable(sd1.text) { summaryParts.append("SD1 \(sd1.text)") }
         if !isUnavailable(sd2.text) { summaryParts.append("SD2 \(sd2.text)") }
+        if let pnn50, !isUnavailable(pnn50.text) { summaryParts.append("pNN50 \(pnn50.text)") }
         let summary = summaryParts.isEmpty ? "Pulse-interval variation (PRV)"
             : summaryParts.joined(separator: " · ") + " · related to HRV"
 
@@ -734,9 +748,124 @@ struct SleepAnalyticsDisplayModel {
             DetailRow("Eligible windows", windows.text + "\(!isUnavailable(withheld.text) ? " · \(withheld.text) withheld" : "")"),
             DetailRow("Rejected beats", rejected.text),
         ]
+        if let pnn50 {
+            rows.append(DetailRow("pNN50 (optical PRV)", pnn50.text + "\(pnn50.note.map { " · \($0)" } ?? "")"))
+            rows.append(DetailRow("Source", "Optical pulse intervals (pulse-rate variability), not ECG"))
+            if let method = prv.pnn50Method { rows.append(DetailRow("pNN50 definition", method)) }
+        }
         return DetailGroup(id: "prv", title: "Pulse-interval diagnostics", icon: "waveform.path.ecg",
                            summary: summary, rows: rows,
                            accessibilityLabel: "Pulse-interval diagnostics, related to heart-rate variability, not ECG-equivalent. \(summary).")
+    }
+
+    /// pNN50 with its denominator: "12.4%" and "1,190 of 9,600 adjacent pairs differ by > 50 ms". The value is
+    /// the pooled proportion the producer persisted (never re-derived here); the pairs are the SD1/SD2 pairs.
+    static func pnn50Display(_ metric: SleepAnalyticsMetric, prv: SleepAnalyticsPrvDiagnosticsGroup) -> MetricDisplay {
+        var shown = display(metric, format: SleepAnalyticsFormat.percentOneDecimal, coverage: nil)
+        guard !isUnavailable(shown.text) else { return shown }
+        var parts: [String] = []
+        if shown.partial { parts.append("Observed/partial") }
+        if let pairs = prv.pnn50PairCount?.value {
+            if let nn50 = prv.nn50Count?.value {
+                parts.append("\(SleepAnalyticsFormat.count(nn50)) of \(SleepAnalyticsFormat.count(pairs)) adjacent pairs differ by > 50 ms")
+            } else {
+                parts.append("of \(SleepAnalyticsFormat.count(pairs)) adjacent pairs")
+            }
+        }
+        shown.note = parts.isEmpty ? nil : parts.joined(separator: " · ")
+        return shown
+    }
+
+    /// One signal of the morning response: "54 → 63 bpm (+9 bpm)" with its OWN coverage, or why not.
+    static func morningSignalText(_ w: SleepAnalyticsSignalWindow) -> String {
+        let unit = w.unit
+        let fmt: (Double) -> String = { SleepAnalyticsFormat.signalValue($0, unit: unit) }
+        let before = display(w.beforeMedian, format: fmt, coverage: nil)
+        let after = display(w.afterMedian, format: fmt, coverage: nil)
+        let change = display(w.change, format: { SleepAnalyticsFormat.signedSignalValue($0, unit: unit) }, coverage: nil)
+        let coverage = "before \(w.beforeValidMinutes) of \(w.eligibleMinutesEachSide) min · after \(w.afterValidMinutes) of \(w.eligibleMinutesEachSide) min valid"
+        var text: String
+        if !isUnavailable(before.text) && !isUnavailable(after.text) {
+            text = "\(before.text) → \(after.text)"
+            if !isUnavailable(change.text) { text += " (\(change.text))" }
+            if before.partial || after.partial || change.partial { text += " · Observed/partial" }
+        } else {
+            // A side without enough valid minutes: never a fabricated median.
+            let reason = (w.change.reason ?? w.beforeMedian.reason ?? w.afterMedian.reason)
+                .map(SleepAnalyticsWording.morningReason)
+            text = ["Unavailable", reason].compactMap { $0 }.joined(separator: " · ")
+        }
+        return "\(text) · \(coverage)"
+    }
+
+    /// HR / skin-temperature / movement around the ESTIMATED end of the sleep window (spec-02 §4.3). A response
+    /// around a detected boundary, never proof of waking physiology; each signal keeps its own coverage.
+    static func morningResponseDetail(_ m: SleepAnalyticsMorningResponseGroup, timezone: String?) -> DetailGroup {
+        let hr = morningSignalText(m.heartRate)
+        let temp = morningSignalText(m.skinTemperature)
+        let move = morningSignalText(m.movement)
+        let disclaimer = "A response around the estimated end of the sleep window, not proof of how waking feels or works"
+        var summaryParts: [String] = []
+        if !hr.hasPrefix("Unavailable") { summaryParts.append("HR \(hr.components(separatedBy: " · ").first ?? hr)") }
+        if !temp.hasPrefix("Unavailable") { summaryParts.append("temp \(temp.components(separatedBy: " · ").first ?? temp)") }
+        let summary: String
+        switch m.quality.status {
+        case .unavailable, .disabled:
+            summary = "Unavailable · not enough data around the estimated window end"
+        case .available, .partial:
+            summary = summaryParts.isEmpty ? "Heart rate, temperature and movement around the estimated window end"
+                : summaryParts.joined(separator: " · ")
+        }
+        var rows: [DetailRow] = [
+            DetailRow("Heart rate, 30 min before → after", hr),
+            DetailRow("Skin temperature, 30 min before → after", temp),
+            DetailRow("Movement, 30 min before → after", move),
+        ]
+        if let ts = m.anchorTs {
+            rows.append(DetailRow("Anchored at", "Estimated end of the sleep window, \(SleepAnalyticsFormat.clock(ts, timezone: timezone))"))
+        } else {
+            rows.append(DetailRow("Anchored at", "Estimated end of the sleep window"))
+        }
+        rows.append(DetailRow("About this", disclaimer))
+        rows.append(DetailRow("Definition", m.algorithmVersion))
+        return DetailGroup(id: "morningResponse", title: "Around the end of the sleep window",
+                           icon: "sunrise", summary: summary, rows: rows,
+                           accessibilityLabel: "Heart rate, skin temperature and movement around the estimated end of the sleep window. \(summary). \(disclaimer).")
+    }
+
+    /// Movement inside each estimated stage (spec-02 §4.4). Unknown stays unknown, and the stager reads wrist
+    /// movement itself, so the association is partly built in — always said.
+    static func stageMovementDetail(_ stages: [SleepAnalyticsStageMovement], note: String?) -> DetailGroup {
+        let order: [SleepAnalyticsLabel] = [.wake, .light, .deep, .rem, .unknown]
+        var rows: [DetailRow] = []
+        var summaryParts: [String] = []
+        for label in order {
+            guard let s = stages.first(where: { $0.label == label }) else { continue }
+            let pct = display(s.movementPercentage, format: { SleepAnalyticsFormat.percentValue($0) }, coverage: nil)
+            let eligible = display(s.eligibleSeconds, format: SleepAnalyticsFormat.minutes, coverage: nil)
+            let rate = display(s.movementBoutsPerEligibleHour,
+                               format: { String(format: "%.1f bouts/h", $0) }, coverage: nil)
+            let title = label == .unknown ? "Unknown stage" : "\(stageTitle(label)) (est.)"
+            var value: String
+            if !isUnavailable(pct.text) {
+                value = pct.text
+                if !isUnavailable(eligible.text) { value += " of \(eligible.text) moving" }
+                if !isUnavailable(rate.text) {
+                    value += " · \(rate.text)" + (rate.partial ? " (short exposure)" : "")
+                }
+                if pct.partial { value += " · Observed/partial" }
+                if label != .unknown { summaryParts.append("\(stageTitle(label)) \(pct.text)") }
+            } else {
+                value = pct.text + "\(pct.note.map { " · \($0)" } ?? "")"
+            }
+            rows.append(DetailRow(title, value))
+        }
+        let disclosure = SleepAnalyticsWording.stageMovementNote(note)
+        rows.append(DetailRow("Note", disclosure))
+        let summary = summaryParts.isEmpty ? "Wrist movement inside each estimated stage" : summaryParts.joined(separator: " · ")
+        return DetailGroup(id: "stageMovement", title: "Movement by estimated stage", icon: "figure.walk.motion",
+                           summary: summary, rows: rows,
+                           accessibilityLabel: "Movement by estimated stage. \(summary). \(disclosure).")
     }
 
     static func coverageDetail(_ document: SleepAnalyticsDocument) -> DetailGroup {
@@ -810,6 +939,22 @@ enum SleepAnalyticsWording {
         case .noSamples: return "no data recorded"
         }
     }
+
+    /// A morning-response side's reason: "insufficient coverage" there means too few valid minutes around the
+    /// boundary, not too little sleep.
+    static func morningReason(_ reason: SleepAnalyticsReason) -> String {
+        switch reason {
+        case .insufficientCoverage: return "too few valid minutes on one side"
+        case .noSamples: return "no readings around the window end"
+        default: return self.reason(reason)
+        }
+    }
+
+    /// The disclosure carried with stage-associated movement (`stage_movement_note`). The stager reads wrist
+    /// movement, so a stage–movement association is partly built in; any note reads as that disclosure.
+    static func stageMovementNote(_ note: String?) -> String {
+        "Stages are estimated partly from wrist movement, so movement and stage are not independent"
+    }
 }
 
 // MARK: - Formatting helpers (presentation only)
@@ -863,6 +1008,60 @@ enum SleepAnalyticsFormat {
     static func value(_ value: Double?, unit: String) -> String {
         guard let value, value.isFinite else { return unavailable }
         return "\(String(format: "%.1f", value)) \(unit)"
+    }
+
+    /// An already-percent number with one decimal: 12.43 → "12.4%" (pNN50).
+    static func percentOneDecimal(_ value: Double?) -> String {
+        guard let value, value.isFinite else { return unavailable }
+        return String(format: "%.1f%%", value)
+    }
+
+    /// A grouped integer count: 9600 → "9,600".
+    static func count(_ value: Int) -> String {
+        let f = NumberFormatter()
+        f.numberStyle = .decimal
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.usesGroupingSeparator = true
+        f.groupingSeparator = ","
+        return f.string(from: NSNumber(value: value)) ?? "\(value)"
+    }
+
+    /// Decimals a morning-response unit is shown with (bpm whole, °C two places, s/min one place).
+    static func signalDecimals(_ unit: String) -> Int {
+        switch unit {
+        case "bpm": return 0
+        case "°C", "c", "C": return 2
+        default: return 1
+        }
+    }
+
+    static func signalUnit(_ unit: String) -> String {
+        unit == "c" || unit == "C" ? "°C" : unit
+    }
+
+    /// "54 bpm" / "33.12 °C" / "1.5 s/min".
+    static func signalValue(_ value: Double?, unit: String) -> String {
+        guard let value, value.isFinite else { return unavailable }
+        return "\(String(format: "%.\(signalDecimals(unit))f", value)) \(signalUnit(unit))"
+    }
+
+    /// Signed: "+9 bpm" / "−0.42 °C".
+    static func signedSignalValue(_ value: Double?, unit: String) -> String {
+        guard let value, value.isFinite else { return unavailable }
+        let digits = signalDecimals(unit)
+        let magnitude = String(format: "%.\(digits)f", abs(value))
+        let zero = String(format: "%.\(digits)f", 0.0)
+        let sign = magnitude == zero ? "±" : (value < 0 ? "−" : "+")
+        return "\(sign)\(magnitude) \(signalUnit(unit))"
+    }
+
+    /// "07:02" in the document's zone (the phone's zone when it has none).
+    static func clock(_ ts: Int, timezone: String?) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_GB")
+        f.dateFormat = "HH:mm"
+        f.timeZone = timezone.flatMap(TimeZone.init(identifier:)) ?? .current
+        return f.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
     }
 }
 

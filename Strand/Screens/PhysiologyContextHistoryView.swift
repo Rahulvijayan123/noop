@@ -30,6 +30,8 @@ struct ContextHistoryBoutRow: Identifiable, Equatable {
     let ongoing: Bool
     /// Measured heart-rate response, when any was measured.
     let response: String?
+    /// Breathing-rate return after the bout (spec-02 `recovery.respiratory_recovery`), when it was evaluated.
+    var breathing: String? = nil
 }
 
 struct PhysiologyContextHistoryModel: Equatable {
@@ -40,7 +42,7 @@ struct PhysiologyContextHistoryModel: Equatable {
     var allText: [String] {
         (metricEpisodes + otherEpisodes).flatMap { [$0.title, $0.state, $0.dates, $0.direction, $0.reasons]
             .compactMap { $0 } + $0.badges.map(\.text) }
-            + bouts.flatMap { [$0.title, $0.when, $0.duration, $0.status, $0.response].compactMap { $0 } }
+            + bouts.flatMap { [$0.title, $0.when, $0.duration, $0.status, $0.response, $0.breathing].compactMap { $0 } }
     }
 
     static func build(_ history: PhysiologyContextHistory, metric: PhysiologyContext.MetricKind, zone: TimeZone,
@@ -59,7 +61,8 @@ struct PhysiologyContextHistoryModel: Equatable {
                 id: b.id, title: W.boutKind(b.kind),
                 when: "\(W.dayAndTime(b.interval.start, zone: zone, locale: locale))\u{2013}\(W.time(b.interval.end, zone: zone, locale: locale))",
                 duration: W.duration(b.durationS), status: W.boutStatus(b), ongoing: b.status == .ongoing,
-                response: W.boutResponse(b, locale: locale))
+                response: W.boutResponse(b, locale: locale),
+                breathing: b.recovery?.respiratoryRecovery.map { W.respiratoryReturn($0, locale: locale) })
         }
         return PhysiologyContextHistoryModel(metricEpisodes: episodes.filter { ownIds.contains($0.id) },
                                              otherEpisodes: episodes.filter { !ownIds.contains($0.id) },
@@ -262,6 +265,12 @@ struct PhysiologyContextHistoryView: View {
                 .fixedSize(horizontal: false, vertical: true)
             if let response = row.response {
                 Text(response)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            if let breathing = row.breathing {
+                Text(breathing)
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
