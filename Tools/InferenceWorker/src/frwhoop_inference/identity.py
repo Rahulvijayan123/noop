@@ -17,7 +17,8 @@ lock, the manifest and the weights in use belong to one release:
   (``scripts/materialize_model_root.py``);
 * ``artifacts``: the startup verification verdict and digest of every artifact;
 * ``providers``: readiness, plus what a provider reports it has loaded when it
-  implements ``loaded_identity()``.
+  implements ``loaded_identity()`` (the warm worker's report, when the server
+  publishes one as ``worker_loaded_identity``, wins over this process's copy).
 
 Everything is cached by path, size and mtime, so a request costs a few ``stat``
 calls (docs/model-integration/provisioning.md).
@@ -257,17 +258,35 @@ def _equal_or_none(a: Any, b: Any) -> bool | None:
     return str(a).lower() == str(b).lower()
 
 
-def _provider_identity(state: Any) -> dict[str, Any]:
+def _bounded_loaded(reported: Any) -> dict[str, str] | None:
+    if isinstance(reported, Mapping) and reported:
+        return {str(k): str(v)[:200] for k, v in list(reported.items())[:32]}
+    return None
+
+
+def _provider_identity(state: Any, worker_loaded: Any = None) -> dict[str, Any]:
+    """Readiness plus what the provider reports it loaded.
+
+    Checkpoints are loaded in the warm infer worker, not in this process, so a report the
+    worker sent (``app.worker_loaded_identity``, keyed by provider id) wins over asking this
+    process's copy of the provider, which only knows what it can tell without loading."""
     out: dict[str, Any] = {"ready": bool(getattr(state, "ready", False)),
                            "reason": getattr(state, "reason", None)}
+    from_worker = _bounded_loaded(worker_loaded)
+    if from_worker is not None:
+        out["loaded"] = from_worker
+        out["loaded_source"] = "worker"
+        return out
     loaded = getattr(getattr(state, "provider", None), "loaded_identity", None)
     if callable(loaded):
         try:
-            reported = loaded()
-            if isinstance(reported, Mapping) and reported:
-                out["loaded"] = {str(k): str(v)[:200] for k, v in list(reported.items())[:32]}
+            reported = _bounded_loaded(loaded())
+            if reported is not None:
+                out["loaded"] = reported
+                out["loaded_source"] = "process"
         except Exception as exc:  # a provider's report must never break the health route
             out["loaded"] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            out["loaded_source"] = "process"
     return out
 
 
@@ -282,6 +301,9 @@ def runtime_identity(app: Any) -> dict[str, Any]:
     source = source_identity()
     revision = model_revision_summary(root)
     stamp = release if release and not release.get("error") else None
+    worker_loaded = getattr(app, "worker_loaded_identity", None)
+    if not isinstance(worker_loaded, Mapping):
+        worker_loaded = {}
     return {
         "schema": IDENTITY_SCHEMA,
         "package_version": PACKAGE_VERSION,
@@ -318,6 +340,6 @@ def runtime_identity(app: Any) -> dict[str, Any]:
              "sha256": c.expected_sha256 if c.status == "verified" else None}
             for c in manifest.checks
         ],
-        "providers": {pid: _provider_identity(state)
+        "providers": {pid: _provider_identity(state, worker_loaded.get(pid))
                       for pid, state in getattr(app, "provider_states", {}).items()},
     }
