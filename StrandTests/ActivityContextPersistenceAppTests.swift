@@ -181,6 +181,55 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
     }
 
     @MainActor
+    func testAFinalDaySmoothedToNothingIsRecordedOnceAndNotRePlannedOnRelaunch() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
+        let suite = "acx-retro-empty-\(UUID().uuidString)"
+        let marks = try XCTUnwrap(UserDefaults(suiteName: suite))
+        addTeardownBlock { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
+        final class Calls: @unchecked Sendable {
+            private let lock = NSLock()
+            private var n = 0
+            func bump() { lock.lock(); n += 1; lock.unlock() }
+            var count: Int { lock.lock(); defer { lock.unlock() }; return n }
+        }
+        let calls = Calls()
+        let nothing: ActivityContextCoordinator.Smoother = { _, _, _, _, _, _, _, finality in
+            if finality == ActivityContextDayRow.final { calls.bump() }
+            return []
+        }
+        func run(_ logs: @escaping (String) -> Void = { _ in }) async {
+            await ActivityContextCoordinator(repo: repo, horizonDays: 5, isWorn: { true }, remind: { _, _ in },
+                                             log: logs, smooth: nothing, retrospectiveMarks: marks)
+                .drainMaterialization(pauseNs: 0)
+        }
+
+        await run()
+        let firstRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        let first = try XCTUnwrap(firstRow)
+        XCTAssertEqual(first.finality, "final")
+        XCTAssertNil(first.retrospectiveVersion, "the store names no smoother without rows")
+        let smoothed = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end,
+                                                                reading: .retrospective)
+        XCTAssertTrue(smoothed.isEmpty)
+        XCTAssertEqual(calls.count, 1, "smoothed once in the first launch, never looped")
+
+        var logs: [String] = []
+        await run { logs.append($0) }
+        XCTAssertFalse(logs.contains { $0.hasPrefix("Activity context: saved") && $0.hasSuffix(day.key) },
+                       "an empty smoothing result is a result: the day is not decoded again: \(logs)")
+        let againRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        XCTAssertEqual(againRow, first)
+        XCTAssertEqual(calls.count, 1)
+        // Historical reads of such a day are its causal rows.
+        let causal = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        let past = await repo.storedActivityContextWithStatus(from: day.start, to: day.end, feedback: [],
+                                                              reading: .historical)
+        XCTAssertEqual(past.intervals, causal.map(ActivityContextInterval.init(row:)))
+    }
+
+    @MainActor
     func testAProvisionalDayGetsNoRetrospectiveRows() async throws {
         let (repo, store, id) = try await fixture()
         let today = ActivityContextMaterialization.localDays(endingAt: now, count: 1, timeZone: .current)[0]
