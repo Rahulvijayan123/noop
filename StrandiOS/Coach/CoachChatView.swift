@@ -18,6 +18,7 @@ struct CoachChatView: View {
     @EnvironmentObject private var chrome: CoachChromeState
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.noopBottomChromeInset) private var bottomChromeInset
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
@@ -65,6 +66,8 @@ struct CoachChatView: View {
                     Color.clear
                         .frame(width: inline ? Self.inlineWidth : 0)
                     chatColumn
+                        // The composer rests above the glass tab bar, which would otherwise cover it.
+                        .padding(.bottom, bottomChromeInset)
                         .accessibilityHidden(drawer)
                 }
                 .animation(motion, value: inline)

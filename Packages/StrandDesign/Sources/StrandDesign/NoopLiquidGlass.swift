@@ -339,26 +339,60 @@ public struct NoopGlassTabBar: View {
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    public init(items: [NoopGlassTabItem], selection: Binding<Int>, onReselect: @escaping (Int) -> Void) {
+    private let showsScrubber: Bool
+
+    /// `scrubber` adds a glass slider row above the bar: drag its thumb along the bar to move between tabs.
+    public init(items: [NoopGlassTabItem], selection: Binding<Int>, scrubber: Bool = false,
+                onReselect: @escaping (Int) -> Void) {
         self.items = items
         self._selection = selection
+        self.showsScrubber = scrubber
         self.onReselect = onReselect
     }
 
     public var body: some View {
-        HStack(spacing: 0) {
-            ForEach(items) { item in
-                tabButton(item)
+        VStack(spacing: 8) {
+            if showsScrubber, items.count > 1 { scrubber }
+            HStack(spacing: 0) {
+                ForEach(items) { item in
+                    tabButton(item)
+                }
             }
+            .padding(4)
+            .background {
+                LiquidGlassControlBackground(shape: Capsule(style: .continuous), level: level)
+            }
+            .shadow(color: .black.opacity(scheme == .dark ? 0.32 : 0.12), radius: 18, x: 0, y: 8)
         }
-        .padding(4)
-        .background {
-            LiquidGlassControlBackground(shape: Capsule(style: .continuous), level: level)
-        }
-        .shadow(color: .black.opacity(scheme == .dark ? 0.32 : 0.12), radius: 18, x: 0, y: 8)
         .padding(.horizontal, 20)
         .padding(.bottom, 4)
         .accessibilityElement(children: .contain)
+    }
+
+    /// The tab slider: one stop per tab, its thumb one tab wide so it rests right over the selected tab.
+    private var scrubber: some View {
+        let position = Binding<Double>(
+            get: { Double(items.firstIndex { $0.tag == selection } ?? 0) },
+            set: { index in
+                let tag = items[min(items.count - 1, max(0, Int(index.rounded())))].tag
+                guard tag != selection else { return }
+                withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.78)) { selection = tag }
+            }
+        )
+        return NoopGlassSlider(
+            value: position,
+            in: 0...Double(items.count - 1),
+            step: 1,
+            thumbWidth: .fraction(1 / CGFloat(items.count)),
+            edgeInset: 4,
+            showsFill: false,
+            showsTicks: true,
+            label: "Switch tab",
+            valueText: { "\(Int($0.rounded()) + 1) of \(items.count)" },
+            identifier: "tab.slider"
+        )
+        .frame(height: 34)
+        .shadow(color: .black.opacity((scheme == .dark ? 0.24 : 0.08) * level.shadowScale), radius: 10, x: 0, y: 4)
     }
 
     private func tabButton(_ item: NoopGlassTabItem) -> some View {

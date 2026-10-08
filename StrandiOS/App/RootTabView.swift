@@ -50,7 +50,16 @@ struct RootTabView: View {
     @State private var routedPillar: NavRouter.Destination?
     /// Selected tab — bound so tab switches can crossfade (README §Motion: ~240ms opacity swap
     /// between tab roots, calm easing). Defaults to Today.
+    #if DEBUG
+    /// `--demo-tab <n>` opens on tab n (screenshots and UI tests of the tab shell).
+    @State private var selectedTab: Int = {
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--demo-tab"), i + 1 < args.count, let n = Int(args[i + 1]) { return n }
+        return 0
+    }()
+    #else
     @State private var selectedTab: Int = 0
+    #endif
     /// One `NavigationPath` per tab, indexed by tab tag. Re-tapping the already-active tab pops
     /// that tab's stack to its root (#135) by clearing its path — an animated pop that leaves the
     /// root view alive, so an at-root re-tap keeps scroll position and never re-runs `.task`
@@ -71,6 +80,9 @@ struct RootTabView: View {
     /// The glass bar steps aside for the keyboard, as the platform bar does by sitting beneath it. It lives in
     /// the bottom safe-area inset, which the keyboard would otherwise carry up with it.
     @State private var keyboardVisible = false
+    /// The measured height of everything in the bottom inset (glass bar, running-workout bar); see
+    /// `BottomChromeInset.swift`.
+    @State private var bottomChromeHeight: CGFloat = 0
 
     private var showsGlassTabBar: Bool { liquidGlass.isEnabled && !keyboardVisible }
 
@@ -318,11 +330,14 @@ struct RootTabView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 if showsGlassTabBar {
-                    NoopGlassTabBar(items: glassTabItems, selection: $selectedTab, onReselect: reselectTab)
+                    NoopGlassTabBar(items: glassTabItems, selection: $selectedTab, scrubber: true, onReselect: reselectTab)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
+            .reportsBottomChromeHeight()
         }
+        .onPreferenceChange(NoopBottomChromeHeightKey.self) { bottomChromeHeight = $0 }
+        .environment(\.noopBottomChromeInset, liquidGlass.isEnabled ? bottomChromeHeight : 0)
         .animation(.easeInOut(duration: 0.25), value: liftSession.isActive)
         .animation(.easeInOut(duration: 0.2), value: showsGlassTabBar)
         .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
