@@ -87,6 +87,13 @@ struct CoachChatView: View {
         .padding(.horizontal, NoopMetrics.screenHPadding)
         .padding(.top, NoopMetrics.space4)
         .padding(.bottom, NoopMetrics.space2)
+        // A conversation scrolls under the pinned header; a hairline gives it a clean edge (an overlay, so
+        // the header is the same height with or without it).
+        .overlay(alignment: .bottom) {
+            if !vm.messages.isEmpty {
+                Rectangle().fill(StrandPalette.hairline).frame(height: NoopMetrics.hairlineWidth)
+            }
+        }
     }
 
     // MARK: Empty state

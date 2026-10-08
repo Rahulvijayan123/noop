@@ -51,7 +51,13 @@ struct XiaomiBandView: View {
                         .buttonStyle(NoopButtonStyle(.secondary))
                     }
                 } else {
-                    sleepDetailSection
+                    if loaded {
+                        sleepDetailSection
+                    } else {
+                        // Last night's card at its final size while the import loads, so the rows below
+                        // do not move down when it lands.
+                        lastNightPlaceholder
+                    }
                     latestSections
                         .loadingRedaction(!loaded)
                         .background { if !loaded { LoadingAccessibilityElement() } }
@@ -139,6 +145,21 @@ struct XiaomiBandView: View {
                 }
             }
         }
+    }
+
+    private var lastNightPlaceholder: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Last night", trailing: "Mon 00 – Tue 00 Sep")
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    Text(verbatim: "0 h 00 m").font(StrandFont.number(28))
+                    ChartPlaceholder(height: NoopMetrics.chartHeightSecondary)
+                    Text(verbatim: "Deep 0 h 00 m · REM 0 h 00 m").font(StrandFont.footnote)
+                    Text(verbatim: "Light 0 h 00 m · Awake 00 m").font(StrandFont.footnote)
+                }
+            }
+        }
+        .loadingPlaceholder(true)
     }
 
     private func stageLegend(_ name: LocalizedStringKey, _ minutes: Double, _ color: Color) -> some View {

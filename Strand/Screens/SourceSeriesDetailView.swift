@@ -65,8 +65,14 @@ struct SourceSeriesDetailView: View {
         }
     }
 
+    /// The ranges offered: all six once the history is longer than a week; before that a week is the only
+    /// window there is (All would draw the same week), so the control hides.
+    private func options(span: Int) -> [ChartRange] {
+        span > 7 ? ChartRange.allCases : [.week]
+    }
+
     private func effectiveRange(span: Int) -> ChartRange {
-        let visible = RangeControl.visibleOptions(ChartRange.allCases, isAvailable: { isAvailable($0, span: span) })
+        let visible = RangeControl.visibleOptions(options(span: span), isAvailable: { isAvailable($0, span: span) })
         return RangeControl.displayedSelection(range, visible: visible) ?? range
     }
 
@@ -90,7 +96,7 @@ struct SourceSeriesDetailView: View {
                                 unit: presentation.unit, format: presentation.format,
                                 context: selected == nil ? context(points) : nil),
                          isScrubbing: selected != nil)
-            RangeControl(selection: $range, isAvailable: { isAvailable($0, span: span) })
+            RangeControl(selection: $range, options: options(span: span), isAvailable: { isAvailable($0, span: span) })
             NoopCard {
                 chart(points, window: window, range: shownRange,
                       state: inWindow.isEmpty ? .empty(String(localized: "No readings in this range")) : .ready)

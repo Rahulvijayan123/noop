@@ -186,6 +186,11 @@ enum MoreFormat {
         Int(value.rounded()).formatted(.number.grouping(.automatic))
     }
 
+    /// A whole number without decimals ("98"), otherwise one decimal ("97.5"), in the user's locale.
+    static func compact(_ value: Double) -> String {
+        value == value.rounded() ? integer(value) : oneDecimal(value)
+    }
+
     /// One decimal place in the user's locale ("72.4").
     static func oneDecimal(_ value: Double) -> String {
         value.formatted(.number.precision(.fractionLength(1)))

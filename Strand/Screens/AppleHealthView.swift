@@ -159,7 +159,7 @@ struct AppleHealthView: View {
                           value: { "\(Int($0.rounded())) ms" })
                 NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
                 seriesRow("spo2", icon: "drop", color: StrandPalette.metricCyan, title: "Blood oxygen",
-                          value: { "\(MoreFormat.oneDecimal($0)) %" })
+                          value: { "\(MoreFormat.compact($0)) %" })
                 NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
                 seriesRow("resp_rate", icon: "lungs", color: StrandPalette.metricCyan, title: "Respiratory rate",
                           value: { "\(MoreFormat.oneDecimal($0)) rpm" })
@@ -241,7 +241,7 @@ struct AppleHealthView: View {
         case "spo2":
             return SourceSeriesPresentation(
                 title: String(localized: "Blood oxygen"), unit: "%", color: StrandPalette.metricCyan,
-                chart: .percent(domain: 85...100, reference: 95), format: { MoreFormat.oneDecimal($0) },
+                chart: .percent(domain: 85...100, reference: 95), format: { MoreFormat.compact($0) },
                 about: [String(localized: "Blood oxygen saturation as Apple Health records it, usually from your watch's spot readings. Most healthy readings sit between 95 and 100 %. This is a wellness reading, not a medical measurement.")])
         case "resp_rate":
             return SourceSeriesPresentation(
