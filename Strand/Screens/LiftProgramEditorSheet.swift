@@ -44,8 +44,7 @@ struct LiftProgramEditorSheet: View {
 
     var body: some View {
         ScreenScaffold(
-            title: isNew ? "New program" : "Edit program",
-            subtitle: "Your targets for each exercise. What you actually lift is recorded when you run it."
+            title: isNew ? "New program" : "Edit program"
         ) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 detailsSection
@@ -76,7 +75,7 @@ struct LiftProgramEditorSheet: View {
 
     private var detailsSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Program", overline: "Details")
+            SectionHeader("Program")
             NoopCard {
                 VStack(alignment: .leading, spacing: 14) {
                     field("Name") {
@@ -109,11 +108,11 @@ struct LiftProgramEditorSheet: View {
 
     private var exercisesSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Exercises", overline: "In order")
+            SectionHeader("Exercises")
 
             if items.isEmpty {
                 NoopCard {
-                    Text("No exercises yet. Add the first one below — you can type any name you like; NOOP remembers it for next time.")
+                    Text("No exercises yet. Add the first one below — you can type any name you like; Nara remembers it for next time.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
@@ -182,7 +181,7 @@ struct LiftProgramEditorSheet: View {
                     }
                     .accessibilityLabel("Remove exercise")
                 }
-                .font(.system(size: 12, weight: .semibold))
+                .font(StrandFont.icon(.inline))
                 .buttonStyle(.plain)
                 .foregroundStyle(StrandPalette.textSecondary)
             }
@@ -255,7 +254,7 @@ struct LiftProgramEditorSheet: View {
     private func field<Content: View>(_ label: LocalizedStringKey,
                                       @ViewBuilder _ content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 6) {
-            Text(label).strandOverline()
+            Text(label).strandLabel()
             content()
         }
         .frame(maxWidth: .infinity, alignment: .leading)

@@ -62,7 +62,8 @@ struct StretchFamilyView: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: LocalizedStringKey(title), subtitle: LocalizedStringKey(subtitle), lazy: true) {
+        ScreenScaffold(title: LocalizedStringKey(title), dateLine: subtitle.isEmpty ? nil : subtitle,
+                       titleDisplay: .navigationBar, lazy: true) {
             if family != nil { picker }
             if family == nil || tab == .changes {
                 changesList
@@ -77,12 +78,19 @@ struct StretchFamilyView: View {
     }
 
     private var picker: some View {
-        SegmentedPillControl([Tab.stretches, .changes], selection: $tab) { tab in
+        SegmentedPillControl([Tab.stretches, .changes], selection: $tab, fillsAvailableWidth: true) { tab in
             switch tab {
             case .stretches: return String(localized: "Stretches")
             case .changes: return String(localized: "Position changes")
             }
         }
+    }
+
+    private func emptyLine(_ text: LocalizedStringKey) -> some View {
+        Text(text)
+            .font(StrandFont.subhead)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 
     // MARK: Stretches
@@ -91,22 +99,12 @@ struct StretchFamilyView: View {
     private var stretchesList: some View {
         let layout = DayStretchLayout(episodes: episodes, recentCount: 0)
         if layout.earlier.isEmpty {
-            DataPendingNote(title: "No stretches this long",
-                            message: "This kind of activity only came in moments shorter than a minute.",
-                            symbol: "hourglass")
+            emptyLine("This kind of activity only came in moments shorter than a minute.")
         } else {
             ForEach(layout.earlier, id: \.part) { group in
-                VStack(alignment: .leading, spacing: 10) {
-                    HStack(spacing: 8) {
-                        Text(group.part.title)
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text(StretchFormat.count(group.stretches.count))
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    .padding(.horizontal, NoopMetrics.space1)
-                    ForEach(group.stretches) { ep in
+                NoopListSection("\(group.part.title) · \(StretchFormat.count(group.stretches.count))") {
+                    ForEach(Array(group.stretches.enumerated()), id: \.element.id) { index, ep in
+                        if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
                         StretchRow(episode: ep,
                                    verdict: feedback.feedback(kind: .activityContext, start: ep.start, end: ep.end)) {
                             openStretch = StretchSheetInput(target: .activity(ep), document: timeline.activityContext,
@@ -124,45 +122,25 @@ struct StretchFamilyView: View {
     private var changesList: some View {
         let shown = changes
         if shown.isEmpty {
-            DataPendingNote(title: "No position changes",
-                            message: family == nil ? "None were flagged on this day."
-                                                   : "None were flagged around these stretches.",
-                            symbol: "arrow.up.arrow.down")
+            emptyLine(family == nil ? "None were flagged on this day." : "None were flagged around these stretches.")
         } else {
-            VStack(spacing: 0) {
-                ForEach(Array(shown.enumerated()), id: \.offset) { i, event in
-                    Button {
-                        let at = Date(timeIntervalSince1970: TimeInterval(event.ts))
-                        zoom(at.addingTimeInterval(-180)...at.addingTimeInterval(180))
-                    } label: {
-                        HStack(spacing: 8) {
-                            Text(event.kind.displayName)
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Spacer(minLength: 8)
-                            Text(StretchFormat.clock(Date(timeIntervalSince1970: TimeInterval(event.ts)), seconds: true))
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .monospacedDigit()
-                            Text("\(Int((event.probability * 100).rounded()))%")
-                                .font(StrandFont.subhead.weight(.semibold))
-                                .foregroundStyle(StrandPalette.textPrimary)
-                                .monospacedDigit()
-                                .frame(width: 44, alignment: .trailing)
-                            Image(systemName: "magnifyingglass")
-                                .font(StrandFont.caption.weight(.semibold))
-                                .foregroundStyle(StrandPalette.textTertiary)
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    ForEach(Array(shown.enumerated()), id: \.offset) { i, event in
+                        if i > 0 { NoopListDivider() }
+                        Button {
+                            let at = Date(timeIntervalSince1970: TimeInterval(event.ts))
+                            zoom(at.addingTimeInterval(-180)...at.addingTimeInterval(180))
+                        } label: {
+                            NoopListRow(icon: nil, title: "\(event.kind.displayName)",
+                                        subtitle: StretchFormat.clock(Date(timeIntervalSince1970: TimeInterval(event.ts)), seconds: true),
+                                        value: "\(Int((event.probability * 100).rounded())) %")
                         }
-                        .padding(.vertical, 10)
-                        .contentShape(Rectangle())
+                        .buttonStyle(.plain)
+                        .accessibilityHint("Shows this moment on the heart rate graph")
                     }
-                    .buttonStyle(.plain)
-                    .accessibilityHint("Shows this moment on the heart rate graph")
-                    if i < shown.count - 1 { Divider().opacity(0.4) }
                 }
             }
-            .padding(.horizontal, NoopMetrics.space3)
-            .background(NoopPanelSurface(cornerRadius: 16))
         }
     }
 

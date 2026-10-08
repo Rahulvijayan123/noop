@@ -10,25 +10,22 @@ import MapKit
 
 // MARK: - Workout detail (#410)
 //
-// A READ-ONLY drill-down for one tapped session, built ONLY from the locked Noop component system
-// (NoopCard / ChartCard / SectionHeader / StatTile / SegmentBar idiom) so it sits in the same
-// instrument-grade, Effort-amber colour world as the Workouts list it opens from.
+// One session, read-only. The essentials once at the top (duration, effort, calories, distance and pace or
+// steps), then the heart rate through the session on a clock axis with the user's zones shaded behind it (the
+// readout above it follows the scrub), the time in each zone as bars, the recovery after the session, and
+// the route when one was recorded or imported. Method notes, the source and the route's privacy line sit in
+// the About at the bottom.
 //
-//   • a header (sport displayName · date · duration) with the source badge,
-//   • a 3-up StatTile strip (avg HR · max HR · calories / distance),
-//   • a GPS route map when the session recorded one on-device (#524) — a MapKit map of the captured
-//     polyline with start/end markers, shown only when points were actually captured,
-//   • an HR-curve ChartCard fed the workout's 5-min-ish HR buckets over [startTs, endTs],
-//   • an HR-zones bar — imported per-workout zones when the row carries them, else the window's raw
-//     HR samples binned into age-derived %HRmax zone-minutes (honestly labelled as approximate),
-//   • the session's Effort/strain contribution when one was captured.
-//
-// Presented as a `.sheet` wrapped in a NavigationStack by WorkoutsView — these screens aren't hosted in
-// a per-screen NavigationStack, so a sheet is the in-app drill-down idiom (mirrors HealthView opening
-// MetricDetailView, StressView opening Breathe).
+// Pushed from the Workouts list; the classic Today still presents it as a sheet, which keeps its Done.
+// Every section below the statistics has a fixed frame from the first paint (the chart and the zone bars
+// draw placeholders while `load()` runs), so nothing above the fold moves when the reads land.
 
 struct WorkoutDetailView: View {
     let row: WorkoutRow
+    /// How the page was opened: a sheet carries its own Done.
+    var presentation: Presentation = .sheet
+
+    enum Presentation { case sheet, pushed }
 
     @EnvironmentObject private var repo: Repository
     @StateObject private var profile = ProfileStore()
@@ -45,12 +42,12 @@ struct WorkoutDetailView: View {
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var effortScale: EffortScale { UnitPrefs.resolveEffortScale(effortScaleRaw) }
 
-    /// Loaded HR curve over the session window (5-min-ish bucket means). Empty until loaded.
+    /// Loaded HR curve over the session window (bucket means). Empty until loaded.
     @State private var hrPoints: [TrendPoint] = []
-    /// Per-zone MINUTES for the zones bar: imported zones (duration-weighted) when present, else the
+    /// Per-zone MINUTES for the zone bars: imported zones (duration-weighted) when present, else the
     /// window's raw HR samples binned into age-derived %HRmax zones. nil = no zone split to show.
     @State private var zoneMinutes: [Double]? = nil
-    /// True when the zones bar came from imported WHOOP percentages (vs derived from raw strap HR).
+    /// True when the zones came from imported WHOOP percentages (vs derived from raw strap HR).
     @State private var zonesFromImport = false
     @State private var loaded = false
     /// #516: computed from the recorded workout-end + post-workout HR window. nil when the workout was
@@ -64,6 +61,9 @@ struct WorkoutDetailView: View {
     /// Drives the GPX/FIT export chooser for the recorded route.
     @State private var showRouteExport = false
 
+    /// The heart-rate sample under the finger.
+    @State private var hrSelection: Date?
+
     /// Steps over the session window for an on-foot sport (#398): the count plus whether it came from the
     /// strap's own counter (MG/5.0) or the phone pedometer (fallback for WHOOP 4.0 / not-yet-synced / CSV
     /// import). nil = not an on-foot sport, or no step source had data for the window.
@@ -72,35 +72,32 @@ struct WorkoutDetailView: View {
 
     var body: some View {
         ScreenScaffold(title: "\(WorkoutSource.displaySport(row.sport))",
-                       subtitle: "\(dateLabel(row.startTs))",
-                       // PERF: chart/map-heavy column (a MapKit route map, the session HR curve, the
-                       // zone-split chart and the effort card). The LazyVStack path builds the off-screen
-                       // ones on demand — byte-identical layout — so a tall detail doesn't materialise the
-                       // map + both charts before the header is even on screen.
-                       lazy: true,
-                       // The day-of-sky liquid backdrop, matching the Workouts list this detail opens from
-                       // and every other liquid screen. Fixed and full-bleed; it does not scroll. This
-                       // screen is presented in a sheet wrapped in a NavigationStack by WorkoutsView, so it
-                       // needs no extra macOS NavigationStack of its own.
-                       topBackground: liquidScaffoldSky()) {
-            headerCard
-            statStrip
-            routeCard
-            hrCurveCard
-            zonesCard
-            heartRateRecoveryCard
-            if let strain = row.strain {
-                effortCard(strain: strain)
-            }
+                       dateLine: "\(WorkoutFormat.day(row.startTs)) · \(WorkoutFormat.timeRange(row.startTs, row.endTs))",
+                       titleDisplay: .navigationBar,
+                       // PERF: chart/map-heavy column (the session HR curve, a MapKit route map). The
+                       // LazyVStack path builds the off-screen ones on demand.
+                       lazy: true) {
+            StatGrid(essentials, columns: statColumns)
+            heartRateSection
+            zonesSection
+            heartRateRecoverySection
+            routeSection
+            AboutDisclosure("About this workout", paragraphs: aboutParagraphs)
         }
         .toolbar {
-            // A Done affordance for the sheet on both platforms (iOS gets the grabber too).
-            ToolbarItem(placement: .cancellationAction) {
-                Button("Done") { dismiss() }
+            if presentation == .sheet {
+                // A Done affordance for the sheet on both platforms (iOS gets the grabber too).
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { dismiss() }
+                }
             }
         }
         .task { await load() }
     }
+
+    /// Three across on the phone too, so the essentials take two rows and the heart rate starts on the
+    /// first screen; the values step down as a piece if a long one ("1 h 18 m") needs the room.
+    private var statColumns: Int { 3 }
 
     // MARK: - Load
 
@@ -168,146 +165,158 @@ struct WorkoutDetailView: View {
         }
     }
 
+    // MARK: - Essentials
+
+    private var essentials: [StatItem] {
+        var items: [StatItem] = [
+            StatItem(String(localized: "Duration"), value: WorkoutFormat.duration(seconds: row.durationS)),
+        ]
+        let effort = WorkoutFormat.effort(row.strain, scale: effortScale)
+        items.append(StatItem(String(localized: "Effort"), value: effort?.value, detail: effort?.of))
+        items.append(StatItem(String(localized: "Calories"),
+                              value: row.energyKcal.map { WorkoutFormat.grouped($0) }, unit: "kcal"))
+        if let m = row.distanceM, m > 0 {
+            let d = WorkoutFormat.distance(meters: m, system: distanceUnitSystem)
+            items.append(StatItem(String(localized: "Distance"), value: d.value, unit: d.unit))
+            let pace = WorkoutFormat.pace(secPerKm: paceSecPerKm, system: distanceUnitSystem)
+            items.append(StatItem(String(localized: "Avg pace"), value: pace?.value, unit: pace?.unit))
+        }
+        // Steps for an on-foot sport (#398). Shown for the on-foot set even before the value lands, so
+        // the cell doesn't pop in; "—" until a source has data. The detail says which counter it came from.
+        if WorkoutCatalog.isOnFoot(row.sport) {
+            items.append(StatItem(String(localized: "Steps"),
+                                  value: steps.map { WorkoutFormat.grouped(Double($0.count)) },
+                                  detail: steps.map { $0.fromStrap ? String(localized: "strap") : String(localized: "phone") }))
+        }
+        return items
+    }
+
+    /// Avg pace from the row's distance + duration, in seconds per kilometre; nil when either is missing.
+    private var paceSecPerKm: Double? {
+        guard let m = row.distanceM, m > 0 else { return nil }
+        let secs = row.durationS ?? Double(row.endTs - row.startTs)
+        guard secs > 0 else { return nil }
+        return secs / (m / 1000.0)
+    }
+
+    // MARK: - Heart rate
+
+    /// The repository's bucket for this window (`workoutHrBuckets`), so a skipped bucket breaks the line.
+    private var bucketSeconds: Int { max(15, min(300, (row.endTs - row.startTs) / 120)) }
+
+    private var samples: [IntradayChart.Sample] {
+        hrPoints.map { IntradayChart.Sample(time: $0.date, value: $0.value) }
+    }
+
+    private var sessionWindow: ClosedRange<Date> {
+        let start = Date(timeIntervalSince1970: TimeInterval(row.startTs))
+        let end = Date(timeIntervalSince1970: TimeInterval(max(row.endTs, row.startTs + 60)))
+        return start...end
+    }
+
+    /// The user's five zones as shaded bands behind the line, labelled at the trailing edge.
+    private var zoneBands: [IntradayChart.ValueBand] {
+        profile.hrZoneSet.zones.map { z in
+            IntradayChart.ValueBand(id: "z\(z.number)", range: z.lower...max(z.upper, z.lower + 1),
+                                    color: StrandPalette.hrZoneColor(z.number), label: "Z\(z.number)")
+        }
+    }
+
+    private var heartRateSection: some View {
+        let samples = self.samples
+        let avg = row.avgHr.map(Double.init)
+            ?? (samples.isEmpty ? nil : samples.map(\.value).reduce(0, +) / Double(samples.count))
+        let peak = row.maxHr ?? samples.map(\.value).max().map { Int($0.rounded()) }
+        let content: ReadoutContent
+        if let hrSelection, let sample = ChartSelection.sample(for: hrSelection, in: samples) {
+            let zone = profile.hrZoneSet.zoneNumber(forBPM: sample.value)
+            content = .intraday(sample, unit: "bpm", format: { "\(Int($0.rounded()))" },
+                                context: zone >= 1 ? String(localized: "Zone \(zone) · \(LiveWorkoutView.zoneName(zone))")
+                                                   : String(localized: "Below Zone 1"))
+        } else {
+            content = ReadoutContent(dateLine: WorkoutFormat.timeRange(row.startTs, row.endTs),
+                                     value: avg.map { "\(Int($0.rounded()))" }, unit: "bpm",
+                                     context: peak.map { String(localized: "Average · Max HR \($0) bpm") }
+                                        ?? String(localized: "Average"))
+        }
+        let state: ChartState = !loaded ? .loading
+            : (samples.count > 1 ? .ready : .empty(String(localized: "No heart rate recorded")))
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Heart rate")
+            ValueReadout(content, isScrubbing: hrSelection != nil, isLoading: !loaded && row.avgHr == nil)
+            NoopCard {
+                // No average rule: the readout above carries the average, and a rule's label would sit on
+                // the zone labels at the trailing edge.
+                IntradayChart(samples: samples, bucketSeconds: bucketSeconds,
+                              valueBands: zoneBands,
+                              legend: [], state: state, window: sessionWindow,
+                              y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 40)),
+                              selection: $hrSelection,
+                              accessibilityTitle: String(localized: "Heart rate during \(WorkoutSource.displaySport(row.sport))"))
+            }
+        }
+    }
+
+    /// #18: whether the displayed Avg HR was edited away from what this HR trace implies. True only when the
+    /// row carries CAPTURED strain or zones (so the graph/zones/Effort are from a real recording, not the
+    /// typed value) AND the row's avgHr differs from the trace mean by more than a small tolerance. The
+    /// tolerance absorbs ordinary rounding/bucketing drift so an unedited session never trips the note.
+    private func avgHrEditedDisclosure(traceMean: Double) -> Bool {
+        guard let avg = row.avgHr, row.strain != nil || row.zonesJSON != nil else { return false }
+        return abs(Double(avg) - traceMean) > 3
+    }
+
+    // MARK: - Zones
+
+    @ViewBuilder private var zonesSection: some View {
+        if !loaded || (zoneMinutes?.reduce(0, +) ?? 0) > 0 {
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Time in zones",
+                              trailing: !loaded ? nil
+                                : (zonesFromImport ? String(localized: "Whoop import") : String(localized: "Estimate")))
+                NoopCard {
+                    WorkoutZoneBars(minutes: zoneMinutes ?? [], ranges: zonesFromImport ? [] : zoneRanges,
+                                    isLoading: !loaded)
+                }
+            }
+        }
+    }
+
+    /// "120–138" per zone from the user's own zone set (the one the strap-derived minutes use).
+    private var zoneRanges: [String?] {
+        profile.hrZoneSet.zones.sorted { $0.number < $1.number }.map { "\(Int($0.lower))–\(Int($0.upper)) bpm" }
+    }
+
     // MARK: - Heart-rate recovery (#516)
 
-    @ViewBuilder private var heartRateRecoveryCard: some View {
+    @ViewBuilder private var heartRateRecoverySection: some View {
         if let recovery = heartRateRecovery {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Heart Rate Recovery", overline: "After high-intensity effort",
-                              trailing: String(localized: "Peak \(recovery.endHR) bpm"))
-                NoopCard(tint: StrandPalette.metricRose) {
-                    VStack(alignment: .leading, spacing: 14) {
-                        HStack(spacing: 0) {
-                            recoveryStat(String(localized: "1 min"), value: recovery.after1Minute)
-                            recoveryStat(String(localized: "2 min"), value: recovery.after2Minutes)
-                            recoveryStat(String(localized: "5 min"), value: recovery.after5Minutes)
-                        }
-                        Divider().overlay(StrandPalette.hairline)
-                        Text("The change from your heart rate at the end of exercise. Positive values mean your heart rate fell; a dash means the strap did not record enough data around that minute.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-            }
-        }
-    }
-
-    private func recoveryStat(_ label: String, value: Int?) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).strandOverline()
-            Text(value.map { "\($0)" } ?? "–")
-                .font(StrandFont.number(24))
-                .foregroundStyle(value.map { $0 >= 0 ? StrandPalette.statusPositive
-                                                     : StrandPalette.statusWarning }
-                                 ?? StrandPalette.textTertiary)
-            Text("bpm")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(value.map { String(localized: "Heart rate recovery at \(label), \($0) beats per minute") }
-                            ?? String(localized: "Heart rate recovery at \(label), not available"))
-    }
-
-    // MARK: - Header
-
-    private var headerCard: some View {
-        NoopCard(tint: StrandPalette.effortColor) {
-            HStack(alignment: .center, spacing: 14) {
-                Image(systemName: sportSymbol(row.sport))
-                    .font(.system(size: 22, weight: .semibold))
-                    .foregroundStyle(StrandPalette.effortColor)
-                    .frame(width: 44, height: 44)
-                    .background(StrandPalette.effortColor.opacity(0.14),
-                                in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(WorkoutSource.displaySport(row.sport))
-                        .font(StrandFont.title2)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .lineLimit(1)
-                    Text("\(dateLabel(row.startTs)) · \(timeRangeLabel(row.startTs, row.endTs))")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                Spacer(minLength: 0)
-                sourceBadge(row.source)
-            }
-        }
-    }
-
-    // MARK: - Stat strip
-
-    @ViewBuilder private var statStrip: some View {
-        LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.gap)],
-                  alignment: .leading, spacing: NoopMetrics.gap) {
-            StatTile(label: "Duration",
-                     value: durationLabel(row.durationS),
-                     caption: String(localized: "active"),
-                     accent: StrandPalette.effortColor)
-            StatTile(label: "Avg HR",
-                     value: row.avgHr.map { "\($0)" } ?? "–",
-                     caption: row.avgHr != nil ? "bpm" : nil,
-                     accent: row.avgHr != nil ? StrandPalette.metricRose : StrandPalette.textTertiary)
-            StatTile(label: "Max HR",
-                     value: row.maxHr.map { "\($0)" } ?? "–",
-                     caption: row.maxHr != nil ? "bpm" : nil,
-                     accent: row.maxHr != nil ? StrandPalette.metricRose : StrandPalette.textTertiary)
-            StatTile(label: "Calories",
-                     value: row.energyKcal.map { grouped($0) } ?? "–",
-                     caption: row.energyKcal != nil ? "kcal" : nil,
-                     accent: row.energyKcal != nil ? StrandPalette.metricAmber : StrandPalette.textTertiary)
-            if row.distanceM != nil {
-                StatTile(label: "Distance",
-                         value: distanceLabel(row.distanceM),
-                         caption: String(localized: "covered"),
-                         accent: StrandPalette.metricCyan)
-            }
-            // Steps for an on-foot sport (#398). Shown for the on-foot set even before the value lands, so
-            // the tile doesn't pop in; "–" until a source has data. Caption is honest about the source.
-            if WorkoutCatalog.isOnFoot(row.sport) {
-                StatTile(label: "Steps",
-                         value: steps.map { grouped(Double($0.count)) } ?? "–",
-                         caption: steps.map { $0.fromStrap ? String(localized: "strap")
-                                                          : String(localized: "phone") },
-                         accent: steps != nil ? StrandPalette.metricCyan : StrandPalette.textTertiary)
+                SectionHeader("Heart rate recovery", trailing: String(localized: "Peak \(recovery.endHR) bpm"))
+                StatGrid([
+                    StatItem(String(localized: "1 min"), value: recovery.after1Minute.map { "\($0)" }, unit: "bpm"),
+                    StatItem(String(localized: "2 min"), value: recovery.after2Minutes.map { "\($0)" }, unit: "bpm"),
+                    StatItem(String(localized: "5 min"), value: recovery.after5Minutes.map { "\($0)" }, unit: "bpm"),
+                ], columns: 3)
             }
         }
     }
 
     // MARK: - GPS route (#524)
 
-    /// The captured-route card: a MapKit map of the polyline with start/end markers, plus distance and
-    /// pace read off the route. Shown ONLY when ≥2 points were captured — honest "no map" otherwise (a
-    /// Mac with no GPS, denied permission, or a non-distance sport never produce a route).
-    @ViewBuilder private var routeCard: some View {
+    /// The captured-route card: a MapKit map of the polyline with start/end markers. Shown ONLY when ≥2
+    /// points were captured — honest "no map" otherwise (a Mac with no GPS, denied permission, or a
+    /// non-distance sport never produce a route). Distance and pace are in the statistics above.
+    @ViewBuilder private var routeSection: some View {
         if route.count >= 2 {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Route", overline: routeOriginLabel,
-                              trailing: distanceLabel(row.distanceM))
-                NoopCard(padding: 0, tint: StrandPalette.effortColor) {
-                    VStack(alignment: .leading, spacing: 0) {
-                        WorkoutRouteMap(points: route)
-                            .frame(height: 220)
-                            .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius,
-                                                        style: .continuous))
-                            .accessibilityLabel(routeAccessibilityLabel)
-                        HStack(spacing: 0) {
-                            routeStat(String(localized: "Distance"), distanceLabel(row.distanceM),
-                                      tint: StrandPalette.metricCyan)
-                            routeStat(String(localized: "Avg pace"), paceLabel, tint: StrandPalette.effortBright)
-                            routeStat(String(localized: "Points"), "\(route.count)", tint: StrandPalette.textSecondary)
-                        }
-                        .padding(NoopMetrics.cardPadding)
-                    }
+                SectionHeader("Route", trailing: routeOriginLabel)
+                NoopCard(padding: 0) {
+                    WorkoutRouteMap(points: route)
+                        .frame(height: 220)
+                        .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous))
+                        .accessibilityLabel(routeAccessibilityLabel)
                 }
-                Text(routeDescription)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-
                 Button {
                     showRouteExport = true
                 } label: {
@@ -348,51 +357,26 @@ struct WorkoutDetailView: View {
         }
     }
 
-    private func routeStat(_ title: String, _ value: String, tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).strandOverline()
-            Text(value)
-                .font(StrandFont.number(15))
-                .foregroundStyle(tint)
-                .lineLimit(1).minimumScaleFactor(0.7)
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    /// Avg pace from the row's GPS distance + duration, in the user's unit system: "m:ss /km" (metric) or
-    /// "m:ss /mi" (imperial). "–" when distance or duration is missing/zero (pace undefined — honest).
-    private var paceLabel: String {
-        guard let m = row.distanceM, m > 0 else { return "–" }
-        let secs = row.durationS ?? Double(row.endTs - row.startTs)
-        guard secs > 0 else { return "–" }
-        let km = m / 1000.0
-        return UnitFormatter.paceFromSecPerKm(secs / km, system: distanceUnitSystem)
-    }
-
     private var routeAccessibilityLabel: String {
-        let dist = distanceLabel(row.distanceM)
+        let dist = row.distanceM.map { UnitFormatter.distanceFromMeters($0, system: distanceUnitSystem) } ?? "–"
         return String(localized: "Map of your \(WorkoutSource.displaySport(row.sport)) route, \(dist).")
     }
 
-    /// #1205: the route card's overline and description must be honest about where the route came
-    /// from. An on-device recorded route says "Recorded on device"; an imported route (Apple Health
-    /// or Health Connect) says "Imported from Apple Health" / "Imported" so the user is not told
-    /// their phone recorded GPS data that actually came from another app.
-    private var routeOriginLabel: LocalizedStringKey {
+    /// #1205: the route section must be honest about where the route came from. An on-device recorded route
+    /// says "Recorded on device"; an imported route (Apple Health or Health Connect) says "Imported" so the
+    /// user is not told their phone recorded GPS data that actually came from another app.
+    private var routeOriginLabel: String {
         switch WorkoutSource.classify(row.source) {
         // "Imported" rather than naming the app: every string here is one the catalog already carries in
-        // all nine locales, so the honesty fix ships translated on day one. A source-specific variant
-        // ("Imported from Apple Health") would be a NEW key, and nothing catches a missing entry: the i18n
-        // audit checks locale coverage OF catalog entries, not that a `String(localized:)` literal has one.
-        // It would have read English on every non-English device while the gate stayed green.
-        case .apple, .whoop, .lifting, .activityFile: return "Imported"
-        case .detected, .manual: return "Recorded on device"
+        // all nine locales, so the honesty fix ships translated on day one.
+        case .apple, .whoop, .lifting, .activityFile: return String(localized: "Imported")
+        case .detected, .manual: return String(localized: "Recorded on device")
         }
     }
 
     private var routeDescription: String {
         switch WorkoutSource.classify(row.source) {
-        // Same rule as the overline: both of these are existing catalog keys with all nine locales. The
+        // Same rule as the label: both of these are existing catalog keys with all nine locales. The
         // imported line carries the privacy claim without the "recorded on your device" the original
         // string opens with, which is the part that was untrue for a route another app collected.
         case .apple, .whoop, .lifting, .activityFile:
@@ -402,248 +386,40 @@ struct WorkoutDetailView: View {
         }
     }
 
-    // MARK: - HR curve
+    // MARK: - About
 
-    @ViewBuilder private var hrCurveCard: some View {
-        if hrPoints.count > 1 {
-            let values = hrPoints.map(\.value)
-            let lo = max(0, (values.min() ?? 60) - 8)
-            let hi = (values.max() ?? 180) + 8
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                ChartCard(
-                    title: "Heart rate",
-                    subtitle: String(localized: "Beats per minute across the session"),
-                    trailing: row.avgHr.map { String(localized: "avg \($0)") },
-                    tint: StrandPalette.effortColor
-                ) {
-                    TrendChart(
-                        points: hrPoints,
-                        gradient: StrandPalette.effortGradient,
-                        valueRange: lo...hi,
-                        showsArea: true,
-                        valueFormat: { String(localized: "\(Int($0.rounded())) bpm") },
-                        dateFormat: { Self.tooltipTime.string(from: $0) },
-                        accessibilityLabel: String(localized: "Heart rate during \(WorkoutSource.displaySport(row.sport))"),
-                        workoutTimeAxis: Date(timeIntervalSince1970: TimeInterval(row.startTs))...Date(timeIntervalSince1970: TimeInterval(row.endTs))
-                    )
-                } footer: {
-                    ChartFooter([
-                        ("Avg", row.avgHr.map { String(localized: "\($0) bpm") } ?? "–"),
-                        ("Peak", row.maxHr.map { String(localized: "\($0) bpm") } ?? String(localized: "\(Int((values.max() ?? 0).rounded())) bpm")),
-                        ("Low", String(localized: "\(Int((values.min() ?? 0).rounded())) bpm")),
-                    ])
-                }
-                // #18: the row's Avg HR can be EDITED on the manual sheet while the graph, zones and Effort
-                // stay from the recorded session (preservingCaptured keeps the captured strain/zones). When
-                // the typed average disagrees materially with this trace's own mean AND the row carries that
-                // captured strain/zones, say so plainly. We do NOT re-score from the typed number.
-                if avgHrEditedDisclosure(traceMean: values.reduce(0, +) / Double(values.count)) {
-                    Text("The average above was edited. The graph, zones and Effort stay from the recorded session.")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-            }
-        } else if loaded {
-            NoopCard {
-                emptyNote("No heart-rate samples were recorded over this session's window.")
-            }
+    private var aboutParagraphs: [String] {
+        var out: [String] = [String(localized: "Source: \(WorkoutFormat.source(row.source))")]
+        if row.strain != nil {
+            out.append(String(localized: "This session's contribution to the day's Effort, as captured during the workout."))
         }
-    }
-
-    /// #18: whether the displayed Avg HR was edited away from what this HR trace implies. True only when the
-    /// row carries CAPTURED strain or zones (so the graph/zones/Effort are from a real recording, not the
-    /// typed value) AND the row's avgHr differs from the trace mean by more than a small tolerance. The
-    /// tolerance absorbs ordinary rounding/bucketing drift so an unedited session never trips the note.
-    private func avgHrEditedDisclosure(traceMean: Double) -> Bool {
-        guard let avg = row.avgHr, row.strain != nil || row.zonesJSON != nil else { return false }
-        return abs(Double(avg) - traceMean) > 3
-    }
-
-    // MARK: - HR zones
-
-    @ViewBuilder private var zonesCard: some View {
-        if let z = zoneMinutes, z.reduce(0, +) > 0 {
-            let total = z.reduce(0, +)
-            let busiest = z.indices.max(by: { z[$0] < z[$1] }) ?? 0
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("HR Zones",
-                              overline: zonesFromImport ? "Whoop import" : "From strap HR",
-                              trailing: String(localized: "\(Int(total.rounded()))m in zone"))
-                NoopCard(tint: StrandPalette.effortColor) {
-                    VStack(alignment: .leading, spacing: 12) {
-                        GeometryReader { geo in
-                            HStack(spacing: 2) {
-                                ForEach(0..<5, id: \.self) { i in
-                                    Rectangle()
-                                        .fill(StrandPalette.hrZoneColor(i + 1))
-                                        .frame(width: max(0, CGFloat(z[i] / total) * geo.size.width))
-                                        .overlay {
-                                            if i == busiest {
-                                                Rectangle()
-                                                    .strokeBorder(StrandPalette.textPrimary.opacity(0.85), lineWidth: 1.5)
-                                            }
-                                        }
-                                }
-                            }
-                        }
-                        .frame(height: 34)
-                        .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
-                        .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(String(localized: "Heart-rate zone split: \((1...5).map { String(localized: "zone \($0) \(Int((z[$0 - 1] / total * 100).rounded())) percent") }.joined(separator: ", "))"))
-                        Divider().overlay(StrandPalette.hairline)
-                        HStack(spacing: 0) {
-                            ForEach(0..<5, id: \.self) { i in
-                                zoneStat(i + 1, minutes: z[i], total: total)
-                            }
-                        }
-                        Text(zonesFromImport
-                             ? "WHOOP's imported per-zone split for this session."
-                             : "Time in each %HRmax zone, derived from the strap's heart rate over this window (approximate).")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-            }
+        // #18: the row's Avg HR can be EDITED on the manual sheet while the graph, zones and Effort stay
+        // from the recorded session (preservingCaptured keeps the captured strain/zones). Say so plainly;
+        // nothing is re-scored from the typed number.
+        if !hrPoints.isEmpty,
+           avgHrEditedDisclosure(traceMean: hrPoints.map(\.value).reduce(0, +) / Double(hrPoints.count)) {
+            out.append(String(localized: "The average above was edited. The graph, zones and Effort stay from the recorded session."))
         }
-    }
-
-    private func zoneStat(_ zone: Int, minutes: Double, total: Double) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            HStack(spacing: 5) {
-                RoundedRectangle(cornerRadius: 2, style: .continuous)
-                    .fill(StrandPalette.hrZoneColor(zone))
-                    .frame(width: 9, height: 9)
-                Text("Z\(zone)" as String).strandOverline()
-            }
-            Text("\(Int((minutes / max(total, 0.001) * 100).rounded()))%")
-                .font(StrandFont.number(15))
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text(durationLabel(minutes * 60))
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
+        if zoneMinutes != nil {
+            out.append(zonesFromImport
+                       ? String(localized: "WHOOP's imported per-zone split for this session.")
+                       : String(localized: "Time in each %HRmax zone, derived from the strap's heart rate over this window (approximate)."))
         }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    // MARK: - Effort contribution
-
-    private func effortCard(strain: Double) -> some View {
-        // The session's Effort as the signature liquid gauge: a `LiquidVessel` tinted Effort, filled to the
-        // session's contribution on the user's selected scale, with the value counting up over it — the
-        // same hero language as the Workouts list's Typical Effort gauge and the Sleep Rest hero. The
-        // explanatory sentence keeps its place beside the gauge.
-        let displayValue = UnitFormatter.effortValue(strain, scale: effortScale)
-        let scaleMax: Double = effortScale == .whoop ? 21 : 100
-        let fraction = max(0, min(1, displayValue / scaleMax))
-        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Effort", overline: "This session")
-            NoopCard(tint: StrandPalette.effortColor) {
-                HStack(alignment: .center, spacing: 18) {
-                    ZStack {
-                        // Static (posed) vessel — a compact liquid gauge inside a card, so it costs a single
-                        // cached frame rather than a live canvas (same call as Trends' pip vessels).
-                        LiquidVessel(value: fraction, tint: StrandPalette.effortColor, animated: false)
-                            .frame(width: 88, height: 88)
-                        VStack(spacing: 0) {
-                            // The session's Effort contribution ticks up to its value — the NOOP signature.
-                            CountUpText(value: displayValue,
-                                        format: { String(format: "%.1f", $0) },
-                                        font: StrandFont.rounded(28),
-                                        color: StrandPalette.textPrimary)
-                                .shadow(color: .black.opacity(0.5), radius: 5, y: 1)
-                            Text(effortScale == .whoop ? "of 21" : "of 100")
-                                .font(StrandFont.caption)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                        }
-                        .allowsHitTesting(false)
-                    }
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(String(localized: "Effort \(UnitFormatter.effortDisplay(strain, scale: effortScale)) \(effortScale == .whoop ? "of 21" : "of 100")"))
-                    Spacer(minLength: 0)
-                    Text("This session's contribution to the day's Effort, as captured during the workout.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: 240, alignment: .leading)
-                }
-            }
+        if heartRateRecovery != nil {
+            out.append(String(localized: "The change from your heart rate at the end of exercise. Positive values mean your heart rate fell; a dash means the strap did not record enough data around that minute."))
         }
+        if route.count >= 2 { out.append(routeDescription) }
+        return out
     }
-
-    // MARK: - Bits
-
-    private func emptyNote(_ text: String) -> some View {
-        Text(text)
-            .font(StrandFont.subhead)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .fixedSize(horizontal: false, vertical: true)
-    }
-
-    private func sourceBadge(_ source: String) -> some View {
-        let (label, tint): (String, Color) = {
-            switch WorkoutSource.classify(source) {
-            case .whoop:    return (String(localized: "Whoop"), StrandPalette.accent)
-            case .apple:    return (String(localized: "Apple"), StrandPalette.metricCyan)
-            case .detected: return (String(localized: "Detected"), StrandPalette.metricPurple)
-            case .manual:   return (String(localized: "Manual"), StrandPalette.statusWarning)
-            case .lifting:  return (String(localized: "Lifting"), StrandPalette.zone2)
-            case .activityFile: return (String(localized: "File"), StrandPalette.metricAmber)
-            }
-        }()
-        return SourceBadge("\(label)", tint: tint)
-    }
-
-    // MARK: - Formatting (kept local, matching WorkoutsView's rhythm)
-
-    private static let dateFmt: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "EEEE d MMM yyyy"
-        return f
-    }()
-    /// #1821: routed through AppClock so the Clock format setting reaches this label. Was a `static
-    /// let`, which would have frozen the reader's choice at first use until the app relaunched.
-    private static var timeFmt: DateFormatter { AppClock.hourMinuteFormatter() }
-    /// #1821: routed through AppClock so the Clock format setting reaches this label. Was a `static
-    /// let`, which would have frozen the reader's choice at first use until the app relaunched.
-    private static var tooltipTime: DateFormatter { AppClock.hourMinuteFormatter() }
-
-    private func dateLabel(_ ts: Int) -> String {
-        Self.dateFmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
-    }
-    private func timeLabel(_ ts: Int) -> String {
-        Self.timeFmt.string(from: Date(timeIntervalSince1970: TimeInterval(ts)))
-    }
-    private func timeRangeLabel(_ start: Int, _ end: Int) -> String {
-        end > start ? "\(timeLabel(start))-\(timeLabel(end))" : timeLabel(start)
-    }
-    private func durationLabel(_ s: Double?) -> String {
-        guard let s, s > 0 else { return "–" }
-        let total = Int(s.rounded())
-        let h = total / 3600, m = (total % 3600) / 60
-        if h > 0 { return String(localized: "\(h)h \(m)m") }
-        return String(localized: "\(m)m")
-    }
-    private func distanceLabel(_ m: Double?) -> String {
-        guard let m, m > 0 else { return "–" }
-        return UnitFormatter.distanceFromMeters(m, system: distanceUnitSystem)
-    }
-    private func grouped(_ v: Double) -> String {
-        Self.intFmt.string(from: NSNumber(value: Int(v.rounded()))) ?? "\(Int(v.rounded()))"
-    }
-    private static let intFmt: NumberFormatter = {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0; return f
-    }()
 }
 
 // MARK: - Route map (#524)
 //
-// A MapKit map of the captured route polyline, drawn with start (green) + end (red) markers — the Apple
-// analogue of Android's `RouteCanvas`, but on real map tiles. Built as a platform-bridged representable
-// around `MKMapView` so it runs on BOTH iOS 17 and macOS 13 (SwiftUI's newer `Map { MapPolyline }` needs
-// iOS 17 / macOS 14, and the macOS deployment target is 13). The map is offline-capable: MapKit caches
-// tiles locally and the route itself is on-device — NOOP never sends the route anywhere.
+// A MapKit map of the captured route polyline, drawn with start + end markers — the Apple analogue of
+// Android's `RouteCanvas`, but on real map tiles. Built as a platform-bridged representable around
+// `MKMapView` so it runs on BOTH iOS 17 and macOS 13 (SwiftUI's newer `Map { MapPolyline }` needs iOS 17 /
+// macOS 14, and the macOS deployment target is 13). The map is offline-capable: MapKit caches tiles locally
+// and the route itself is on-device — NOOP never sends the route anywhere.
 
 #if canImport(MapKit) && canImport(UIKit)
 import UIKit
@@ -697,8 +473,7 @@ struct WorkoutRouteMap: RouteMapRepresentable {
         func mapView(_ mapView: MKMapView, rendererFor overlay: MKOverlay) -> MKOverlayRenderer {
             guard let line = overlay as? MKPolyline else { return MKOverlayRenderer(overlay: overlay) }
             let r = MKPolylineRenderer(polyline: line)
-            // Effort-amber world, matching the rest of the workout detail. A platform colour (the
-            // renderer needs a UIColor/NSColor, not a SwiftUI Color); kept close to the Effort accent.
+            // The palette's Effort colour, resolved per appearance (the renderer needs a platform colour).
             r.strokeColor = RoutePlatformColor.effort
             r.lineWidth = 4
             r.lineJoin = .round
@@ -718,13 +493,13 @@ struct WorkoutRouteMap: RouteMapRepresentable {
     #endif
 }
 
-/// The route stroke colour as a platform colour (MapKit's renderer can't take a SwiftUI `Color`). A fixed
-/// Effort-amber so it reads in the same colour world as the rest of the screen on both platforms.
+/// The route stroke colour as a platform colour (MapKit's renderer can't take a SwiftUI `Color`): the
+/// palette's Effort colour, so the line matches the rest of the app in both appearances.
 private enum RoutePlatformColor {
     #if canImport(UIKit)
-    static let effort = UIColor(red: 0.98, green: 0.62, blue: 0.16, alpha: 1.0)
+    static var effort: UIColor { UIColor(StrandPalette.effortColor) }
     #elseif canImport(AppKit)
-    static let effort = NSColor(red: 0.98, green: 0.62, blue: 0.16, alpha: 1.0)
+    static var effort: NSColor { NSColor(StrandPalette.effortColor) }
     #endif
 }
 #else
@@ -743,10 +518,9 @@ struct WorkoutRouteMap: View {
             endTs: Int(Date().timeIntervalSince1970),
             sport: "Running", source: "whoop", durationS: 3600, energyKcal: 712,
             avgHr: 152, maxHr: 178, strain: 14.2, distanceM: 10_400,
-            zonesJSON: #"{"z1":12.5,"z2":28.0,"z3":33.5,"z4":18.0,"z5":6.0}"#, notes: nil, steps: nil))
+            zonesJSON: #"{"z1":12.5,"z2":28.0,"z3":33.5,"z4":18.0,"z5":6.0}"#, notes: nil, steps: nil),
+            presentation: .pushed)
             .environmentObject(Repository(deviceId: "preview"))
     }
-    .frame(width: 1040, height: 940)
-    .preferredColorScheme(.dark)
 }
 #endif

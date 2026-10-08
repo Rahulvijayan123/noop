@@ -49,7 +49,7 @@ struct LiftHeartRate: View {
         case .compact:
             HStack(spacing: 3) {
                 Image(systemName: "heart.fill")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(StrandFont.icon(.inline))
                 value.font(StrandFont.captionNumber)
             }
             .foregroundStyle(tint)

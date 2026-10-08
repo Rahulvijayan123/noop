@@ -669,6 +669,12 @@ enum DemoScreens {
         case "live":     return AnyView(LiveView())
         case "stress":   return AnyView(StressView())
         case "workouts": return AnyView(WorkoutsView())
+        // Workout screens with no strap (Strand/Screens/WorkoutDemoHosts.swift). Pair the list and detail with
+        // `--demo-workouts` (per-second HR, a route and a manual row) and `--demo-workout-open <page>`.
+        case "liveworkout": return AnyView(LiveWorkoutDemoHost())
+        case "startworkout": return AnyView(StartWorkoutDemoHost())
+        case "manualworkout": return AnyView(ManualWorkoutDemoHost())
+        case "liftlog": return AnyView(LiftLogView())
         case "health":   return AnyView(HealthView())
         case "insights": return AnyView(InsightsView())
         case "explore":  return AnyView(MetricExplorerView())

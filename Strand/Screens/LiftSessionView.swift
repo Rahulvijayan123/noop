@@ -149,7 +149,7 @@ struct LiftSessionView: View {
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "plus.circle.fill")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                 Text("Add exercise").font(StrandFont.body)
             }
             .foregroundStyle(canAdd ? StrandPalette.effortColor : StrandPalette.textTertiary)
@@ -239,7 +239,7 @@ struct LiftSessionView: View {
             } label: {
                 HStack(spacing: 6) {
                     Image(systemName: "plus.circle")
-                        .font(.system(size: 17, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                     Text("Add set").font(StrandFont.caption)
                 }
                 .foregroundStyle(canAdd ? StrandPalette.effortColor : StrandPalette.textTertiary)
@@ -254,7 +254,7 @@ struct LiftSessionView: View {
                 session.removeSet(fromExercise: index)
             } label: {
                 Image(systemName: "minus.circle")
-                    .font(.system(size: 17, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                     // Dimmed rather than gone: the pair reads as one control, and a minus that
                     // disappears once the last set is done looks like a feature that broke.
                     .foregroundStyle(canRemove ? StrandPalette.textSecondary
@@ -285,11 +285,11 @@ struct LiftSessionView: View {
 
     private var columnHeadings: some View {
         HStack(spacing: 8) {
-            Text("Set").strandOverline()
+            Text("Set").strandLabel()
                 .frame(width: Self.setColumnWidth, alignment: .center)
-            Text(weightHeading).strandOverline().frame(maxWidth: .infinity, alignment: .leading)
-            Text("Reps").strandOverline().frame(maxWidth: .infinity, alignment: .leading)
-            Text("RPE").strandOverline().frame(maxWidth: .infinity, alignment: .leading)
+            Text(weightHeading).strandLabel().frame(maxWidth: .infinity, alignment: .leading)
+            Text("Reps").strandLabel().frame(maxWidth: .infinity, alignment: .leading)
+            Text("RPE").strandLabel().frame(maxWidth: .infinity, alignment: .leading)
             Color.clear.frame(width: Self.tickColumnWidth)
         }
         .lineLimit(1)
@@ -343,7 +343,7 @@ struct LiftSessionView: View {
                 if recorded == nil { session.start(slot) } else { session.start(slot) }
             } label: {
                 Image(systemName: recorded == nil ? "circle" : "checkmark.circle.fill")
-                    .font(.system(size: 20, weight: .semibold))
+                    .font(StrandFont.icon(.row))
                     .foregroundStyle(recorded == nil
                                      ? StrandPalette.textTertiary
                                      : StrandPalette.statusPositive)
@@ -397,7 +397,7 @@ struct LiftSessionView: View {
     /// sheet is scrolled to a later exercise, the band is the only thing that says which rest.
     private func restBand(_ engine: LiftSessionEngine) -> some View {
         HStack(spacing: 8) {
-            Text("Rest period").strandOverline()
+            Text("Rest period").strandLabel()
                 .foregroundStyle(StrandPalette.metricAmber)
             Spacer(minLength: 0)
             LiftRunningClock { engine.restRemaining(now: $0) ?? 0 }
@@ -541,7 +541,7 @@ struct LiftSessionView: View {
                 Spacer(minLength: 0)
                 Button { session.undo() } label: {
                     Image(systemName: "arrow.uturn.backward")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(StrandFont.icon(.tile))
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(engine.canUndo ? StrandPalette.textSecondary : StrandPalette.textTertiary)
@@ -595,7 +595,7 @@ struct LiftSessionView: View {
 
     private func labelled<Value: View>(_ label: String, @ViewBuilder value: () -> Value) -> some View {
         VStack(alignment: .leading, spacing: 1) {
-            Text(label).strandOverline()
+            Text(label).strandLabel()
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
             value()
@@ -639,12 +639,11 @@ struct LiftSessionView: View {
         let asksAboutProgram = !setCountChanges.isEmpty || !addedExercises.isEmpty
         let answered = (unfinished == 0 || unfinishedChoice != nil)
             && (!asksAboutProgram || programChoice != nil)
-        return ScreenScaffold(title: "Finish session",
-                              subtitle: "One number for the whole session, so a leg day can be compared with a run.") {
+        return ScreenScaffold(title: "Finish session") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 NoopCard {
                     VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                        Text("How hard was the whole session? (1–10)").strandOverline()
+                        Text("How hard was the whole session? (1–10)").strandLabel()
                         TextField("7", text: $sessionRpeText)
                             .textFieldStyle(.plain)
                             .font(StrandFont.bodyNumber)
@@ -715,7 +714,7 @@ struct LiftSessionView: View {
     private func unfinishedCard(count: Int) -> some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("Unfinished sets").strandOverline()
+                Text("Unfinished sets").strandLabel()
                 Text("Sets not started: \(count)")
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
@@ -753,7 +752,7 @@ struct LiftSessionView: View {
         let added = addedExercises
         return NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("Program").strandOverline()
+                Text("Program").strandLabel()
                 Text(programQuestion(countsChanged: !setCountChanges.isEmpty, exercisesAdded: !added.isEmpty))
                     .font(StrandFont.body)
                     .foregroundStyle(StrandPalette.textPrimary)
