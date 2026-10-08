@@ -27,7 +27,7 @@ extension PhysiologyContext {
     public struct ReferenceConfig: Codable, Equatable, Sendable {
         /// pc-reference-4: context strata (`<series>.ctx_<seated|recumbent_awake|upright_stationary>`) and the
         /// predecessor-regime fallback after a strap change (D4-09).
-        public var version = "pc-reference-4"
+        public var version = ContextReferences.version
 
         // Daily values (contracts §5).
         /// Minimum independent stable-awake windows behind a daily value (and behind a time-band stratum value).

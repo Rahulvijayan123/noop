@@ -46,7 +46,7 @@ extension PhysiologyContext {
 
     public struct PostureConfig: Codable, Equatable, Sendable {
         /// pc-posture-2: adds the context stratum (`ContextStratum`); the recumbency stratum is unchanged.
-        public var version = "pc-posture-2"
+        public var version = PostureEvidence.version
         /// A gravity sample is forearm-flat when `|x| / |g|` is below this (x is the strap's forearm axis).
         public var forearmFlatMaxAbsX = 0.35
         /// Gravity samples whose norm is outside this range (g) are not orientation evidence.
@@ -144,7 +144,7 @@ extension PhysiologyContext {
 
     public enum PostureEvidence {
 
-        public static let version = "pc-posture-1"
+        public static let version = "pc-posture-2"
         public static let basisForearmGravity = "forearm_gravity"
         public static let basisInBedWindow = "in_bed_window"
         static let inBedLabel = "in_bed"
