@@ -55,6 +55,8 @@ struct ElderNetSettings: Equatable {
     /// Wall-clock seconds ElderNet may spend in one job (its readiness check and every chunk call together)
     /// before it is stopped for the rest of that job (`job_time_budget`). FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS.
     var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
+    /// FRWHOOP_ELDERNET_THREADS: torch and numerical-library threads of the serve process (1…16, default 1).
+    var threads: Int = 1
 
     static let serveModule = ["-m", "activity_context.eldernet.serve"]
     static let defaultTimeoutSeconds = 60.0
@@ -118,6 +120,10 @@ struct ElderNetSettings: Equatable {
             if InertiaSettings.isHex64(sha) { settings.weightsSHA256 = sha }
             else { errors.append("FRWHOOP_ELDERNET_WEIGHTS_SHA256 must be 64 hex characters") }
         }
+        if let raw = value("FRWHOOP_ELDERNET_THREADS") {
+            if let n = Int(raw), (1...16).contains(n) { settings.threads = n }
+            else { errors.append("invalid FRWHOOP_ELDERNET_THREADS \(raw) (1…16)") }
+        }
         if let raw = value("FRWHOOP_ELDERNET_GAIT_PRIOR") {
             if let p = Double(raw), p.isFinite, GaitQualityEvidenceConfig.gaitPriorBounds.contains(p) { settings.gaitPrior = p }
             else { errors.append("FRWHOOP_ELDERNET_GAIT_PRIOR must be a number in [0.01, 0.99]") }
@@ -147,9 +153,11 @@ struct ElderNetSettings: Equatable {
         return bytes.allSatisfy { alnum($0) || $0 == 46 || $0 == 95 || $0 == 58 || $0 == 43 || $0 == 45 }
     }
 
-    static func serveArgs(weightsDir: String, upstreamDir: String, timeoutSeconds: Double? = nil) -> [String] {
+    static func serveArgs(weightsDir: String, upstreamDir: String, timeoutSeconds: Double? = nil,
+                          threads: Int? = nil) -> [String] {
         var args = serveModule + ["--weights-dir", weightsDir, "--upstream-dir", upstreamDir]
         if let timeoutSeconds { args += ["--timeout", InertiaSettings.formatSeconds(timeoutSeconds)] }
+        if let threads { args += ["--threads", String(threads)] }
         return args
     }
 
@@ -159,13 +167,15 @@ struct ElderNetSettings: Equatable {
         return ActivityPythonService.Config(
             pythonBin: python, activityHome: activityHome, modelDir: nil,
             serveArgs: Self.serveArgs(weightsDir: weightsDir, upstreamDir: upstreamDir,
-                                      timeoutSeconds: InertiaSettings.serveTimeoutSeconds(workerTimeout: timeoutSeconds)),
+                                      timeoutSeconds: InertiaSettings.serveTimeoutSeconds(workerTimeout: timeoutSeconds),
+                                      threads: threads),
             requestTimeoutSeconds: timeoutSeconds,
             maxRequestBytes: 64 * 1024 * 1024,
             maxResponseLineBytes: 16 * 1024 * 1024,
             restartCap: 4,
             restartCooldownSeconds: 120,
-            keepsRawLines: true)
+            keepsRawLines: true,
+            numericalThreads: threads)
     }
 }
 
@@ -228,11 +238,12 @@ struct ElderNetStage {
     /// upload, so without this every claim re-runs every chunk and a job outlives the revision it must publish.
     var responses = ElderNetResponseCache()
 
-    /// The key of `request`'s answer, or nil when the stage is not pinned (the answer could come from any model).
+    /// The key of `request`'s answer under what the running child measured it loaded (its ping `loaded` map: the
+    /// weights digest read from the files, the verified upstream source, the calibration, the code), or nil when
+    /// the child reported none (an older serve process): an answer whose bytes cannot be named is never reused.
     func cacheKey(_ request: ActivityPythonService.RunRequest) -> String? {
-        guard let version = expectedModelVersion, let digest = expectedWeightsDigest else { return nil }
-        return ActivityLocalCache.inferenceKey(request: request, modelVersion: "eldernet:\(version)",
-                                               preprocessingVersion: digest)
+        guard let identity = service.cacheIdentity else { return nil }
+        return ActivityLocalCache.inferenceKey(request: request, identity: identity, versions: ["route": "eldernet"])
     }
 
     enum Outcome: Equatable {
@@ -294,7 +305,9 @@ struct ElderNetStage {
             }
             if expectedModelVersion != nil || expectedWeightsDigest != nil {
                 let version = service.lastPingDetails["model_version"]
-                let digest = service.lastPingObjects["weights"].map { Self.weightsDigest(of: $0) }
+                // The digest measured from the weight files when the child reports one; the served map otherwise.
+                let digest = service.loadedIdentity["weights_digest"]
+                    ?? service.lastPingObjects["weights"].map { Self.weightsDigest(of: $0) }
                 if let why = pinRefusal(version: version, digest: digest) { return (Self.pinMismatchKind, why) }
             }
             return nil

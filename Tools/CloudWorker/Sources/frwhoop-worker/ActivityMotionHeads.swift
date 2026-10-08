@@ -196,7 +196,8 @@ struct InertiaSettings: Equatable {
             restartCap: 4,
             restartCooldownSeconds: 120,
             extraEnvironment: env,
-            keepsRawLines: true)
+            keepsRawLines: true,
+            numericalThreads: threads ?? 1)
     }
 }
 

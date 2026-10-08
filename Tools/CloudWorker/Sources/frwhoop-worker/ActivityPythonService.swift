@@ -41,6 +41,25 @@ final class ActivityPythonService {
         /// response line carries its id but is not JSON (a NaN token, say) at once instead of waiting for the
         /// timeout. Off for the HART service, whose behaviour is unchanged.
         var keepsRawLines = false
+        /// Threads every numerical library in the child may use (OpenMP, OpenBLAS, MKL, Accelerate, numexpr; the
+        /// serve processes cap torch themselves). Every activity child shares the worker's cgroup, so none may
+        /// size its pools by the host's cores. nil leaves the inherited environment as it is.
+        var numericalThreads: Int? = nil
+
+        /// The environment variables `numericalThreads` sets.
+        static let numericalThreadVariables = ["OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS",
+                                               "VECLIB_MAXIMUM_THREADS", "NUMEXPR_NUM_THREADS"]
+
+        /// The HART child: thread caps, `ACTIVITY_THREADS` for its torch, and its in-process ElderNet expert off
+        /// whatever the worker's own environment says (`ACTIVITY_GAIT_EXPERT`). ElderNet has one route on the
+        /// worker, its own service (`ElderNetStage`), so the same network never runs twice for the same seconds.
+        func hartChild(threads: Int) -> Config {
+            var c = self
+            c.numericalThreads = threads
+            c.extraEnvironment["ACTIVITY_THREADS"] = String(threads)
+            c.extraEnvironment["ACTIVITY_GAIT_EXPERT"] = ""
+            return c
+        }
 
         /// FRWHOOP_ACTIVITY_PYTHON (default python3), FRWHOOP_ACTIVITY_HOME
         /// (default <cwd>/Tools/ActivityContext), FRWHOOP_ACTIVITY_MODEL_DIR,
@@ -190,6 +209,8 @@ final class ActivityPythonService {
         var gaitSchema: String? = nil
         var gaitModelVersion: String? = nil
         var gaitStatus: String? = nil
+        /// `loaded_digest` of the process that answered (nil from an older serve.py).
+        var loadedDigest: String? = nil
     }
 
     /// One run request per C10 serve protocol. `columnsB64` is one base64
@@ -229,6 +250,8 @@ final class ActivityPythonService {
     private var restartCount = 0
     private var lastRestartAt: Date?
     private(set) var lastPingStatus: PingStatus?
+    /// Set by a ping answered by the running process, cleared by every (re)start.
+    private var identityProbed = false
     /// Model/preprocessing versions reported by the child (from the last ping
     /// or infer response); used to stamp the C10 document when the policy seam
     /// builds it.
@@ -288,6 +311,41 @@ final class ActivityPythonService {
         return lastPingStatus?.objects ?? [:]
     }
 
+    /// What the running child reported it loaded (`loaded`: artifact and code digests measured from the bytes it
+    /// read, its thread settings), from the last ping of this process; empty until it was pinged, or from a serve
+    /// process too old to report it. See Tools/ActivityContext/activity_context/loaded.py.
+    var loadedIdentity: [String: String] {
+        lock.lock(); defer { lock.unlock() }
+        return identityProbed ? (lastPingStatus?.objects["loaded"] ?? [:]) : [:]
+    }
+
+    /// The digest of `loadedIdentity`, recomputed here (nil when there is none, or when the child's own
+    /// `loaded_digest` disagrees with it: an identity that does not check out is no identity).
+    var loadedDigest: String? {
+        let loaded = loadedIdentity
+        guard !loaded.isEmpty else { return nil }
+        let digest = Self.loadedDigest(loaded)
+        lock.lock(); defer { lock.unlock() }
+        return lastPingStatus?.details["loaded_digest"] == digest ? digest : nil
+    }
+
+    /// `loadedIdentity` when it checks out (`loadedDigest`), else nil: what answer caches may be keyed by.
+    var cacheIdentity: [String: String]? {
+        loadedDigest == nil ? nil : loadedIdentity
+    }
+
+    /// True once this child process has answered a ping (a respawn clears it).
+    var hasBeenPinged: Bool {
+        lock.lock(); defer { lock.unlock() }
+        return identityProbed
+    }
+
+    /// sha256 of `activity-loaded-1\n` then `key=value\n` per entry in key order (loaded.py `loaded_digest`).
+    static func loadedDigest(_ loaded: [String: String]) -> String {
+        let text = "activity-loaded-1\n" + loaded.keys.sorted().map { "\($0)=\(loaded[$0]!)\n" }.joined()
+        return sha256Hex(Data(text.utf8))
+    }
+
     var restartCountValue: Int {
         lock.lock(); defer { lock.unlock() }
         return restartCount
@@ -335,6 +393,9 @@ final class ActivityPythonService {
         env["PYTHONUNBUFFERED"] = "1"
         env["FRWHOOP_ACTIVITY_HOME"] = home.path
         if let modelDir = config.modelDir { env["FRWHOOP_ACTIVITY_MODEL_DIR"] = modelDir }
+        if let n = config.numericalThreads {
+            for key in Config.numericalThreadVariables { env[key] = String(max(1, n)) }
+        }
         for (k, v) in config.extraEnvironment { env[k] = v }
         proc.environment = env
 
@@ -362,6 +423,7 @@ final class ActivityPythonService {
         self.restartCount += 1
         self.lastRestartAt = Date()
         self.lastPingStatus = nil
+        self.identityProbed = false
 
         let reader = Thread { [weak self] in self?.drainStdout(stdoutPipe.fileHandleForReading) }
         reader.name = "frwhoop.activity.python.stdout"
@@ -454,6 +516,7 @@ final class ActivityPythonService {
         lock.lock()
         let status = Self.parsePing(obj)
         lastPingStatus = status
+        identityProbed = true
         // A successful exchange proves the child is healthy: the restart cap
         // counts consecutive respawns since the last healthy ping.
         if status.ok { restartCount = 0 }
@@ -484,6 +547,8 @@ final class ActivityPythonService {
                                             modelVersion: result.modelVersion,
                                             preprocessingVersion: result.preprocessingVersion,
                                             error: nil)
+                // A status inferred from an answer carries no measured identity: ask again before trusting one.
+                identityProbed = false
             }
         }
         if !result.ok {
@@ -789,7 +854,8 @@ final class ActivityPythonService {
             gaitWindows: parseGaitWindows(obj["gait_windows"], modelVersion: gaitVersion ?? "unknown"),
             gaitSchema: obj["gait_schema"] as? String,
             gaitModelVersion: gaitVersion,
-            gaitStatus: obj["gait_status"] as? String)
+            gaitStatus: obj["gait_status"] as? String,
+            loadedDigest: obj["loaded_digest"] as? String)
     }
 
     /// One window's `fine` distribution; nil when absent or nothing finite and non-negative survives.
