@@ -7,7 +7,11 @@ One DigitalOcean Droplet, one systemd service, outbound-only, TLS-verified.
 - Droplet `frwhoop-worker-2` (sfo3, 4 vCPU/8 GB, Ubuntu 24.04, IPv6)
 - Service `frwhoop-worker.service` (user `frwhoop`, `ProtectHome=true`,
   `HOME=/var/lib/frwhoop`, restart always, SIGTERM graceful stop)
-- Code `/opt/noop` (release artifacts under `Tools/CloudWorker/.build/release`)
+- Code: one immutable directory per release, `/opt/noop/releases/<id>`, selected by the
+  `/opt/noop/current` symlink; the unit runs
+  `/opt/noop/current/Tools/CloudWorker/.build/release/frwhoop-worker`. A host provisioned before
+  releases existed has the code directly under `/opt/noop` (`Tools`, `contracts`, `deploy`); see
+  "Moving an existing host to releases" below.
 - Secrets `/etc/frwhoop/worker.env` (0600 root) + `/etc/frwhoop/supabase-ca-chain.pem` (0644)
 - DB: `sslmode=verify-full` against the pinned Supabase CA chain — the worker
   refuses plaintext (`FRWHOOP_ALLOW_INSECURE_DB=1` is local-dev only). Verified
@@ -19,39 +23,147 @@ One DigitalOcean Droplet, one systemd service, outbound-only, TLS-verified.
 sudo deploy/provision.sh          # or copy step-by-step below
 ```
 
-Steps (what provision.sh automates):
+The script resolves its own directory and the repository root before it changes directory, so the
+relative form works from any cwd. Steps (what provision.sh automates):
 1. Packages: `build-essential clang curl unzip git pkg-config libpq-dev
    zlib1g-dev libssl-dev libzstd-dev postgresql-client`
 2. Swift 6.0.3 (pinned tarball + sha256) from swift.org ubuntu2404 x86_64
 3. Private snapshot-enabled SQLite (GRDB needs `sqlite3_snapshot_*`;
    distro builds omit it): pinned amalgamation 3530400 + sha256 check,
    built with `-DSQLITE_ENABLE_SNAPSHOT=1` at `/opt/sqlite`
-4. `frwhoop` service user + `/etc/frwhoop` + `/var/lib/frwhoop` (HOME)
+4. `frwhoop` service user + `/etc/frwhoop` + `/var/lib/frwhoop` (HOME) + `/opt/noop/releases`
 5. Unit install + `systemd-analyze verify`
+6. The inference sidecar (see "Physiology inference sidecar" below)
+
+`--sidecar-only` runs only step 6, and `--models-only --models-root DIR` runs only the sidecar's
+model revision step, unprivileged (see [docs/model-integration/provisioning.md](../docs/model-integration/provisioning.md)).
 
 ## Build + release
 
+A release is ONE git revision of everything the worker build and its tests read:
+`Tools/CloudWorker`, the local packages its `Package.swift` reaches (today `Packages/StrandAnalytics`,
+`WhoopProtocol`, `WhoopStore` and, through WhoopStore, `OuraProtocol`; derived from the
+`Package.swift` files, never listed by hand), the repository files those packages' tests read by
+path (the `android/app/src/test/resources` oracles, `Tools/MetricInsight/tests/data`, an
+`Tools/EnergyModels` fixture), `contracts`, `deploy`, `Tools/ActivityContext`,
+`Tools/InferenceWorker` and the licence files. Extracting only some directories over an old tree
+used to leave a host building against whatever `Packages/` it still had; a release is therefore
+always extracted into a fresh directory, built there, and selected with a symlink.
+
+1. **Package** (developer machine, clean checkout of the revision to ship):
+
+   ```bash
+   deploy/package-release.sh --out ~/nara-releases          # HEAD; --rev <commit> for another
+   ```
+
+   It refuses uncommitted changes in the release paths; `--allow-dirty` packages them and stamps the
+   release `dirty: true` (id `<commit>-dirty-<tree>`). Output: `nara-release-<id>.tar.gz` (a
+   `git archive`), its `.sha256`, `nara-release-<id>.release.json` (the stamp, readable before
+   extracting) and `release-host.sh` from the same revision. Inside, `RELEASE.files` lists every
+   file's sha256 (`sha256sum -c RELEASE.files` works) and `RELEASE.json` records the commit, tree,
+   dirty flag, `Package.resolved` / `uv.lock` / manifest digests, included paths and the digest of
+   `RELEASE.files`.
+
+2. **Copy** to the host:
+
+   ```bash
+   scp ~/nara-releases/nara-release-<id>.tar.gz{,.sha256} ~/nara-releases/release-host.sh \
+     root@HOST:/opt/noop/incoming/
+   ```
+
+3. **Install** into a fresh `/opt/noop/releases/<id>` (refused when that directory exists; the tarball
+   checksum and every stamped file are verified before it is moved into place):
+
+   ```bash
+   bash /opt/noop/incoming/release-host.sh install /opt/noop/incoming/nara-release-<id>.tar.gz
+   ```
+
+4. **Build and test there**, against the private SQLite:
+
+   ```bash
+   /opt/noop/releases/<id>/deploy/release-host.sh build <id>
+   ```
+
+   This runs `swift build -c release` and `swift test` in `releases/<id>/Tools/CloudWorker`
+   (`-Xcc -I/opt/sqlite -Xlinker -L/opt/sqlite`, `LD_LIBRARY_PATH=/opt/sqlite`), writes
+   `releases/<id>/BUILD.json` (the binary's sha256, Swift version, test summary), runs the new binary
+   with `--print-identity` and refuses the release unless it reports `matches_release: true`, deletes
+   the test build products, and makes the release read-only. A failed test leaves no `BUILD.json`,
+   so the release cannot be selected. The log is in `/opt/noop/releases/.logs/<id>/`.
+
+5. **Sidecar from the same release** (hosts that run it):
+
+   ```bash
+   FRWHOOP_UV_SHA256=<published uv digest> /opt/noop/releases/<id>/deploy/provision.sh --sidecar-only
+   ```
+
+   It creates `/opt/frwhoop-inference/venvs/<id>` from that release's `uv.lock`, switches
+   `/opt/frwhoop-inference/venv` to it, and stages the model revision (below).
+
+6. **Switch, then restart**:
+
+   ```bash
+   /opt/noop/releases/<id>/deploy/release-host.sh switch <id>
+   systemctl restart frwhoop-worker            # and frwhoop-inference after step 5
+   ```
+
+   `current` is replaced atomically (a new symlink renamed over the old one); the release it pointed
+   to becomes `previous`. `switch` refuses a release without `BUILD.json`, or whose binary no longer
+   has the recorded digest. If this release's unit file differs from the installed one it prints the
+   install command; install it before restarting.
+
+7. **Verify** with the runtime checklist in [OPERATIONS.md](OPERATIONS.md#runtime-identity-checklist):
+   the heartbeat's `meta.identity.matches_release` must be `true` and its `release.git_commit` the
+   commit you shipped.
+
+`release-host.sh status` lists the releases, `current`, `previous` and the current binary's identity.
+
+How each component of a release is used:
+
+| Component | Installed as | Runs from |
+| --- | --- | --- |
+| `Tools/CloudWorker` + `Packages/*` | built in place by `release-host.sh build` | `/opt/noop/current/Tools/CloudWorker/.build/release/frwhoop-worker` |
+| `Tools/ActivityContext` | used in place; its third-party packages stay in `/var/lib/frwhoop/activity-venv` | `FRWHOOP_ACTIVITY_HOME=/opt/noop/current/Tools/ActivityContext` |
+| `Tools/InferenceWorker` | `provision.sh --sidecar-only` from the release: `/opt/frwhoop-inference/venvs/<id>` (editable install of the release's source) | `/opt/frwhoop-inference/venv -> venvs/<id>` |
+| `deploy` | unit files and these scripts, from the release that is selected | |
+| `contracts`, test fixtures | read by `swift test` during `build` | |
+
+### Rollback
+
 ```bash
-# From a clean checkout of the pinned revision:
-tar czf worker.tar.gz --exclude="Tools/CloudWorker/.build" Tools/CloudWorker contracts deploy
-scp worker.tar.gz root@HOST:/opt/
-ssh root@HOST 'rm -rf /opt/noop/Tools/CloudWorker /opt/noop/contracts /opt/noop/deploy &&
-  tar xzf /opt/worker.tar.gz -C /opt/noop &&
-  chown -R frwhoop:frwhoop /opt/noop/Tools/CloudWorker &&
-  cd /opt/noop/Tools/CloudWorker &&
-  LD_LIBRARY_PATH=/opt/sqlite swift build -c release -Xcc -I/opt/sqlite -Xlinker -L/opt/sqlite &&
-  swift test -Xcc -I/opt/sqlite -Xlinker -L/opt/sqlite'
+/opt/noop/current/deploy/release-host.sh rollback && systemctl restart frwhoop-worker
+# the sidecar, when it was moved too: re-run the previous release's sidecar step
+/opt/noop/releases/<previous>/deploy/provision.sh --sidecar-only && systemctl restart frwhoop-inference
 ```
 
-Versioned immutable releases (recommended): build to
-`.build/release-<git-sha>` and atomically switch a symlink; keep the previous
-artifact for rollback. `systemctl restart frwhoop-worker` only after tests pass.
+The previous release is never deleted by these scripts. Delete old releases by hand once they are
+neither `current` nor `previous` (a built release is about 1 GB with the test build pruned):
+`chmod -R u+w /opt/noop/releases/<old> && rm -rf /opt/noop/releases/<old>`.
+
+### Moving an existing host to releases (once)
+
+The old layout (`/opt/noop/{Tools,contracts,deploy}` extracted in place, unit pointing at
+`/opt/noop/Tools/CloudWorker/.build/release`) stays untouched; it is the rollback target for the
+first move.
+
+1. Steps 1-5 above (`mkdir -p /opt/noop/incoming /opt/noop/releases` first).
+2. In `/etc/frwhoop/worker.env`, point `FRWHOOP_ACTIVITY_HOME` at
+   `/opt/noop/current/Tools/ActivityContext` (an old path would keep running the OLD activity code).
+3. `release-host.sh switch <id>`, then install the release's unit and restart:
+   `install -m 644 /opt/noop/current/deploy/frwhoop-worker.service /etc/systemd/system/ &&
+   systemctl daemon-reload && systemctl restart frwhoop-worker`. The drop-in
+   `frwhoop-worker.service.d/no-projection-replay.conf` is kept.
+4. Rolling back to the old layout: `install -m 644 /opt/noop/deploy/frwhoop-worker.service
+   /etc/systemd/system/ && systemctl daemon-reload && systemctl restart frwhoop-worker` (and the old
+   `FRWHOOP_ACTIVITY_HOME`).
 
 ## Configure
 
 `/etc/frwhoop/worker.env` (names-only template: `deploy/worker.env.example`):
 DB URL + `FRWHOOP_DB_SSLMODE=verify-full` + `FRWHOOP_DB_SSLROOTCERT=/etc/frwhoop/supabase-ca-chain.pem`,
 B2 key id + application key, ingest secret, worker name, source revision, lane budgets.
+`FRWHOOP_SOURCE_REVISION` is only a claim: the heartbeat's `meta.identity` reports the digest of the
+binary that actually runs and whether its release's build record names it.
 
 ### Activity context lane (optional, off by default)
 
@@ -69,12 +181,12 @@ chown -R frwhoop:frwhoop /var/lib/frwhoop/activity-venv
 # artifacts (about 650 KB): config.json, manifest.json and model.safetensors in /var/lib/frwhoop/activity-model
 # check that serve.py loads them as the service user, before touching the live worker:
 printf '%s\n' '{"id":"1","op":"ping"}' '{"id":"2","op":"shutdown"}' | su -s /bin/bash frwhoop -c \
-  "cd /opt/noop/Tools/ActivityContext && HOME=/var/lib/frwhoop $PY -m activity_context.serve \
+  "cd /opt/noop/current/Tools/ActivityContext && HOME=/var/lib/frwhoop $PY -m activity_context.serve \
    --manifest /var/lib/frwhoop/activity-model/manifest.json --checkpoint /var/lib/frwhoop/activity-model"
 # the ping must answer "model_status": "hart_loaded"; then enable in /etc/frwhoop/worker.env:
 #   FRWHOOP_ACTIVITY_ENABLED=1
 #   FRWHOOP_ACTIVITY_PYTHON=/var/lib/frwhoop/activity-venv/bin/python
-#   FRWHOOP_ACTIVITY_HOME=/opt/noop/Tools/ActivityContext
+#   FRWHOOP_ACTIVITY_HOME=/opt/noop/current/Tools/ActivityContext   (the selected release's code)
 #   FRWHOOP_ACTIVITY_MODEL_DIR=/var/lib/frwhoop/activity-model
 #   OMP_NUM_THREADS=2          # torch would otherwise spin all four cores next to the scoring lane
 #   HF_HUB_OFFLINE=1           # the checkpoint is local; never reach for the network
@@ -127,13 +239,11 @@ reaches anyone, the server needs four things, in this order:
    from) and `push` (its object lane must advertise `rawImuSession`; check `GET /push/capabilities` shows an
    `objectLane`). A phone that meets an older `scores` simply decodes without HART.
 
-3. **The Python side on the worker host**: the venv and model above, plus the code itself. The release tarball
-   does not carry it, so copy it alongside:
+3. **The Python side on the worker host**: the venv and model above. The code itself is part of every
+   release (`/opt/noop/current/Tools/ActivityContext`, the same revision as the worker), so nothing is
+   copied separately:
 
    ```bash
-   tar czf activity.tar.gz Tools/ActivityContext
-   scp activity.tar.gz root@HOST:/opt/ && ssh root@HOST 'rm -rf /opt/noop/Tools/ActivityContext &&
-     tar xzf /opt/activity.tar.gz -C /opt/noop && chown -R frwhoop:frwhoop /opt/noop/Tools/ActivityContext'
    # the trained artifacts (hart-wisdm-v0, sha256 39dc12e0… for model.safetensors) are not in git:
    scp config.json manifest.json model.safetensors root@HOST:/var/lib/frwhoop/activity-model/
    ssh root@HOST 'chown -R frwhoop:frwhoop /var/lib/frwhoop/activity-model && chmod 0644 /var/lib/frwhoop/activity-model/*'
@@ -163,6 +273,9 @@ journalctl -u frwhoop-worker -f
 psql "$FRWHOOP_DB_URL" -c "select pid,ssl,version from pg_stat_ssl join pg_stat_activity using (pid) where application_name like '%frwhoop%';"
 # Queues:
 psql "$FRWHOOP_DB_URL" -c "select state,count(*) from noop_projection_debt group by 1;"
+# What actually runs (see OPERATIONS.md, "Runtime identity checklist"):
+/opt/noop/current/deploy/release-host.sh status
+psql "$FRWHOOP_DB_URL" -Atc "select meta->'identity' from scoring_service_heartbeats where id = 1;"
 ```
 
 ## Recovery
@@ -170,8 +283,8 @@ psql "$FRWHOOP_DB_URL" -c "select state,count(*) from noop_projection_debt group
 - Stateless worker: every claim is a leased transaction; restarts are safe.
 - DB outage: the worker reconnects with capped backoff (or exits for systemd
   restart) — see PostgresClient reconnection.
-- Rollback: `git checkout <previous-sha>` + rebuild, or restore the retained
-  previous release artifact.
+- Rollback: `release-host.sh rollback` and a restart (see "Rollback" above); the
+  previous release is kept on disk, already built.
 - Supabase DB backups and B2 object retention are SEPARATE concerns; a Droplet
   snapshot is not a raw-data backup.
 
@@ -192,14 +305,25 @@ absent or not ready.
 - Config: `/etc/frwhoop/inference.env` (0600, root) — names-only template in
   `deploy/inference.env.example`.
 - Pinned runtime: `deploy/provision.sh` installs a pinned `uv` (sha256 checked, and
-  it **fails closed** when the digest is not supplied) and creates the venv once at
-  deploy-prep from the committed `Tools/InferenceWorker/uv.lock`. A normal service
-  start resolves no packages, downloads nothing and compiles nothing.
-- Artifact cache: `/opt/frwhoop-models/revisions/<manifest-sha256-12>/` with an
-  atomic `current` symlink. Every artifact is sha256-verified against the pinned
-  manifest at deploy-prep; the sidecar re-verifies at startup and reports
-  `ready=false` when one is missing or mismatched. Artifacts marked
-  `blocked_license` / `blocked_artifact` / `blocked_input` are never fetched.
+  it **fails closed** when the digest is not supplied) and creates one venv per
+  release, `/opt/frwhoop-inference/venvs/<release id>`, at deploy-prep from that
+  release's committed `Tools/InferenceWorker/uv.lock`; `/opt/frwhoop-inference/venv`
+  points at it. A normal service start resolves no packages, downloads nothing and
+  compiles nothing.
+- Artifact cache: `/opt/frwhoop-models/revisions/<id>/` (read-only, with the
+  manifest it was staged from and a `revision.json`) and an atomic `current`
+  symlink. `Tools/InferenceWorker/scripts/materialize_model_root.py` stages a
+  complete revision from the manifest's artifact sources (the SleepECG checkpoint
+  comes from the installed `sleepecg` wheel; the optional ParaDigMa, DeepBeat and
+  SiamAF files are downloaded and checked against their pinned sha256 and size),
+  verifies it with the sidecar's own verifier, builds the sidecar's provider
+  registry against it as the service user to prove readiness, and only then
+  switches `current`. A missing or mismatched required artifact, or a required
+  provider that is not ready, leaves `current` where it was; a missing optional
+  artifact withholds only its own provider. Entries marked `blocked_license` /
+  `blocked_input` / `unverified`, or not wired, are recorded and never fetched. The
+  sidecar re-verifies at startup and reports `ready=false` when an artifact is
+  missing or mismatched. Details: [docs/model-integration/provisioning.md](../docs/model-integration/provisioning.md).
 - Client side (the worker): `FRWHOOP_INFERENCE_URL` (loopback only),
   `FRWHOOP_INFERENCE_TIMEOUT_MS` (default 25000, kept strictly above the sidecar's
   own 20000 ms budget so the sidecar's withheld/timeout verdict reaches the worker),
@@ -235,9 +359,9 @@ candidate lane's promotion semantics.
   (hypnogram analysis only — YASA's PSG classifiers are never applied to WHOOP
   signals). `uv.lock` is committed; deploy-prep resolves it from the lock like
   every other sidecar dependency.
-- Deploy step (additive, after the normal sidecar provision): sync
-  `Tools/InferenceWorker` to `/opt/frwhoop-inference`, `uv sync --frozen` in its
-  venv, then `systemctl restart frwhoop-inference`. Verify with
+- Deploy step: the sidecar step of a release (`provision.sh --sidecar-only` from
+  `/opt/noop/releases/<id>`, step 5 of "Build + release"), then
+  `systemctl restart frwhoop-inference`. Verify with
   `curl -s http://127.0.0.1:8787/healthz` and one loopback smoke POST.
 - Phone: no migration, no new route — the Sleep page reads the typed document
   from the cached hosted snapshot (`HostedDayResult.sleepFeatures`), decoded
@@ -246,8 +370,11 @@ candidate lane's promotion semantics.
 ## Sidecar provision (run once per host)
 
 ```bash
-FRWHOOP_UV_SHA256=<published uv digest> sudo deploy/provision.sh
+FRWHOOP_UV_SHA256=<published uv digest> sudo deploy/provision.sh                 # cold host
+FRWHOOP_UV_SHA256=<published uv digest> /opt/noop/releases/<id>/deploy/provision.sh --sidecar-only
 ```
 
-The sidecar section of `provision.sh` is additive: it does not touch the Swift or
-SQLite steps. See `deploy/OPERATIONS.md` for start/verify/rollback commands.
+The sidecar section of `provision.sh` does not touch the Swift or SQLite steps, and
+`--sidecar-only` runs nothing else. The model step alone, unprivileged, against any
+directory: `deploy/provision.sh --models-only --models-root DIR [--offline] [--mirror DIR]`.
+See `deploy/OPERATIONS.md` for start/verify/rollback commands.

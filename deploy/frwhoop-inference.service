@@ -17,6 +17,9 @@ Environment=OPENBLAS_NUM_THREADS=1
 Environment=MKL_NUM_THREADS=1
 Environment=NUMEXPR_NUM_THREADS=1
 Environment=UV_PYTHON_DOWNLOADS=never
+# venv -> venvs/<release id>, made by `deploy/provision.sh --sidecar-only` from that release (the
+# code is the release's Tools/InferenceWorker); /opt/frwhoop-models/current is resolved once at
+# startup. GET /healthz reports both under "identity".
 ExecStart=/opt/frwhoop-inference/venv/bin/python -m frwhoop_inference.server --host 127.0.0.1 --port 8787
 Restart=always
 RestartSec=5
