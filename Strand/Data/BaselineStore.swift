@@ -62,6 +62,10 @@ final class BaselineStore: ObservableObject {
     private var imuLastPersistUnix: Int = 0
     private var dayTapeByDay: [String: LBDayTape] = [:]
     private var tapeLastPersistUnix: Int = 0
+    /// Device era the tape and IMU accumulator belong to. Nil until the Watchdog binds a device;
+    /// until then the last bound device's rows (or the pre-scope blob) are shown, never written.
+    private var layer1DeviceId: String?
+    private var layer1StrapSerial: String?
     @Published var showStartForm = false
     @Published var showDoseForm = false
     @Published var showEndForm = false
@@ -101,6 +105,7 @@ final class BaselineStore: ObservableObject {
     private let imuKey = "noop.baseline.imu.v1"
     private let tapeKey = "noop.baseline.daytape.v2"
     private let tapeKeyLegacy = "noop.baseline.daytape.v1"
+    private let layer1DeviceKey = "noop.baseline.layer1Device.v1"
     private let dismissedPromptKey = "noop.baseline.dismissedPrompt.v1"
 
     init(defaults: UserDefaults = .standard, asOf: String? = nil, resetCourse: Bool = false) {
@@ -118,6 +123,11 @@ final class BaselineStore: ObservableObject {
             defaults.removeObject(forKey: imuKey)
             defaults.removeObject(forKey: tapeKey)
             defaults.removeObject(forKey: tapeKeyLegacy)
+            defaults.removeObject(forKey: layer1DeviceKey)
+            for key in defaults.dictionaryRepresentation().keys
+            where key.hasPrefix(LBDeviceScope.tapePrefix) || key.hasPrefix(LBDeviceScope.imuPrefix) {
+                defaults.removeObject(forKey: key)
+            }
             defaults.removeObject(forKey: dismissedPromptKey)
             for series in LBSeries.allCases {
                 defaults.removeObject(forKey: freezeKeyPrefix + series.rawValue)
@@ -132,9 +142,17 @@ final class BaselineStore: ObservableObject {
             self.events = Self.loadEvents(defaults: defaults)
             self.confoundersByDay = Self.loadConfounders(defaults: defaults)
             self.dayLogsByDay = Self.loadDayLogs(defaults: defaults)
-            self.imuAccByDay = Self.loadImu(defaults: defaults)
-            self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.map { ($0.key, $0.value.observation) })
-            self.dayTapeByDay = Self.loadDayTape(defaults: defaults)
+            if let device = defaults.string(forKey: layer1DeviceKey) {
+                // Read-only until the Watchdog binds: show the last bound device's own rows.
+                let (tape, imu) = Self.loadLayer1(defaults: defaults, deviceId: device, serial: nil)
+                self.dayTapeByDay = tape
+                self.imuAccByDay = imu
+            } else {
+                self.imuAccByDay = Self.loadImu(defaults: defaults)
+                self.dayTapeByDay = Self.loadDayTape(defaults: defaults)
+            }
+            self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.filter { $0.value.sampleCount > 0 }
+                .map { ($0.key, $0.value.observation) })
             self.dismissedPromptDay = defaults.string(forKey: dismissedPromptKey)
         }
     }
@@ -269,7 +287,8 @@ final class BaselineStore: ObservableObject {
     /// Scoring tape only. Stub series (no DailyMetric column) stay empty — never +6 / ×0.88 / −0.2.
     func observations(from days: [DailyMetric], series: LBSeries) -> [LBDailyObservation] {
         if series == .wakingImuEnergy {
-            return imuAccByDay.values.map(\.observation).sorted { $0.day < $1.day }
+            // A skip-only accumulator (watermark, no samples) is not a day of data.
+            return imuAccByDay.values.filter { $0.sampleCount > 0 }.map(\.observation).sorted { $0.day < $1.day }
         }
         if series.hasDailyMetricColumn {
             return LongitudinalBaseline.observations(from: days, series: series)
@@ -277,31 +296,83 @@ final class BaselineStore: ObservableObject {
         return dayTapeByDay.values.compactMap { $0.observation(series: series) }.sorted { $0.day < $1.day }
     }
 
+    /// Scopes the awake day tape and the IMU usual to one device era (local id + strap serial).
+    /// The pre-scope global blob is adopted once by the first device; a swapped strap starts fresh.
+    func bindLayer1Tapes(deviceId: String, strapSerial: String?) {
+        guard deviceId != layer1DeviceId || (strapSerial != nil && strapSerial != layer1StrapSerial) else { return }
+        if layer1DeviceId != nil {
+            persistDayTape()
+            persistImu()
+        }
+        let (tape, imu) = Self.loadLayer1(defaults: defaults, deviceId: deviceId, serial: strapSerial)
+        layer1DeviceId = deviceId
+        layer1StrapSerial = strapSerial
+        defaults.set(deviceId, forKey: layer1DeviceKey)
+        dayTapeByDay = tape
+        imuAccByDay = imu
+        imuByDay = Dictionary(uniqueKeysWithValues: imu.filter { $0.value.sampleCount > 0 }
+            .map { ($0.key, $0.value.observation) })
+    }
+
     /// Unique-minute stub series from the same window Watchdog scored. Does not write Layer 1 snapshots.
+    /// Each minute lands on its own civil day, so a pre-midnight minute read after midnight stays put.
     func ingestWatchdogTape(window: WatchdogWindow, nowUnix: Int, lastWorkoutEndUnix: Int,
                              sleepIntervals: [WatchdogSleepInterval] = []) {
-        let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
-        var tape = dayTapeByDay[day] ?? LBDayTape(day: day)
-        guard tape.ingest(window: window, nowUnix: nowUnix, lastWorkoutEndUnix: lastWorkoutEndUnix,
-                          sleepIntervals: sleepIntervals) else { return }
-        dayTapeByDay[day] = tape
+        let changed = LBDayTape.ingest(window: window, nowUnix: nowUnix,
+                                       lastWorkoutEndUnix: lastWorkoutEndUnix,
+                                       sleepIntervals: sleepIntervals,
+                                       into: &dayTapeByDay, dayOf: Self.minuteDayOf())
+        guard !changed.isEmpty else { return }
         if nowUnix - tapeLastPersistUnix >= 60 {
             persistDayTape()
             tapeLastPersistUnix = nowUnix
         }
     }
 
+    /// A tick that may not train (alert, quality, confounded day) consumes its minutes and IMU samples,
+    /// so the next quiet tick cannot back-fill them into either usual. Persisted at once: a relaunch
+    /// must not forget the skip and let the next quiet tick file the alerting stretch.
+    func skipWatchdogTape(window: WatchdogWindow, nowUnix: Int) {
+        let dayOf = Self.minuteDayOf()
+        if !LBDayTape.skipThrough(window: window, into: &dayTapeByDay, dayOf: dayOf).isEmpty {
+            persistDayTape()
+            tapeLastPersistUnix = nowUnix
+        }
+        if !LBImuDaily.skipThrough(window.imu, into: &imuAccByDay, dayOf: dayOf).isEmpty {
+            persistImu()
+            imuLastPersistUnix = nowUnix
+        }
+    }
+
     /// Incremental IMU usual. New samples only; does not write Charge or other Layer 1 series.
-    func ingestImu(samples: [WatchdogIMUSample], nowUnix: Int) {
+    /// Samples inside sleep are not waking energy; each sample lands on its own civil day.
+    func ingestImu(samples: [WatchdogIMUSample], nowUnix: Int, sleepIntervals: [WatchdogSleepInterval] = []) {
         guard !samples.isEmpty else { return }
-        let day = Self.dayKey(Date(timeIntervalSince1970: TimeInterval(nowUnix)))
-        var acc = imuAccByDay[day] ?? LBImuDayAccumulator(day: day)
-        guard acc.add(samples) else { return }
-        imuAccByDay[day] = acc
-        imuByDay[day] = acc.observation
+        let changed = LBImuDaily.ingest(samples, sleepIntervals: sleepIntervals,
+                                        into: &imuAccByDay, dayOf: Self.minuteDayOf())
+        guard !changed.isEmpty else { return }
+        for day in changed {
+            imuByDay[day] = imuAccByDay[day]?.observation
+        }
         if nowUnix - imuLastPersistUnix >= 60 {
             persistImu()
             imuLastPersistUnix = nowUnix
+        }
+    }
+
+    /// Local civil day of a unix second, one formatter and one lookup per minute.
+    private static func minuteDayOf() -> (Int) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        var memo: [Int: String] = [:]
+        return { unix in
+            let minute = unix - unix % 60
+            if let d = memo[minute] { return d }
+            let d = f.string(from: Date(timeIntervalSince1970: TimeInterval(minute)))
+            memo[minute] = d
+            return d
         }
     }
 
@@ -967,16 +1038,41 @@ final class BaselineStore: ObservableObject {
         }
     }
 
+    private var layer1IO: LBKeyValueIO {
+        let defaults = self.defaults
+        return LBKeyValueIO(data: { defaults.data(forKey: $0) }, setData: { defaults.set($0, forKey: $1) },
+                            string: { defaults.string(forKey: $0) }, setString: { defaults.set($0, forKey: $1) })
+    }
+
+    /// Scoped to the bound device era. Unbound (no Watchdog tick yet) never writes.
     private func persistImu() {
-        if let data = try? JSONEncoder().encode(Array(imuAccByDay.values)) {
-            defaults.set(data, forKey: imuKey)
-        }
+        guard let deviceId = layer1DeviceId else { return }
+        LBDeviceScope.save(LBDeviceScopedRows(deviceId: deviceId, strapSerial: layer1StrapSerial,
+                                              rows: Array(imuAccByDay.values)),
+                           prefix: LBDeviceScope.imuPrefix, io: layer1IO)
     }
 
     private func persistDayTape() {
-        if let data = try? JSONEncoder().encode(Array(dayTapeByDay.values)) {
-            defaults.set(data, forKey: tapeKey)
-        }
+        guard let deviceId = layer1DeviceId else { return }
+        LBDeviceScope.save(LBDeviceScopedRows(deviceId: deviceId, strapSerial: layer1StrapSerial,
+                                              rows: Array(dayTapeByDay.values)),
+                           prefix: LBDeviceScope.tapePrefix, io: layer1IO)
+    }
+
+    private static func loadLayer1(defaults: UserDefaults, deviceId: String,
+                                   serial: String?) -> ([String: LBDayTape], [String: LBImuDayAccumulator]) {
+        let io = LBKeyValueIO(data: { defaults.data(forKey: $0) }, setData: { defaults.set($0, forKey: $1) },
+                              string: { defaults.string(forKey: $0) }, setString: { defaults.set($0, forKey: $1) })
+        let (tape, _): (LBDeviceScopedRows<LBDayTape>, LBDeviceScope.Origin) = LBDeviceScope.load(
+            prefix: LBDeviceScope.tapePrefix, legacyKeys: LBDeviceScope.legacyTapeKeys,
+            deviceId: deviceId, serial: serial, io: io)
+        let (imu, _): (LBDeviceScopedRows<LBImuDayAccumulator>, LBDeviceScope.Origin) = LBDeviceScope.load(
+            prefix: LBDeviceScope.imuPrefix, legacyKeys: LBDeviceScope.legacyImuKeys,
+            deviceId: deviceId, serial: serial, io: io)
+        var tapes = tape.rows
+        for i in tapes.indices { tapes[i].migrateHrvFromLnIfNeeded() }
+        return (Dictionary(tapes.map { ($0.day, $0) }, uniquingKeysWith: { a, _ in a }),
+                Dictionary(imu.rows.map { ($0.day, $0) }, uniquingKeysWith: { a, _ in a }))
     }
 
     private static func loadImu(defaults: UserDefaults) -> [String: LBImuDayAccumulator] {

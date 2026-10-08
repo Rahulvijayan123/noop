@@ -428,3 +428,125 @@ public enum WatchdogBand: Sendable {
         return values.map { $0 * g }
     }
 }
+
+/// Streaming median of one day's eligible ticks (P² quantile sketch, Jain & Chlamtac 1985).
+/// Five markers, constant size, so it can ride in the persisted carry. Exact below five values.
+public struct WatchdogP2Median: Equatable, Sendable, Codable {
+    public var q: [Double] = []
+    public var pos: [Double] = []
+    public var want: [Double] = []
+    public var count: Int = 0
+
+    public static let empty = WatchdogP2Median()
+    private static let step: [Double] = [0, 0.25, 0.5, 0.75, 1]
+
+    public init() {}
+
+    public var median: Double? {
+        guard count > 0 else { return nil }
+        if count >= 5, q.count == 5 { return q[2] }
+        let s = q.prefix(count).sorted()
+        let m = s.count / 2
+        return s.count % 2 == 1 ? s[m] : (s[m - 1] + s[m]) / 2
+    }
+
+    public mutating func add(_ x: Double) {
+        guard x.isFinite else { return }
+        if count < 5 {
+            q.append(x)
+            count += 1
+            if count == 5 {
+                q.sort()
+                pos = [1, 2, 3, 4, 5]
+                want = [1, 2, 3, 4, 5]
+            }
+            return
+        }
+        guard q.count == 5, pos.count == 5, want.count == 5 else { return }
+        let k: Int
+        if x < q[0] {
+            q[0] = x
+            k = 0
+        } else if x >= q[4] {
+            q[4] = x
+            k = 3
+        } else {
+            k = (0..<4).first { q[$0] <= x && x < q[$0 + 1] } ?? 3
+        }
+        for i in (k + 1)..<5 { pos[i] += 1 }
+        for i in 0..<5 { want[i] += Self.step[i] }
+        for i in 1...3 {
+            let d = want[i] - pos[i]
+            guard (d >= 1 && pos[i + 1] - pos[i] > 1) || (d <= -1 && pos[i - 1] - pos[i] < -1) else { continue }
+            let s: Double = d >= 0 ? 1 : -1
+            let parabolic = q[i] + s / (pos[i + 1] - pos[i - 1]) * (
+                (pos[i] - pos[i - 1] + s) * (q[i + 1] - q[i]) / (pos[i + 1] - pos[i])
+                + (pos[i + 1] - pos[i] - s) * (q[i] - q[i - 1]) / (pos[i] - pos[i - 1]))
+            if q[i - 1] < parabolic && parabolic < q[i + 1] {
+                q[i] = parabolic
+            } else {
+                let j = i + Int(s)
+                q[i] += s * (q[j] - q[i]) / (pos[j] - pos[i])
+            }
+            pos[i] += s
+        }
+        count += 1
+    }
+}
+
+/// Where the live awake-rest anchor came from. Display / audit only; scoring is unchanged.
+public struct WatchdogUsualProvenance: Equatable, Sendable, Codable {
+    /// Phase key the live tick asked for.
+    public var requestedKey: String
+    /// Key whose mature usual anchored HR. Nil: Layer 1 prompt only (no mature phase usual).
+    public var hrAnchorKey: String?
+    /// The anchor is the quiet-still usual standing in for a context that has no usual of its own
+    /// (a non-still family, or a still-tail minute whose class is stand / unknown).
+    public var fallbackUsed: Bool
+    /// Family the anchor fell back to (`still`) when `fallbackUsed`.
+    public var fallbackFamily: String?
+    /// Evidenced activity class of the live minute.
+    public var liveClass: String
+    /// Wrist IMU does not resolve sit / stand / recumbent for the awake usual.
+    public var posture: String
+    /// How the per-day value that trains the phase usual is reduced.
+    public var dayReducer: String
+
+    public static let postureUnresolved = "unresolved"
+    public static let dayReducerMedian = "p2_median"
+
+    public init(requestedKey: String, hrAnchorKey: String?, fallbackUsed: Bool,
+                fallbackFamily: String?, liveClass: String,
+                posture: String = Self.postureUnresolved, dayReducer: String = Self.dayReducerMedian) {
+        self.requestedKey = requestedKey
+        self.hrAnchorKey = hrAnchorKey
+        self.fallbackUsed = fallbackUsed
+        self.fallbackFamily = fallbackFamily
+        self.liveClass = liveClass
+        self.posture = posture
+        self.dayReducer = dayReducer
+    }
+}
+
+extension WatchdogPhaseUsualStore {
+    /// Awake phase usuals train only on quiet-still evidence. `stand` here is occupancy fidget, not
+    /// posture, and `unknown` has no motion evidence; neither may mix into the still regime.
+    public static func trainsStillUsual(phase: WatchdogPhase, cls: WatchdogActivityClass) -> Bool {
+        phase == .sleep || cls == .still
+    }
+
+    /// `blendPrompt` plus where its HR anchor came from. The still-first HR anchor is unchanged.
+    public func blendPromptWithProvenance(_ prompt: UniTSPrompt, key: WatchdogPhaseKey,
+                                          liveClass: WatchdogActivityClass) -> (UniTSPrompt, WatchdogUsualProvenance) {
+        let stillKey = WatchdogPhaseKey(phase: key.phase, family: .still)
+        let anchor: WatchdogPhaseKey? = mature(stillKey) != nil ? stillKey : (mature(key) != nil ? key : nil)
+        let fromStill = anchor == stillKey
+        let ownRegime = key.family == .still && (key.phase == .sleep || liveClass == .still)
+        let fallback = fromStill && !ownRegime
+        let prov = WatchdogUsualProvenance(
+            requestedKey: key.id, hrAnchorKey: anchor?.id, fallbackUsed: fallback,
+            fallbackFamily: fallback ? WatchdogActivityFamily.still.rawValue : nil,
+            liveClass: liveClass.rawValue)
+        return (blendPrompt(prompt, key: key), prov)
+    }
+}

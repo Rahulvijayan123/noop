@@ -88,9 +88,16 @@ public enum WatchdogActivityRuntime: Sendable {
         return logits
     }
 
-    public static func applyAutoWorkoutOverlap(_ logits: [[Double]], overlap: [Double]) -> [[Double]] {
-        zip(logits, overlap).map { row, bit in
+    /// HR-only Auto Workout bits may tilt a quiet minute toward walk only when that minute's own
+    /// motion agrees (walk/run step ticks, or IMU occupancy at the walk floor). Heart rate alone
+    /// is the signal the Watchdog judges, so a sustained resting tachycardia must not relabel
+    /// still / stand / unknown minutes as walking. No `corroborated` mask means no motion agreed.
+    public static func applyAutoWorkoutOverlap(_ logits: [[Double]], overlap: [Double],
+                                               corroborated: [Bool]? = nil) -> [[Double]] {
+        zip(logits, overlap).enumerated().map { i, pair in
+            let (row, bit) = pair
             guard bit >= 0.5 else { return row }
+            guard let corroborated, i < corroborated.count, corroborated[i] else { return row }
             guard let idx = row.enumerated().max(by: { $0.element < $1.element })?.offset else { return row }
             let label = WatchdogActivityClass.allCases[idx]
             guard label == .unknown || label == .still || label == .stand else { return row }
@@ -100,6 +107,24 @@ public enum WatchdogActivityRuntime: Sendable {
             out[w] += 0.35
             return out
         }
+    }
+
+    /// IMU occupancy at which `pick` starts calling an unlabeled minute walk.
+    public static let locomotionMotionFloor = 0.18
+
+    /// Per-minute motion corroboration for an HR-only workout bout: at least one walk/run step tick
+    /// in the minute, or measured motion occupancy at `locomotionMotionFloor` or above.
+    public static func motionCorroboratesLocomotion(motion: [Double?], steps: [StepSample],
+                                                    startUnix: Int, nowUnix: Int) -> [Bool] {
+        let n = motion.count
+        guard n > 0 else { return [] }
+        let span = max(nowUnix - startUnix, 1)
+        var moving = (0..<n).map { i in (motion[i] ?? 0) >= locomotionMotionFloor }
+        for s in steps where s.ts >= startUnix && s.ts < nowUnix
+            && (s.activityClass == 1 || s.activityClass == 2) {
+            moving[min(n - 1, max(0, ((s.ts - startUnix) * n) / span))] = true
+        }
+        return moving
     }
 
     /// Occupancy the reconstructor may use: class effort, not raw 0–1, except unknown falls back to IMU mag.

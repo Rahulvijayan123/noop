@@ -211,7 +211,10 @@ public enum WatchdogWindowBuilder {
         let logitsRaw = WatchdogActivityRuntime.embed(motion: motion, hr: hr, steps: feed.steps, imu: feed.imu,
                                                    startUnix: start, nowUnix: end, family: feed.family)
         let workoutBits = Self.autoWorkoutBits(hr: hrDeduped, start: start, end: end)
-        let logits = WatchdogActivityRuntime.applyAutoWorkoutOverlap(logitsRaw, overlap: workoutBits)
+        let workoutMoving = WatchdogActivityRuntime.motionCorroboratesLocomotion(
+            motion: motion, steps: feed.steps, startUnix: start, nowUnix: end)
+        let logits = WatchdogActivityRuntime.applyAutoWorkoutOverlap(logitsRaw, overlap: workoutBits,
+                                                                     corroborated: workoutMoving)
         let rhr = restHr(hr: hr, motion: motion, logits: logits, nowUnix: end, steps: feed.steps,
                          startUnix: start, endUnix: end)
         let ppg = uniquePPGIdentities(feed.ppgIdentities)
@@ -506,6 +509,7 @@ public enum WatchdogWindowBuilder {
     }
 
     /// Binary overlap of in-tree Auto Workout (HR-only). Not Charge. Missing IMU is still unknown class.
+    /// The bit stays an HR-only feature (col 15); it relabels a minute only with motion corroboration.
     static func autoWorkoutBits(hr: [HRSample], start: Int, end: Int) -> [Double] {
         let pairs = hr.map { ($0.ts, $0.bpm) }
         let bouts = AutoWorkoutDetector.detect(hr: pairs, restingBpm: 60)
