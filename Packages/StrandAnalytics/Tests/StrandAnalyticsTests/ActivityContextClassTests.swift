@@ -14,10 +14,10 @@ final class ActivityContextClassTests: XCTestCase {
                           arm: [ArmBehaviorClass: Double] = [.unknown: 1],
                           sleep: SleepContextState = .awake, inBed: Bool = false,
                           wear: WearContextState = .onWrist,
-                          quality: Double = 0.8) -> ActivityClassification {
+                          quality: Double = 0.8, learned: Bool = false) -> ActivityClassification {
         ActivityClassifier.classify(posture: Posture(posture), locomotion: Locomotion(locomotion),
                                     armBehavior: Arm(arm), sleep: sleep, inBed: inBed, wear: wear,
-                                    evidenceQuality: quality)
+                                    evidenceQuality: quality, learnedPostureEvidence: learned)
     }
 
     // MARK: Vocabulary
@@ -30,7 +30,8 @@ final class ActivityContextClassTests: XCTestCase {
             "vigorous_activity", "unknown",
         ])
         // act-class-3: `confidence` is now the subclass mass with `familyConfidence` alongside (I9).
-        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-3")
+        // act-class-4: wrist-only sitting / standing confidence is capped (D9-08); codes unchanged.
+        XCTAssertEqual(ActivityClassVersions.taxonomy, "act-class-4")
     }
 
     func testTheRequestedVocabularyIsAllRepresented() {
@@ -204,6 +205,79 @@ final class ActivityContextClassTests: XCTestCase {
                                 locomotion: [.stationary: 0.97, .unknown: 0.03], arm: [.quiet: 0.9, .other: 0.1])
         XCTAssertEqual(standing.activityClass, .standing)
         XCTAssertEqual(standing.confidence, 0.97 * 0.7, accuracy: 1e-9)
+    }
+
+    // MARK: Wrist-only posture confidence (D9-08)
+
+    func testAWristOnlySittingOrStandingClaimNeverExceedsTheCap() {
+        let cap = ActivityClassifier.wristOnlyPostureConfidenceCap
+        XCTAssertEqual(cap, 0.75)
+        let loco: [LocomotionClass: Double] = [.stationary: 0.97, .unknown: 0.03]
+        let sitting = classify(posture: [.seatedLikely: 0.9, .uprightStationary: 0.05, .unknown: 0.05], locomotion: loco,
+                               arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(sitting.activityClass, .sitting, "the class itself is unchanged")
+        XCTAssertEqual(sitting.confidence, cap, accuracy: 1e-12)
+        XCTAssertEqual(sitting.familyConfidence, cap, accuracy: 1e-12)
+        let desk = classify(posture: [.seatedLikely: 0.9, .uprightStationary: 0.05, .unknown: 0.05], locomotion: loco,
+                            arm: [.deskLike: 0.8, .quiet: 0.2])
+        XCTAssertEqual(desk.activityClass, .sittingDesk)
+        XCTAssertEqual(desk.confidence, cap, accuracy: 1e-12)
+        let standing = classify(posture: [.uprightStationary: 0.9, .seatedLikely: 0.05, .unknown: 0.05], locomotion: loco,
+                                arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(standing.activityClass, .standing)
+        XCTAssertEqual(standing.confidence, cap, accuracy: 1e-12)
+        // The runner-up mass is capped the same way.
+        let still = classify(posture: [.seatedLikely: 0.48, .uprightStationary: 0.42, .unknown: 0.1], locomotion: loco,
+                             arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(still.activityClass, .stationary)
+        XCTAssertLessThanOrEqual(still.runnerUpConfidence, cap)
+        // Below the cap nothing changes.
+        let low = classify(posture: [.seatedLikely: 0.7, .uprightStationary: 0.2, .unknown: 0.1], locomotion: loco,
+                           arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(low.confidence, 0.97 * 0.7, accuracy: 1e-12)
+    }
+
+    func testLearnedPostureEvidenceOrAVehicleLiftsTheCap() {
+        let loco: [LocomotionClass: Double] = [.stationary: 0.97, .unknown: 0.03]
+        let learned = classify(posture: [.seatedLikely: 0.9, .uprightStationary: 0.05, .unknown: 0.05], locomotion: loco,
+                               arm: [.quiet: 0.9, .other: 0.1], learned: true)
+        XCTAssertEqual(learned.confidence, 0.97 * 0.9, accuracy: 1e-12)
+        XCTAssertTrue(ActivityClassifier.learnedPostureEvidence(experts: ["hart_fine"]))
+        XCTAssertTrue(ActivityClassifier.learnedPostureEvidence(experts: ["encoder", "transition"]))
+        XCTAssertFalse(ActivityClassifier.learnedPostureEvidence(experts: ["encoder", "eldernet"]),
+                       "folded encoder classes and the gait expert say nothing about posture")
+        // A vehicle is the encoder's call (it names vehicle motion): not a wrist posture claim.
+        let car = classify(posture: [.seatedLikely: 0.6, .unknown: 0.4],
+                           locomotion: [.vehicleMotion: 0.85, .stationary: 0.1, .unknown: 0.05], arm: [.quiet: 1])
+        XCTAssertEqual(car.activityClass, .sitting)
+        XCTAssertEqual(car.detail, .inVehicle)
+        XCTAssertGreaterThan(car.confidence, 0.85)
+    }
+
+    func testStatesAndRunsReadTheirExpertsForTheCap() {
+        func state(hartFine: Bool) -> ActivityContextState {
+            ActivityContextState(
+                ts: 1_760_000_000, posture: Posture([.seatedLikely: 0.9, .uprightStationary: 0.05, .unknown: 0.05]),
+                locomotion: Locomotion([.stationary: 0.97, .unknown: 0.03]), armBehavior: Arm([.quiet: 1]),
+                intensity: 0.05, transition: nil, sleep: SleepContext(state: .awake),
+                wear: WearContext(state: .onWrist, validity: 1), overallConfidence: 0.8, overallUncertainty: 0.2,
+                headConfidence: ActivityHeadConfidence(posture: 0.9, locomotion: 0.97, armBehavior: 1),
+                displayContext: "Sitting quietly",
+                history: ActivityHistorySummary(sinceLocomotionS: nil, stationaryForS: 300, recentEvents: []),
+                evidence: ActivityEvidenceSummary(imu: false, encoder: hartFine, dynAccel: true, gravity: true,
+                                                  steps: true, heartRate: true, sleep: true, coverage: 0.8,
+                                                  hartFine: hartFine ? true : nil),
+                versions: ActivityStateVersions())
+        }
+        XCTAssertEqual(ActivityClassifier.classify(state: state(hartFine: false)).confidence, 0.75, accuracy: 1e-12)
+        XCTAssertEqual(ActivityClassifier.classify(state: state(hartFine: true)).confidence, 0.97 * 0.9, accuracy: 1e-12)
+        var run = ActivityContextRun(start: 0, end: 60, posture: state(hartFine: false).posture,
+                                     locomotion: state(hartFine: false).locomotion, armBehavior: Arm([.quiet: 1]),
+                                     intensity: 0.05, overallConfidence: 0.8, overallUncertainty: 0.2,
+                                     displayContext: "Sitting quietly", sleep: .awake, wear: .onWrist, count: 12)
+        XCTAssertEqual(run.classification.confidence, 0.75, accuracy: 1e-12)
+        run.experts = ["hart_fine"]
+        XCTAssertEqual(run.classification.confidence, 0.97 * 0.9, accuracy: 1e-12)
     }
 
     func testStillWristWithNoLeanStaysStationaryNotSittingOrStanding() {

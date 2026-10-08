@@ -492,6 +492,18 @@ public struct ActivityContextDecoder: Sendable {
 
     private typealias Evidence = ActivityContextModel.PostureEvidence
 
+    /// Per-source memory caps (upper side): the population caps, except that a wearer whose adopted profile
+    /// carries their own held-orientation row for lying (fitted and validated on their labelled lie-downs) lets
+    /// the held orientation hedge further toward recumbent (`recumbentOrientationCapPersonal`).
+    private var postureEvidenceCaps: [Double] {
+        var caps = Evidence.caps
+        let bed = observationProfiles[BodyMode.bedRest.rawValue]
+        if bed.orientation != nil || bed.orientationUnsigned != nil {
+            caps[Evidence.recumbentOrientationIndex] = ActivityContextModel.recumbentOrientationCapPersonal
+        }
+        return caps
+    }
+
     /// Fold this second's gait forearm axis into the sign calibration; the calibrated sign, or nil while unknown.
     private mutating func calibrateForearmSign(_ f: ActivityFeatures) -> Double? {
         var votes = tracking.forearmSignVotes ?? 0, weight = tracking.forearmSignWeight ?? 0
@@ -553,6 +565,7 @@ public struct ActivityContextDecoder: Sendable {
     private mutating func boundPosture(_ score: ActivityContextModel.Score, _ f: ActivityFeatures,
                                        sleep: SleepEvidence, inBed: Bool) {
         var memory = tracking.postureEvidence ?? [Double](repeating: 0, count: Evidence.caps.count)
+        let caps = postureEvidenceCaps
         let fresh = score.postureEvidence.values
         // Moving about makes what was known about the posture before obsolete: the memory fades fast while the
         // body is in a moving mode (about 3 s at full belief), so a walk resets it.
@@ -587,7 +600,7 @@ public struct ActivityContextDecoder: Sendable {
             let shiftFade = i == direction ? 1 - 0.25 * shift * (1 - clarity) : 1 - 0.25 * shift
             let fade = i < Evidence.recumbentStart ? movingFade * burstFade * shiftFade
                 : movingFade * (1 - 0.5 * min(1, post[BodyMode.gettingUp.rawValue] / 0.3))
-            memory[i] = min(Evidence.caps[i], max(-Evidence.lowerCaps[i], memory[i] * exp(-1 / Evidence.taus[i]) * fade + fresh[i]))
+            memory[i] = min(caps[i], max(-Evidence.lowerCaps[i], memory[i] * exp(-1 / Evidence.taus[i]) * fade + fresh[i]))
         }
         // The staged night (asleep, or awake inside its in-bed window) is recumbent evidence in full.
         let night = sleep == .asleep || inBed

@@ -97,8 +97,9 @@ struct ModeProfile {
     // Fixed soft mappings onto the public heads.
     let posture: [PostureClass: Double]
     let locomotion: [LocomotionClass: Double]
-    // Observation profile. `move`, `orientPath`, `hrRel`, `encoder` and `arm` are the fields a wearer's
-    // `ActivityPersonalProfile` may adapt (`ActivityContextModel.profiles(for:)`); the rest stay fixed.
+    // Observation profile. `move`, `orientPath`, `hrRel` (moving modes only), `encoder`, `arm` and the held
+    // forearm-orientation rows (stationary modes only) are the fields a wearer's `ActivityPersonalProfile` may
+    // adapt (`ActivityContextModel.profiles(for:)`); the rest stay fixed.
     var move: ClosedRange<Double>
     let moveIsBurst: Bool
     /// Judge `move` against the 30-s median instead of the 10-s mean: recumbent rest is almost always
@@ -111,6 +112,12 @@ struct ModeProfile {
     var hrRel: Double
     var encoder: [String: Double]
     var arm: [Double]          // compat with ArmBehaviorClass cases except unknown (7 values)
+    /// A wearer's own held-forearm category shares (hand above the elbow, flat, inclined, hanging; sums to 1)
+    /// for a stationary mode, with the forearm sign calibrated / not yet calibrated. nil (always, in the static
+    /// table) reads `ActivityContextModel.orientationRows` / `orientationRowsUnsigned`. Only an adopted
+    /// `ActivityPersonalProfile` sets them (channel 3c).
+    var orientation: [Double]? = nil
+    var orientationUnsigned: [Double]? = nil
     let sleepAsleep: Double
     let workout: Double
     /// Specialist modes (stairs, cycling, vehicle) have no evidence of their own in the current feature
@@ -151,6 +158,15 @@ enum ActivityContextModel {
     private static let transitionEnc: [String: Double] =
         ["other_movement": 0.45, "stationary": 0.35, "walking": 0.18, "running": 0.02]
 
+    /// The one relative heart-rate level every stationary posture (bed rest, seated, upright) expects (D9-02).
+    /// Heart rate tells resting from working; it does not tell lying from sitting from standing well enough
+    /// to be posture evidence (a seated wearer after coffee or under mild stress reads like a stander, and a
+    /// low rate reads like lying), and posture-stratified heart rate and HRV must not depend on the rate
+    /// being measured. So the HR channel is posture-neutral among the stationary modes: it separates them only
+    /// from the active and exertion modes. (hsmm-1.7/1.8 used 0.06 / 0.08 / 0.12.) A personal profile never
+    /// adapts it per posture (`profiles(for:)`, `ActivityPersonalProfileFitter.fitMode`).
+    static let stationaryHrRel = 0.08
+
     /// Index == `BodyMode.rawValue`.
     static let profiles: [ModeProfile] = [
         // unknown — re-acquisition prior; observation profile unused (flat).
@@ -167,7 +183,7 @@ enum ActivityContextModel {
                     exits: [(.gettingUp, 0.60), (.seated, 0.10), (.upright, 0.05), (.walk, 0.05), (.unknown, 0.20)],
                     posture: [.recumbent: 0.88, .unknown: 0.12], locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.20, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.06, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: stationaryArm, sleepAsleep: 1.0, workout: 0.05, moveIsMedian: true),
         // seated
         ModeProfile(meanDwellS: 900, phases: 2,
@@ -177,7 +193,7 @@ enum ActivityContextModel {
                     posture: [.seatedLikely: 0.84, .uprightStationary: 0.10, .unknown: 0.06],
                     locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.50, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.08, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: stationaryArm, sleepAsleep: 0.2, workout: 0.35),
         // upright (standing, stationary)
         ModeProfile(meanDwellS: 100, phases: 2,
@@ -187,7 +203,7 @@ enum ActivityContextModel {
                     posture: [.uprightStationary: 0.72, .seatedLikely: 0.20, .unknown: 0.08],
                     locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.50, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.12, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: arm(0.38, 0.12, 0.20, 0.08, 0.16, 0.0, 0.06), sleepAsleep: 0.2, workout: 0.6),
         // walk
         ModeProfile(meanDwellS: 90, phases: 2,
@@ -300,9 +316,14 @@ enum ActivityContextModel {
             var p = table[mode.rawValue]
             if let move = adj.move?.range { p.move = move }
             if let path = adj.orientPath?.range { p.orientPath = path }
-            if let hr = adj.hrRel { p.hrRel = hr }
+            // Never per stationary posture (D9-02): a profile fit before hsmm-1.8 may still carry one; it is ignored.
+            if let hr = adj.hrRel, !mode.isStationary { p.hrRel = hr }
             if let arm = adj.arm, arm.count == p.arm.count { p.arm = arm }
             if let enc = adj.encoder, !enc.isEmpty { p.encoder = enc }
+            if mode.isStationary {
+                if let row = adj.orientation.flatMap(orientationRow) { p.orientation = row }
+                if let row = adj.orientationUnsigned.flatMap(orientationRow) { p.orientationUnsigned = row }
+            }
             table[mode.rawValue] = p
         }
         return table
@@ -419,6 +440,15 @@ enum ActivityContextModel {
     static let orientationRowsUnsigned: (bed: [Double], seated: [Double], upright: [Double]) = (
         [0, 0.42, 0.17, 0.41], [0, 0.30, 0.40, 0.30], [0, 0.12, 0.36, 0.52])
 
+    /// A stored per-wearer orientation row as channel 3c reads it: four finite, non-negative shares with a
+    /// positive sum, normalised; nil for anything else (the population row is used instead).
+    static func orientationRow(_ row: [Double]) -> [Double]? {
+        guard row.count == 4, row.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+        let total = row.reduce(0, +)
+        guard total > 0 else { return nil }
+        return row.map { $0 / total }
+    }
+
     /// A forearm-axis gravity component as the orientation cues read it: signed by the calibrated forearm sign,
     /// or |x| while the sign is unknown (nothing on the strap says which way round it is worn; the old code
     /// refused absolute orientation for that reason).
@@ -476,6 +506,12 @@ enum ActivityContextModel {
     /// alone reaches at most its own source cap (ln 2.5, recumbent ≤ ~23 % of the stationary mass: a hedge,
     /// never a lying claim); a lie-down's direction and the staged night may go further.
     static let postureEvidenceCapRecumbent = log(200.0)
+    /// The held orientation's recumbent cap for a wearer whose adopted profile carries their own lying row
+    /// (`ModeProfile.orientation`; the population cap is `PostureEvidence.caps[4]`, ln 2.5). Recumbent may then
+    /// reach 0.12 × 6 of sitting + standing (~42 % of the stationary mass): enough that the wearer's own lying
+    /// forearm stops reading as confident sitting (the seated head falls below the commit bar, "Stationary"),
+    /// still short of a lying claim, which keeps needing the night, the in-bed window or a lie-down's direction.
+    static let recumbentOrientationCapPersonal = log(6.0)
     /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
     static let recumbentShareFloor = 0.12
     /// Slack (log-odds) the seated / upright split may lean without any posture evidence: small enough that
@@ -807,9 +843,17 @@ enum ActivityContextModel {
         var orientRecumbent = 0.0, orientSeated = 0.0
         if let ux = forearmAxis(f.heldUx, sign: f.forearmSign) {
             let c = orientationCategories(ux)
-            let rows = f.forearmSign != nil ? orientationRows : orientationRowsUnsigned
-            func held(_ row: [Double]) -> Double { row[0] * c.neg + row[1] * c.flat + row[2] * c.mid + row[3] * c.hang }
-            let fb = held(rows.bed), fs = held(rows.seated), fu = held(rows.upright)
+            // A wearer's adopted profile may carry their own rows (the owner's in-bed seconds are 69 % flat
+            // against 3 % by day, a likelihood ratio the population compromise cannot hold).
+            let signed = f.forearmSign != nil
+            let rows = signed ? orientationRows : orientationRowsUnsigned
+            func row(_ m: Int, _ population: [Double]) -> [Double] {
+                (signed ? profiles[m].orientation : profiles[m].orientationUnsigned) ?? population
+            }
+            func held(_ row: [Double]) -> Double {
+                max(1e-3, row[0] * c.neg + row[1] * c.flat + row[2] * c.mid + row[3] * c.hang)
+            }
+            let fb = held(row(bed, rows.bed)), fs = held(row(seat, rows.seated)), fu = held(row(up, rows.upright))
             let q = armPattern(f, includeWorkout: false)
             let qs = q[0..<ArmState.unknown].reduce(0, +)
             let busy = qs > 0 ? (q[ArmState.desk] + q[ArmState.repetitive] + q[ArmState.gesture]) / qs : 0

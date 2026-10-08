@@ -79,12 +79,18 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
 
         mutating func hold(_ seconds: Int) { for _ in 0..<seconds { second(state) } }
 
+        /// Forearm-axis gravity held in each state: inclined while sitting or standing (the same, so only motion
+        /// tells them apart), flat while lying (the owner's production data: 69 % of in-bed still seconds flat
+        /// against 3 % by day).
+        static func forearm(_ s: State) -> Double { s == .lying ? 0.05 : 0.55 }
+
         /// Move to `next`: a 3-s posture shift.
         mutating func move(to next: State) {
             guard let degrees = ActivityPersonalCalibrationEndToEndTests.shift(from: state, to: next) else { return }
             var opt = ActivitySim.Options()
             opt.hr = w.standHR
-            sim.postureShift(netDegrees: degrees, opt: opt)
+            let to = Self.forearm(next)
+            sim.postureShift(netDegrees: degrees, toForearm: to == Self.forearm(state) ? nil : to, opt: opt)
             state = next
         }
     }
@@ -95,6 +101,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
     static func session(_ w: Wearer, id: String, seed: UInt64, start: Int, leadIn: Int = 600,
                         skipping: Set<String> = []) -> Session {
         var p = Player(sim: ActivitySim(start: start, seed: seed), w: w)
+        p.sim.forearm(Player.forearm(.seated))
         var labels: [ActivityGroundTruthLabel] = []
         p.hold(leadIn)
         for activity in ActivityCalibrationProtocols.current.activities where !skipping.contains(activity.id) {
@@ -137,19 +144,24 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
     struct DayScore {
         var balanced: Double
         var recall: [BodyMode: Double]
+        /// Share of labelled seconds the published class claimed as another mode.
+        var wrong: Double
     }
 
+    /// Scored on the published class (`ActivityPersonalProfileFitter.replay`): a hedged "stationary" second claims
+    /// nothing, so it is neither a hit nor a wrong claim.
     static func score(_ run: ActivityCalibrationRun, config: ActivityDecoderConfig) -> DayScore {
         let replay = ActivityPersonalProfileFitter.replay(run, config: config)
-        var total: [BodyMode: Int] = [:], hit: [BodyMode: Int] = [:]
+        var total: [BodyMode: Int] = [:], hit: [BodyMode: Int] = [:], wrong = 0
         for s in replay.samples {
             total[s.truth, default: 0] += 1
             if s.predicted == s.truth { hit[s.truth, default: 0] += 1 }
+            else if s.predicted != .unknown { wrong += 1 }
         }
         var recall: [BodyMode: Double] = [:]
         for (mode, n) in total where n >= 10 { recall[mode] = Double(hit[mode] ?? 0) / Double(n) }
         let balanced = recall.isEmpty ? 0 : recall.values.reduce(0, +) / Double(recall.count)
-        return DayScore(balanced: balanced, recall: recall)
+        return DayScore(balanced: balanced, recall: recall, wrong: Double(wrong) / Double(max(1, replay.samples.count)))
     }
 
     /// Fit on `calibrationRuns` guided runs, then decode a fresh run (new seed, new day) with and without the result.
@@ -172,8 +184,13 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
             return "\(m.personalKey) \(Int(b * 100))->\(Int(a * 100))"
         }
         return "\(w.name): \(c.result.status.rawValue), unseen day balanced \(Int(c.before.balanced * 100))% -> "
-            + "\(Int(c.after.balanced * 100))% [\(classes.joined(separator: ", "))], adapted "
+            + "\(Int(c.after.balanced * 100))% [\(classes.joined(separator: ", "))], wrong claims "
+            + "\(Int(c.before.wrong * 100))% -> \(Int(c.after.wrong * 100))%, adapted "
             + "\(c.result.profile?.modes.keys.sorted() ?? [])"
+    }
+
+    static func gain(_ c: (result: ActivityPersonalFitResult, before: DayScore, after: DayScore), _ m: BodyMode) -> Double {
+        (c.after.recall[m] ?? 0) - (c.before.recall[m] ?? 0)
     }
 
     // MARK: Tests
@@ -199,8 +216,12 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
             print("CALIBRATION", line)
             XCTAssertEqual(c.result.status, .adopted, line)
             XCTAssertGreaterThanOrEqual(c.after.balanced - c.before.balanced, 0.05, line)
-            XCTAssertGreaterThan((c.after.recall[.upright] ?? 0) - (c.before.recall[.upright] ?? 0), 0.3,
-                                 "standing is what the defaults got wrong: \(line)")
+            // Scored on the published class: the defaults hedge every still second ("stationary", recall 0) or read
+            // the busy stand as desk sitting (a wrong claim). The profile resolves the sitting / standing split for
+            // this wearer, mostly on the seated side (hsmm-1.8 commits standing only on strong evidence).
+            XCTAssertGreaterThan(max(Self.gain(c, .seated), Self.gain(c, .upright)), 0.3,
+                                 "the profile resolves sitting vs standing: \(line)")
+            XCTAssertLessThanOrEqual(c.after.wrong, c.before.wrong + 0.03, "no more wrong claims: \(line)")
             for (mode, before) in c.before.recall {
                 XCTAssertGreaterThanOrEqual(c.after.recall[mode] ?? 0, before - 0.05, "\(mode.personalKey) got worse: \(line)")
             }
@@ -242,7 +263,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
         // stops fitting it); what matters is that sitting / standing were calibrated and lying was not.
         XCTAssertTrue(c.result.profile?.modes["upright"] != nil || c.result.profile?.modes["seated"] != nil, line)
         XCTAssertNil(c.result.profile?.modes["bedRest"], "nothing labelled lying, nothing adapted: \(line)")
-        XCTAssertGreaterThan((c.after.recall[.upright] ?? 0) - (c.before.recall[.upright] ?? 0), 0.3, line)
+        XCTAssertGreaterThan(max(Self.gain(c, .seated), Self.gain(c, .upright)), 0.3, line)
     }
 
     func testAWearerTheDefaultsAlreadyFitIsNeverMadeWorse() {
