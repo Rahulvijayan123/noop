@@ -209,54 +209,24 @@ struct InsightsView: View {
     @State private var currentDayKey = Repository.localDayKey(Date())
 
     var body: some View {
-        ScreenScaffold(title: "Insights", subtitle: "Interrogate what affects what.",
-                       // PERF (scroll): lazy column, byte-identical layout (LazyVStack == eager VStack
-                       // alignment/spacing/header). The content is one inner eager VStack, so any nested
-                       // staggered reveals are unchanged; this only defers building that stack on scroll-in.
-                       lazy: true,
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Insights sits in one atmosphere ("the options change, not the page").
-                       // Static + non-interactive; the cards below sit on the opaque canvas and stay legible.
-                       topBackground: liquidScaffoldSky()) {
-            if !loaded {
-                ComingSoon(what: "Reading your journal and outcomes…")
-            } else {
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                    // v5: a single row into the "What moves you" hub, the lag-aware ranked-effect feed
-                    // + alcohol/caffeine dose-response. Reachable as its own destination too; this is the
-                    // honest in-Insights entry point.
-                    whatMovesYouLink
-                    // Native logging, always reachable: the account-free way into Insights.
-                    JournalLogCard(importedQuestions: importedQuestions,
-                                   answers: dayAnswers,
-                                   numericAnswers: dayNumeric,
-                                   dayOffset: $journalDayOffset,
-                                   onChanged: { Task { await load() } })
-                    // Mind, daily mood check-in + mood↔body correlations.
-                    // Self-contained (owns its own load/state); sits with the
-                    // journal card so the two daily-logging surfaces read as one
-                    // "log today" block above the derived insights.
-                    MindSection()
-                    // Caffeine window (#526), log an intake + a rough on-device "still active" hint.
-                    // Self-contained (owns its own UserDefaults-backed store); sits in the same
-                    // "log today" block. Opt-in: shows nothing until the user logs an intake.
-                    CaffeineLogCard()
-                    experimentSection
-                    if behaviours.isEmpty {
-                        // No journal yet, explain, without dead-ending on a paid export.
-                        NoopCard {
-                            Text("Log behaviours above. After a few days of answers, NOOP ranks how each one moves your charge, HRV and rest. Importing a WHOOP export (which includes its journal) backfills history instantly.")
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                    } else {
-                        behaviourSection
-                    }
-                    activityCostSection
-                    relationshipsSection
-                }
-            }
+        // The journal: logging first (always reachable, the account-free way in), then one list of what
+        // the journal shows, each a page one tap down. The ranked behaviour effects live on What moves
+        // you (the lag-aware ranking), so this page does not draw a second, same-day list of them.
+        ScreenScaffold(title: "Insights", titleDisplay: .navigationBar, isLoading: !loaded) {
+            JournalLogCard(importedQuestions: importedQuestions,
+                           answers: dayAnswers,
+                           numericAnswers: dayNumeric,
+                           dayOffset: $journalDayOffset,
+                           onChanged: { Task { await load() } })
+            // Mind, daily mood check-in + mood↔body correlations. Self-contained (owns its own
+            // load/state); sits with the journal card so the two daily-logging surfaces read as one
+            // "log today" block above the derived insights.
+            MindSection()
+            // Caffeine window (#526), log an intake + a rough on-device "still active" hint.
+            // Self-contained (owns its own UserDefaults-backed store). Opt-in: shows nothing until the
+            // user logs an intake.
+            CaffeineLogCard()
+            journalInsightsSection
         }
         // #860 item 4: key on the data-refresh seq AND today's day-key, so the journal re-loads both on a
         // data change and the moment the calendar day rolls over (driven by the foreground/appear refresh
@@ -292,39 +262,49 @@ struct InsightsView: View {
         if key != currentDayKey { currentDayKey = key }
     }
 
-    /// The deep-link row into the v5 "What moves you" hub.
-    private var whatMovesYouLink: some View {
-        Button { router.openInsightsHub() } label: {
-            NoopCard(tint: StrandPalette.chargeColor) {
-                HStack(spacing: 12) {
-                    Image(systemName: "wand.and.sparkles")
-                        .font(.system(size: 16, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.accent.opacity(0.14), in: RoundedRectangle(cornerRadius: 9, style: .continuous))
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 4) {
-                        // WHOOP tappable-card title: UPPERCASE tracked white + trailing "›" chevron
-                        // glyph (mirrors "HEALTH MONITOR ›"). The descriptive line stays beneath.
-                        Text("WHAT MOVES YOU \u{203A}")
-                            .font(StrandFont.overline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Ranked, lag-aware: which of your habits actually move your Charge, plus your personal alcohol/caffeine dose-response.")
-                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                        .accessibilityHidden(true)
+    // MARK: - What the journal shows (rows, each one tap down)
+
+    private var journalInsightsSection: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Patterns")
+            NoopListSection {
+                whatMovesYouRow
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                InsightsDetailLink { experimentPage } label: {
+                    NoopListRow(icon: "flask", iconColor: StrandPalette.accent, title: "Personal experiment",
+                                value: activeExperimentSnapshot?.phaseLabel ?? String(localized: "Setup"))
+                }
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                InsightsDetailLink { activityCostPage } label: {
+                    NoopListRow(icon: "figure.run", iconColor: StrandPalette.accent, title: "Activity cost",
+                                value: activityCosts.isEmpty ? nil : "\(activityCosts.count)")
+                }
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                InsightsDetailLink { relationshipsPage } label: {
+                    NoopListRow(icon: "point.3.connected.trianglepath.dotted", iconColor: StrandPalette.accent,
+                                title: "Metric relationships",
+                                value: relationships.isEmpty ? nil : "\(relationships.count)")
                 }
             }
         }
-        // Liquid tap response: the same physical settle-inward every tappable liquid card gets.
-        .buttonStyle(LiquidPressStyle())
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("What moves you. Ranked patterns in your own data, and your dose-response.")
+    }
+
+    /// What moves you: the lag-aware ranked effects and the dose-response, pushed inside the journal's own
+    /// stack on iOS (the journal is itself a sheet, so a router hop would try to stack a second sheet on
+    /// the same root). The Mac selects its sidebar item.
+    @ViewBuilder
+    private var whatMovesYouRow: some View {
+        #if os(macOS)
+        Button { router.openInsightsHub() } label: {
+            NoopListRow(icon: "wand.and.sparkles", iconColor: StrandPalette.accent, title: "What moves you")
+        }
+        .buttonStyle(.plain)
+        #else
+        NavigationLink { InsightsHubView() } label: {
+            NoopListRow(icon: "wand.and.sparkles", iconColor: StrandPalette.accent, title: "What moves you")
+        }
+        .buttonStyle(.plain)
+        #endif
     }
 
     // MARK: - Load
@@ -550,11 +530,9 @@ struct InsightsView: View {
     // present-vs-absent contrast rather than a raw pre/post window. Nothing leaves the
     // device: state is @AppStorage and "Mark done" writes a normal journal answer.
 
-    private var experimentSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Personal Experiment",
-                          overline: "N-of-1 protocol",
-                          trailing: activeExperimentSnapshot?.phaseLabel ?? String(localized: "Setup"))
+    /// The personal experiment one tap below its row: the setup form, or the running experiment.
+    private var experimentPage: some View {
+        ScreenScaffold(title: "Personal experiment", titleDisplay: .navigationBar) {
             NoopCard {
                 if let snapshot = activeExperimentSnapshot {
                     activeExperimentCard(snapshot)
@@ -562,56 +540,45 @@ struct InsightsView: View {
                     experimentSetupCard
                 }
             }
+            AboutDisclosure(paragraphs: [
+                String(localized: "Pick one behaviour you log, one outcome, and a short window. Nara compares the days you log the behaviour against your behaviour-free days before the start."),
+                String(localized: "Local only"),
+            ])
         }
     }
 
     @ViewBuilder private var experimentSetupCard: some View {
         let candidates = experimentCandidates
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
-                    Text("Run a clean personal test")
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("Pick one behaviour you log, one outcome, and a short window. NOOP compares the days you log the behaviour against your behaviour-free days before the start.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 12)
-                StatePill("Local only", tone: .neutral, showsDot: false)
-            }
+            Text("Run a clean personal test")
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
 
             if candidates.isEmpty {
                 Text("Log at least one behaviour above before starting an experiment.")
                     .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                    .foregroundStyle(StrandPalette.textSecondary)
                     .frame(maxWidth: .infinity, alignment: .leading)
             } else {
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 220), spacing: NoopMetrics.gap)],
-                    alignment: .leading,
-                    spacing: NoopMetrics.gap
-                ) {
-                    experimentField("Behaviour") {
-                        Picker("Behaviour", selection: experimentBehaviourBinding) {
-                            ForEach(candidates, id: \.self) { q in
-                                Text(verbatim: q).tag(q)
-                            }
+                experimentField("Behaviour") {
+                    Picker("Behaviour", selection: experimentBehaviourBinding) {
+                        ForEach(candidates, id: \.self) { q in
+                            Text(verbatim: q).tag(q)
                         }
-                        .labelsHidden()
-                        .pickerStyle(.menu)
-                        .accessibilityLabel("Experiment behaviour")
                     }
-                    experimentField("Outcome") {
-                        SegmentedPillControl(Outcome.allCases, selection: experimentOutcomeBinding) { $0.label }
-                            .accessibilityLabel("Experiment outcome metric")
-                    }
-                    experimentField("Window") {
-                        SegmentedPillControl(ExperimentLength.allCases,
-                                             selection: experimentLengthBinding) { $0.label }
-                            .accessibilityLabel("Experiment window length")
-                    }
+                    .labelsHidden()
+                    .pickerStyle(.menu)
+                    .tint(StrandPalette.accent)
+                    .accessibilityLabel("Experiment behaviour")
+                }
+                experimentField("Outcome") {
+                    SegmentedPillControl(Outcome.allCases, selection: experimentOutcomeBinding) { $0.label }
+                        .accessibilityLabel("Experiment outcome metric")
+                }
+                experimentField("Window") {
+                    SegmentedPillControl(ExperimentLength.allCases,
+                                         selection: experimentLengthBinding) { $0.label }
+                        .accessibilityLabel("Experiment window length")
                 }
 
                 NoopButton("Start experiment", systemImage: "flask.fill",
@@ -625,7 +592,7 @@ struct InsightsView: View {
     private func activeExperimentCard(_ snapshot: ExperimentSnapshot) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             HStack(alignment: .firstTextBaseline) {
-                VStack(alignment: .leading, spacing: 4) {
+                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
                     Text(verbatim: snapshot.behavior)
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
@@ -634,9 +601,8 @@ struct InsightsView: View {
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
-                Spacer(minLength: 12)
-                StatePill(LocalizedStringKey(snapshot.phaseLabel), tone: snapshot.phaseTone,
-                          pulsing: snapshot.daysElapsed < snapshot.durationDays)
+                Spacer(minLength: NoopMetrics.space3)
+                StatePill(LocalizedStringKey(snapshot.phaseLabel), tone: snapshot.phaseTone)
             }
 
             Text(experimentReading(snapshot))
@@ -645,33 +611,28 @@ struct InsightsView: View {
                 .fixedSize(horizontal: false, vertical: true)
 
             LazyVGrid(
-                columns: [GridItem(.adaptive(minimum: 154), spacing: NoopMetrics.gap)],
+                columns: [GridItem(.adaptive(minimum: 140), spacing: NoopMetrics.space2)],
                 alignment: .leading,
-                spacing: NoopMetrics.gap
+                spacing: NoopMetrics.space2
             ) {
                 experimentMeasure("Baseline",
                                   value: snapshot.baselineMean.map { formatOutcome($0, as: snapshot.outcome) } ?? "—",
-                                  caption: String(localized: "\(snapshot.baselineCount) days without it"),
-                                  tint: StrandPalette.textSecondary)
+                                  caption: String(localized: "\(snapshot.baselineCount) days without it"))
                 experimentMeasure("Intervention",
                                   value: snapshot.interventionMean.map { formatOutcome($0, as: snapshot.outcome) } ?? "—",
-                                  caption: String(localized: "\(snapshot.interventionCount) logged days"),
-                                  tint: StrandPalette.accent)
+                                  caption: String(localized: "\(snapshot.interventionCount) logged days"))
                 experimentMeasure("Change",
                                   value: formatExperimentDelta(snapshot.delta, outcome: snapshot.outcome),
-                                  caption: snapshot.deltaCaption,
-                                  tint: experimentDeltaColor(snapshot))
+                                  caption: snapshot.deltaCaption)
                 experimentMeasure("Compliance",
-                                  value: "\(Int(snapshot.compliance.rounded()))%",
-                                  caption: snapshot.loggedToday ? String(localized: "logged today") : String(localized: "not logged today"),
-                                  tint: snapshot.loggedToday ? StrandPalette.statusPositive : StrandPalette.statusWarning)
+                                  value: "\(Int(snapshot.compliance.rounded())) %",
+                                  caption: snapshot.loggedToday ? String(localized: "logged today") : String(localized: "not logged today"))
             }
 
-            VStack(alignment: .leading, spacing: 6) {
-                // Liquid progress: the experiment window as a filling LiquidTube (the same horizontal
-                // vessel Today's Key Metrics + workout bars use) rather than a flat ProgressView. Static
-                // (no live slosh needed for a progress read); carries the same a11y label + value.
-                LiquidTube(frac: snapshot.progress, tint: StrandPalette.accent, height: 8, animated: false)
+            // The experiment has a real end, so its progress is a real bar toward it.
+            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                ProgressView(value: snapshot.progress)
+                    .tint(StrandPalette.accent)
                     .accessibilityLabel("Experiment progress")
                     .accessibilityValue("\(snapshot.daysElapsed) of \(snapshot.durationDays) days")
                 HStack {
@@ -685,7 +646,7 @@ struct InsightsView: View {
                 .foregroundStyle(StrandPalette.textTertiary)
             }
 
-            HStack(spacing: NoopMetrics.rowSpacing) {
+            HStack(spacing: NoopMetrics.space2) {
                 Button { Task { await markExperimentToday(true) } } label: {
                     Label("Mark done today", systemImage: "checkmark.circle.fill")
                 }
@@ -697,7 +658,7 @@ struct InsightsView: View {
                 }
                 .buttonStyle(NoopButtonStyle(.secondary))
 
-                Spacer(minLength: 8)
+                Spacer(minLength: NoopMetrics.space2)
 
                 Button(role: .destructive) { endExperiment() } label: {
                     Label("End", systemImage: "stop.circle")
@@ -711,29 +672,22 @@ struct InsightsView: View {
     private func experimentField<Content: View>(_ title: LocalizedStringKey,
                                                 @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            Text(title)
-                .font(StrandFont.overline)
-                .foregroundStyle(StrandPalette.textTertiary)
+            Text(title).strandLabel()
             content()
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, minHeight: 82, alignment: .topLeading)
-        .background(NoopPanelSurface(cornerRadius: 8))
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
     private func experimentMeasure(_ label: LocalizedStringKey,
                                    value: String,
-                                   caption: String,
-                                   tint: Color) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            Text(label)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
+                                   caption: String) -> some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            Text(label).strandLabel()
                 .lineLimit(1)
             Text(value)
-                .font(StrandFont.number(22))
-                .foregroundStyle(tint)
+                .font(StrandFont.number(20))
+                .foregroundStyle(StrandPalette.textPrimary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
             Text(caption)
@@ -744,7 +698,7 @@ struct InsightsView: View {
         }
         .padding(NoopMetrics.space3)
         .frame(maxWidth: .infinity, minHeight: 92, alignment: .topLeading)
-        .background(NoopPanelSurface(tint: tint, cornerRadius: 8))
+        .background(NoopInsetSurface())
     }
 
     /// Behaviours the user actually has data for: distinct logged journal questions
@@ -972,7 +926,7 @@ struct InsightsView: View {
         var progress: Double { min(1, Double(daysElapsed) / Double(max(durationDays, 1))) }
         var phaseLabel: String {
             daysElapsed >= durationDays ? String(localized: "Complete")
-                                        : String(localized: "DAY \(daysElapsed)/\(durationDays)")
+                                        : String(localized: "Day \(daysElapsed) of \(durationDays)")
         }
         var phaseTone: StrandTone { daysElapsed >= durationDays ? .positive : .accent }
         var delta: Double? {
@@ -990,263 +944,80 @@ struct InsightsView: View {
         let tone: StrandTone
     }
 
-    // MARK: - Behaviour effects section
+    // MARK: - Activity Cost page (#439)
 
-    private var behaviourSection: some View {
-        // `ranked` is memoized in @State (see recomputeRanked()); reading it
-        // here does no expensive work per render.
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            // Keep the outcome labels intrinsic while they fit beside the header. When either
-            // localization or Dynamic Type needs more room, move the control to its own row.
-            ViewThatFits(in: .horizontal) {
-                HStack(alignment: .center) {
-                    SectionHeader("Behaviour Effects",
-                                  overline: "What moves your \(outcome.outcomeName.lowercased())")
-                    Spacer(minLength: NoopMetrics.space2)
-                    behaviourOutcomeControl
-                        .fixedSize(horizontal: true, vertical: false)
-                }
-
-                VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                    SectionHeader("Behaviour Effects",
-                                  overline: "What moves your \(outcome.outcomeName.lowercased())")
-                    behaviourOutcomeControl
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                }
-            }
-
-            if ranked.isEmpty {
-                noEffects
-            } else {
-                ForEach(ranked.indices, id: \.self) { i in
-                    effectCard(ranked[i])
-                        .staggeredAppear(index: i)
-                }
-            }
-        }
-    }
-
-    private var behaviourOutcomeControl: some View {
-        SegmentedPillControl(Outcome.allCases, selection: $outcome,
-                             adaptsToAvailableWidth: true) { $0.label }
-            .accessibilityLabel("Outcome metric")
-    }
-
-    private var noEffects: some View {
-        NoopCard {
-            Text(String(localized: "Not enough overlap between your journal answers and \(outcome.outcomeName.lowercased()) to measure an effect yet. Keep logging. Effects need days both with and without each behaviour."))
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-
-    /// One behaviour-effect card: sentence + with/without StatTiles + significance pill.
-    private func effectCard(_ e: BehaviorEffect) -> some View {
-        // Sign-aware tint: did this behaviour move the outcome the GOOD way?
-        // good move = (delta > 0 when higherIsBetter) OR (delta < 0 when lower is better).
-        let movedGood: Bool? = {
-            if e.delta == 0 { return nil }
-            let up = e.delta > 0
-            return up == outcome.higherIsBetter
-        }()
-        let tint: StrandTone = {
-            guard let good = movedGood else { return .neutral }
-            // Only let strong-tint shine when significant; weak effects read muted.
-            if e.significant { return good ? .positive : .critical }
-            return good ? .positive : .warning
-        }()
-        let tintColor = toneColor(tint)
-        let deltaText: String = {
-            let arrow = e.delta > 0 ? "↑" : (e.delta < 0 ? "↓" : "→")
-            if let pct = e.pctChange { return "\(arrow) \(Int(abs(pct).rounded()))%" }
-            return "\(arrow) \(String(format: "%.1f", abs(e.delta)))"
-        }()
-        // Build the plain-English sentence ONCE and reuse it for both the visible
-        // copy and the accessibility label (was computed twice per card).
-        let sentence = BehaviorInsights.sentence(e)
-
-        // The card wash reads as the OUTCOME's colour world (so the whole Behaviour
-        // Effects section sits in one world), while the dot / StatTile accents stay
-        // sign-aware to flag the good/bad direction.
-        return NoopCard(tint: outcome.domain.color) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-
-                // Header: behaviour name + significance pill. The old direction dot becomes a small liquid
-                // vessel filled to the effect magnitude (|Cohen's d|, capped where large is about 0.8+) in
-                // the sign-aware tint, the leading-gauge idiom Today uses, so the strength reads at a glance.
-                HStack(alignment: .center) {
-                    HStack(spacing: 10) {
-                        LiquidVessel(value: min(1, abs(e.cohensD) / 0.8), tint: tintColor, animated: false)
-                            .frame(width: 26, height: 26)
-                            .accessibilityHidden(true)
-                        Text(e.behavior)
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    Spacer()
-                    StatePill(e.significant ? "Significant" : "Exploratory",
-                              tone: e.significant ? .positive : .neutral,
-                              showsDot: false)
-                }
-
-                // Plain-English sentence.
-                Text(sentence)
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // With / without means as uniform StatTiles.
-                LazyVGrid(
-                    columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
-                    alignment: .leading,
-                    spacing: NoopMetrics.gap
-                ) {
-                    StatTile(label: "With",
-                             value: formatOutcome(e.meanWith),
-                             caption: "n = \(e.nWith)",
-                             accent: tintColor,
-                             delta: deltaText,
-                             deltaColor: tintColor)
-                    StatTile(label: "Without",
-                             value: formatOutcome(e.meanWithout),
-                             caption: "n = \(e.nWithout)",
-                             accent: StrandPalette.textPrimary)
-                }
-
-                Divider().overlay(StrandPalette.hairline)
-
-                // Effect-size footer: Cohen's d + interpretation.
-                HStack {
-                    Text("Effect size").strandOverline()
-                    Spacer()
-                    HStack(spacing: 6) {
-                        Text(String(format: "d = %.2f", e.cohensD))
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(tintColor)
-                        Text(effectMagnitudeWord(e.cohensD))
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        // Whole-string key per variant (never a concatenated localized tail on an a11y label).
-        .accessibilityLabel(e.significant
-            ? String(localized: "\(sentence) Cohen's d \(String(format: "%.2f", e.cohensD)). Statistically significant.")
-            : String(localized: "\(sentence) Cohen's d \(String(format: "%.2f", e.cohensD)). Exploratory, not yet significant."))
-    }
-
-    // MARK: - Metric relationships section
-
-    // MARK: - Activity Cost section (#439)
-
-    /// "What each activity costs your recovery": one ranked NoopCard per sport that cleared the
-    /// engine's minSessions gate, each carrying next-morning Charge vs rest baseline, days-to-baseline,
-    /// the sample count + confidence pill, and the engine's plain-English sentence. Sign-aware tint:
-    /// a positive cost (recovery dipped) reads warmer/critical, a recovery-POSITIVE delta reads green.
-    @ViewBuilder private var activityCostSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Activity Cost", overline: "What each activity costs your recovery")
+    /// "What each activity costs your recovery", one tap below its row: one card per sport that cleared
+    /// the engine's minSessions gate, each with the engine's sentence and the next-morning Charge against
+    /// the rest baseline, days to bounce back and the session count.
+    private var activityCostPage: some View {
+        ScreenScaffold(title: "Activity cost", titleDisplay: .navigationBar) {
             if activityCosts.isEmpty {
-                NoopCard {
-                    Text("Tag a few sessions of the same activity and NOOP will learn its personal recovery cost.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                ComingSoon(what: "Tag a few sessions of the same activity and Nara will learn its personal recovery cost.")
             } else {
-                ForEach(Array(activityCosts.enumerated()), id: \.element.sport) { index, cost in
+                ForEach(activityCosts, id: \.sport) { cost in
                     activityCostCard(cost)
-                        .staggeredAppear(index: index)
                 }
             }
         }
     }
 
     private func activityCostCard(_ cost: ActivityCost) -> some View {
-        // Sign-aware accent: a POSITIVE delta means the next morning sat BELOW baseline (it cost you)
-        // → warm/critical; a negative delta means you woke higher → green. A near-zero cost reads
-        // neutral gold so "barely moves" doesn't shout either way.
-        let costing = cost.delta >= ActivityCostEngine.barelyMovesPoints
-        let lifting = cost.delta <= -ActivityCostEngine.barelyMovesPoints
-        let accent: Color = costing ? StrandPalette.statusCritical
-            : (lifting ? StrandPalette.statusPositive : StrandPalette.chargeColor)
-        let scoreState: ScoreState = cost.confidence == .solid ? .solid : .building
         let pointsLabel = String(format: "%@%.0f", cost.delta >= 0 ? "−" : "+", abs(cost.delta))
-
-        return NoopCard(tint: accent) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                HStack(alignment: .center, spacing: 8) {
+        return NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .center, spacing: NoopMetrics.space2) {
                     Image(systemName: sportSymbol(cost.sport))
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(accent)
+                        .font(StrandFont.icon(.inline))
+                        .foregroundStyle(StrandPalette.effortColor)
                         .frame(width: 20)
+                        .accessibilityHidden(true)
                     Text(cost.sport)
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .lineLimit(1)
-                    Spacer(minLength: 8)
-                    ScoreStatePill(scoreState)
+                    Spacer(minLength: NoopMetrics.space2)
+                    StatePill(cost.confidence == .solid ? "Solid" : "Building",
+                              tone: cost.confidence == .solid ? .positive : .neutral, showsDot: false)
                 }
                 Text(cost.sentence())
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.gap)],
-                          alignment: .leading, spacing: NoopMetrics.gap) {
-                    StatTile(label: "Next morning",
-                             value: "\(Int(cost.meanNextMorning.rounded()))",
-                             caption: String(localized: "Charge · \(pointsLabel) pts"),
-                             accent: accent)
-                    StatTile(label: "Rest baseline",
-                             value: "\(Int(cost.baselineMean.rounded()))",
-                             caption: String(localized: "untouched days"),
-                             accent: StrandPalette.textPrimary)
-                    StatTile(label: "Bounce back",
-                             value: cost.daysToBaseline.map { "\($0)d" } ?? "—",
-                             caption: cost.daysToBaseline != nil ? String(localized: "to baseline") : String(localized: "not within 7d"),
-                             accent: StrandPalette.chargeColor)
-                    StatTile(label: "Sessions",
-                             value: "\(cost.n)",
-                             caption: cost.confidence == .solid ? String(localized: "solid") : String(localized: "building"),
-                             accent: StrandPalette.textPrimary)
-                }
+                InsightsComparisonBars(bars: [
+                    .init(id: "next", label: String(localized: "Next morning"), value: cost.meanNextMorning,
+                          valueText: "\(Int(cost.meanNextMorning.rounded())) %",
+                          detail: String(localized: "Charge · \(pointsLabel) pts"),
+                          color: StrandPalette.chargeColor),
+                    .init(id: "base", label: String(localized: "Rest baseline"), value: cost.baselineMean,
+                          valueText: "\(Int(cost.baselineMean.rounded())) %",
+                          detail: String(localized: "untouched days"),
+                          color: StrandPalette.textTertiary),
+                ], domain: 0...100)
+                InsightsValueRow(label: String(localized: "Bounce back"),
+                                 value: cost.daysToBaseline.map { "\($0)" } ?? "—",
+                                 unit: cost.daysToBaseline != nil ? String(localized: "days") : nil)
+                InsightsValueRow(label: String(localized: "Sessions"), value: "\(cost.n)")
             }
         }
     }
 
-    private var relationshipsSection: some View {
-        // `relationships` is memoized in @State (see recomputeRelationships());
-        // the four Pearson correlations no longer run per render.
-        let rels = relationships
-        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Metric Relationships", overline: "Pearson r")
+    // MARK: - Metric relationships page
 
-            if rels.isEmpty {
-                NoopCard {
-                    Text("Not enough overlapping history to correlate your metrics yet.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+    /// The curated metric pairs one tap below their row: for each, its strength in words and r, a bar for
+    /// direction and size, and the scatter of the days the two share, which is what actually shows the
+    /// relationship.
+    private var relationshipsPage: some View {
+        // `relationships` is memoized in @State (see recomputeRelationships()); the four Pearson
+        // correlations no longer run per render.
+        ScreenScaffold(title: "Metric relationships", titleDisplay: .navigationBar) {
+            if relationships.isEmpty {
+                ComingSoon(what: "Not enough overlapping history to correlate your metrics yet.")
             } else {
-                // Every curated relationship terminates in Charge, so the card sits in
-                // the Charge (green) colour world via a faint wash.
-                NoopCard(tint: DomainTheme.charge.color) {
-                    VStack(spacing: 0) {
-                        ForEach(Array(rels.enumerated()), id: \.element.id) { idx, rel in
-                            relationshipRow(rel)
-                            if idx < rels.count - 1 {
-                                Divider().overlay(StrandPalette.hairline)
-                            }
-                        }
-                    }
+                ForEach(relationships) { rel in
+                    relationshipCard(rel)
                 }
             }
+            AboutDisclosure(paragraphs: relationships.map(\.blurb))
         }
     }
 
@@ -1256,6 +1027,10 @@ struct InsightsView: View {
         let title: String        // "Sleep → Recovery"
         let blurb: String        // what the pairing probes
         let corr: Correlation
+        /// The series keys behind the pair, for the scatter, and the lag in days.
+        var xKey: String = ""
+        var yKey: String = ""
+        var lagDays: Int = 0
     }
 
     private func computeRelationships() -> [Relationship] {
@@ -1268,7 +1043,7 @@ struct InsightsView: View {
             out.append(.init(id: "sleep-rec",
                              title: String(localized: "Rest ↔ Charge"),
                              blurb: String(localized: "How closely a good night tracks next-morning charge."),
-                             corr: c))
+                             corr: c, xKey: "sleep_performance", yKey: "recovery"))
         }
         // HRV ↔ recovery (same day).
         if let c = CorrelationEngine.pearson(
@@ -1276,7 +1051,7 @@ struct InsightsView: View {
             out.append(.init(id: "hrv-rec",
                              title: String(localized: "HRV ↔ Charge"),
                              blurb: String(localized: "Heart-rate variability as the engine behind your charge score."),
-                             corr: c))
+                             corr: c, xKey: "hrv", yKey: "recovery"))
         }
         // Resting HR ↔ recovery (same day), expected to be negative.
         if let c = CorrelationEngine.pearson(
@@ -1284,7 +1059,7 @@ struct InsightsView: View {
             out.append(.init(id: "rhr-rec",
                              title: String(localized: "Resting HR ↔ Charge"),
                              blurb: String(localized: "A lower resting heart rate usually means a higher charge."),
-                             corr: c))
+                             corr: c, xKey: "rhr", yKey: "recovery"))
         }
         // Today's recovery ↔ NEXT-day recovery (1-day lag) as a strain/carry-over proxy.
         // (Strain series isn't in the outcome set; recovery→next-day recovery shows
@@ -1293,79 +1068,71 @@ struct InsightsView: View {
             out.append(.init(id: "rec-lag",
                              title: String(localized: "Charge → Next-day charge"),
                              blurb: String(localized: "How much one day's charge carries into the next."),
-                             corr: c))
+                             corr: c, xKey: "recovery", yKey: "recovery", lagDays: 1))
         }
 
         return out
     }
 
-    private func relationshipRow(_ rel: Relationship) -> some View {
+    /// The day pairs a relationship was computed over, for its scatter (display only): the same-day join
+    /// `CorrelationEngine.alignByDay` uses, or x's day against y's day `lagDays` later.
+    private func scatterPairs(_ rel: Relationship) -> [(Double, Double)] {
+        let x = seriesByKey[rel.xKey] ?? []
+        let y = seriesByKey[rel.yKey] ?? []
+        guard rel.lagDays != 0 else { return CorrelationEngine.alignByDay(x, y) }
+        var mapY: [String: Double] = [:]
+        for row in y { mapY[row.day] = row.value }
+        return x.sorted { $0.day < $1.day }.compactMap { row in
+            mapY[WeeklyDigestEngine.addDays(row.day, rel.lagDays)].map { (row.value, $0) }
+        }
+    }
+
+    private func axisTitle(_ key: String, nextDay: Bool = false) -> String {
+        let name: String
+        switch key {
+        case "sleep_performance": name = String(localized: "Rest") + " (%)"
+        case "hrv": name = "HRV (ms)"
+        case "rhr": name = String(localized: "Resting HR") + " (bpm)"
+        default: name = String(localized: "Charge") + " (%)"
+        }
+        return nextDay ? String(localized: "Next day") + " · " + name : name
+    }
+
+    private func relationshipCard(_ rel: Relationship) -> some View {
         let r = rel.corr.r
-        let strength = correlationColor(r)
         // Build the reading sentence ONCE and reuse it for the visible copy and
         // the accessibility label (was computed twice per row).
         let sentence = relationshipSentence(rel)
-        return VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 10) {
-                // Liquid magnitude accent: a small filling vessel showing |r| in the correlation's
-                // strength colour, the same leading-gauge idiom Today's card rows + vitals use. Static
-                // (a small gauge doesn't need live slosh); decorative, the exact r + a11y read below.
-                LiquidVessel(value: min(1, abs(r)), tint: strength, animated: false)
-                    .frame(width: 28, height: 28)
-                    .accessibilityHidden(true)
-                Text(rel.title)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Spacer()
-                Text(String(format: "r = %+.2f", r))
-                    .font(StrandFont.number(16))
-                    .foregroundStyle(strength)
-                StatePill(rel.corr.pApprox < 0.05 ? "p < 0.05" : "n.s.",
-                          tone: rel.corr.pApprox < 0.05 ? .accent : .neutral,
-                          showsDot: false)
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader(LocalizedStringKey(rel.title),
+                          trailing: rel.corr.pApprox < 0.05 ? "p < 0.05" : String(localized: "n.s."))
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    HStack(alignment: .firstTextBaseline) {
+                        Text(String(format: "r = %+.2f", r))
+                            .font(StrandFont.number(20))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Spacer(minLength: NoopMetrics.space2)
+                        Text(sentence)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(2)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(sentence)
+                    InsightsDivergingBar(value: r, magnitude: 1,
+                                         positiveColor: StrandPalette.chargeColor,
+                                         negativeColor: StrandPalette.metricRose)
+                    InsightsScatterChart(pairs: scatterPairs(rel),
+                                         xTitle: axisTitle(rel.xKey),
+                                         yTitle: axisTitle(rel.yKey, nextDay: rel.lagDays != 0))
+                }
             }
-
-            // r bar, visual magnitude/direction (hover reveals the exact value).
-            rBar(r: r, color: strength, label: rel.title)
-
-            Text(sentence)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Text(rel.blurb)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
         }
-        .padding(.vertical, 11)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(sentence)
-    }
-
-    /// A centred bar: zero in the middle, fills left (negative) or right (positive)
-    /// proportional to |r|. Hovering reveals a tooltip with the exact r value, so the
-    /// bar, like every Strand chart, is never an unexplained coloured shape.
-    private func rBar(r: Double, color: Color, label: String) -> some View {
-        RBar(r: r, color: color, label: label)
     }
 
     // MARK: - Formatting / interpretation helpers
-
-    /// Map a tone to its public palette color (StrandTone.color is module-internal).
-    private func toneColor(_ tone: StrandTone) -> Color {
-        switch tone {
-        case .neutral:  return StrandPalette.textSecondary
-        case .accent:   return StrandPalette.accent
-        case .positive: return StrandPalette.statusPositive
-        case .warning:  return StrandPalette.statusWarning
-        case .critical: return StrandPalette.statusCritical
-        }
-    }
-
-    /// Format an outcome value with sensible units for the selected metric.
-    private func formatOutcome(_ v: Double) -> String {
-        formatOutcome(v, as: outcome)
-    }
 
     /// Format an outcome value with sensible units for a specific metric (used by the
     /// experiment card, which formats against its own stored outcome rather than the
@@ -1375,16 +1142,6 @@ struct InsightsView: View {
         case .recovery, .sleep: return "\(Int(v.rounded()))%"
         case .hrv:              return "\(Int(v.rounded())) ms"
         case .rhr:              return "\(Int(v.rounded())) bpm"
-        }
-    }
-
-    /// Cohen's d → conventional magnitude word.
-    private func effectMagnitudeWord(_ d: Double) -> String {
-        switch abs(d) {
-        case ..<0.2:  return String(localized: "negligible")
-        case ..<0.5:  return String(localized: "small")
-        case ..<0.8:  return String(localized: "moderate")
-        default:      return String(localized: "large")
         }
     }
 
@@ -1399,77 +1156,11 @@ struct InsightsView: View {
         }
     }
 
-    /// Tint a correlation by strength, keyed on the recovery gradient so strong
-    /// positive reads mint and strong negative reads red.
-    private func correlationColor(_ r: Double) -> Color {
-        // Map r∈[-1,1] → 0…1 of the recovery scale (−1 red, 0 gold, +1 mint).
-        StrandPalette.sample(stops: StrandPalette.recoveryStops, at: (r + 1) / 2)
-    }
-
     private func relationshipSentence(_ rel: Relationship) -> String {
         let r = rel.corr.r
         let dir = r > 0 ? String(localized: "positive") : (r < 0 ? String(localized: "negative") : String(localized: "flat"))
         let strength = strengthWord(r)
         return String(localized: "\(strength.capitalizedFirst) \(dir) relationship (r = \(String(format: "%.2f", r)), n = \(rel.corr.n)).")
-    }
-}
-
-// MARK: - Correlation magnitude bar (hover-aware)
-
-/// A centred correlation bar (zero in the middle, fills left/negative or
-/// right/positive by |r|). On hover it shows the locked ChartTooltip with the exact
-/// r value, matching the hover affordance every other Strand chart provides.
-private struct RBar: View {
-    let r: Double
-    let color: Color
-    let label: String
-
-    @State private var hovering = false
-
-    var body: some View {
-        GeometryReader { geo in
-            let half = geo.size.width / 2
-            let mag = CGFloat(min(abs(r), 1.0)) * half
-            ZStack(alignment: .leading) {
-                Capsule().fill(StrandPalette.surfaceInset)
-                // centre tick
-                Rectangle()
-                    .fill(StrandPalette.hairlineStrong)
-                    .frame(width: 1)
-                    .position(x: half, y: geo.size.height / 2)
-                // value fill
-                Capsule()
-                    .fill(color)
-                    .frame(width: mag, height: geo.size.height)
-                    .offset(x: r >= 0 ? half : half - mag)
-            }
-            .clipShape(Capsule())
-        }
-        .frame(height: 8)
-        // Tooltip floats above the bar without affecting layout (overlays aren't
-        // clipped), so the exact r value reads on hover, same affordance as charts.
-        .overlay(alignment: .center) {
-            if hovering {
-                ChartTooltip(
-                    value: String(format: "r = %+.2f", r),
-                    label: label,
-                    accent: color
-                )
-                .fixedSize()
-                .offset(y: -26)
-                .transition(.opacity)
-                .allowsHitTesting(false)
-            }
-        }
-        .contentShape(Rectangle())
-        .onContinuousHover { phase in
-            switch phase {
-            case .active: hovering = true
-            case .ended:  hovering = false
-            }
-        }
-        .animation(StrandMotion.fade, value: hovering)
-        .accessibilityHidden(true)
     }
 }
 
