@@ -69,7 +69,7 @@ final class BankedReadingsRenderTests: XCTestCase {
         renderer.scale = 2
         let image = try XCTUnwrap(renderer.cgImage, "\(name) produced no image")
         XCTAssertGreaterThan(image.width, 300)
-        XCTAssertGreaterThan(image.height, 400, "the card is a header, plot, stats and an hourly chart tall")
+        XCTAssertGreaterThan(image.height, 400, "the card is a header, a plot, its stats and the timeline link tall")
 
         if let dir = ProcessInfo.processInfo.environment["BANKED_READINGS_RENDER_DIR"] {
             let png = NSBitmapImageRep(cgImage: image).representation(using: .png, properties: [:])

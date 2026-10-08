@@ -86,7 +86,7 @@ struct ActivityExpertsBlock: View {
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
             if summary.experts.isEmpty {
-                Text("Only the strap's motion, steps and heart rate. The full activity breakdown, position-change expert and ElderNet gait appear once this day's raw motion has been processed.")
+                Text("The strap's motion, steps and heart rate")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)

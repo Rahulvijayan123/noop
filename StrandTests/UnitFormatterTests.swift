@@ -223,4 +223,15 @@ final class UnitFormatterTests: XCTestCase {
         XCTAssertEqual(UnitFormatter.temperatureUnit(.celsius), "°C")
         XCTAssertEqual(UnitFormatter.temperatureUnit(.fahrenheit), "°F")
     }
+
+    // MARK: - Durations (detail pages)
+
+    func testDurationFromMinutesPrintsHoursAndMinutes() {
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(402), "6 h 42 m")
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(42), "42 m")
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(420), "7 h 0 m")
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(59.6), "1 h 0 m")
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(-48), "48 m", "the sign is the caller's")
+        XCTAssertEqual(UnitFormatter.durationFromMinutes(.nan), "—")
+    }
 }

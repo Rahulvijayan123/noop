@@ -340,9 +340,9 @@ struct ActivityTimelineView: View {
 
 // MARK: - One-line read-out (with day ribbon + detail sheet)
 
-/// One line under a metric value on detail pages (spec §11): the activity read-out derived from the
-/// epochs overlapping the selected interval, with the day ribbon beneath it, and a tap-through to
-/// the compact detail sheet.
+/// One row of the detail page's context card (spec §11): the activity read-out derived from the epochs
+/// overlapping the selected interval, with the day ribbon beneath it, and a tap-through to the compact
+/// detail sheet.
 ///
 /// Callers render this ONLY when a hosted snapshot carries an activity context (feature-off default
 /// renders nothing otherwise). All data flows through the pure join + wording helpers above.
@@ -365,26 +365,29 @@ struct ActivityContextLine: View {
             showingDetail = true
         } label: {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                HStack(spacing: NoopMetrics.space2) {
+                HStack(spacing: NoopMetrics.space3) {
                     Circle()
                         .fill(dotColor(for: summary))
-                        .frame(width: 8, height: 8)
+                        .frame(width: 10, height: 10)
+                        .frame(width: 28)
                         .accessibilityHidden(true)
                     Text(ActivityContextWording.text(for: summary))
-                        .font(StrandFont.subhead)
+                        .font(StrandFont.body)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .lineLimit(1)
                     Spacer(minLength: NoopMetrics.space2)
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 12, weight: .medium))
+                    Image(systemName: "chevron.right")
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .accessibilityHidden(true)
                 }
                 ActivityTimelineView(document: document, dayStart: dayStart, dayEnd: dayEnd)
+                    .padding(.leading, 28 + NoopMetrics.space3)
             }
-            .padding(NoopMetrics.cardPadding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background { FrostedCardSurface(tint: nil, cornerRadius: NoopMetrics.cardRadius) }
+            .padding(.horizontal, NoopMetrics.cardPadding)
+            .padding(.vertical, NoopMetrics.space3)
+            .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
+            .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
         .accessibilityHint("Shows activity detail")
@@ -431,13 +434,16 @@ struct ActivityContextDetailSheet: View {
             .navigationTitle("Activity")
             #if os(iOS)
             .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Done") { dismiss() }
                 }
             }
-            #endif
         }
+        #if os(macOS)
+        .frame(minWidth: NoopMetrics.detailSheetMinWidth, minHeight: NoopMetrics.detailSheetMinHeight)
+        #endif
     }
 
     @Environment(\.dismiss) private var dismiss
@@ -450,9 +456,6 @@ struct ActivityContextDetailSheet: View {
             Text(data.wording)
                 .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
-            Text("Server-computed activity for this reading.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 
@@ -532,12 +535,10 @@ struct ActivityContextDetailSheet: View {
     }
 
     private var userCorrectionNote: some View {
-        NoopCard(tint: StrandPalette.metricAmber) {
-            Text("Labels you confirm stay local to this device. The server\u{2019}s posture stays unknown in this version.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+        Text("Labels you confirm stay local to this device. The server\u{2019}s posture stays unknown in this version.")
+            .font(StrandFont.footnote)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     /// "… ago" style for the dedicated activity data_through, mirroring ServerScoreRepository's

@@ -39,7 +39,6 @@ public struct ChartTooltip: View {
                 Circle()
                     .fill(accent)
                     .frame(width: 7, height: 7)
-                    .shadow(color: accent.opacity(0.8), radius: 3)
             }
             VStack(alignment: .leading, spacing: 1) {
                 Text(value)
