@@ -135,12 +135,17 @@ enum DaytimeStressMode {
                 // 30 days of historical R-R reads; they cannot change the selected mode.
                 let dayRR = DaytimeStress.daytimeRMSSDScoringEnabled
                     ? await repo.rrIntervals(from: from, to: to, limit: 200_000) : []
+                // The day's gravity too, read exactly as the scorer reads today's (StressView / StressDayCurve
+                // `gravitySamplesUnion`, same limit), so the aggregate's ambulatory mask sees the SAME gravity
+                // gate the scorer applies, plus the context share; never context on one side and gravity on
+                // the other. Reduced with the day below and not retained, like HR (#2107).
+                let dayGravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)
                 let context = DaytimeStress.DayContext(
                     sleepSpans: spanSleep.filter { $0.end > from && $0.start <= to },
                     intervals: spanContext.intervals.filter { $0.end > from && $0.start <= to })
                 aggregates.append(
                     DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz,
-                                                      context: context)
+                                                      gravity: dayGravity, context: context)
                 )
             }
             return DaytimeStress.scoringModeFromAggregates(aggregates)

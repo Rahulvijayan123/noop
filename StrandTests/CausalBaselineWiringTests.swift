@@ -24,7 +24,9 @@ final class CausalBaselineWiringTests: XCTestCase {
         let mode = try source("Strand/Data/DaytimeStressMode.swift")
         XCTAssertTrue(mode.contains("aggregates.append((hr: nil, rmssd: nil))"))
         XCTAssertTrue(mode.contains("DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz,\n"
-                                    + "                                                      context: context)"))
+                                    + "                                                      gravity: dayGravity, context: context)"))
+        // Same gravity read as the scorer, so both sides of the comparison see the same ambulatory gate.
+        XCTAssertTrue(mode.contains("let dayGravity = await repo.gravitySamplesUnion(from: from, to: to, limit: 200_000)"))
     }
 
     func testStressOnsetCallSiteSuppliesStoredContext() throws {
