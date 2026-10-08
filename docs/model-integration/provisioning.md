@@ -94,7 +94,7 @@ source digest is computed once at import, so a request costs a few `stat` calls.
 
 | Field | Meaning |
 | --- | --- |
-| `code_revision {commit, dirty, source_matches_release, uv_lock_matches_release}` | commit from the release stamp, confirmed by the measured source tree and lock; null without a stamp (a claim is never promoted) |
+| `code_revision {commit, dirty, release_claimed, source_matches_release, uv_lock_matches_release}` | `commit`/`dirty` come from the release stamp only when the measured source tree matches it and the lock does not contradict it; otherwise they are null and the stamp's commit is reported as `release_claimed` (a claim is never promoted) |
 | `source {path, sha256, files, measured_at_utc, error?}` | digest over the imported `frwhoop_inference` package (bytecode ignored) |
 | `uv_lock_sha256` | the lock beside the package |
 | `release` | stamp summary (`RELEASE.json` beside the code or `FRWHOOP_RELEASE_STAMP`), or `{error}` |
@@ -136,6 +136,22 @@ changed, and replaces `current` atomically (old target becomes `previous`); `rol
 with `ReadWritePaths=/var/lib/frwhoop` only. The sidecar venv is per release
 (`/opt/frwhoop-inference/venvs/<id>`, outside the read-only release tree) and
 `/opt/frwhoop-inference/venv` points at it.
+
+## Permissions and ordering (round 3 review fixes)
+
+- The staging directory is `0755` from creation (`STAGING_MODE`; `mkdtemp` makes it `0700`) and stays
+  so through the probe, so the probe user (`--probe-user frwhoop-inf` in `provision.sh`) can enter the
+  revision it proves; it is sealed `0555` after the probe. The probe child runs with the service
+  user's uid, primary gid and its own supplementary groups (`probe_identity()`: `user=`, `group=`,
+  `extra_groups=os.getgrouplist(...)`), never root's groups, matching systemd's `User=`.
+- `release-host.sh install` makes the extracted release `0755` (`mktemp -d` makes it `0700`), and
+  `build` seals with `chmod -R a+rX,a-w`, so `frwhoop` and `frwhoop-inf` can run code from the
+  release. Before this fix a built release was `0500 root`, which neither service user could enter.
+- `provision.sh --sidecar-only` probes with the NEW release's venv and links
+  `/opt/frwhoop-inference/venv` to it only after the materializer selected (or kept) a revision; a
+  rejected revision exits under `set -e` with the old venv and the old revision still paired.
+- `deploy/inference.env.example` no longer sets `FRWHOOP_RELEASE_STAMP` (it pointed at the worker's
+  `/opt/noop/current/RELEASE.json`); the sidecar finds its own release's stamp above its code.
 
 ## Rollback
 
@@ -318,7 +334,8 @@ size), which is sound because stamps, build records and revisions are immutable 
 
 ## Requests to parent
 
-1. **Runtime area (`execution.py`, `server.py`): report what the warm worker loaded.** In the infer
+1. *(Done by the parent at the integration HEAD: `server.py` now fills `worker_loaded_identity`.)*
+   **Runtime area (`execution.py`, `server.py`): report what the warm worker loaded.** In the infer
    worker's hello (`execution.py`, next to `readiness = jobs.warm(...)`), add
    `"loaded": {pid: provider.loaded_identity()}` for providers that implement it (exceptions caught,
    values stringified), and in `InferenceServer._on_infer_hello` set

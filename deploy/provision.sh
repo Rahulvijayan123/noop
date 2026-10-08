@@ -236,11 +236,7 @@ UV_PROJECT_ENVIRONMENT="$VENV_DIR" UV_PYTHON_DOWNLOADS=never /usr/local/bin/uv s
   --project "$REPO_ROOT/Tools/InferenceWorker" \
   --python-preference only-system
 test -x "$VENV_DIR/bin/python" || { echo "FATAL: sidecar venv missing at $VENV_DIR"; exit 1; }
-if [ -e "$SIDECAR_ROOT/venv" ] && [ ! -L "$SIDECAR_ROOT/venv" ]; then
-  mv "$SIDECAR_ROOT/venv" "$SIDECAR_ROOT/venv.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
-fi
-switch_link "$VENV_DIR" "$SIDECAR_ROOT/venv"
-echo "  sidecar venv: $SIDECAR_ROOT/venv -> $VENV_DIR"
+echo "  sidecar venv built: $VENV_DIR (linked only after its model revision is selected)"
 
 echo "== sidecar: model revision (stage, verify, probe, switch) =="
 model_args=(--probe-user frwhoop-inf)
@@ -250,9 +246,17 @@ model_args=(--probe-user frwhoop-inf)
 for mirror in ${MIRRORS[@]+"${MIRRORS[@]}"}; do model_args+=(--mirror "$mirror"); done
 # The service user reads the cache and cannot write it (ReadOnlyPaths=); a rejected revision
 # leaves `current` where it was and stops this script here.
+# The probe uses THIS release's venv, so the revision is proven against the code that will serve
+# it. Only then is the venv linked: a rejection stops here with the old code still on the old
+# revision.
 provision_models "$VENV_DIR/bin/python" "$MODELS_ROOT" "${model_args[@]}" \
   --report "$SIDECAR_ROOT/last-model-provision.json" > /dev/null
 echo "  models: $MODELS_ROOT/current -> $(readlink "$MODELS_ROOT/current")"
+if [ -e "$SIDECAR_ROOT/venv" ] && [ ! -L "$SIDECAR_ROOT/venv" ]; then
+  mv "$SIDECAR_ROOT/venv" "$SIDECAR_ROOT/venv.replaced-$(date -u +%Y%m%dT%H%M%SZ)"
+fi
+switch_link "$VENV_DIR" "$SIDECAR_ROOT/venv"
+echo "  sidecar venv: $SIDECAR_ROOT/venv -> $VENV_DIR"
 
 echo "== sidecar: systemd unit =="
 install -m 644 "$SCRIPT_DIR/frwhoop-inference.service" /etc/systemd/system/frwhoop-inference.service

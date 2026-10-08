@@ -615,3 +615,72 @@ def test_the_service_environment_comes_from_the_unit_and_its_environment_file(tm
     assert env["HOME"] == "/var/lib/frwhoop-inf"
     assert env["FRWHOOP_DEEPBEAT_SHADOW_ENABLED"] == "1"
     assert env["PATH"]
+
+
+def test_the_service_user_can_enter_and_read_the_revision_it_probes(tmp_path):
+    """The probe runs as the service user (``--probe-user frwhoop-inf``), not the owner. Every
+    directory of the staged revision, its root included, must be traversable and every file
+    readable by others when the probe starts, or a fresh host never gets a ``current``."""
+    models = tmp_path / "models"
+    seen: dict[str, object] = {}
+    inner = ready_probe()
+
+    def probe(root: str, **kwargs):
+        seen["root"] = root
+        modes = {}
+        for dirpath, dirnames, filenames in os.walk(root):
+            modes[dirpath] = os.stat(dirpath).st_mode
+            for name in filenames:
+                modes[os.path.join(dirpath, name)] = os.stat(os.path.join(dirpath, name)).st_mode
+        seen["modes"] = modes
+        return inner(root, **kwargs)
+
+    report = _stage(models, REAL_MANIFEST, probe=probe)
+    assert report.outcome == "selected", report.reason
+    modes = seen["modes"]
+    assert os.path.basename(seen["root"]).startswith(".staging"), "the probe saw the staged tree"
+    assert stat.S_IMODE(modes[seen["root"]]) & 0o055 == 0o055, oct(modes[seen["root"]])
+    for path, mode in modes.items():
+        need = 0o005 if stat.S_ISDIR(mode) else 0o004
+        assert mode & need == need, f"{path}: {oct(mode)} is not open to the service user"
+    assert stat.S_IMODE(os.stat(models / "revisions").st_mode) & 0o005 == 0o005
+    sealed = models / "revisions" / report.revision_id
+    assert stat.S_IMODE(os.stat(sealed).st_mode) == 0o555
+
+
+def test_the_probe_runs_with_the_service_users_groups_not_the_callers(monkeypatch):
+    """``subprocess.run(user=)`` alone keeps root's groups; the probe gets the service user's."""
+    import pwd
+
+    class Entry:
+        pw_name, pw_uid, pw_gid = "frwhoop-inf", 991, 991
+
+    monkeypatch.setattr(pwd, "getpwnam", lambda name: Entry)
+    monkeypatch.setattr(os, "geteuid", lambda: 0)
+    monkeypatch.setattr(os, "getgrouplist", lambda name, gid: [gid, 44, gid])
+    assert mm.probe_identity("frwhoop-inf") == {"user": 991, "group": 991, "extra_groups": [44, 991]}
+    assert mm.probe_identity(None) == {}
+
+    calls = {}
+
+    def fake_run(command, **kwargs):
+        calls.update(kwargs)
+        raise subprocess.TimeoutExpired(command, 0)
+
+    monkeypatch.setattr(mm.shutil, "chown", lambda *a, **k: None)
+    monkeypatch.setattr(mm.subprocess, "run", fake_run)
+    result = mm.probe_readiness("/nonexistent", service_env={}, user="frwhoop-inf", timeout_s=1)
+    assert result["ok"] is False
+    assert (calls["user"], calls["group"], calls["extra_groups"]) == (991, 991, [44, 991])
+
+
+def test_provision_sh_switches_the_sidecar_venv_only_after_the_revision_is_selected():
+    """A rejected revision stops provision.sh (set -e) before the new release's venv is linked,
+    so the running sidecar never pairs new code with a revision that code never probed."""
+    text = (DEPLOY_DIR / "provision.sh").read_text()
+    sidecar = text[text.index("== sidecar: pinned venv"):]
+    probe_at = sidecar.index('provision_models "$VENV_DIR/bin/python"')
+    switch_at = sidecar.index('switch_link "$VENV_DIR" "$SIDECAR_ROOT/venv"')
+    assert probe_at < switch_at, "the venv link moved before the model revision was proven"
+    assert sidecar.count('switch_link "$VENV_DIR"') == 1
+    assert "set -euo pipefail" in text

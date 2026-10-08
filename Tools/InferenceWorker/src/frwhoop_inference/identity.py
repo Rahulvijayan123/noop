@@ -290,6 +290,23 @@ def _provider_identity(state: Any, worker_loaded: Any = None) -> dict[str, Any]:
     return out
 
 
+def _code_revision(stamp: Mapping[str, Any] | None, source_sha: str | None,
+                   uv_lock_sha: str | None) -> dict[str, Any]:
+    """The release commit is this process's code revision only when the measured source tree
+    matches the stamp's (and the lock does not contradict it); otherwise the stamp is only a
+    claim, reported as ``release_claimed``."""
+    source_match = _equal_or_none(source_sha, stamp.get("source_tree_sha256") if stamp else None)
+    lock_match = _equal_or_none(uv_lock_sha, stamp.get("uv_lock_sha256") if stamp else None)
+    proven = bool(stamp) and source_match is True and lock_match is not False
+    return {
+        "commit": stamp.get("git_commit") if proven else None,
+        "dirty": stamp.get("dirty") if proven else None,
+        "release_claimed": stamp.get("git_commit") if stamp and not proven else None,
+        "source_matches_release": source_match,
+        "uv_lock_matches_release": lock_match,
+    }
+
+
 def runtime_identity(app: Any) -> dict[str, Any]:
     """The identity block for ``app`` (a ``server.Application``)."""
     manifest = app.manifest
@@ -309,14 +326,7 @@ def runtime_identity(app: Any) -> dict[str, Any]:
         "package_version": PACKAGE_VERSION,
         "contract_version": CONTRACT_VERSION,
         "claimed_source_revision": os.environ.get("FRWHOOP_SOURCE_REVISION") or None,
-        "code_revision": {
-            "commit": stamp.get("git_commit") if stamp else None,
-            "dirty": stamp.get("dirty") if stamp else None,
-            "source_matches_release": _equal_or_none(source.get("sha256"),
-                                                     stamp.get("source_tree_sha256") if stamp else None),
-            "uv_lock_matches_release": _equal_or_none(uv_lock_sha,
-                                                      stamp.get("uv_lock_sha256") if stamp else None),
-        },
+        "code_revision": _code_revision(stamp, source.get("sha256"), uv_lock_sha),
         "source": source,
         "uv_lock_sha256": uv_lock_sha,
         "release": release,
