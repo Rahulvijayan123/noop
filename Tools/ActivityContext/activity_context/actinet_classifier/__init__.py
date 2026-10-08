@@ -77,7 +77,11 @@ DEFAULT_GRID = "run"
 # Epoch validity reasons (an invalid epoch carries no probabilities and no label).
 REASON_PARTIAL = "partial_window"             # the 30 s span is not fully covered by one contiguous run
 REASON_NO_DATA = "no_data"                    # ``request`` grid: no sample at all in the span
-REASONS: Tuple[str, ...] = (REASON_PARTIAL, REASON_NO_DATA)
+REASON_NONFINITE = "nonfinite_output"          # the network returned a non-finite value for the epoch
+REASONS: Tuple[str, ...] = (REASON_PARTIAL, REASON_NO_DATA, REASON_NONFINITE)
+
+# The class order of the pinned Walmsley artifact (its sha256-pinned HMM file is the source; runtime asserts it).
+CLASS_ORDER: Tuple[str, ...] = ("light", "moderate-vigorous", "sedentary", "sleep")
 
 ERROR_KINDS: Tuple[str, ...] = ("malformed", "model_missing", "weights_mismatch", "timeout", "internal",
                                 "output_too_large", "too_many_epochs")
@@ -87,5 +91,5 @@ __all__ = [
     "UPSTREAM_CLASSIFIER_KEY", "UPSTREAM_REPO", "UPSTREAM_VERSION", "UPSTREAM_COMMIT", "UPSTREAM_NETWORK",
     "UPSTREAM_LICENSE", "UPSTREAM_COPYRIGHT", "RELEASE_MODE", "CONSUMER", "SOURCE_HZ", "EPOCH_S",
     "EPOCH_SOURCE_SAMPLES", "MODEL_HZ", "MODEL_SAMPLES", "AXES", "REQUIRED_CHANNELS", "GRIDS", "DEFAULT_GRID",
-    "REASON_PARTIAL", "REASON_NO_DATA", "REASONS", "ERROR_KINDS",
+    "REASON_PARTIAL", "REASON_NO_DATA", "REASON_NONFINITE", "REASONS", "CLASS_ORDER", "ERROR_KINDS",
 ]

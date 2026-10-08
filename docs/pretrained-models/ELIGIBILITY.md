@@ -80,7 +80,7 @@ deployed one is `actukb`.
 
 | | ActiNet `walmsley` (target) | `actukb` `movement_intensity` | `actukb` class heads |
 |---|---|---|---|
-| Output type | One label per 30-s epoch (argmax, then HMM Viterbi). Upstream publishes labels, not probabilities (`sslmodel.predict(output_logits=False)`). | Scalar regression in [0, 1] | Calibrated probabilities over supported classes |
+| Output type | One label per 30-s epoch (argmax, then HMM Viterbi). Upstream's `predict` returns labels; the network itself returns logits (`output_logits=True`). The adapter sends logits, a `softmax(logits)` block labelled as derived and uncalibrated, and the HMM label, all separately (updated 2026-10-08). | Scalar regression in [0, 1] | Calibrated probabilities over supported classes |
 | Label space | sleep, sedentary, light, moderate-vigorous (static scan of the artifact) | Proxy for log-MET; no sleep class (sleep MET 0.95 maps to 0) | posture(4), locomotion(8), arm(7), transition events(8) |
 | Evaluation | Capture-24 is in-sample: the classifier was fitted on all of it. | Test MAE 0.085 (constant 0.137), R² 0.627, n = 96,146 public windows. Not in the test gate. | Final gate: mostly `abstain`. Strong: `vehicle_motion`, `seated_likely`. |
 | Consumer | None yet (must be named before activation) | Logged only | Candidate comparison document only |
@@ -137,6 +137,11 @@ streams only.
 - **Whole-recording steps.** Calibration fits gain and offset to stationary periods gathered over the whole
   recording. Non-wear detection needs more than 90 minutes of stillness. Neither can be computed from 60-s bursts.
 - **HMM.** Run it only inside contiguous runs, and record when it was skipped.
+  *Built differently (2026-10-08, after review).* The adapter reproduces upstream exactly: one Viterbi pass
+  across the request, with the raw label restored after each gap. Cutting the pass at gaps would be a new
+  temporal model that no upstream output could check. Instead, each epoch reports its contiguous-chain length
+  (`label.contiguous_epochs`) and the request reports `viterbi_spans_gaps`, so a consumer can tell which
+  labels had real smoothing ([ACTINET_CLASSIFIER.md](ACTINET_CLASSIFIER.md) §4).
 - **Imputation and sleep.** Never use the daily imputation as observed data. The ActiNet sleep label must not
   replace canonical staging.
 
@@ -348,7 +353,7 @@ work.
 | Gate | Candidates | Cleared by |
 |---|---|---|
 | Upstream parity of the frozen `walmsley` classifier plus original preprocessing, on fixtures and real windows | ActiNet | Motion agent |
-| A named downstream consumer and a shadow store for 4-class labels (labels, not probabilities) | ActiNet | Lead and motion agent (Spec 01 authority rules) |
+| A named downstream consumer and a shadow store for 4-class labels, with logits and derived probabilities kept as separate fields | ActiNet | Lead and motion agent (Spec 01 authority rules) |
 | Out-of-sample comparison: GOTOV/PAMAP2 test splits, sleep-accel sleep vs wake, any WHOOP labels; final features, coverage and runtime against `actukb` | ActiNet | Motion agent; more WHOOP labels from the owner |
 | Licence scope of the Oxford Academic Use Licence for a service on beta testers' data. It covers ActiNet and ssl-wearables, which is already live in `actukb`, and also ElderNet. Then correct NOTICE.md and registry.py. | ActiNet (and the live lanes) | **Owner**, or a licence from Oxford University Innovation |
 | Anchored, versioned PPG transport (codec, receiver, worker), then phone build, deploy and re-upload of recoverable local records | wav2sleep, Pulsewatch | Spec 01 PPG transport, then owner deploy |

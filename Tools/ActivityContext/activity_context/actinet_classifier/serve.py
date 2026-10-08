@@ -33,6 +33,9 @@ from .runtime import (DEFAULT_MAX_BATCH, MAX_EPOCHS_PER_REQUEST, ActiNetRuntime,
                       handle_request)
 
 DEFAULT_TIMEOUT_SECONDS = 60.0
+# A full-day request of 86,400 input seconds is ~1.6 KB per second of base64 plus framing (~140 MB worst case);
+# anything longer is refused before it is parsed.
+MAX_REQUEST_BYTES = 192 * 1024 * 1024
 
 
 class _RequestTimeout(Exception):
@@ -62,6 +65,8 @@ def encode_line(resp: Dict[str, Any], max_bytes: int) -> str:
 
 def handle_line(rt: ActiNetRuntime, line: str, timeout: float = 0.0) -> Tuple[str, bool]:
     """One request line -> (response line, is_shutdown). Never raises."""
+    if len(line) > MAX_REQUEST_BYTES:
+        return json.dumps(error_response(None, "malformed", f"request line exceeds {MAX_REQUEST_BYTES} bytes")), False
     try:
         req = json.loads(line)
         if not isinstance(req, dict):
@@ -120,6 +125,11 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--max-batch", type=int, default=DEFAULT_MAX_BATCH, help="inference batch rows (fixed; padded)")
     ap.add_argument("--max-epochs", type=int, default=MAX_EPOCHS_PER_REQUEST, help="epochs per request (refused above)")
     args = ap.parse_args(argv)
+    try:                                       # Spec 01: inter-op pool 1, intra-op = --threads, before any model runs
+        from ..loaded import configure_torch_threads
+        configure_torch_threads(args.threads)
+    except ImportError:
+        pass
     rt = build_runtime(args.artifact_dir, threads=args.threads, max_batch=args.max_batch, max_epochs=args.max_epochs)
     if rt.error is not None:
         print(f"[actinet_classifier.serve] model unavailable: {rt.error.kind}: {rt.error.message}", file=sys.stderr,

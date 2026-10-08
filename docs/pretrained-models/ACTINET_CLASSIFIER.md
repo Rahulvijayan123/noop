@@ -44,8 +44,9 @@ fine-tuned on all Capture-24 participants, plus a fitted HMM. It is **not** the 
   parameters: the HMM cases use synthetic matrices, and the e2e fixture holds upstream outputs for a synthetic
   request only.
 
-**Class order** comes only from the HMM file, and the runtime asserts it. It is
-`light, moderate-vigorous, sedentary, sleep`. The golden fixture (`golden_e2e.json` `classes`) and the head-to-head
+**Class order** comes only from the HMM file. When the real pins are in use, `build_runtime` refuses
+(`weights_mismatch`) any order other than `CLASS_ORDER`. That order is `light, moderate-vigorous, sedentary,
+sleep`. The golden fixture (`golden_e2e.json` `classes`) and the head-to-head
 script check the same order.
 
 ## 2. Input contract and preprocessing (`actinet-prep-1`)
@@ -94,6 +95,8 @@ inputs (`test_model_inputs_do_not_depend_on_chunking`). An epoch never spans two
 - Limits: `sample_rate_hz` must be 100 and `channels_order` must be `[ax, ay, az, gx, gy, gz]`. A request holds
   at most 2,880 epochs, 4,000 runs and 86,400 s, in time order with no overlap. A request over a limit is
   refused, never truncated.
+- The epoch limit counts invalid (partial) epochs too. A day of many sub-30 s runs could be refused as
+  `too_many_epochs` while holding fewer than 2,880 valid epochs; the worker then splits the request at a gap.
 
 **Not applied**, and why: calibration and non-wear detection need whole recordings or more than 90 minutes of
 stillness. Neither can be computed from 60 s bursts, and imputing them would invent data. Upstream's daily
@@ -130,6 +133,15 @@ gapped recording. Under Nara's default part-time capture (60 s in every 180 s), 
 and about half of all epochs follow a gap: 479 of 960 on a synthetic duty-cycled day. For those the HMM label is
 the raw label. Treat the HMM output as meaningful only on continuous runs.
 
+The wire says which labels those are:
+
+- `label.contiguous_epochs[i]` is the length of the chain of valid epochs, exactly 30 s apart, that epoch `i`
+  belongs to.
+- `label.viterbi_spans_gaps` is true whenever the request has any gap.
+
+A label in a short chain, including the epoch *before* a gap, leans on evidence from across the gap. A consumer
+should weight or filter by `contiguous_epochs`. Test: `test_one_hmm_pass_spans_the_request_and_restores_after_gaps`.
+
 ## 5. Outputs
 
 One response per request, with blocks of different types aligned by epoch index:
@@ -137,13 +149,15 @@ One response per request, with blocks of different types aligned by epoch index:
 | Block | Content |
 |---|---|
 | `epochs[]` | `s`, `e` (UTC seconds), `valid`, `reason` |
-| `probabilities` | `output_type: class_probabilities`, `classes`, `calibrated: false`, `values[i]` = 4 floats (6 dp), or `null` for an invalid epoch |
-| `label` | `output_type: hmm_label`, `method: actinet-hmm-1`, `values[i]` = class name or `null`, `after_gap[i]` |
+| `logits` | `output_type: logits`: the network's output (upstream can return it, `sslmodel.predict(output_logits=True)`), 4 floats (6 dp) or `null` |
+| `probabilities` | `output_type: class_probabilities`, `calibrated: false`, `derivation`: softmax of the logits in float64. Upstream's `predict()` returns labels only and uses this softmax to fit its HMM emission. 4 floats (6 dp) or `null` |
+| `label` | `output_type: hmm_label`, `method: actinet-hmm-1`, `values[i]` = class name or `null`, `after_gap[i]`, `contiguous_epochs[i]`, `viterbi_spans_gaps` |
 | `counts` | `epochs`, `valid`, `invalid` by reason |
 | identity | `model_id`, `model_version`, `upstream`, `artifact.digest` and per-file sha256, `preprocessing_version`, `temporal_version`, `preprocessing_digest`, `input_digest`, `cache_key`, and `loaded_digest` once Spec 01 is merged |
 
-- Probabilities and labels are never merged into one field. The raw argmax is derivable from the probabilities
-  and is not sent separately.
+- Logits, probabilities and labels are separate fields. The probabilities are a transform of the logits, not a
+  separate model output; they are labelled so (Spec 03: keep probabilities only where the model returns them).
+  The raw argmax is derivable from the logits and is not sent separately.
 - **Cache identity** is `cache_key = sha256("actinet-classifier-cache-1\n" + input_digest + artifact_digest +
   preprocessing_digest)`.
   - `input_digest` covers each run's `start_ts,end_ts` and every body second's timestamp and 1,200 column bytes.
@@ -161,6 +175,10 @@ One response per request, with blocks of different types aligned by epoch index:
 - **Options:** `--artifact-dir` (or `$ACTINET_CLASSIFIER_DIR`), `--timeout` (default 60 s, SIGALRM),
   `--threads` (1), `--max-batch` (64), `--max-epochs` (2880).
 - **Response cap:** 12 MiB per line; anything larger becomes `output_too_large`. NaN is refused.
+- **Request cap:** a line over 192 MiB is refused as `malformed` before parsing
+  (`test_oversized_request_line_is_refused_before_parsing`).
+- **Threads:** when Spec 01's `loaded.py` exists, `serve` calls its `configure_torch_threads(--threads)`, which also
+  fixes torch's inter-op pool at 1.
 - **Errors:** `{"ok": false, "kind": malformed | model_missing | weights_mismatch | timeout | internal |
   output_too_large | too_many_epochs}`.
 - **Load failure:** the process stays up. `ping` answers `model_available: false`, and every `infer` fails with the
@@ -292,7 +310,7 @@ ActiNet calls 35 of 97 light epochs sedentary; `actukb` spreads its errors acros
 - PAMAP2 sensitivity (lying and sitting counted as sedentary regardless of protocol MET): ActiNet 0.900,
   `actukb` 0.813 macro-F1. The PAMAP2 result depends on how the reference treats those postures.
 
-**Earlier Capture-24 comparator.** For the record, v1 against `shadow-ncsa-primary-actc24`, the same 313 epochs,
+**Earlier Capture-24 comparator.** v1 against `shadow-ncsa-primary-actc24`, the same 313 epochs,
 `eval/head_to_head.json`:
 
 | Set | ActiNet HMM | `actc24` |
@@ -301,14 +319,35 @@ ActiNet calls 35 of 97 light epochs sedentary; `actukb` spreads its errors acros
 | GOTOV | 0.836 | 0.734 |
 | Pooled | 0.809 | 0.758 |
 
-Difference CI [−0.011, 0.168], P = 0.061. The v2 rerun of `actc24`, with the same methodology as the `actukb` table,
-is in `eval/head_to_head_c24_v2.json` (§10.1).
+Difference CI [−0.011, 0.168], P = 0.061.
+
+### 10.1 `actc24` rerun with v2
+
+`eval/head_to_head_c24_v2.json`. Encoder `actinet/harnet30-c24-mw/30s@20hz`, checkpoint `46732ff2…`, same split
+digest. v2 reproduces v1 exactly: pooled 0.809 vs 0.758, CI [−0.011, 0.168], P = 0.061. It adds:
+
+| Set | ActiNet HMM | `actc24` | κ | `actc24` OOD | Subject sign-flip p | Epoch McNemar p |
+|---|---|---|---|---|---|---|
+| PAMAP2 | 0.734 | 0.790 | 0.700 | 11.2 % | 0.50 | 0.54 |
+| GOTOV | 0.836 | 0.734 | 0.682 | 4.3 % | 0.078 | 0.0007 |
+| Pooled | 0.809 | 0.758 | 0.697 | 7.0 % | 0.090 | 0.033 |
+
+Against `actc24`, the epoch-level McNemar test is nominally significant pooled, but it treats clustered epochs as
+independent. The subject-level tests are not significant (p = 0.090, and P = 0.061 by bootstrap).
+
+`actc24` is not deployed. It is also in-sample for Capture-24, which matters only for Capture-24 evaluation, not
+here.
 
 **Verdict.** On these 9 external subjects, ActiNet's 4-class output is **not shown to be better or worse** than the
 deployed `actukb` intensity head cut into the same three classes. The direction depends on the dataset (better on
 GOTOV's measured METs, worse on PAMAP2's protocol METs), and the subject-level tests are far from significant.
-Nine subjects cannot settle a difference of this size. There is no WHOOP intensity reference at all. **No
-improvement is claimed.**
+Nine subjects cannot settle a difference of this size.
+
+The direction on PAMAP2 also depends on the reference. Its protocol METs put sitting and standing (1.8 MET) in
+*light*, against the usual sedentary-behaviour definition, which counts sitting and lying as sedentary. Under that
+posture-based reference ActiNet scores 0.900 against `actukb`'s 0.813.
+
+There is no WHOOP intensity reference at all. **No improvement is claimed.**
 
 ## 11. Spec 01 integration
 

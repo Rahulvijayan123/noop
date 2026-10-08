@@ -246,6 +246,10 @@ def test_thread_cap_is_applied_and_restored(stand_in, monkeypatch):
     assert seen == [2] and torch.get_num_threads() == before
     assert runtime.thread_cap(99) == C.MAX_THREADS and runtime.thread_cap("x") == 1
     assert runtime.thread_cap(0) == 1
+    monkeypatch.setenv("FRWHOOP_INFERENCE_MATH_THREADS", "1")      # Spec 01's process cap wins
+    assert runtime.thread_cap(4) == 1
+    monkeypatch.setenv("FRWHOOP_INFERENCE_MATH_THREADS", "x")
+    assert runtime.thread_cap(2) == 2
 
 
 def test_registry_shim_maps_ok_results_and_never_publishes(gap_night, stand_in):

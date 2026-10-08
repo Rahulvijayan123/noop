@@ -17,39 +17,66 @@ from activity_context.actinet_classifier import CONSUMER, MODEL_ID, RELEASE_MODE
 from ._helpers import fake_runtime, request
 
 REPO = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..", "..", ".."))
-PACKAGE = os.path.join(REPO, "Tools", "ActivityContext", "activity_context")
-OWN = os.path.join(PACKAGE, "actinet_classifier")
-TOKENS = ("actinet_classifier", WIRE_SCHEMA, CONSUMER, MODEL_ID)
-PRODUCTION_ROOTS = ("Tools/CloudWorker/Sources", "Tools/InferenceWorker/src", "supabase", "Packages", "Strand",
-                    "StrandiOS", "StrandiOSShared", "StrandiOSWidgets", "NOOPWatch", "android", "deploy",
-                    "Tools/ActivityContext/activity_context")
-SUFFIXES = (".py", ".swift", ".ts", ".sql", ".kt", ".json", ".sh", ".service", ".env", ".yml", ".yaml", ".toml")
+AC = os.path.join(REPO, "Tools", "ActivityContext")
+# Paths that may name the classifier: its own package, its tests and fixtures, and documentation.
+OWN = tuple(os.path.join(AC, *p) for p in (("activity_context", "actinet_classifier"), ("tests", "actinet_classifier"),
+                                           ("fixtures", "actinet_classifier")))
+TOKENS = tuple(t.lower() for t in ("actinet_classifier", WIRE_SCHEMA, CONSUMER, MODEL_ID, "ACTINET_CLASSIFIER_DIR",
+                                   "FRWHOOP_ACTINET_CLASSIFIER"))
+# Everything production builds, deploys or configures from. Files are scanned whatever their extension (Dockerfile,
+# unit files); documentation (*.md) and binaries are not.
+PRODUCTION_ROOTS = ("Tools/CloudWorker", "Tools/InferenceWorker", "Tools/ActivityContext", "supabase", "Packages",
+                    "Strand", "StrandiOS", "StrandiOSShared", "StrandiOSWidgets", "NOOPWatch", "NOOPWatchComplications",
+                    "android", "deploy", "Config", "contracts", "project.yml")
+SKIP_SUFFIXES = (".md", ".png", ".jpg", ".pdf", ".npz", ".pt", ".pth", ".bin", ".zip", ".gz", ".lzma", ".joblib",
+                 ".parquet", ".mlmodel", ".safetensors", ".lock")
+MAX_SCAN_BYTES = 4 * 1024 * 1024
 
 
-def _offenders():
+def _tracked(repo, roots):
+    """Git-tracked files under ``roots`` (what production builds from; local build output and venvs excluded)."""
+    import subprocess
+    out = subprocess.run(["git", "-C", repo, "ls-files", "-z", "--", *roots], capture_output=True, check=True)
+    return [os.path.join(repo, p) for p in out.stdout.decode("utf-8").split("\0") if p]
+
+
+def _offenders(repo, files, tokens, own):
     hits = []
-    for rel in PRODUCTION_ROOTS:
-        root = os.path.join(REPO, rel)
-        for d, dirs, files in os.walk(root):
-            dirs[:] = [x for x in dirs if x not in ("__pycache__", "node_modules", ".build", ".venv")]
-            if os.path.abspath(d).startswith(OWN):
+    for path in files:
+        if os.path.abspath(path).startswith(own) or path.endswith(SKIP_SUFFIXES):
+            continue
+        try:
+            if os.path.getsize(path) > MAX_SCAN_BYTES:
                 continue
-            for name in files:
-                if not name.endswith(SUFFIXES):
-                    continue
-                path = os.path.join(d, name)
-                try:
-                    text = open(path, encoding="utf-8", errors="ignore").read()
-                except OSError:
-                    continue
-                hits += [f"{os.path.relpath(path, REPO)}: {t}" for t in TOKENS if t in text]
+            text = open(path, encoding="utf-8", errors="ignore").read().lower()
+        except OSError:
+            continue
+        hits += [f"{os.path.relpath(path, repo)}: {t}" for t in tokens if t in text]
     return hits
 
 
-def test_no_production_path_references_the_shadow_classifier():
-    if not os.path.isdir(os.path.join(REPO, "Tools", "CloudWorker")):
+def _full_checkout_or_skip():
+    has_git = os.path.exists(os.path.join(REPO, ".git"))          # a directory, or a file in a worktree
+    if not (os.path.isdir(os.path.join(REPO, "Tools", "CloudWorker")) and has_git):
+        if os.environ.get("CI"):
+            pytest.fail("isolation guard needs the full repository checkout in CI")
         pytest.skip("not running from a full repository checkout")
-    assert _offenders() == []
+
+
+def test_no_production_path_references_the_shadow_classifier():
+    _full_checkout_or_skip()
+    files = _tracked(REPO, PRODUCTION_ROOTS)
+    assert len(files) > 1000                   # the scan really covers the tree
+    assert _offenders(REPO, files, TOKENS, OWN) == []
+
+
+def test_the_guard_would_catch_wiring(tmp_path):
+    """An extensionless file naming the env var in upper case is caught; this package's own files are not."""
+    unit = tmp_path / "Dockerfile"
+    unit.write_text("ENV ACTINET_CLASSIFIER_DIR=/var/lib/frwhoop/actinet\n")
+    assert _offenders(str(tmp_path), [str(unit)], TOKENS, OWN) == ["Dockerfile: actinet_classifier",
+                                                                     "Dockerfile: actinet_classifier_dir"]
+    assert _offenders(REPO, [os.path.join(OWN[0], "serve.py")], TOKENS, OWN) == []
 
 
 def test_every_output_is_shadow_and_names_its_consumer():

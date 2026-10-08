@@ -18,7 +18,7 @@
  "license_evidence": "code: repository LICENSE (MIT, (c) 2026 Jonathan Carter, sha256 4d7f2e5bbae4970024ccbad782883bfd4d3c8241ff3d2e3a07051fb7082f1fa8, copied to frwhoop_sleep/wav2sleep_vendored/LICENSE); weights: Hugging Face model card license: mit",
  "rights_verdict": "clear",
  "status": "blocked_input",
- "status_reason": "adapter implemented (wav2sleep.ppg-only.v1, shadow-only, disabled by default) and bit-identical to the official code on synthetic fixtures (max abs probability diff 0, argmax 100%); blocked because no anchored, contiguous overnight PPG reaches the server (Spec 01 transport not landed, no overnight raw-optical capture) and there is no WHOOP sleep-stage evaluation set",
+ "status_reason": "adapter implemented (wav2sleep.ppg-only.v1, shadow-only, disabled by default) and bit-identical to the official code on synthetic fixtures at 24 and 25 Hz with max_length_hours equal to the run length (max abs probability diff 0, argmax 100%; against the official 10-h default padding only 395/960 and 398/960 agree, deviation D1); blocked because no anchored, contiguous overnight PPG reaches the server (Spec 01 transport not landed, no overnight raw-optical capture) and there is no WHOOP sleep-stage evaluation set",
  "provider_id": "wav2sleep.ppg-only.v1",
  "wired": false,
  "release_mode": "shadow",

@@ -27,9 +27,19 @@ def test_response_separates_output_types_and_stays_shadow():
     n = len(r["epochs"])
     probs, label = r["probabilities"], r["label"]
     assert probs["output_type"] == "class_probabilities" and probs["calibrated"] is False
-    assert label["output_type"] == "hmm_label" and set(label) == {"output_type", "method", "values", "after_gap"}
-    assert set(probs) == {"output_type", "classes", "calibrated", "values"} and probs["classes"] == list(CLASSES)
-    assert len(probs["values"]) == len(label["values"]) == len(label["after_gap"]) == n
+    assert label["output_type"] == "hmm_label" and set(label) == {"output_type", "method", "values", "after_gap",
+                                                                   "contiguous_epochs", "viterbi_spans_gaps"}
+    assert set(probs) == {"output_type", "classes", "calibrated", "derivation", "values"}
+    assert probs["classes"] == list(CLASSES) and "softmax(logits)" in probs["derivation"]
+    logits = r["logits"]
+    assert logits["output_type"] == "logits" and logits["classes"] == list(CLASSES)
+    assert len(probs["values"]) == len(label["values"]) == len(label["after_gap"]) == len(logits["values"]) == n
+    for lg, p in zip(logits["values"], probs["values"]):
+        if p is not None:                     # the probabilities are exactly softmax of the sent logits
+            e = np.exp(np.asarray(lg) - max(lg))
+            assert np.allclose(e / e.sum(), p, atol=2e-6)
+        else:
+            assert lg is None
     for ep, p, lab, gap in zip(r["epochs"], probs["values"], label["values"], label["after_gap"]):
         assert ep["e"] - ep["s"] == 30
         if ep["valid"]:
@@ -49,6 +59,16 @@ def test_one_hmm_pass_spans_the_request_and_restores_after_gaps():
     starts = [s for s, _ in valid]
     assert gaps[0] is False
     assert gaps[1:] == [b - a != 30 for a, b in zip(starts, starts[1:])]
+    # contiguous_epochs: the length of each epoch's 30 s chain; the request has gaps, so Viterbi spans them
+    chains = [c for e, c in zip(r["epochs"], r["label"]["contiguous_epochs"]) if e["valid"]]
+    expect, k = [], 0
+    while k < len(starts):
+        j = k + 1
+        while j < len(starts) and starts[j] - starts[j - 1] == 30:
+            j += 1
+        expect += [j - k] * (j - k)
+        k = j
+    assert chains == expect and r["label"]["viterbi_spans_gaps"] is True
 
 
 def test_cache_identity_covers_input_artifact_and_preprocessing():
@@ -198,3 +218,9 @@ def test_wire_classes_follow_the_runtime_not_a_constant():
                                hmm=fake_runtime().hmm)
     r, _ = _infer(rt, request())
     assert r["classes"] == ["q", "r", "s", "t"] and set(v for v in r["label"]["values"] if v) <= {"q", "r", "s", "t"}
+
+
+def test_oversized_request_line_is_refused_before_parsing(monkeypatch):
+    monkeypatch.setattr(serve, "MAX_REQUEST_BYTES", 64)
+    r = json.loads(serve.handle_line(fake_runtime(), json.dumps(request()), timeout=0)[0])
+    assert r["ok"] is False and r["kind"] == "malformed" and "exceeds" in r["error"]

@@ -100,12 +100,15 @@ def _check_hydra_free(node: Any, where: str) -> None:
         raise Withhold("config_mismatch", f"{where}: unsupported value type {type(node).__name__}")
 
 
-def parse_config(path: str) -> dict[str, Any]:
+def parse_config(path: str, data: Optional[bytes] = None) -> dict[str, Any]:
     """``yaml.safe_load`` + structural checks of the released 4-class, non-causal config."""
     import yaml
 
-    with open(path, "r", encoding="utf-8") as handle:
-        config = yaml.safe_load(handle)
+    if data is not None:                   # the bytes that were hashed (load_model): no second read
+        config = yaml.safe_load(data.decode("utf-8"))
+    else:
+        with open(path, "r", encoding="utf-8") as handle:
+            config = yaml.safe_load(handle)
     if not isinstance(config, dict):
         raise Withhold("config_mismatch", "config.yaml root must be a mapping")
     _check_hydra_free(config, "config")
@@ -144,11 +147,13 @@ def build_model(config: Mapping[str, Any]):
     return build(config, "config")
 
 
-def load_state_dict_strict(model: Any, path: str) -> dict[str, Any]:
+def load_state_dict_strict(model: Any, path: str, data: Optional[bytes] = None) -> dict[str, Any]:
     """``torch.load(weights_only=True)`` + exact key/shape/dtype match + strict load."""
     import torch
 
-    state = torch.load(path, map_location="cpu", weights_only=True)
+    import io
+    source = io.BytesIO(data) if data is not None else path
+    state = torch.load(source, map_location="cpu", weights_only=True)
     if not isinstance(state, Mapping) or not state:
         raise Withhold("state_dict_mismatch", "state_dict.pth is not a non-empty mapping")
     expected = model.state_dict()
@@ -199,9 +204,19 @@ def load_model(model_root: str, pins: Optional[Mapping[str, Mapping[str, Any]]] 
     """Verify, build and strictly load. Raises :class:`Withhold` for every artifact fault."""
     started = time.perf_counter()
     verified = verify_artifacts(model_root, pins)
-    config = parse_config(verified["config.yaml"].path)
+    # Parse exactly the bytes whose digest is checked here, so a file replaced after verify_artifacts cannot be
+    # loaded under the verified identity.
+    data: dict[str, bytes] = {}
+    for name, artifact in verified.items():
+        with open(artifact.path, "rb") as handle:
+            blob = handle.read()
+        if hashlib.sha256(blob).hexdigest() != artifact.sha256:
+            raise Withhold("artifact_sha256_mismatch", f"{name} changed after verification", artifact=name,
+                           path=artifact.path)
+        data[name] = blob
+    config = parse_config(verified["config.yaml"].path, data["config.yaml"])
     model = build_model(config)
-    inventory = load_state_dict_strict(model, verified["state_dict.pth"].path)
+    inventory = load_state_dict_strict(model, verified["state_dict.pth"].path, data["state_dict.pth"])
     model.eval()
     model.requires_grad_(False)
     if model.training or any(p.requires_grad for p in model.parameters()):

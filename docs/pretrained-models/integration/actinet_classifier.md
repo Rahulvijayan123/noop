@@ -53,9 +53,13 @@ A new `ActiNetIntensityStage` beside `ElderNetStage` (`ActivityGaitQuality.swift
   `head_b64`/`tail_b64` are accepted and ignored). One request per day matters: upstream's HMM runs over one
   recording, and the adapter runs one Viterbi pass per request. Bounds: at most 2,880 epochs, 4,000 runs and 86,400
   input seconds per request, and a 12 MiB response line. Split a longer request at a gap, never inside a run.
-- **Cache.** Key the answer with `ActivityLocalCache.inferenceKey(request:identity:versions:)` using this child's
-  `cacheIdentity`. The response's own `cache_key = sha256(input_digest, artifact_digest, preprocessing_digest)` is
-  stored with the row (§3) for audit; it is not a substitute for the worker key, which also covers code and threads.
+- **Cache.** `ActivityLocalCache.inferenceKey(request:identity:versions:)` (`ActivityLocalCache.swift:72` at
+  `783ac84da`) takes a single `ActivityPythonService.RunRequest`, but this request carries a day of runs. Add an
+  overload, for example `inferenceKey(runs: [RunRequest], identity:versions:)`, under a new key schema
+  `activity-infer-multi-1`: the sha256 of each run's existing key material in time order, plus the child's
+  `cacheIdentity`. Return nil without an identity, as the single-run key does. The response's own
+  `cache_key = sha256(input_digest, artifact_digest, preprocessing_digest)` is stored with the row (§3) for audit.
+  It does not replace the worker key, which also covers code and threads.
 - **Failure.** A child error, timeout or `model_available: false` stores nothing and touches no other lane. Count it
   in the heartbeat as Inertia does (`*_failures`, `*_unavailable`).
 - **Heartbeat.** Add `actinet_classifier.loaded_digest` to the hard-coded child list in `ActivityLane.identity`
@@ -69,34 +73,57 @@ A new `ActiNetIntensityStage` beside `ElderNetStage` (`ActivityGaitQuality.swift
 
 ## 3. Storage (`supabase/migrations`, new)
 
-`activity_intensity_shadow_days`, with the same fence pattern as `activity_motion_heads_days` after
-`20261008100000_activity_release_authority.sql`:
+`activity_intensity_shadow_days`, in the pattern of `20261005170000_activity_motion_heads.sql` plus
+`20261008100000_activity_release_authority.sql`: `user_id` and `device_id` with the composite key to `devices`, a
+job fingerprint and input revision, a result-revision sequence, worker-written rows, and a fenced publish function
+with the same lease and revision fence as `publish_activity_motion_heads_day`. Sketch (column checks abbreviated
+where they copy the motion-heads table verbatim):
 
 ```sql
 create table public.activity_intensity_shadow_days (
-  owner uuid not null references auth.users(id) on delete cascade,
-  device_id uuid not null,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  device_id uuid not null references public.devices(id) on delete cascade,
   day date not null,
   model_id text not null check (model_id = 'actinet-walmsley'),
-  model_version text not null,
+  model_version text not null check (model_version ~ '^[A-Za-z0-9][A-Za-z0-9._-]{0,95}$'),
+  mode text not null check (mode = 'shadow'),
   release_mode text not null default 'shadow' check (release_mode = 'shadow'),
-  authority jsonb,
-  input_revision bigint not null,
-  input_digest text not null,
-  artifact_digest text not null,
-  preprocessing_digest text not null,
-  cache_key text not null,
-  loaded_digest text not null,
-  summary jsonb not null,      -- counts, valid / invalid by reason, after_gap fraction, class epoch counts (HMM and raw)
-  epochs jsonb not null,       -- compact columns: s, valid, reason, probabilities[4] (6 dp), hmm label, after_gap
-  computed_at timestamptz not null default now(),
-  primary key (owner, device_id, day, model_version)
+  authority jsonb check (authority is null or jsonb_typeof(authority) = 'object'),
+  wire_schema text not null check (wire_schema = 'actinet-classifier-1'),
+  artifact_digest text not null check (artifact_digest ~ '^[0-9a-f]{64}$'),
+  preprocessing_version text not null, temporal_version text not null,
+  preprocessing_digest text not null check (preprocessing_digest ~ '^[0-9a-f]{64}$'),
+  input_digest text not null check (input_digest ~ '^[0-9a-f]{64}$'),
+  cache_key text not null check (cache_key ~ '^[0-9a-f]{64}$'),
+  loaded_digest text not null check (loaded_digest ~ '^[0-9a-f]{64}$'),
+  job_fingerprint text not null check (job_fingerprint ~ '^[0-9a-f]{64}$'),
+  input_revision bigint not null check (input_revision >= 1),
+  n_epochs integer not null check (n_epochs between 0 and 2880),
+  n_valid integer not null check (n_valid between 0 and n_epochs),
+  withheld_reason text check (withheld_reason is null or length(withheld_reason) between 1 and 240),
+  summary jsonb not null check (jsonb_typeof(summary) = 'object'),
+  -- columnar `ai-col-1`: epoch start deltas, valid/reason codes, probabilities in per-mille x4, logits x4 (3 dp),
+  -- hmm label index, after_gap, contiguous_epochs; null when over the worker's size cap (summary says so)
+  epochs jsonb check (epochs is null or (jsonb_typeof(epochs) = 'object'
+                                         and (epochs ->> 'format') is not distinct from 'ai-col-1')),
+  result_revision bigint not null,
+  created_at timestamptz not null default clock_timestamp(),
+  computed_at timestamptz not null,
+  primary key (user_id, device_id, day, model_version, mode),
+  foreign key (user_id, device_id) references public.devices(user_id, id) on delete cascade
 );
+create sequence if not exists public.activity_intensity_shadow_days_result_revision_seq;
 alter table public.activity_intensity_shadow_days enable row level security;
--- No select policy for `authenticated`: shadow output is never readable by the app or any user-facing route.
--- service_role writes and reads (worker, offline comparison). Retention as ActivityMotionHeadsDays.retentionDays.
+revoke all on public.activity_intensity_shadow_days from public, anon, authenticated;
+grant all on public.activity_intensity_shadow_days to service_role;
+create policy activity_intensity_shadow_days_service on public.activity_intensity_shadow_days
+  for all to service_role using (true) with check (true);
+-- publish_activity_intensity_shadow_day(...): copy of publish_activity_motion_heads_day's lease + revision fence.
+-- prune_activity_intensity_shadow_days(): 30-day retention, as prune_activity_motion_heads_days.
 ```
 
+- **One deliberate departure from the motion-heads table:** no `select` grant or policy for `authenticated`. The
+  motion-heads rows are owner-readable. Shadow intensity has no app reader and must not get one by accident.
 - `authority` follows the row authority block (`expert-authority-1`) with `channel: "activity_intensity"`,
   `route: "standalone"`, `mode: "shadow"`, `release_mode: "shadow"`, `use: "none"` and
   `pinned_artifact_digest: <pin>`. This needs one additive key in `ActivityExpertAuthority`.

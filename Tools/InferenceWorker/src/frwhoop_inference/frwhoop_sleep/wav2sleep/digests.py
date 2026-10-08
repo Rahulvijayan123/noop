@@ -32,7 +32,8 @@ MODEL_CODE_FILES = ("settings.py", "models/__init__.py", "models/wav2sleep.py",
                     "models/blocks.py", "models/utils.py")
 #: Files that define the tensor handed to the model.
 PREPROCESSING_CODE_FILES = (("adapter", "constants.py"), ("adapter", "contract.py"),
-                            ("adapter", "preprocessing.py"), ("vendored", "data/zscore.py"))
+                            ("adapter", "preprocessing.py"), ("adapter", "provider.py"),
+                            ("vendored", "data/zscore.py"))  # provider.py owns the epoch grid and the gates
 
 
 def _canonical(payload: Any) -> bytes:

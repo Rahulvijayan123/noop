@@ -21,7 +21,7 @@
       "decision_reasons": [
         "No Nara bundle supplies the Walmsley label space or a label output; the deployed actukb bundle has Nara posture/locomotion/arm/transition heads plus a log-only, not test-gated movement_intensity regression.",
         "Complete 30-s windows of 100 Hz accelerometer in g exist (about 2,400 non-overlapping windows, 2026-10-05 to 10-08).",
-        "Part-time capture (60 s per 180 s) makes the upstream HMM, sleep correction and daily imputation inapplicable; window-level labels only.",
+        "Part-time capture (60 s per 180 s) makes the upstream HMM, sleep correction and daily imputation inapplicable; window-level labels only. Built (2026-10-08): upstream's exact HMM semantics (one Viterbi pass across gaps, raw label restored after each gap), with per-epoch contiguous_epochs so consumers can tell which labels had real smoothing.",
         "Upstream parity shown on a synthetic six-run request (tests/actinet_classifier/test_actinet_classifier_real.py; 2026-10-08).",
         "Licence scope for a service on beta testers' data is an owner decision (Oxford Academic Use Licence)."
       ],
@@ -92,12 +92,12 @@
       ],
       "remaining_gates": [
         {"gate": "Upstream parity of the frozen walmsley classifier plus original preprocessing", "cleared_by": "motion agent"},
-        {"gate": "Named downstream consumer and shadow store for 4-class labels (labels, not probabilities)", "cleared_by": "lead and motion agent under Spec 01 authority rules"},
+        {"gate": "Named downstream consumer and shadow store for 4-class labels (labels; logits and derived probabilities kept as separate fields)", "cleared_by": "lead and motion agent under Spec 01 authority rules"},
         {"gate": "Out-of-sample comparison (GOTOV/PAMAP2 test splits for intensity, sleep-accel PSG for sleep vs wake, WHOOP labels) against actukb on final features, coverage and runtime; Capture-24 is in-sample", "cleared_by": "motion agent; more WHOOP labels from the owner"},
         {"gate": "Licence scope for a service on beta testers' data; correct NOTICE.md and registry.py", "cleared_by": "owner (or an Oxford University Innovation licence)"}
       ],
       "adapter_constraints": [
-        "Window-level only on part-time data; run the HMM only inside contiguous runs and record when it was skipped.",
+        "Window-level only on part-time data; run the HMM only inside contiguous runs and record when it was skipped. Superseded 2026-10-08: the adapter reproduces upstream exactly and reports label.contiguous_epochs and label.viterbi_spans_gaps instead (ACTINET_CLASSIFIER.md section 4).",
         "Never treat upstream daily imputation as observed data; the sleep label never replaces canonical sleep staging.",
         "Do not attach a new head to the 1024-d embeddings; use the complete upstream classifier.",
         "Runtime reference: harnet30 encoder ~37 windows/s per thread on the VPS (INERTIA1.md:110-111)."

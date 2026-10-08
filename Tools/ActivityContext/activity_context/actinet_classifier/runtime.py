@@ -36,9 +36,9 @@ import numpy as np
 from .. import __version__
 from ..preprocess import (MAX_HEAD_SECONDS, MAX_RUN_SECONDS, MAX_TAIL_SECONDS, PreprocessError,
                           decode_columns_b64, validate_request_units)
-from . import (CONSUMER, DEFAULT_GRID, EPOCH_S, ERROR_KINDS, MODEL_ID, MODEL_VERSION, PREPROCESSING_VERSION,
-               RELEASE_MODE, REQUIRED_CHANNELS, SOURCE_HZ, TEMPORAL_VERSION, UPSTREAM_CLASSIFIER_KEY,
-               UPSTREAM_COMMIT, UPSTREAM_VERSION, WIRE_SCHEMA)
+from . import (CLASS_ORDER, CONSUMER, DEFAULT_GRID, EPOCH_S, ERROR_KINDS, MODEL_ID, MODEL_VERSION,
+               PREPROCESSING_VERSION, REASON_NONFINITE, RELEASE_MODE, REQUIRED_CHANNELS, SOURCE_HZ, TEMPORAL_VERSION,
+               UPSTREAM_CLASSIFIER_KEY, UPSTREAM_COMMIT, UPSTREAM_VERSION, WIRE_SCHEMA)
 from .hmm import HMMParams, params_from_doc, smooth
 from .preprocess import Epoch, Run, epochs as make_epochs, model_batch, runs_from_seconds, validate_grid
 from .weights import CONVERTED, SOURCE, PinnedFile, WeightsError, artifact_digest
@@ -47,7 +47,6 @@ MAX_OUTPUT_BYTES = 12 * 1024 * 1024          # below the worker's 16 MiB line ca
 MAX_EPOCHS_PER_REQUEST = 2880                # 24 h of contiguous 30 s epochs
 MAX_RUNS = 4000                              # a day of 60 s / 180 s bursts is 480
 DEFAULT_MAX_BATCH = 64
-REASON_NONFINITE = "nonfinite_output"
 INTERVAL_MS = EPOCH_S * 1000
 INPUT_DIGEST_PREFIX = b"actinet-input-1\n"
 CACHE_PREFIX = "actinet-classifier-cache-1\n"
@@ -155,6 +154,8 @@ def build_runtime(artifact_dir: Optional[str] = None, *, threads: Optional[int] 
             from .model import build_classifier
             from .weights import read_artifact
             state, classes_, hmm_block, measured = read_artifact(artifact_dir, pins)
+            if tuple(pins) == CONVERTED and tuple(classes_) != CLASS_ORDER:
+                raise WeightsError("weights_mismatch", f"class order {tuple(classes_)} != pinned {CLASS_ORDER}")
             kw["loaded_files"] = dict(measured)
             hmm = params_from_doc(hmm_block, classes_)
             classifier = build_classifier(state, len(classes_), threads=threads, max_batch=max_batch)
@@ -315,12 +316,25 @@ def _num(x: float):
 def wire_response(rt: ActiNetRuntime, res: EpochResults, digest: str, t0: float) -> Dict[str, Any]:
     n = len(res.epochs)
     probs: List[Optional[List[float]]] = [None] * n
+    logits: List[Optional[List[float]]] = [None] * n
     labels: List[Optional[str]] = [None] * n
     gaps: List[Optional[bool]] = [None] * n
+    chain: List[Optional[int]] = [None] * n
     for j, i in enumerate(res.index.tolist()):
         probs[i] = [round(float(v), WIRE_DECIMALS) for v in res.probabilities[j]]
+        logits[i] = [round(float(v), WIRE_DECIMALS) for v in res.logits[j]]
         labels[i] = rt.classes[int(res.label[j])]
         gaps[i] = bool(res.after_gap[j])
+    # Length of the chain of valid epochs exactly 30 s apart that each epoch belongs to. The Viterbi pass spans the
+    # whole request (upstream semantics), so a label in a short chain leans on evidence from across a gap; only
+    # long chains carry real temporal smoothing (ACTINET_CLASSIFIER.md §4).
+    idx = res.index.tolist()
+    a = 0
+    for b in range(1, len(idx) + 1):
+        if b == len(idx) or bool(res.after_gap[b]):
+            for k in range(a, b):
+                chain[idx[k]] = b - a
+            a = b
     reasons: Dict[str, int] = {}
     for ep in res.epochs:
         if not ep.valid:
@@ -337,9 +351,13 @@ def wire_response(rt: ActiNetRuntime, res: EpochResults, digest: str, t0: float)
         "preprocessing_digest": pre, "input_digest": digest, "cache_key": cache_key(digest, art, pre),
         "epoch_s": EPOCH_S, "grid": rt.grid, "classes": list(rt.classes),
         "epochs": [{"s": _num(ep.s), "e": _num(ep.e), "valid": ep.valid, "reason": ep.reason} for ep in res.epochs],
+        "logits": {"output_type": "logits", "source": "network output (upstream sslmodel.predict output_logits=True)",
+                   "classes": list(rt.classes), "values": logits},
         "probabilities": {"output_type": "class_probabilities", "classes": list(rt.classes), "calibrated": False,
-                          "values": probs},
-        "label": {"output_type": "hmm_label", "method": TEMPORAL_VERSION, "values": labels, "after_gap": gaps},
+                          "derivation": "softmax(logits) in float64; upstream predict() returns labels only and uses "
+                                        "this softmax to fit its HMM emission", "values": probs},
+        "label": {"output_type": "hmm_label", "method": TEMPORAL_VERSION, "values": labels, "after_gap": gaps,
+                  "contiguous_epochs": chain, "viterbi_spans_gaps": bool(res.after_gap.any())},
         "counts": {"epochs": n, "valid": int(res.index.shape[0]), "invalid": reasons},
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }

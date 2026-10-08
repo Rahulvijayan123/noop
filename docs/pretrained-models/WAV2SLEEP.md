@@ -1,7 +1,9 @@
 # wav2sleep, PPG-only: shadow sleep-stage adapter (Spec 03, candidate 2)
 
 **Status:** the adapter is implemented, shadow-only, off by default and unregistered. It matches the official
-code bit for bit on synthetic fixtures at 24 and 25 Hz (all 11 real-weight tests pass, 2026-10-08). **Activation is deferred.** No anchored overnight PPG reaches the
+code bit for bit on synthetic fixtures at 24 and 25 Hz (all 11 real-weight tests pass, 2026-10-08). "Bit for bit"
+means against the official route with `max_length_hours` set to the run length. Against the official 10-h default
+padding, agreement is only 395/960 (24 Hz) and 398/960 (25 Hz); that is deviation D1, §8.1. **Activation is deferred.** No anchored overnight PPG reaches the
 server yet, and there is no sleep-stage evaluation set with a PPG waveform. Nothing here is evidence
 that the model stages WHOOP sleep correctly.
 
@@ -10,7 +12,7 @@ that the model stages WHOOP sleep correctly.
 | Provider | `wav2sleep.ppg-only.v1`, metric `sleep_stage`, mode `retrospective`, release mode `shadow` |
 | Code | `Tools/InferenceWorker/src/frwhoop_inference/frwhoop_sleep/wav2sleep/` (adapter), `.../wav2sleep_vendored/` (MIT model code) |
 | Tests | `Tools/InferenceWorker/tests/test_wav2sleep_*.py` |
-| Enable | `FRWHOOP_WAV2SLEEP_SHADOW_ENABLED=1` (exactly "1"); thread cap `FRWHOOP_WAV2SLEEP_THREADS` (default 1, max 4) |
+| Enable | `FRWHOOP_WAV2SLEEP_SHADOW_ENABLED=1` (exactly "1"); thread cap `FRWHOOP_WAV2SLEEP_THREADS` (default 1, max 4, never above Spec 01's `FRWHOOP_INFERENCE_MATH_THREADS`) |
 | Registered | No. The one-line registration and the manifest update are fragments in [integration/wav2sleep.md](integration/wav2sleep.md) |
 | Consumer | `sleep_stage_shadow_comparison`, proposed. It compares these epochs with the canonical stager's epochs for the same night. It never shows the result to users. |
 
@@ -52,7 +54,7 @@ Every response carries three digests: `input`, `artifact` and `preprocessing`. I
 | | Native (WHOOP) | Model (pinned code) |
 | --- | --- | --- |
 | Signal | optical PPG, absolute ADC counts (anchor + cumulative deltas) | `PPG` |
-| Rate | 24 samples/s; sample j at `start_unix + j/24`; the next second owns the 25th point | 1024 samples per 30-s epoch = 34.133 Hz (`settings.COLS_TO_SAMPLES_PER_EPOCH['PPG']`) |
+| Rate | the declared native rate r, 25 (anchored v26) or 24 (legacy) samples/s; sample j at `start_unix + j/r`; the next second owns point r+1 | 1024 samples per 30-s epoch = 34.133 Hz (`settings.COLS_TO_SAMPLES_PER_EPOCH['PPG']`) |
 | Grid | whole seconds | `k * 30/1024` s, k = 1..1024n, from the run's epoch origin; this is the pinned `process_waveform_dataframe` target index |
 | Max length | the window is at most 10 h | 1200 epochs (`TRAINING_LENGTH_HOURS = 10`) |
 
@@ -135,8 +137,9 @@ Withheld reasons (`diagnostics.reason_detail` → wire `withheld_reason`):
 | `clock_rate_mismatch` | `blocked_input` | `clock.samples_per_second` differs from `ppg.native_rate_hz` |
 | `optical_config_identity_missing` | `blocked_input` | `config.identity` is absent |
 | `optical_config_unidentified` | `unverified` | `config.identity` is `"unknown"`, or `config.known` is not `true` |
-| `optical_config_changed` / `optical_config_changed_within_run` | `blocked_input` | `config.stable` is not `true`, or `config.identity` changes inside one `run_id` |
-| `noncontiguous_run` / `overlapping_segments` / `unsorted_segments` | `blocked_input` | a gap inside one `run_id`, overlapping pieces, or pieces out of time order |
+| `optical_config_changed` | `blocked_input` | `config.stable` is not `true` |
+| `overlapping_segments` / `unsorted_segments` | `blocked_input` | overlapping pieces, or pieces out of time order |
+| (no refusal) | — | a gap or a `config.identity` change inside one `run_id` splits the run there and is counted as `ppg_run_id_discontinuity` in the diagnostics |
 | `invalid_segment` / `unsupported_native_rate` | `blocked_input` | the sample count is not `duration_s × native_rate_hz`, or the declared rate is not in {24, 25} or differs from `sample_count_per_second` |
 | `nonfinite_samples` / `non_integer_samples` / `saturated_samples` | `blocked_input` | NaN or inf, fractional counts, or values on or beyond the signed 20-bit rails or flagged saturated |
 | `channel_not_admitted` / `derived_respiration_refused` | `blocked_input` | section 3 |
@@ -198,7 +201,7 @@ Mask reasons:
 | `no_ppg` | gap |
 | `run_edge_partial_epoch` | the epoch is only partly covered by its run |
 | `run_too_short` | the run is shorter than `min_run_epochs` |
-| `flat_signal` | the run's native std is below 0.001 (the pinned ingest's flat-PPG rule) |
+| `flat_signal` | the run's native std is below 0.001 (the pinned ingest's flat-PPG rule). Upstream applies it in EDF physical units; on integer ADC counts it fires only on a perfectly flat run. **There is effectively no signal-quality gate**, and one must be defined before activation (gate 3) |
 | `nonfinite_model_output` | the model returned non-finite values for the run |
 
 **Supported window and quality gates.** These are provisional. They were not tuned, because there is
@@ -308,7 +311,7 @@ Setup:
 - **Path.** Each run went `process_waveform_dataframe` → parquet → `ParquetDataset(...)[0]` →
   `load_model(folder)` → forward.
 - **Adapter.** The sidecar env (`uv sync --frozen`).
-- **Fixtures.** Deterministic SYNTHETIC PPG-like signals at 24 Hz, shaped like Spec 01 segments
+- **Fixtures.** Deterministic SYNTHETIC PPG-like signals at 24 and 25 Hz, shaped like Spec 01 segments
   (`tests/wav2sleep_fixtures.py`).
 
 | Fixture | Epochs | resampled | z-scored | max abs prob diff | max abs logit diff | argmax agreement |
@@ -381,7 +384,19 @@ Other measured sizes:
   `max_epochs = 1200`, so the peak is bounded at about 1.3 GB for the sidecar process. It must not
   coincide with other heavy model loads in the same process. Run it in the Spec 01 bounded worker
   process with a memory limit of about 1.6 GB.
-- **Fit against the Droplet snapshot.** The eligibility agent recorded the Droplet in
+- **Spec 01's bounds supersede the snapshot below.** Spec 01's unit sets `MemoryHigh=2G` for the whole sidecar
+  (`deploy/frwhoop-inference.service:37` on its branch), with one shared infer worker
+  (`FRWHOOP_INFERENCE_MAX_ACTIVE` 1).
+  - The table above measured a whole-process peak of about 1.29 GB per fresh process, including a parsed 7 MB JSON
+    request.
+  - A warm in-process re-measurement on 2026-10-08 (no JSON parsing; `_build-scratch/spec03-physio/warm_rss_20261008.json`)
+    peaked at 686 MB after calls 1 and 2 and at 924 MB after call 3. Peak memory is not flat across calls.
+  - The independent review reported a second warm call above 1.3 GB, which was not recorded in a file and is not
+    reproduced here.
+  - Either way, one wav2sleep forward can take most of a 2 GB unit. Registration (Phase B) needs either a
+    dedicated lane or measured headroom under 2 GB on the Droplet.
+  - The adapter's thread cap now also obeys Spec 01's `FRWHOOP_INFERENCE_MATH_THREADS`: the lower of the two wins.
+- **Fit against the Droplet snapshot (pre-Spec 01).** The eligibility agent recorded the Droplet in
   [ELIGIBILITY.md](ELIGIBILITY.md): the sidecar unit has `MemoryMax` 3 GiB, uses 835 MB and has
   `CPUQuota` 150%. In process, one forward would take the sidecar to roughly 1.8–1.9 GB, which is
   inside that limit. That leaves about 1.1 GB for any other heavy provider running at the same

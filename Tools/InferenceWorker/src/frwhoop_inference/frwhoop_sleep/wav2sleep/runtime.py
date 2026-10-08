@@ -39,7 +39,13 @@ def thread_cap(value: Any = None) -> int:
         cap = int(raw) if raw is not None else C.DEFAULT_THREADS
     except (TypeError, ValueError):
         cap = C.DEFAULT_THREADS
-    return max(1, min(C.MAX_THREADS, cap))
+    cap = max(1, min(C.MAX_THREADS, cap))
+    # Spec 01's bounded worker sets the process-wide math-thread cap; this lane never exceeds it.
+    try:
+        process_cap = int(os.environ.get("FRWHOOP_INFERENCE_MATH_THREADS", ""))
+    except ValueError:
+        process_cap = 0
+    return min(cap, process_cap) if process_cap >= 1 else cap
 
 
 def get_model(model_root: str) -> LoadedModel:
