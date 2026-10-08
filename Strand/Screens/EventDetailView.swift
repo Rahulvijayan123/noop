@@ -13,7 +13,7 @@ struct EventDetailView: View {
     let event: HealthEvent
     var history: [HealthEvent] = []
 
-    @State private var metricIndex = 0
+    @State private var metricIndex = EventDetailView.initialMetricIndex
     @State private var selected: Date?
 
     var body: some View {
@@ -34,6 +34,15 @@ struct EventDetailView: View {
             AboutDisclosure(paragraphs: aboutParagraphs)
         }
         .onChangeCompat(of: metricIndex) { _ in selected = nil }
+    }
+
+    /// The metric the page opens on: the first. DEBUG builds take `--demo-event-metric N` for screenshots.
+    private static var initialMetricIndex: Int {
+        #if DEBUG
+        return DemoLaunch.intArg("--demo-event-metric") ?? 0
+        #else
+        return 0
+        #endif
     }
 
     // MARK: Physiology

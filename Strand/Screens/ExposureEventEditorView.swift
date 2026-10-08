@@ -11,6 +11,7 @@ struct ExposureEventEditorView: View {
     @State private var draft: ExposureEventDraft
     @State private var working = false
     @State private var failed = false
+    @State private var confirmingRemove = false
 
     init(event: PhysiologyContext.ExposureEvent? = nil, defaultTime: Date = Date(),
          onDone: @escaping () -> Void = {}) {
@@ -20,70 +21,89 @@ struct ExposureEventEditorView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader(event == nil ? "Add event" : "Edit")
-                NoopCard {
-                    VStack(alignment: .leading, spacing: 12) {
-                        Picker("Kind", selection: $draft.kind) {
-                            ForEach(PhysiologyContext.ExposureKind.allCases, id: \.self) { kind in
-                                Text(kind.title).tag(kind)
+        NavigationStack {
+            Form {
+                Section {
+                    Picker("Kind", selection: $draft.kind) {
+                        ForEach(PhysiologyContext.ExposureKind.allCases, id: \.self) { kind in
+                            Text(kind.title).tag(kind)
+                        }
+                    }
+                    LabeledContent("Name") {
+                        TextField("Optional", text: $draft.label)
+                            .multilineTextAlignment(.trailing)
+                    }
+                }
+                .eventEditorRow()
+
+                Section {
+                    Toggle("Time range", isOn: isRange)
+                        .tint(StrandPalette.accent)
+                    DatePicker(draft.end == nil ? "Time" : "Start", selection: $draft.start)
+                    if draft.end != nil {
+                        DatePicker("End", selection: endBinding)
+                    }
+                    Picker("Time is", selection: $draft.precision) {
+                        Text("Exact").tag(PhysiologyContext.TimePrecision.exact)
+                        Text("Approximate").tag(PhysiologyContext.TimePrecision.approximate)
+                    }
+                    .pickerStyle(.segmented)
+                }
+                .eventEditorRow()
+
+                Section {
+                    LabeledContent("Amount") {
+                        TextField("Optional", text: $draft.doseText)
+                            .multilineTextAlignment(.trailing)
+                        #if os(iOS)
+                            .keyboardType(.decimalPad)
+                        #endif
+                    }
+                    LabeledContent("Unit") {
+                        TextField("e.g. mg", text: $draft.doseUnit)
+                            .multilineTextAlignment(.trailing)
+                    }
+                } footer: {
+                    if !messages.isEmpty {
+                        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                            ForEach(messages, id: \.self) { message in
+                                Text(message)
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.statusWarning)
                             }
-                        }
-                        TextField("Name (optional)", text: $draft.label)
-                            .textFieldStyle(.roundedBorder)
-
-                        Divider().overlay(StrandPalette.hairline)
-
-                        Toggle("Time range", isOn: isRange)
-                            .toggleStyle(.switch)
-                            .tint(StrandPalette.accent)
-                        DatePicker(draft.end == nil ? "Time" : "Start", selection: $draft.start)
-                        if draft.end != nil {
-                            DatePicker("End", selection: endBinding)
-                        }
-                        Picker("Time is", selection: $draft.precision) {
-                            Text("Exact").tag(PhysiologyContext.TimePrecision.exact)
-                            Text("Approximate").tag(PhysiologyContext.TimePrecision.approximate)
-                        }
-                        .pickerStyle(.segmented)
-
-                        Divider().overlay(StrandPalette.hairline)
-
-                        HStack {
-                            TextField("Amount (optional)", text: $draft.doseText)
-                                .textFieldStyle(.roundedBorder)
-                            #if os(iOS)
-                                .keyboardType(.decimalPad)
-                            #endif
-                            TextField("Unit", text: $draft.doseUnit)
-                                .textFieldStyle(.roundedBorder)
-                                .frame(maxWidth: 110)
-                        }
-
-                        ForEach(messages, id: \.self) { message in
-                            Text(message)
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.signalYellow)
                         }
                     }
                 }
+                .eventEditorRow()
 
-                HStack {
-                    Button("Cancel") { onDone() }
-                        .disabled(working)
-                    Spacer()
-                    if event != nil {
-                        Button("Remove", role: .destructive) { remove() }
+                if event != nil {
+                    Section {
+                        Button("Remove event", role: .destructive) { confirmingRemove = true }
                             .disabled(working)
                     }
+                    .eventEditorRow()
+                }
+            }
+            .eventEditorForm()
+            .navigationTitle(event == nil ? "Add event" : "Edit event")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { onDone() }
+                        .disabled(working)
+                }
+                ToolbarItem(placement: .confirmationAction) {
                     Button("Save") { save() }
                         .keyboardShortcut(.defaultAction)
                         .disabled(working || !draft.problems.isEmpty)
                 }
-                .font(StrandFont.subhead)
             }
-            .padding(NoopMetrics.cardPadding)
+            .confirmationDialog("Remove this event?", isPresented: $confirmingRemove, titleVisibility: .visible) {
+                Button("Remove", role: .destructive) { remove() }
+                Button("Cancel", role: .cancel) {}
+            }
         }
         #if os(macOS)
         .frame(minWidth: 380, minHeight: 460)

@@ -701,6 +701,12 @@ enum DemoScreens {
         // `--demo-kit-only <ids>` for a few sections.
         case "kitcharts": return AnyView(KitChartsGallery())
         case "kitcomponents": return AnyView(KitComponentsGallery())
+        // The event editors (Strand/Screens/EventsDemoScreens.swift). `treatment` takes
+        // `--demo-treatment-sheet start|dose|end|edit` to open one of its sheets.
+        case "treatment": return AnyView(TreatmentCaregiverView())
+        case "exposurelist": return AnyView(EventsDemoScreens.exposureList())
+        case "exposureeditor": return AnyView(EventsDemoScreens.exposureEditor())
+        case "markereditor": return AnyView(EventsDemoScreens.markerEditor())
         default:         return nil
         }
     }
