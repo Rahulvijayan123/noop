@@ -105,7 +105,16 @@ struct MetricDetailView: View {
 
     init(metric: MetricDescriptor) {
         self.metric = metric
-        _range = State(initialValue: ExploreRange(MetricPresentation.of(metric).defaultRange))
+        var initial = ExploreRange(MetricPresentation.of(metric).defaultRange)
+        #if DEBUG
+        // `--demo-metric-range 3M`: open on another range, for simulator screenshots of binned charts.
+        let args = CommandLine.arguments
+        if let i = args.firstIndex(of: "--demo-metric-range"), i + 1 < args.count,
+           let demo = ChartRange(rawValue: args[i + 1]) {
+            initial = ExploreRange(demo)
+        }
+        #endif
+        _range = State(initialValue: initial)
     }
 
     private var loadTaskID: String {
@@ -619,6 +628,20 @@ struct MetricDetailView: View {
             MetricShareCard(title: p.isNightly ? String(localized: "Nights by band") : String(localized: "Days by band"),
                             rows: MetricShareRows.bands(bands, values: f.windowRows.map(\.value)),
                             isLoading: loading)
+        }
+        if p.secondary.contains(.weekdayPattern), !loading, f.windowRows.count >= 28,
+           f.chartRange != .week, f.chartRange != .month {
+            let fill: (Double) -> Color = {
+                if case .scoreBars(let scoreFill) = p.chart, let bands = MetricScoreBands.bands(for: scoreFill) {
+                    return { bands.band(for: $0).color }
+                }
+                let max = f.scoreMax
+                return { StrandPalette.effortTint(fraction: $0 / max) }
+            }()
+            MetricShareCard(title: String(localized: "By weekday"),
+                            rows: MetricShareRows.weekdays(f.windowRows, scaleMax: f.scoreMax, color: fill,
+                                                           text: { p.textWithUnit($0, unit: f.unit) }),
+                            isLoading: false)
         }
         if p.secondary.contains(.distribution), f.hasData || loading {
             MetricShareCard(title: String(localized: "Check-ins"),

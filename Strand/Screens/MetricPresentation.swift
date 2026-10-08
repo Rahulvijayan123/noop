@@ -125,6 +125,8 @@ struct MetricPresentation: Equatable {
         case bandMix
         /// Mood check-ins per level.
         case distribution
+        /// The average per weekday (3M and longer, where a weekly rhythm can show).
+        case weekdayPattern
         /// The strap's banked readings over the last 24 hours (skin temperature, SpO2).
         case banked
         /// The server's intraday series (cloud only).
@@ -250,7 +252,7 @@ extension MetricPresentation {
         // Charge
         case "recovery":
             return make(.scoreBars(.charge), .charge, stats: [.average, .low, .high, .atLeast(RecoveryScorer.bandYellowMax)],
-                        secondary: [.bandMix], scoring: .charge)
+                        secondary: [.bandMix, .weekdayPattern], scoring: .charge)
         case "hrv":
             return make(.line(minSpan: 20), .purple, cadence: .nightly, stats: vitalStats, secondary: intraday,
                         band: .hrv)
@@ -306,7 +308,8 @@ extension MetricPresentation {
 
         // Effort
         case "strain":
-            return make(.scoreBars(.effort), .effort, stats: [.average, .low, .high, .vsPrevious], scoring: .effort)
+            return make(.scoreBars(.effort), .effort, stats: [.average, .low, .high, .vsPrevious],
+                        secondary: [.weekdayPattern], scoring: .effort)
         case "steps", "steps_est":
             return make(.totals(.mean), .cyan, stats: totalStats, secondary: key == "steps" ? intraday : [],
                         estimate: key == "steps_est", onDeviceEstimates: true)

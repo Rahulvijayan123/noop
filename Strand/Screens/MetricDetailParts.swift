@@ -288,43 +288,68 @@ struct MetricStackData {
 
 // MARK: - Share bars (band mix, mood distribution)
 
-/// One row of a share card: a name, its colour, and how many days fall in it.
+/// One row of a share card: a name, its colour, how long its bar is (0…1) and the value printed beside it.
 struct MetricShareRow: Identifiable, Equatable {
     let id: String
     let name: String
     let color: Color
-    let count: Int
+    let fraction: Double
+    let valueText: String
 }
 
 enum MetricShareRows {
-    /// Days in each score band over the range, best band first.
+    /// Days in each score band over the range, best band first; bars against the largest band.
     static func bands(_ bands: ScoreBands, values: [Double]) -> [MetricShareRow] {
         let counts = Dictionary(grouping: values.filter(\.isFinite)) { bands.band(for: $0).name }.mapValues(\.count)
+        let largest = Double(max(1, counts.values.max() ?? 1))
         return bands.bands.reversed().map { band in
-            MetricShareRow(id: band.name, name: band.name, color: band.color, count: counts[band.name] ?? 0)
+            let n = counts[band.name] ?? 0
+            return MetricShareRow(id: band.name, name: band.name, color: band.color,
+                                  fraction: Double(n) / largest, valueText: "\(n)")
         }
     }
 
     /// Check-ins per mood level, best first.
     static func levels(values: [Double]) -> [MetricShareRow] {
         let counts = Dictionary(grouping: values.filter(\.isFinite)) { min(5, max(1, Int($0.rounded()))) }.mapValues(\.count)
+        let largest = Double(max(1, counts.values.max() ?? 1))
         return (1...5).reversed().map { level in
-            MetricShareRow(id: "\(level)", name: MetricMood.label(level), color: MetricMood.color(level),
-                           count: counts[level] ?? 0)
+            let n = counts[level] ?? 0
+            return MetricShareRow(id: "\(level)", name: MetricMood.label(level), color: MetricMood.color(level),
+                                  fraction: Double(n) / largest, valueText: "\(n)")
+        }
+    }
+
+    /// The average for each weekday over the range, in the locale's week order; bars on the score's scale.
+    static func weekdays(_ rows: [(day: String, value: Double)], scaleMax: Double, color: (Double) -> Color,
+                         text: (Double) -> String, calendar: Calendar = .current) -> [MetricShareRow] {
+        var sums: [Int: (sum: Double, n: Int)] = [:]
+        for row in rows where row.value.isFinite {
+            guard let date = ChartDay.date(forKey: row.day, calendar: calendar) else { continue }
+            let weekday = calendar.component(.weekday, from: date)
+            let entry = sums[weekday] ?? (0, 0)
+            sums[weekday] = (entry.sum + row.value, entry.n + 1)
+        }
+        let symbols = calendar.shortWeekdaySymbols
+        return (0..<7).map { offset in
+            let weekday = (calendar.firstWeekday - 1 + offset) % 7 + 1
+            let mean = sums[weekday].map { $0.sum / Double(max(1, $0.n)) }
+            return MetricShareRow(id: "\(weekday)", name: symbols[weekday - 1],
+                                  color: mean.map(color) ?? StrandPalette.textTertiary,
+                                  fraction: mean.map { min(1, max(0, $0 / max(scaleMax, 1))) } ?? 0,
+                                  valueText: mean.map(text) ?? "—")
         }
     }
 }
 
-/// How the range's days split across bands or levels: one flat bar per row against the largest, with the
-/// count. Kit candidate (a categorical share chart is not in the kit yet).
+/// How the range's days split across bands, levels or weekdays: one flat bar per row, with its value.
+/// Kit candidate (a categorical bar card is not in the kit yet).
 struct MetricShareCard: View {
     let title: String
     let rows: [MetricShareRow]
     let isLoading: Bool
 
     var body: some View {
-        let total = max(1, rows.map(\.count).reduce(0, +))
-        let largest = max(1, rows.map(\.count).max() ?? 1)
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 Text(title)
@@ -342,19 +367,19 @@ struct MetricShareCard: View {
                                 ZStack(alignment: .leading) {
                                     Capsule().fill(StrandPalette.surfaceInset)
                                     Capsule().fill(row.color)
-                                        .frame(width: row.count == 0 ? 0
-                                               : max(6, geo.size.width * CGFloat(row.count) / CGFloat(largest)))
+                                        .frame(width: row.fraction <= 0 ? 0 : max(6, geo.size.width * CGFloat(row.fraction)))
                                 }
                             }
                             .frame(height: 8)
-                            Text("\(row.count)")
+                            Text(row.valueText)
                                 .font(StrandFont.captionNumber)
                                 .foregroundStyle(StrandPalette.textPrimary)
-                                .frame(width: 32, alignment: .trailing)
+                                .lineLimit(1)
+                                .frame(width: 44, alignment: .trailing)
                         }
                         .frame(minHeight: 24)
                         .accessibilityElement(children: .ignore)
-                        .accessibilityLabel(Text("\(row.name), \(row.count) of \(total)"))
+                        .accessibilityLabel(Text("\(row.name), \(row.valueText)"))
                     }
                 }
             }
