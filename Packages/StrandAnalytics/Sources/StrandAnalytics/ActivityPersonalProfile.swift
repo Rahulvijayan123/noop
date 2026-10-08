@@ -10,6 +10,12 @@ import Foundation
 // per-second features inside every static label, and shrinks the default profile of each labelled mode
 // toward this wearer's own values (`w = n / (n + k)`, clamped). Each mode is kept only when it beats the
 // defaults on runs it was not fit on (leave-one-run-out), so an adaptation that does not help is never used.
+// "Beats" is judged on what the decoder publishes (the class of each labelled second), not on its internal
+// body-mode argmax: a hedged "stationary" second claims no posture and counts as a miss.
+//
+// Two fields are deliberately NOT per posture: the relative heart rate of the stationary modes (one shared level,
+// D9-02, so that posture context never depends on the heart rate it is later used to stratify). The held
+// forearm-orientation shares of the stationary modes are personal (channel 3c).
 
 // MARK: - Profile
 
@@ -29,16 +35,27 @@ public struct ActivityPersonalModeAdjustment: Codable, Equatable, Sendable {
     public var move: ActivityPersonalRange?
     /// log10(1 + orientPath10) range.
     public var orientPath: ActivityPersonalRange?
+    /// Relative heart-rate level. Walking modes only: the stationary postures share one level
+    /// (`ActivityContextModel.stationaryHrRel`, D9-02), so a stored value on one of them is ignored.
     public var hrRel: Double?
     /// Arm-class compat (7 values, sums to 1), the `ArmBehaviorClass` order without unknown.
     public var arm: [Double]?
     /// HART class compat keyed by label raw value.
     public var encoder: [String: Double]?
+    /// Held forearm-orientation category shares (hand above the elbow, flat, inclined, hanging; sums to 1) of a
+    /// stationary mode, read while the strap's forearm sign is calibrated; they replace
+    /// `ActivityContextModel.orientationRows` for this wearer. Stationary modes only; nil keeps the population row.
+    public var orientation: [Double]?
+    /// The same shares while the forearm sign is not calibrated yet (|x|: the first entry is always 0, a raised
+    /// hand reads as hanging); they replace `orientationRowsUnsigned`.
+    public var orientationUnsigned: [Double]?
 
     public init(seconds: Int, move: ActivityPersonalRange? = nil, orientPath: ActivityPersonalRange? = nil,
-                hrRel: Double? = nil, arm: [Double]? = nil, encoder: [String: Double]? = nil) {
+                hrRel: Double? = nil, arm: [Double]? = nil, encoder: [String: Double]? = nil,
+                orientation: [Double]? = nil, orientationUnsigned: [Double]? = nil) {
         self.seconds = seconds; self.move = move; self.orientPath = orientPath
         self.hrRel = hrRel; self.arm = arm; self.encoder = encoder
+        self.orientation = orientation; self.orientationUnsigned = orientationUnsigned
     }
 }
 
@@ -63,15 +80,29 @@ public struct ActivityPersonalValidation: Codable, Equatable, Sendable {
     public var transitions: Int
     public var baselineTransitionHits: Int
     public var personalTransitionHits: Int
+    /// Share of the labelled seconds the published class claimed as a DIFFERENT adaptable mode (sitting for a
+    /// labelled stand, …), with the defaults and with the profile. Recall alone rewards committing: against a
+    /// hedged baseline (every second "stationary", recall 0), a profile that calls every still second sitting
+    /// would gain. nil in a validation stored before published-class scoring.
+    public var baselineWrongClaims: Double?
+    public var personalWrongClaims: Double?
 
     public init(runs: Int, labelledSeconds: Int, baselineBalancedAccuracy: Double, personalBalancedAccuracy: Double,
                 classes: [String: ActivityPersonalClassScore], transitions: Int,
-                baselineTransitionHits: Int, personalTransitionHits: Int) {
+                baselineTransitionHits: Int, personalTransitionHits: Int,
+                baselineWrongClaims: Double? = nil, personalWrongClaims: Double? = nil) {
         self.runs = runs; self.labelledSeconds = labelledSeconds
         self.baselineBalancedAccuracy = baselineBalancedAccuracy
         self.personalBalancedAccuracy = personalBalancedAccuracy
         self.classes = classes; self.transitions = transitions
         self.baselineTransitionHits = baselineTransitionHits; self.personalTransitionHits = personalTransitionHits
+        self.baselineWrongClaims = baselineWrongClaims; self.personalWrongClaims = personalWrongClaims
+    }
+
+    /// How much the profile raised the wrong-claim share (0 when it did not, or was not measured).
+    public var wrongClaimRise: Double {
+        guard let b = baselineWrongClaims, let p = personalWrongClaims else { return 0 }
+        return max(0, p - b)
     }
 
     public var gain: Double { personalBalancedAccuracy - baselineBalancedAccuracy }
@@ -83,7 +114,10 @@ public struct ActivityPersonalValidation: Codable, Equatable, Sendable {
 }
 
 public struct ActivityPersonalProfile: Codable, Equatable, Sendable {
-    public static let currentVersion = "personal-profile-1"
+    /// 2: stationary modes never adapt a heart-rate level (D9-02), stationary modes carry the wearer's held
+    /// forearm-orientation rows, and validation scores the published class with a wrong-claim guard. The app's
+    /// refit fingerprint includes this, so profiles fitted under 1 are refit (and re-validated) once.
+    public static let currentVersion = "personal-profile-2"
     /// The modes a profile may adapt, by key: lying, sitting, standing, walking, brisk walking.
     public static let modeKeys = ["bedRest", "seated", "upright", "walk", "briskWalk"]
     static let adaptableModes: [BodyMode] = [.bedRest, .seated, .upright, .walk, .briskWalk]
@@ -200,6 +234,8 @@ public enum ActivityPersonalProfileFitter {
     /// Held-out balanced-accuracy gain a mode has to add to be kept.
     static let minStepGain = 0.005
     static let maxRecallDrop = 0.05
+    /// Rise in the share of labelled seconds claimed as the wrong mode a profile may cause.
+    static let maxWrongClaimRise = 0.03
     /// Seconds dropped at the start of a static label (the body is still settling into the state) and at
     /// its end (the next step's cue).
     static let settleSeconds = 3
@@ -254,6 +290,7 @@ public enum ActivityPersonalProfileFitter {
         func holds(_ v: ActivityPersonalValidation) -> Bool {
             let rate = { (hits: Int) in v.transitions > 0 ? Double(hits) / Double(v.transitions) : 0 }
             return v.worstRecallDrop <= maxRecallDrop + 1e-9
+                && v.wrongClaimRise <= maxWrongClaimRise + 1e-9
                 && rate(v.personalTransitionHits) >= rate(v.baselineTransitionHits) - maxRecallDrop - 1e-9
         }
 
@@ -262,6 +299,10 @@ public enum ActivityPersonalProfileFitter {
         // short, sleepless lie-down teaches "quiet wrist", which is also quiet sitting), and all-or-nothing would
         // let that sink the modes that help; adding modes one at a time instead misses pairs that only help together
         // (a busy standing range needs the seated range beside it).
+        // A step is judged on held-out recall net of wrong claims: a mode whose adaptation keeps another mode's
+        // seconds from being claimed wrongly (a wearer's own lying forearm that stops quiet lying reading as
+        // sitting) earns its place even when it adds no recall of its own.
+        func net(_ v: ActivityPersonalValidation) -> Double { v.personalBalancedAccuracy - (v.personalWrongClaims ?? 0) }
         let all = validate(candidates)
         var kept = candidates
         var validation = all
@@ -270,15 +311,13 @@ public enum ActivityPersonalProfileFitter {
             for mode in ActivityPersonalProfile.modeKeys where kept.contains(mode) {
                 let v = validate(kept.subtracting([mode]))
                 if let d = drop {
-                    let better = holds(v) != holds(d.v) ? holds(v)
-                        : v.personalBalancedAccuracy > d.v.personalBalancedAccuracy + 1e-9
+                    let better = holds(v) != holds(d.v) ? holds(v) : net(v) > net(d.v) + 1e-9
                     if !better { continue }
                 }
                 drop = (mode, v)
             }
             guard let drop else { break }
-            let cheap = holds(drop.v)
-                && drop.v.personalBalancedAccuracy >= validation.personalBalancedAccuracy - minStepGain - 1e-9
+            let cheap = holds(drop.v) && net(drop.v) >= net(validation) - minStepGain - 1e-9
             guard !holds(validation) || cheap else { break }
             kept.remove(drop.mode)
             validation = drop.v
@@ -373,22 +412,33 @@ public enum ActivityPersonalProfileFitter {
         var transitionHits = 0
     }
 
-    /// Decode one run and keep every labelled second's features and most likely body mode, plus whether
-    /// each transition label was matched by a decoded event of its kind within the tolerance.
+    /// Decode one run and keep every labelled second's features and the body mode the published class names
+    /// (`publishedMode` of the latest published state), plus whether each transition label was matched by a
+    /// decoded event of its kind within the tolerance.
+    ///
+    /// Scored on the published class, not the argmax of the body-mode belief: since hsmm-1.8 a split without
+    /// posture evidence is held near the head-even lean, where the upright MODE is slightly ahead in mass while
+    /// the published heads (and class) are hedged, so the argmax called every hedged second "standing" and the
+    /// baseline seated recall was about 0 for a hedged wearer (WP1).
     static func replay(_ run: ActivityCalibrationRun, config: ActivityDecoderConfig) -> Replay {
         let truth = truthBySecond(run.labels)
         var decoder = ActivityContextDecoder(config: config)
         decoder.recordsScoredSeconds = true
         var events: [ActivityTransitionEvent] = []
         var out = Replay()
+        // The decoder publishes on its 5-s grid; a second between two states reads the latest one, as a stored
+        // run does.
+        var published = BodyMode.unknown, publishedTs = Int.min / 2
         for o in run.observations {
             let state = decoder.ingest(o)
             if let t = state?.transition { events.append(t) }
+            if let state {
+                published = publishedMode(ActivityClassifier.classify(state: state))
+                publishedTs = state.ts
+            }
             guard let mode = truth[o.ts], let scored = decoder.lastScored else { continue }
-            var best = 0
-            for m in scored.posterior.indices where scored.posterior[m] > scored.posterior[best] { best = m }
-            out.samples.append(Sample(truth: mode, predicted: BodyMode(rawValue: best) ?? .unknown,
-                                      features: scored.features))
+            let fresh = o.ts - publishedTs < 2 * max(1, config.publishIntervalS)
+            out.samples.append(Sample(truth: mode, predicted: fresh ? published : .unknown, features: scored.features))
         }
         for label in run.labels where label.source == .guided && !label.userUnsure {
             guard let kind = label.transitionKind, let ts = label.transitionTs else { continue }
@@ -398,6 +448,26 @@ public enum ActivityPersonalProfileFitter {
             }
         }
         return out
+    }
+
+    /// The adaptable body mode a published class claims; `.unknown` when it claims none of them (still with the
+    /// posture unresolved, moving otherwise, unknown, off the wrist).
+    static func publishedMode(_ k: ActivityClassification) -> BodyMode {
+        switch k.activityClass {
+        case .sitting, .sittingDesk: return .seated
+        case .standing: return .upright
+        case .lyingDown, .sleeping: return .bedRest
+        case .walking: return .walk
+        case .briskWalking: return .briskWalk
+        case .fidgeting:
+            switch k.posture {
+            case .seatedLikely: return .seated
+            case .uprightStationary: return .upright
+            default: return .unknown
+            }
+        case .stationary, .lightActivity, .vigorousActivity, .running, .cycling, .offWrist, .unknown:
+            return .unknown
+        }
     }
 
     // MARK: Fit
@@ -433,7 +503,8 @@ public enum ActivityPersonalProfileFitter {
             adj.orientPath = shrinkRange(p.orientPath, toward: paths, w: w, bounds: 0...2, minWidth: 0.15)
         }
 
-        let hrs = fs.compactMap(\.hrRel)
+        // Never per stationary posture (D9-02): heart rate is not posture evidence.
+        let hrs = mode.isStationary ? [] : fs.compactMap(\.hrRel)
         if hrs.count >= minModeSeconds, let median = quantile(hrs, 0.5) {
             let shift = min(0.15, max(-0.15, w * (median - p.hrRel)))
             adj.hrRel = round4(p.hrRel + shift)
@@ -471,8 +542,45 @@ public enum ActivityPersonalProfileFitter {
             adj.encoder = mixed
         }
 
+        if mode.isStationary {
+            adj.orientation = orientationShares(mode, fs, signed: true)
+            adj.orientationUnsigned = orientationShares(mode, fs, signed: false)
+        }
+
         let changed = adj.move != nil || adj.orientPath != nil || adj.hrRel != nil || adj.arm != nil || adj.encoder != nil
+            || adj.orientation != nil || adj.orientationUnsigned != nil
         return changed ? adj : nil
+    }
+
+    /// A stationary mode's held forearm-orientation shares (neg, flat, mid, hang) from the labelled seconds whose
+    /// held orientation channel 3c reads in that frame (forearm sign calibrated, or not yet), shrunk toward the
+    /// population row by `w = n / (n + k)`. Each share keeps a 0.01 floor (0 stays 0 for the unsigned "hand
+    /// above the elbow", which |x| cannot see), so no category ever becomes impossible. nil under
+    /// `minModeSeconds` such seconds.
+    static func orientationShares(_ mode: BodyMode, _ fs: [ActivityFeatures], signed: Bool) -> [Double]? {
+        let rows = signed ? ActivityContextModel.orientationRows : ActivityContextModel.orientationRowsUnsigned
+        let prior: [Double]
+        switch mode {
+        case .bedRest: prior = rows.bed
+        case .seated: prior = rows.seated
+        case .upright: prior = rows.upright
+        default: return nil
+        }
+        var sum = [Double](repeating: 0, count: 4), n = 0
+        for f in fs where (f.forearmSign != nil) == signed {
+            guard let ux = ActivityContextModel.forearmAxis(f.heldUx, sign: f.forearmSign) else { continue }
+            let c = ActivityContextModel.orientationCategories(ux)
+            for (i, v) in [c.neg, c.flat, c.mid, c.hang].enumerated() { sum[i] += v }
+            n += 1
+        }
+        guard n >= minModeSeconds else { return nil }
+        let w = Double(n) / (Double(n) + shrinkSeconds)
+        let mixed = prior.indices.map { i -> Double in
+            prior[i] == 0 ? 0 : max(0.01, (1 - w) * prior[i] + w * sum[i] / Double(n))
+        }
+        let total = mixed.reduce(0, +)
+        guard total > 0 else { return nil }
+        return mixed.map { round4($0 / total) }
     }
 
     /// Move each end of `prior` toward the wearer's 5th / 95th percentile by `w`, each end by at most half
@@ -508,14 +616,20 @@ public enum ActivityPersonalProfileFitter {
 
     static func score(baseline: [Replay], personal: [Replay]) -> ActivityPersonalValidation {
         var total: [BodyMode: Int] = [:], baseHit: [BodyMode: Int] = [:], persHit: [BodyMode: Int] = [:]
+        var baseWrong = 0, persWrong = 0
+        let wrong = { (s: Sample) in s.predicted != .unknown && s.predicted != s.truth }
         for r in baseline {
             for s in r.samples {
                 total[s.truth, default: 0] += 1
                 if s.predicted == s.truth { baseHit[s.truth, default: 0] += 1 }
+                if wrong(s) { baseWrong += 1 }
             }
         }
         for r in personal {
-            for s in r.samples where s.predicted == s.truth { persHit[s.truth, default: 0] += 1 }
+            for s in r.samples {
+                if s.predicted == s.truth { persHit[s.truth, default: 0] += 1 }
+                if wrong(s) { persWrong += 1 }
+            }
         }
         var classes: [String: ActivityPersonalClassScore] = [:]
         var baseRecalls: [Double] = [], persRecalls: [Double] = []
@@ -528,6 +642,7 @@ public enum ActivityPersonalProfileFitter {
             baseRecalls.append(b); persRecalls.append(p)
         }
         let mean = { (xs: [Double]) in xs.isEmpty ? 0 : xs.reduce(0, +) / Double(xs.count) }
+        let labelled = max(1, total.values.reduce(0, +))
         return ActivityPersonalValidation(
             runs: baseline.count,
             labelledSeconds: total.values.reduce(0, +),
@@ -536,6 +651,8 @@ public enum ActivityPersonalProfileFitter {
             classes: classes,
             transitions: baseline.map(\.transitions).reduce(0, +),
             baselineTransitionHits: baseline.map(\.transitionHits).reduce(0, +),
-            personalTransitionHits: personal.map(\.transitionHits).reduce(0, +))
+            personalTransitionHits: personal.map(\.transitionHits).reduce(0, +),
+            baselineWrongClaims: round4(Double(baseWrong) / Double(labelled)),
+            personalWrongClaims: round4(Double(persWrong) / Double(labelled)))
     }
 }

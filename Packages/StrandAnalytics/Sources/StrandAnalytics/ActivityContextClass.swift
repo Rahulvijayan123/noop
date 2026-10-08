@@ -40,7 +40,9 @@ public enum ActivityClassVersions {
     /// from the posture head's recumbent lean.
     /// 3: `ActivityClassification.confidence` is the chosen class's own (subclass) posterior mass, with the
     /// family mass in `familyConfidence` (I9), so stored class confidences are derived again.
-    public static let taxonomy = "act-class-3"
+    /// 4: a sitting / standing claim backed only by the wrist's own posture cues carries at most
+    /// `ActivityClassifier.wristOnlyPostureConfidenceCap` (D9-08). Class codes and the label mapping are unchanged.
+    public static let taxonomy = "act-class-4"
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
@@ -277,6 +279,22 @@ public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
 
 public enum ActivityClassifier {
 
+    /// The most confidence a sitting or standing claim may carry when only the wrist's own posture cues back it
+    /// (arm pattern, held forearm orientation, a shift's direction): no learned head that reads posture (HART's
+    /// fine sit / stand rows) and no transition expert spoke (D9-08). Posterior mass is not a calibrated
+    /// probability: on the D7 replays wrist-only sitting reached 0.88-0.90 (FORTH, PAMAP2), and in free living
+    /// (Capture-24) the wrist's sitting / standing claims are right far less often than their mass says. Until a
+    /// fitted calibration map exists, the class confidence of such a claim is capped here. A vehicle detail is
+    /// the encoder's call (it names vehicle motion) and is not capped.
+    public static let wristOnlyPostureConfidenceCap = 0.75
+
+    /// Whether a learned posture source backed this evidence: HART's fine distribution (its sit / stand rows) or
+    /// the transition expert (`ActivityEvidenceSummary.experts`: "hart_fine", "transition"). The folded encoder
+    /// classes say nothing about posture, and the gait expert only speaks while walking.
+    public static func learnedPostureEvidence(experts: [String]) -> Bool {
+        experts.contains("hart_fine") || experts.contains("transition")
+    }
+
     /// The display label → class mapping. Total over `ActivityDisplay.allLabels` (a test pins it), and
     /// anything unrecognised — a future label an older reader does not know — is `unknown`, never a guess.
     public static func activityClass(forDisplayLabel label: String?) -> ActivityClass {
@@ -319,7 +337,8 @@ public enum ActivityClassifier {
                                 sleep: SleepContextState,
                                 inBed: Bool = false,
                                 wear: WearContextState,
-                                evidenceQuality: Double) -> ActivityClassification {
+                                evidenceQuality: Double,
+                                learnedPostureEvidence: Bool = false) -> ActivityClassification {
         let quality = min(1, max(0, evidenceQuality))
         if wear == .offWrist {
             return ActivityClassification(activityClass: .offWrist, confidence: 1, familyConfidence: 1,
@@ -342,6 +361,11 @@ public enum ActivityClassifier {
         // them, not the posture head's lean (which reads a still sleeper as seated; see `ActivityDisplay`).
         let lying = (sleep == .asleep || inBed) ? stationary : stationary * recumbent
 
+        // D9-08: the sitting / standing mass the wrist alone may claim.
+        let postureCap = learnedPostureEvidence ? 1.0 : wristOnlyPostureConfidenceCap
+        let sittingMass = min(postureCap, stationary * seated) + locomotion[.vehicleMotion]
+        let standingMass = min(postureCap, stationary * upright)
+
         var candidates: [ActivityClass: Double] = [
             .running: locomotion[.running],
             .briskWalking: locomotion[.briskWalking],
@@ -349,8 +373,8 @@ public enum ActivityClassifier {
             .cycling: locomotion[.cycling],
             .vigorousActivity: other * exerciseShare,
             .lightActivity: other * (1 - exerciseShare) + stationary * transition,
-            .sitting: stationary * seated + locomotion[.vehicleMotion],
-            .standing: stationary * upright,
+            .sitting: sittingMass,
+            .standing: standingMass,
             .stationary: stationary * unresolved,
         ]
         if sleep == .asleep { candidates[.sleeping] = lying }
@@ -374,10 +398,10 @@ public enum ActivityClassifier {
         case .sleeping: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
         case .lyingDown: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
         case .sitting, .sittingDesk:
-            confidence = stationary * seated + locomotion[.vehicleMotion]
+            confidence = sittingMass
             family = confidence
             sameFamily = [.sitting, .sittingDesk]
-        case .standing: confidence = stationary * upright; family = confidence
+        case .standing: confidence = standingMass; family = confidence
         case .fidgeting: confidence = stationary * (seated + upright); family = confidence
         case .stationary: confidence = stationary * (1 - recumbent); family = confidence
         }
@@ -426,12 +450,14 @@ public enum ActivityClassifier {
 
     public static func classify(run: ActivityContextRun) -> ActivityClassification {
         classify(posture: run.posture, locomotion: run.locomotion, armBehavior: run.armBehavior,
-                 sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence)
+                 sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence,
+                 learnedPostureEvidence: learnedPostureEvidence(experts: run.experts))
     }
 
     public static func classify(state: ActivityContextState) -> ActivityClassification {
         classify(posture: state.posture, locomotion: state.locomotion, armBehavior: state.armBehavior,
                  sleep: state.sleep.state, inBed: state.sleep.inBed, wear: state.wear.state,
-                 evidenceQuality: state.overallConfidence)
+                 evidenceQuality: state.overallConfidence,
+                 learnedPostureEvidence: learnedPostureEvidence(experts: state.evidence.experts))
     }
 }
