@@ -203,3 +203,21 @@ Results: see §8.
 - The `Spec02Reserved` list in the wording test can be removed once SleepRhythm, ExertionBouts and ContextReferences
   register their codes.
 - The golden pair and `CURRENT_ALGORITHMS.md` are untouched.
+
+## 8. Results
+
+| Run | Result | Log |
+| --- | --- | --- |
+| `sbuild.sh … ui mac-test` on Spec02SleepFeaturesReadbackTests, Spec02SleepAnalyticsReadbackTests, Spec02PhysiologyContextReadbackTests, PhysiologyContextWordingCoverageTests, SleepAnalyticsSectionTests, SleepFeatureDocumentTests and PhysiologyContextAppTests, at HEAD `5a11eaebc` | **113 run, 0 failures**. Per class: Spec02SleepFeatures 15, Spec02SleepAnalytics 10, Spec02PhysiologyContext 9, WordingCoverage 4, SleepAnalyticsSection 26, SleepFeatureDocument 8, PhysiologyContextApp 41. | `_build-scratch/spec02/logs/ui-mac-test-150148.log` |
+| The same set at `2f3f908ba`, before the lead's follow-ups | 112 run, 0 failures | `ui-mac-test-142312.log` |
+| Two intermediate `mac-test` runs | The build succeeded both times, but the test runner hung before connecting (machine load average about 575–720). Both are environmental, and the third retry passed. | `ui-mac-test-144357.log`, `ui-mac-test-145133.log` |
+| `sbuild.sh … ui mac` | BUILD SUCCEEDED | `ui-mac-150138.log` |
+| `sbuild.sh … ui ios` (NOOPiOS, generic iOS Simulator) | BUILD SUCCEEDED | `ui-ios-145727.log` |
+| `deno test --allow-all tests/spec02_readback_route_test.ts` | 5 passed, 0 failed | terminal |
+| `deno test --allow-all tests/sleep_analytics_route_test.ts` (existing) | 4 passed, 0 failed | terminal |
+
+The first `mac-test` attempt failed to compile because it referenced the producer-only `SleepRhythm` constants. That
+is fixed: they are now string literals.
+
+Not run: the full StrandTests suite. Its known baseline failures are on main: ActivityCalibrationSessionTests ×2 and
+IntradayWordingAndCoachTests.
