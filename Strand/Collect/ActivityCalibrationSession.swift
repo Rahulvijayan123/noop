@@ -75,24 +75,19 @@ public struct ActivityCalibrationRestoreMarker {
 // MARK: - Guided session state machine
 
 /// The guided capture session runner. A pure state machine: the owning view calls `tick()` from
-/// its own timer (any cadence — transitions happen when `now()` passes a deadline, so coarse
-/// ticks just land later, never twice), calls `refreshGate()` while a bout is active, and reads
-/// `phase` to render. `begin`/`cancel`/`finish` are the only entry points that change flow.
+/// its own timer (transitions happen when `now()` passes a deadline, so a late tick lands late,
+/// never twice), calls `refreshGate()` while running, and renders `phase`.
 ///
-/// Timing vocabulary (all unix seconds, from the injected `now` closure):
-///   instructionTs      — when this repetition's instructions+countdown first appeared
-///   countdownStartTs   — the 3 s countdown start
-///   cueStartTs         — start haptic (the strap begins the labeled movement)
-///   cueStopTs          — stop haptic (cueStartTs + task.durationSeconds)
-///   intervalStartTs/EndTs — canonical guarded label interval [cueStart+guard, cueStop-guard);
-///                        the seconds actually fed to evaluation, kept inside the cue boundaries
-///                        so reaction-time edges around the haptics never contaminate the label.
+/// Flow: `begin` -> `.ready(0)` -> `start` -> `.countdown` -> `.step` ... -> `.ready(1)` -> ... ->
+/// `.finished`. Each activity waits at `.ready` for the wearer to be in position; inside it the steps
+/// run back to back with no taps. `skip` drops the current activity (and only its unfinished step)
+/// from `.ready`, `.countdown` or `.step` and moves on.
 ///
-/// Transition tasks add a third moment: `preStateSeconds` of quiet hold after the start cue, then
-/// a "do it now" cue (auto-fired by the runner, or earlier via `markTransitionNow()` when the
-/// user taps) that records `transitionTs`, then `postStateSeconds` of hold to the stop cue. The
-/// transition itself is therefore always inside the guarded interval when
-/// `preStateSeconds >= guardSeconds`, which the default protocol arranges.
+/// Cues are exactly two, so a buzz always means one thing:
+///   `.move` — fired at a move's `cueSeconds`: change posture now. Holds never buzz.
+///   `.done` — fired when an activity's last step ends: relax, the activity is over.
+/// The published step carries the same `Date` deadlines the runner acts on, and `moved` flips in
+/// the same tick the `.move` cue fires, so the screen can never say "move" before the buzz.
 @MainActor
 public final class ActivityCalibrationSessionRunner: ObservableObject {
     /// Why a session could not run or had to stop. Produced by the injected `gate` closure —
@@ -112,52 +107,60 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
         case blocked(BlockedReason)
     }
 
+    public enum Cue: Equatable, Sendable {
+        case move
+        case done
+    }
+
+    /// The step being recorded. `cueAt` is nil for holds.
+    public struct Step: Equatable, Sendable {
+        public var activity: Int
+        public var task: Int
+        public var startedAt: Date
+        public var endsAt: Date
+        public var cueAt: Date?
+        /// The `.move` cue has fired (and `transitionTs` is recorded).
+        public var moved: Bool
+    }
+
     /// What the screen should show. `.gate` is a terminal blocked state (marker already cleared,
     /// previous mode already restored); `begin` may be called again from it.
     public enum Phase: Equatable, Sendable {
         case idle
         case gate(BlockedReason)
-        case countdown(taskIndex: Int, endsAt: Date)
-        case active(taskIndex: Int, rep: Int, cueStartTs: Int)
-        case rest(taskIndex: Int, rep: Int, endsAt: Date)
+        case ready(activity: Int)
+        case countdown(activity: Int, endsAt: Date)
+        case step(Step)
         case finished
         case cancelled
     }
 
     @Published public private(set) var phase: Phase = .idle
+    /// Activities skipped in this session, by index.
+    @Published public private(set) var skipped: Set<Int> = []
 
     /// The local BLE device id the session is labeling, carried for the UI's label building
     /// (it is not part of `ActivityCalibrationBout`).
     public let deviceId: String?
 
-    /// Called once per finished repetition, AFTER the stop cue, so the bout's timestamps are final.
+    /// Called once per completed step, after its end deadline, so the bout's timestamps are final.
     /// The UI turns each bout into an `ActivityGroundTruthLabel` and persists it.
     public var onBout: ((ActivityCalibrationBout) -> Void)?
 
-    /// Seconds of the pre-task countdown.
-    public static let countdownSeconds = 3
-
-    private let model: ActivityCalibrationProtocolModel
+    public let model: ActivityCalibrationProtocolModel
     private let gate: () -> GateStatus
     private let applyMode: (ActivityImuCaptureMode) -> Void
-    private let haptic: () -> Void
+    private let haptic: (Cue) -> Void
     private let now: () -> Date
     private let defaults: UserDefaults
 
     private var previousMode: ActivityImuCaptureMode?
-    private var currentRep = 0
-    private var instructionTs: Int?
-    private var countdownStartTs: Int?
-    private var cueStartTs = 0
-    private var cueStopTs = 0
-    private var intervalStartTs = 0
-    private var intervalEndTs = 0
-    private var transitionTs: Int?
+    private var transitionAt: Date?
 
     init(protocol model: ActivityCalibrationProtocolModel, deviceId: String?,
          gate: @escaping () -> GateStatus,
          applyMode: @escaping (ActivityImuCaptureMode) -> Void,
-         haptic: @escaping () -> Void,
+         haptic: @escaping (Cue) -> Void,
          now: @escaping () -> Date,
          defaults: UserDefaults = .standard) {
         self.model = model
@@ -171,7 +174,7 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
 
     // MARK: - Flow control
 
-    /// Start a guided session over the protocol's tasks.
+    /// Start a session and wait at the first activity.
     ///
     /// Ordering is deliberate and crash-safe: the durable marker (with `previousMode`) lands
     /// BEFORE `.continuous` is applied, then the gate is checked. A blocked gate restores the
@@ -179,210 +182,153 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
     /// Calling `begin` while a session is already running is a no-op; after `.finished`,
     /// `.cancelled` or `.gate` it starts a fresh session.
     func begin(previousMode: ActivityImuCaptureMode) {
-        guard canBegin else { return }
+        guard !isRunning else { return }
         self.previousMode = previousMode
-        currentRep = 0
-        transitionTs = nil
+        skipped = []
+        transitionAt = nil
         ActivityCalibrationRestoreMarker.begin(previousMode: previousMode, now: now(), defaults: defaults)
         applyMode(.continuous)
         switch gate() {
         case .ready:
-            // An empty protocol has nothing to capture: restore and end cleanly.
-            guard !model.tasks.isEmpty else {
-                teardown()
-                phase = .finished
-                return
-            }
-            beginCountdown(taskIndex: 0)
+            enterActivity(0)
         case .blocked(let reason):
             block(reason)
         }
     }
 
-    /// Stop the session as a normal end (last bout done, or the user tapped Finish). Publishes
-    /// `.finished` after restoring the previous mode and clearing the marker. A no-op when the
-    /// session is not running; a bout that is mid-capture is not emitted (only completed bouts,
-    /// whose stop cue has fired, are).
+    /// The wearer is in position: run the start countdown, then the activity's first step.
+    public func start() {
+        guard case .ready(let activity) = phase else { return }
+        phase = .countdown(activity: activity,
+                           endsAt: now().addingTimeInterval(TimeInterval(ActivityCalibrationProtocols.startCountdownSeconds)))
+    }
+
+    /// Leave the current activity out and move to the next one. Bouts this activity already
+    /// emitted stay saved; the step in progress is dropped. No cue fires.
+    public func skip() {
+        let activity: Int
+        switch phase {
+        case .ready(let a), .countdown(let a, _): activity = a
+        case .step(let s): activity = s.activity
+        default: return
+        }
+        skipped.insert(activity)
+        transitionAt = nil
+        enterActivity(activity + 1)
+    }
+
+    /// Stop the session as a normal end (the user tapped Stop, or the last activity ended).
+    /// Publishes `.finished` after restoring the previous mode and clearing the marker. A step
+    /// that is mid-capture is not emitted.
     public func finish() {
         guard isRunning else { return }
         teardown()
         phase = .finished
     }
 
-    /// Stop the session as an abort (user tapped Cancel, or a lifecycle interruption). Publishes
-    /// `.cancelled` after restoring the previous mode and clearing the marker. Idempotent: a
-    /// second `cancel` after `.cancelled`/`.finished` is a no-op.
+    /// Stop the session as an abort (a lifecycle interruption such as backgrounding). Publishes
+    /// `.cancelled` after restoring the previous mode and clearing the marker. Idempotent.
     public func cancel() {
         guard isRunning else { return }
         teardown()
         phase = .cancelled
     }
 
-    /// Re-check the gate mid-session (the UI calls this periodically while a bout is active and
-    /// on scene-phase changes). A newly blocked gate stops the session exactly like a gate
-    /// failure at `begin`: `.gate` published, previous mode restored, marker cleared.
+    /// Re-check the gate mid-session (the UI calls this periodically and on scene-phase
+    /// changes). A newly blocked gate stops the session exactly like a gate failure at `begin`.
     public func refreshGate() {
         guard isRunning else { return }
-        switch gate() {
-        case .ready:
-            break
-        case .blocked(let reason):
-            block(reason)
-        }
+        if case .blocked(let reason) = gate() { block(reason) }
     }
 
-    /// Advance the state machine. Call from the owning view's timer; safe to call at any cadence
-    /// and any time. Deadlines are compared against the injected `now`, so no work is skipped
-    /// when a tick is late — the next state just starts at the actual wall time.
+    /// Advance the state machine. Call from the owning view's timer at any cadence; deadlines are
+    /// compared against the injected `now`, and at most one deadline is acted on per tick.
     public func tick() {
-        guard isRunning else { return }
+        let t = now()
         switch phase {
-        case .countdown(let taskIndex, let endsAt):
-            if now() >= endsAt { startActive(taskIndex: taskIndex) }
-        case .active(let taskIndex, let rep, _):
-            maybeFireTransitionCue(taskIndex: taskIndex)
-            if nowSeconds >= cueStopTs { endActive(taskIndex: taskIndex, rep: rep) }
-        case .rest(let taskIndex, let rep, let endsAt):
-            if now() >= endsAt { advanceAfterRest(taskIndex: taskIndex, rep: rep) }
-        case .idle, .gate, .finished, .cancelled:
+        case .countdown(let activity, let endsAt):
+            if t >= endsAt { startStep(activity: activity, task: 0, at: Self.chainStart(deadline: endsAt, now: t)) }
+        case .step(var step):
+            if !step.moved, let cueAt = step.cueAt, t >= cueAt {
+                transitionAt = t
+                step.moved = true
+                phase = .step(step)
+                haptic(.move)
+            } else if t >= step.endsAt {
+                endStep(step, now: t)
+            }
+        case .idle, .gate, .ready, .finished, .cancelled:
             break
         }
     }
 
-    /// The "do it now" tap for a transition task: the user performs the transition early, before
-    /// the auto-fired cue. Records `transitionTs` at the tap and buzzes. No-op for non-transition
-    /// tasks and when the transition moment is already recorded.
-    public func markTransitionNow() {
-        guard case .active(let taskIndex, _, _) = phase else { return }
-        guard model.tasks[taskIndex].transitionKind != nil else { return }
-        guard transitionTs == nil else { return }
-        transitionTs = clampedToInterval(nowSeconds)
-        haptic()
-    }
-
-    /// A tap inside the guard trims would put `transitionTs` outside the label interval, which the
-    /// server rejects (`invalid_transition_ts`) so the label could never sync. Record the nearest
-    /// instant inside the interval instead.
-    private func clampedToInterval(_ ts: Int) -> Int {
-        guard intervalEndTs >= intervalStartTs else { return ts }
-        return min(max(ts, intervalStartTs), intervalEndTs)
+    public var isRunning: Bool {
+        switch phase {
+        case .ready, .countdown, .step: return true
+        case .idle, .gate, .finished, .cancelled: return false
+        }
     }
 
     // MARK: - Private transitions
 
-    private var canBegin: Bool {
-        switch phase {
-        case .idle, .gate, .finished, .cancelled:
-            return true
-        case .countdown, .active, .rest:
-            return false   // already in flight
+    private func enterActivity(_ index: Int) {
+        if model.activities.indices.contains(index) {
+            phase = .ready(activity: index)
+        } else {
+            finish()
         }
     }
 
-    private var isRunning: Bool {
-        switch phase {
-        case .countdown, .active, .rest:
-            return true
-        case .idle, .gate, .finished, .cancelled:
-            return false
+    /// Steps chain on the previous deadline, not on the tick that noticed it, so a late tick never
+    /// stretches the protocol or shifts the next step's cue. After a real stall (over a second) the
+    /// next step starts now instead, so its cue never fires early to catch up.
+    static func chainStart(deadline: Date, now: Date) -> Date {
+        now.timeIntervalSince(deadline) > 1 ? now : deadline
+    }
+
+    private func startStep(activity: Int, task: Int, at start: Date) {
+        let spec = model.activities[activity].tasks[task]
+        transitionAt = nil
+        phase = .step(Step(activity: activity, task: task, startedAt: start,
+                           endsAt: start.addingTimeInterval(TimeInterval(spec.durationSeconds)),
+                           cueAt: spec.cueSeconds.map { start.addingTimeInterval(TimeInterval($0)) },
+                           moved: false))
+    }
+
+    private func endStep(_ step: Step, now t: Date) {
+        let spec = model.activities[step.activity].tasks[step.task]
+        onBout?(bout(for: step, spec: spec))
+        // The onBout handler is the UI's label path; if it ended the session, keep that decision.
+        guard case .step = phase else { return }
+        if step.task + 1 < model.activities[step.activity].tasks.count {
+            startStep(activity: step.activity, task: step.task + 1, at: Self.chainStart(deadline: step.endsAt, now: t))
+        } else {
+            haptic(.done)
+            enterActivity(step.activity + 1)
         }
     }
 
-    private var nowSeconds: Int { Int(now().timeIntervalSince1970) }
-
-    private func beginCountdown(taskIndex: Int) {
-        // Instructions are on screen for the whole countdown; both timestamps land when the
-        // countdown begins. They are distinct fields on the bout so a future UI that shows
-        // instructions earlier (or per-repetition) can record the real moments separately.
-        instructionTs = nowSeconds
-        countdownStartTs = nowSeconds
-        let endsAt = now().addingTimeInterval(TimeInterval(Self.countdownSeconds))
-        phase = .countdown(taskIndex: taskIndex, endsAt: endsAt)
-    }
-
-    private func startActive(taskIndex: Int) {
-        let task = model.tasks[taskIndex]
-        cueStartTs = nowSeconds
-        cueStopTs = cueStartTs + task.durationSeconds
-        intervalStartTs = cueStartTs + task.guardSeconds
-        intervalEndTs = cueStopTs - task.guardSeconds
-        transitionTs = nil
-        // A transition task's only movement cue is "do it now": a start buzz a few seconds earlier
-        // reads as that cue, and people move on the wrong one.
-        if !Self.hasHeldPreState(task) { haptic() }   // start cue
-        phase = .active(taskIndex: taskIndex, rep: currentRep, cueStartTs: cueStartTs)
-    }
-
-    /// Auto-fire the transition cue once `preStateSeconds` of quiet hold have passed since the
-    /// start cue. Runs only for transition tasks and only once per repetition.
-    static func hasHeldPreState(_ task: ActivityCalibrationTask) -> Bool {
-        task.transitionKind != nil && (task.preStateSeconds ?? 0) > 0
-    }
-
-    private func maybeFireTransitionCue(taskIndex: Int) {
-        guard transitionTs == nil else { return }
-        let task = model.tasks[taskIndex]
-        guard Self.hasHeldPreState(task), let pre = task.preStateSeconds else { return }
-        guard nowSeconds >= cueStartTs + pre else { return }
-        transitionTs = clampedToInterval(nowSeconds)
-        haptic()   // "do it now" cue
-    }
-
-    private func endActive(taskIndex: Int, rep: Int) {
-        haptic()   // stop cue
-        let task = model.tasks[taskIndex]
-        let bout = ActivityCalibrationBout(
-            taskId: task.id,
-            repetition: rep + 1,
-            instructionTs: instructionTs,
-            countdownStartTs: countdownStartTs,
-            cueStartTs: cueStartTs,
-            cueStopTs: cueStopTs,
-            intervalStartTs: intervalStartTs,
-            intervalEndTs: intervalEndTs,
-            posture: task.posture,
-            locomotion: task.locomotion,
-            armBehavior: task.armBehavior,
-            semanticTag: task.semanticTag,
-            transitionKind: task.transitionKind,
+    private func bout(for step: Step, spec: ActivityCalibrationTask) -> ActivityCalibrationBout {
+        let start = step.startedAt.timeIntervalSince1970
+        let end = step.endsAt.timeIntervalSince1970
+        let guardS = TimeInterval(spec.guardSeconds)
+        let intervalStart = Int((start + guardS).rounded(.up))
+        let intervalEnd = Int((end - guardS).rounded(.down))
+        // The server rejects a transition_ts outside the label interval (`invalid_transition_ts`).
+        let transitionTs = transitionAt.map {
+            min(max(Int($0.timeIntervalSince1970.rounded()), intervalStart), intervalEnd)
+        }
+        return ActivityCalibrationBout(
+            taskId: spec.id,
+            stepStartTs: Int(start.rounded(.down)),
+            stepEndTs: Int(end.rounded(.up)),
+            cueTs: step.cueAt.map { Int($0.timeIntervalSince1970.rounded()) },
+            intervalStartTs: intervalStart,
+            intervalEndTs: intervalEnd,
+            posture: spec.posture,
+            transitionKind: spec.transitionKind,
             transitionTs: transitionTs,
             protocolVersion: model.version)
-        onBout?(bout)
-        // The onBout handler is the UI's label path; if it synchronously cancelled or finished
-        // the session (its own lifecycle), do not override that decision with a rest phase.
-        guard isRunning else { return }
-        let isLast = taskIndex == model.tasks.count - 1 && rep == task.repetitions - 1
-        if isLast {
-            // No trailing rest after the final bout: the session is done the moment the stop
-            // cue fires, so a user who walks away is not kept in a rest phase.
-            finish()
-        } else {
-            let endsAt = now().addingTimeInterval(TimeInterval(task.restSeconds))
-            phase = .rest(taskIndex: taskIndex, rep: rep, endsAt: endsAt)
-        }
-    }
-
-    /// Rest is over: re-check the gate (a disconnect or a Raw Data session that started during
-    /// the rest must stop us before we label blind seconds), then start the next repetition or
-    /// the next task's countdown.
-    private func advanceAfterRest(taskIndex: Int, rep: Int) {
-        switch gate() {
-        case .blocked(let reason):
-            block(reason)
-            return
-        case .ready:
-            break
-        }
-        let task = model.tasks[taskIndex]
-        if rep < task.repetitions - 1 {
-            // Same task, next repetition: keep counting up so the bout's `repetition` advances.
-            currentRep = rep + 1
-            beginCountdown(taskIndex: taskIndex)
-        } else {
-            // Task done: reset the repetition counter for the next task's first bout.
-            currentRep = 0
-            beginCountdown(taskIndex: taskIndex + 1)
-        }
     }
 
     /// Terminal blocked path, shared by begin-time and mid-session gate failures: clear the
@@ -401,51 +347,41 @@ public final class ActivityCalibrationSessionRunner: ObservableObject {
         }
         ActivityCalibrationRestoreMarker.clear(defaults: defaults)
         self.previousMode = nil
+        transitionAt = nil
     }
 }
 
-// MARK: - Per-repetition output
+// MARK: - Per-step output
 
-/// One completed repetition of a guided calibration task, as recorded by the runner and handed to
-/// the UI's label builder. All timestamps are unix seconds. The canonical evaluation interval is
-/// `[intervalStartTs, intervalEndTs)`; the cue timestamps are preserved beside it so the raw
-/// seconds and the reaction-time margins stay auditable.
+/// One completed step of a guided session, as recorded by the runner and handed to the UI's label
+/// builder. All timestamps are unix seconds. The canonical evaluation interval is
+/// `[intervalStartTs, intervalEndTs)`; the step edges and the move cue are kept beside it so the
+/// reaction-time margins stay auditable.
 public struct ActivityCalibrationBout: Codable, Equatable, Sendable {
     public var taskId: String
-    /// 1-based repetition number within the task.
-    public var repetition: Int
-    public var instructionTs: Int?
-    public var countdownStartTs: Int?
-    public var cueStartTs: Int
-    public var cueStopTs: Int
-    /// cueStartTs + guardSeconds ..< cueStopTs - guardSeconds
+    public var stepStartTs: Int
+    public var stepEndTs: Int
+    /// When a move's "move now" buzz was due; nil for holds.
+    public var cueTs: Int?
+    /// stepStart + guardSeconds ..< stepEnd - guardSeconds
     public var intervalStartTs: Int
     public var intervalEndTs: Int
     public var posture: String?
-    public var locomotion: String?
-    public var armBehavior: String?
-    public var semanticTag: String?
     public var transitionKind: String?
+    /// When the "move now" buzz actually fired, inside the interval.
     public var transitionTs: Int?
     public var protocolVersion: String
 
-    public init(taskId: String, repetition: Int, instructionTs: Int?, countdownStartTs: Int?,
-                cueStartTs: Int, cueStopTs: Int, intervalStartTs: Int, intervalEndTs: Int,
-                posture: String?, locomotion: String?, armBehavior: String?,
-                semanticTag: String?, transitionKind: String?, transitionTs: Int?,
-                protocolVersion: String) {
+    public init(taskId: String, stepStartTs: Int, stepEndTs: Int, cueTs: Int?,
+                intervalStartTs: Int, intervalEndTs: Int, posture: String?,
+                transitionKind: String?, transitionTs: Int?, protocolVersion: String) {
         self.taskId = taskId
-        self.repetition = repetition
-        self.instructionTs = instructionTs
-        self.countdownStartTs = countdownStartTs
-        self.cueStartTs = cueStartTs
-        self.cueStopTs = cueStopTs
+        self.stepStartTs = stepStartTs
+        self.stepEndTs = stepEndTs
+        self.cueTs = cueTs
         self.intervalStartTs = intervalStartTs
         self.intervalEndTs = intervalEndTs
         self.posture = posture
-        self.locomotion = locomotion
-        self.armBehavior = armBehavior
-        self.semanticTag = semanticTag
         self.transitionKind = transitionKind
         self.transitionTs = transitionTs
         self.protocolVersion = protocolVersion

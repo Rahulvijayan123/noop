@@ -534,7 +534,7 @@ struct ActivityCalibrationEntry: View {
     private var subtitle: String {
         let n = labelledCount
         return n == 0
-            ? String(localized: "A few guided minutes of sitting, standing and walking so Nara learns how you move.")
+            ? String(localized: "Five guided minutes of sitting, standing and lying down so Nara learns how you change position.")
             : String(localized: "\(n) labelled examples so far. Add more to sharpen sitting, standing and position changes.")
     }
 }

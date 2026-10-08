@@ -2184,6 +2184,11 @@ final class AppModel: ObservableObject {
         ble.buzzStrapOnce()
     }
 
+    /// An acknowledged `loops`-buzz cue for timed instructions (guided calibration).
+    func buzzCue(loops: UInt8) {
+        ble.buzzCue(loops: loops)
+    }
+
 
     /// Tell the strap to STOP an in-progress haptic pattern (#769). The biofeedback layers (Breathe /
     /// "Calm me" / resonance) schedule a stream of buzzes; cancelling the app-side DispatchWorkItems stops

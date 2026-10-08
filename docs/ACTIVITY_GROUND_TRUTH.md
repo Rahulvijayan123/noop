@@ -12,15 +12,22 @@ Settings → Test Centre → **Activity calibration** (shown only when a WHOOP 5
    part-time duty cycle);
 3. gates on: strap connected + bonded, 5/MG, on-wrist, battery above the low-battery threshold and not
    charging-up-from-low, and no manual Raw Data session in flight (the raw session owns the stream);
-4. walks the guided protocol (`calibration-v2`, about 10 minutes, one repetition per step): sit, type,
-   desk work, phone use, fidget; stand up, stand, sit down; stand up and walk, brisk walk, stop; walk to a
-   bed or sofa, lie down, rest lying down, get up, sit down;
-5. each step: instructions → 3 s countdown → labeled interval (2 s guard trimmed from each cue edge so
-   reaction time never contaminates the label) → stop haptic. Transition steps hold still for 3 s, then
-   buzz "do it now"; an early "do it now" tap is recorded at the nearest instant inside the labeled
-   interval, so its `transition_ts` is always one the server accepts;
-6. writes one strong ground-truth label per step with all cue timestamps, multi-head partial labels
-   (posture / locomotion / arm behavior / transition + `transition_ts` / semantic tag), the phone's raw-IMU
+4. walks the guided protocol (`calibration-v3`, about 5.5 minutes) as two skippable activities, posture and
+   posture changes only. Walking, desk work, typing and fidgeting are not collected: ElderNet and the gait
+   chain already call walking, and the personal-profile fitter never learns from arm tags.
+   - *Sit and stand*: sit, stand up, stand, sit down, twice (30 s holds).
+   - *Lie down and get up*: sit, lie down, lie, sit up, sit, lie down, lie, get up and stand.
+   Each run has eight position changes (sit to stand, stand to sit, lying down, getting up);
+5. each activity waits on a Start tap, then a 5 s countdown, then its steps run back to back with no taps.
+   There are exactly two cues: **one buzz = move now** (fired 3 s into a move, after an on-screen "get ready"
+   count) and **three buzzes = activity done**. Holds never buzz. The screen reads the same `Date`
+   deadlines the runner acts on, so the words, the numbers and the buzz change in the same 0.1 s tick. The
+   strap buzz is an acknowledged write so the IMU stream cannot crowd it out; the phone mirrors both cues.
+   Every activity can be skipped (**Skip activity**), and **Stop** ends the run; skipping or stopping keeps the
+   steps already saved. The labeled interval trims a 2 s guard from each step edge, and a move's
+   `transition_ts` is the instant the buzz fired, always inside the interval so the server accepts it;
+6. writes one ground-truth label per step with its cue timestamps, posture or transition heads
+   (+ `transition_ts`), the phone's raw-IMU
    coverage for the interval (`sensor_quality`: covered seconds, gaps, 100 Hz), and raw-evidence
    references (`raw_refs`); a label with no raw evidence records *explicitly missing* coverage, never a
    silent zero;

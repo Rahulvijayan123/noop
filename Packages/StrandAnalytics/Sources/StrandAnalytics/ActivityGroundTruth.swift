@@ -546,298 +546,149 @@ public struct ActivityGroundTruthLabel: Codable, Equatable, Identifiable, Sendab
 
 // MARK: - Guided calibration protocol
 
-/// The group a calibration task belongs to. Raw values are the wire codes; `title` is the UI wording.
-public enum ActivityCalibrationTaskCategory: String, Codable, CaseIterable, Sendable {
-    case posture
-    case desk
-    case locomotion
-    case transition
-
-    public var title: String {
-        switch self {
-        case .posture: return "Posture"
-        case .desk: return "Desk / arm"
-        case .locomotion: return "Locomotion"
-        case .transition: return "Transitions"
-        }
-    }
-}
-
-/// One guided-capture task: what to do, for how long, how many times, and what the resulting label
-/// should claim. `guardSeconds` (default 2) trims each cue edge so the label interval is never
-/// reaction-time contaminated (spec §7.3); transition tasks keep `preStateSeconds`/`postStateSeconds`
-/// of guaranteed stable state around the event so evaluation never judges a transition from one
-/// timestamp (spec §7.4).
-public struct ActivityCalibrationTask: Codable, Equatable, Identifiable, Sendable {
+/// One guided step: a hold (the wearer stays in `posture`) or a move (the wearer changes posture once,
+/// on the buzz at `cueSeconds`). Steps inside an activity run back to back, so a move's pre-cue seconds
+/// are the tail of the previous hold and its post-cue seconds settle into the next one.
+///
+/// The label interval is `[start + guardSeconds, end - guardSeconds)`, so reaction time at either edge
+/// never reaches the label (spec §7.3). A move's label claims no posture (the interval holds both
+/// states); `endPosture` only tells the screen what to say after the buzz.
+public struct ActivityCalibrationTask: Equatable, Identifiable, Sendable {
     public var id: String
+    /// Short imperative shown large on screen ("Sit", "Stand up").
     public var title: String
     public var instructions: String
-    /// Raw value of `ActivityCalibrationTaskCategory`; kept a plain String so Codable stays simple.
-    public var category: String
     public var posture: String?
-    public var locomotion: String?
-    public var armBehavior: String?
-    public var semanticTag: String?
     public var transitionKind: String?
+    public var endPosture: String?
     public var durationSeconds: Int
-    public var repetitions: Int
-    public var restSeconds: Int
-    public var preStateSeconds: Int?
-    public var postStateSeconds: Int?
+    /// Seconds after the step starts at which a move's "move now" buzz fires; nil for holds.
+    public var cueSeconds: Int?
     public var guardSeconds: Int
 
-    public init(id: String, title: String, instructions: String, category: String,
-                posture: String? = nil, locomotion: String? = nil, armBehavior: String? = nil,
-                semanticTag: String? = nil, transitionKind: String? = nil,
-                durationSeconds: Int, repetitions: Int, restSeconds: Int = 5,
-                preStateSeconds: Int? = nil, postStateSeconds: Int? = nil,
-                guardSeconds: Int = 2) {
+    public init(id: String, title: String, instructions: String, posture: String? = nil,
+                transitionKind: String? = nil, endPosture: String? = nil,
+                durationSeconds: Int, cueSeconds: Int? = nil, guardSeconds: Int = 2) {
         self.id = id
         self.title = title
         self.instructions = instructions
-        self.category = category
         self.posture = posture
-        self.locomotion = locomotion
-        self.armBehavior = armBehavior
-        self.semanticTag = semanticTag
         self.transitionKind = transitionKind
+        self.endPosture = endPosture
         self.durationSeconds = durationSeconds
-        self.repetitions = repetitions
-        self.restSeconds = restSeconds
-        self.preStateSeconds = preStateSeconds
-        self.postStateSeconds = postStateSeconds
+        self.cueSeconds = cueSeconds
         self.guardSeconds = guardSeconds
     }
 
-    enum CodingKeys: String, CodingKey {
-        case id, title, instructions, category, posture, locomotion, repetitions
-        case armBehavior = "arm_behavior", semanticTag = "semantic_tag", transitionKind = "transition_kind"
-        case durationSeconds = "duration_seconds", restSeconds = "rest_seconds"
-        case preStateSeconds = "pre_state_seconds", postStateSeconds = "post_state_seconds"
-        case guardSeconds = "guard_seconds"
-    }
+    public var isMove: Bool { transitionKind != nil }
 }
 
-/// An editable, versioned guided-capture protocol.
-public struct ActivityCalibrationProtocolModel: Codable, Sendable {
-    public var version: String
+/// A skippable block of steps that needs one setup (a chair, a bed or sofa). The wearer starts it with a
+/// tap once in position; skipping it never touches the labels other activities saved.
+public struct ActivityCalibrationActivity: Equatable, Identifiable, Sendable {
+    public var id: String
+    public var title: String
+    /// Where to be before tapping Start.
+    public var setup: String
     public var tasks: [ActivityCalibrationTask]
 
-    public init(version: String, tasks: [ActivityCalibrationTask]) {
-        self.version = version
+    public init(id: String, title: String, setup: String, tasks: [ActivityCalibrationTask]) {
+        self.id = id
+        self.title = title
+        self.setup = setup
         self.tasks = tasks
     }
 
-    /// Wall-clock length of one run: every repetition is a countdown plus its active interval, and
-    /// every repetition except the very last is followed by its rest.
-    public func estimatedSeconds(countdownSeconds: Int) -> Int {
-        let reps = tasks.reduce(0) { $0 + $1.repetitions }
-        let perRep = tasks.reduce(0) { $0 + ($1.durationSeconds + countdownSeconds) * $1.repetitions }
-        let rests = tasks.reduce(0) { $0 + $1.restSeconds * $1.repetitions } - (tasks.last?.restSeconds ?? 0)
-        return reps == 0 ? 0 : perRep + max(0, rests)
+    public var seconds: Int { tasks.reduce(0) { $0 + $1.durationSeconds } }
+}
+
+/// A versioned guided-capture protocol.
+public struct ActivityCalibrationProtocolModel: Equatable, Sendable {
+    public var version: String
+    public var activities: [ActivityCalibrationActivity]
+
+    public init(version: String, activities: [ActivityCalibrationActivity]) {
+        self.version = version
+        self.activities = activities
+    }
+
+    public var tasks: [ActivityCalibrationTask] { activities.flatMap(\.tasks) }
+
+    /// Wall-clock length of one run with nothing skipped: each activity's start countdown plus its steps.
+    public func estimatedSeconds(startCountdownSeconds: Int = ActivityCalibrationProtocols.startCountdownSeconds) -> Int {
+        activities.reduce(0) { $0 + startCountdownSeconds + $1.seconds }
     }
 }
 
-/// The shipped guided-capture protocols. Editable copies are made from these; the statics stay pristine
-/// so the protocol can be re-derived after a user edits it (spec §7.4 "editable and versioned").
+/// The shipped guided-capture protocol. Earlier versions (`calibration-v1`, the hour-long drill, and
+/// `calibration-v2`, a 9-minute day-in-miniature with desk and walking steps) are not kept: every label
+/// carries its own heads, timestamps and `protocol_version`, so nothing reads an old definition back.
 public enum ActivityCalibrationProtocols {
-    /// The default protocol: spec §7.4 groups (posture 45 s×3, desk 60/45/45/30/45 s, locomotion
-    /// 90/90/60/60/120 s, six transition kinds at 10 reps each). Every instruction string embeds the
-    /// natural-variation guidance from spec §7.5 (vary arm position, hand dominance, wrist placement,
-    /// desk posture, gait speed) so the protocol never teaches one scripted wrist pose.
-    public static let v1: ActivityCalibrationProtocolModel = {
-        let cat = ActivityCalibrationTaskCategory.self
-
-        func task(_ id: String, _ title: String, _ category: String, _ instructions: String,
-                  duration: Int, repetitions: Int, restSeconds: Int = 5,
-                  posture: String? = nil, locomotion: String? = nil, armBehavior: String? = nil,
-                  semanticTag: String? = nil, transitionKind: String? = nil,
-                  preState: Int? = nil, postState: Int? = nil) -> ActivityCalibrationTask {
-            ActivityCalibrationTask(id: id, title: title, instructions: instructions, category: category,
-                                    posture: posture, locomotion: locomotion, armBehavior: armBehavior,
-                                    semanticTag: semanticTag, transitionKind: transitionKind,
-                                    durationSeconds: duration, repetitions: repetitions,
-                                    restSeconds: restSeconds, preStateSeconds: preState,
-                                    postStateSeconds: postState)
-        }
-
-        // Spec §7.4 static/posture: 45 s × 3 each. Heads claim only posture — the arm can be anything
-        // while sitting/standing/lying quietly.
-        let postureGroup = [
-            task("posture.sitting-quietly", "Sitting quietly", cat.posture.rawValue,
-                 "Sit in a chair with your feet flat and hands relaxed. Stay as still as you comfortably can for the whole interval. Between repetitions, vary your arm position (hands in your lap, resting on the table, hanging at your side) and keep a relaxed, natural wrist.",
-                 duration: 45, repetitions: 3, posture: PostureClass.seatedLikely.rawValue),
-            task("posture.standing-quietly", "Standing quietly", cat.posture.rawValue,
-                 "Stand still with your weight on both feet. Stay as still as you comfortably can. Between repetitions, vary your arm position (arms at your sides, hands clasped in front or behind) and stand naturally, not frozen.",
-                 duration: 45, repetitions: 3, posture: PostureClass.uprightStationary.rawValue),
-            task("posture.lying-down", "Lying down", cat.posture.rawValue,
-                 "Lie down on a bed or sofa on your back, relaxed. Stay as still as you comfortably can. Between repetitions, vary your arm position (at your sides, on your chest or abdomen) and keep your wrist relaxed.",
-                 duration: 45, repetitions: 3, posture: PostureClass.recumbent.rawValue),
-        ]
-
-        // Spec §7.4 desk/arm: seated, with a fine semantic tag on top of the arm head.
-        let deskGroup = [
-            task("desk.desk-work", "Desk work", cat.desk.rawValue,
-                 "Work at a desk as you normally would (computer, reading, writing). Between repetitions, vary your desk posture, arm position and wrist placement (relaxed vs active), and switch which hand leads.",
-                 duration: 60, repetitions: 3, posture: PostureClass.seatedLikely.rawValue,
-                 armBehavior: ArmBehaviorClass.deskLike.rawValue, semanticTag: ActivityGroundTruthSemanticTag.deskWork.rawValue),
-            task("desk.typing", "Typing", cat.desk.rawValue,
-                 "Type at a keyboard at your natural pace. Between repetitions, alternate which hand carries the rhythm, adjust your wrist height and how relaxed your wrists are, and keep a natural typing speed.",
-                 duration: 45, repetitions: 3, posture: PostureClass.seatedLikely.rawValue,
-                 armBehavior: ArmBehaviorClass.repetitiveHandMotion.rawValue, semanticTag: ActivityGroundTruthSemanticTag.typing.rawValue),
-            task("desk.writing-mouse", "Writing or mouse use", cat.desk.rawValue,
-                 "Write by hand or use a mouse at your natural pace. Between repetitions, alternate dominant and non-dominant hand use, change your grip and wrist placement, and keep a natural rhythm.",
-                 duration: 45, repetitions: 3, posture: PostureClass.seatedLikely.rawValue,
-                 armBehavior: ArmBehaviorClass.deskLike.rawValue, semanticTag: ActivityGroundTruthSemanticTag.writing.rawValue),
-            task("desk.fidgeting-seated", "Fidgeting while seated", cat.desk.rawValue,
-                 "Stay seated and fidget naturally as you might during a long meeting: shift in your seat, tap, stretch, adjust. Between repetitions, vary the fidget movements, your arm position and which hand is involved.",
-                 duration: 30, repetitions: 3, posture: PostureClass.seatedLikely.rawValue,
-                 armBehavior: ArmBehaviorClass.fidgeting.rawValue, semanticTag: ActivityGroundTruthSemanticTag.fidgeting.rawValue),
-            task("desk.phone-use", "Quiet phone use", cat.desk.rawValue,
-                 "Sit quietly and use your phone as you normally would (scroll or read). Between repetitions, hold the phone in your dominant vs non-dominant hand, change how your arm rests, and relax your wrist.",
-                 duration: 45, repetitions: 2, posture: PostureClass.seatedLikely.rawValue,
-                 armBehavior: ArmBehaviorClass.quiet.rawValue, semanticTag: ActivityGroundTruthSemanticTag.phoneUse.rawValue),
-        ]
-
-        // Spec §7.4 locomotion. Running/stairs/cycling are optional (safety/availability); the wording
-        // says so because the task type has no separate "optional" flag.
-        let locomotionGroup = [
-            task("locomotion.walking", "Normal walking", cat.locomotion.rawValue,
-                 "Walk at your normal, comfortable pace. Between repetitions, keep a natural stride and arm swing, and don't force a scripted gait — walk as you naturally would.",
-                 duration: 90, repetitions: 2, locomotion: LocomotionClass.walking.rawValue),
-            task("locomotion.brisk-walking", "Brisk walking", cat.locomotion.rawValue,
-                 "Walk briskly, as if you're slightly late. Between repetitions, pick a comfortably brisk pace and keep a natural arm swing; don't force the speed.",
-                 duration: 90, repetitions: 2, locomotion: LocomotionClass.briskWalking.rawValue),
-            task("locomotion.running", "Running", cat.locomotion.rawValue,
-                 "Run at a comfortable jogging pace — only if it is safe and available to you. Between repetitions, run at your natural pace with relaxed arms and a natural wrist.",
-                 duration: 60, repetitions: 2, locomotion: LocomotionClass.running.rawValue),
-            task("locomotion.stairs", "Stairs", cat.locomotion.rawValue,
-                 "Walk up and down stairs at a normal pace — only if stairs are available to you. Between repetitions, vary using a railing vs not, and keep a natural arm swing.",
-                 duration: 60, repetitions: 2, locomotion: LocomotionClass.stairs.rawValue),
-            task("locomotion.cycling", "Cycling", cat.locomotion.rawValue,
-                 "Cycle at a comfortable, steady pace (a stationary bike is fine) — optional, when available. Keep a natural grip and relaxed wrist, and vary your effort slightly between repetitions.",
-                 duration: 120, repetitions: 1, locomotion: LocomotionClass.cycling.rawValue),
-        ]
-
-        // Spec §7.4 transitions: 10 reps each, ~8 s stable pre-state + the event + ~8 s stable post-state
-        // (durationSeconds 20 models the whole labeled interval). Heads stay nil — the interval contains
-        // both pre- and post-state, so no single head value is true over all of it; evaluation uses the
-        // definitive transition_kind/transition_ts and the surrounding raw seconds.
-        let transitionGroup = [
-            task("transition.sit-to-stand", "Sit → stand", cat.transition.rawValue,
-                 "Sit in a chair, relaxed. On the cue, stand up naturally and stay still. Each repetition is ~8 s sitting, the stand-up, then ~8 s standing. Between repetitions, vary your arm position and hand use, and move at your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.sitToStand.rawValue, preState: 8, postState: 8),
-            task("transition.stand-to-sit", "Stand → sit", cat.transition.rawValue,
-                 "Stand still, relaxed. On the cue, sit down naturally and stay still. Each repetition is ~8 s standing, the sit-down, then ~8 s sitting. Between repetitions, vary your arm position and hand use, and move at your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.standToSit.rawValue, preState: 8, postState: 8),
-            task("transition.lying-down", "Lying down", cat.transition.rawValue,
-                 "Stand next to a bed or sofa. On the cue, lie down naturally and stay still. Each repetition is ~8 s standing, the lie-down, then ~8 s lying. Between repetitions, vary which side you use, your arm position, and your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.lyingDown.rawValue, preState: 8, postState: 8),
-            task("transition.getting-up", "Getting up", cat.transition.rawValue,
-                 "Lie down, relaxed. On the cue, get up and stand naturally, then stay still. Each repetition is ~8 s lying, the get-up, then ~8 s standing. Between repetitions, vary your arm use and your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.gettingUp.rawValue, preState: 8, postState: 8),
-            task("transition.walk-start", "Walk start", cat.transition.rawValue,
-                 "Stand still, relaxed. On the cue, start walking at your natural pace. Each repetition is ~8 s standing, the start, then ~8 s walking. Between repetitions, vary which foot leads, your arm swing, and your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.walkStart.rawValue, preState: 8, postState: 8),
-            task("transition.walk-stop", "Walk stop", cat.transition.rawValue,
-                 "Walk at your natural pace. On the cue, stop and stand still. Each repetition is ~8 s walking, the stop, then ~8 s standing. Between repetitions, vary your deceleration, arm position, and your natural speed.",
-                 duration: 20, repetitions: 10, restSeconds: 8,
-                 transitionKind: ActivityGroundTruthTransitionKind.walkStop.rawValue, preState: 8, postState: 8),
-        ]
-
-        return ActivityCalibrationProtocolModel(
-            version: "calibration-v1",
-            tasks: postureGroup + deskGroup + locomotionGroup + transitionGroup)
-    }()
-
     /// The protocol the guided session runs.
-    public static var current: ActivityCalibrationProtocolModel { v2 }
+    public static var current: ActivityCalibrationProtocolModel { v3 }
 
-    /// A ~9 minute run shaped like an ordinary stretch of a day. Every step ends in the state the next
-    /// one starts from (sit -> desk -> stand -> walk -> stop -> lie -> get up -> sit), so the transitions
-    /// are the real moves between steps rather than drilled repetitions, and nobody has to reset between
-    /// bouts (rest 0). One bout per class per run is deliberate: personalization needs >= 3 sessions
-    /// per class and evaluation pools transition events across sessions, so a few short runs on
-    /// different days carry more evidence than one long one. Running, stairs and cycling are left to
-    /// recorded workouts. Transition pre-states are short (3 s, >= the 2 s guard) because the step
-    /// before already holds that state. Standing is the longest static bout (70 s) so that a single run
-    /// clears `ActivityPersonalProfileFitter.minModeSeconds` after the cue guards and the fitter's own settle
-    /// and end trims: standing is the class the population profile confuses with sitting most.
-    public static let v2: ActivityCalibrationProtocolModel = {
-        let cat = ActivityCalibrationTaskCategory.self
+    /// Seconds between tapping Start and an activity's first step: time to put the phone hand down and
+    /// let the decoder's trailing windows clear the tap.
+    public static let startCountdownSeconds = 5
 
-        func step(_ id: String, _ title: String, _ category: ActivityCalibrationTaskCategory,
-                  _ instructions: String, duration: Int,
-                  posture: PostureClass? = nil, locomotion: LocomotionClass? = nil,
-                  arm: ArmBehaviorClass? = nil, tag: ActivityGroundTruthSemanticTag? = nil) -> ActivityCalibrationTask {
-            ActivityCalibrationTask(id: id, title: title, instructions: instructions, category: category.rawValue,
-                                    posture: posture?.rawValue, locomotion: locomotion?.rawValue,
-                                    armBehavior: arm?.rawValue, semanticTag: tag?.rawValue,
-                                    durationSeconds: duration, repetitions: 1, restSeconds: 0)
+    /// Short runs it takes before a personal profile can be fit and tested: leave-one-run-out trains on
+    /// all runs but one, so each posture needs `ActivityPersonalProfileFitter.minModeSeconds` across two runs.
+    public static let runsToPersonalise = 3
+
+    /// About 5 minutes, posture and posture changes only: the distinctions the decoder gets wrong (sitting vs
+    /// standing vs lying) and the moves between them. Walking, desk work, typing and fidgeting are gone:
+    /// ElderNet and the gait chain already call walking well, and the fitter never learns from arm tags.
+    ///
+    /// Two activities, each skippable. Sit and stand holds are 30 s: after the 2 s cue guards, the fitter's 3 s settle and
+    /// 1 s end trims, that leaves 22 s per hold, 44 s per posture, so leave-one-run-out folds of
+    /// two runs clear the 60 s per-mode minimum (`runsToPersonalise`). Moves buzz 3 s in, after the screen's
+    /// 3-2-1, and run 7–9 s past the buzz so the next hold starts after the decoder's 10 s change-settle.
+    /// Each run carries eight position changes, every one with a known `transition_ts`.
+    public static let v3: ActivityCalibrationProtocolModel = {
+        let seated = PostureClass.seatedLikely.rawValue
+        let upright = PostureClass.uprightStationary.rawValue
+        let lying = PostureClass.recumbent.rawValue
+
+        func hold(_ id: String, _ title: String, _ posture: String, _ seconds: Int,
+                  _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, posture: posture,
+                                    durationSeconds: seconds)
+        }
+        func move(_ id: String, _ title: String, _ kind: ActivityGroundTruthTransitionKind, to end: String,
+                  _ seconds: Int, _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, transitionKind: kind.rawValue,
+                                    endPosture: end, durationSeconds: seconds, cueSeconds: 3)
         }
 
-        func move(_ id: String, _ title: String, _ kind: ActivityGroundTruthTransitionKind,
-                  _ instructions: String, duration: Int = 10) -> ActivityCalibrationTask {
-            ActivityCalibrationTask(id: id, title: title, instructions: instructions,
-                                    category: cat.transition.rawValue, transitionKind: kind.rawValue,
-                                    durationSeconds: duration, repetitions: 1, restSeconds: 0,
-                                    preStateSeconds: 3, postStateSeconds: duration - 6)
-        }
+        let sitStand = ActivityCalibrationActivity(
+            id: "sit-stand", title: "Sit and stand",
+            setup: "Sit on a chair, or on the edge of a bed or sofa. Hold the phone in the hand without the strap.",
+            tasks: [
+                hold("sit-stand.sit-1", "Sit", seated, 30, "Sit relaxed, the way you normally do. Hands wherever is natural."),
+                move("sit-stand.stand-up-1", "Stand up", .sitToStand, to: upright, 10, "Stand up at your normal speed, then stay standing."),
+                hold("sit-stand.stand-1", "Stand", upright, 30, "Stand relaxed, as if waiting in a queue. Shifting your weight is fine."),
+                move("sit-stand.sit-down-1", "Sit down", .standToSit, to: seated, 10, "Sit back down, then stay seated."),
+                hold("sit-stand.sit-2", "Sit", seated, 30, "Sit relaxed. Try a different hand position from last time."),
+                move("sit-stand.stand-up-2", "Stand up", .sitToStand, to: upright, 10, "Stand up at your normal speed, then stay standing."),
+                hold("sit-stand.stand-2", "Stand", upright, 30, "Stand relaxed. Arms however you normally hold them."),
+                move("sit-stand.sit-down-2", "Sit down", .standToSit, to: seated, 10, "Sit back down and stay seated."),
+            ])
 
-        let tasks: [ActivityCalibrationTask] = [
-            step("posture.sitting-quietly", "Sit and relax", .posture,
-                 "Sit in a chair the way you normally would and relax. Rest your hands wherever feels natural.",
-                 duration: 40, posture: .seatedLikely),
-            step("desk.typing", "Type", .desk,
-                 "Put the phone down where you can see it and type on a keyboard at your normal pace: an email, notes, anything.",
-                 duration: 40, posture: .seatedLikely, arm: .repetitiveHandMotion, tag: .typing),
-            step("desk.desk-work", "Desk work", .desk,
-                 "Carry on at the desk as you usually would: use the mouse, read, write something by hand. Mix it up.",
-                 duration: 30, posture: .seatedLikely, arm: .deskLike, tag: .deskWork),
-            step("desk.phone-use", "Use your phone", .desk,
-                 "Still seated, pick up the phone and scroll or read as you normally would.",
-                 duration: 30, posture: .seatedLikely, arm: .quiet, tag: .phoneUse),
-            step("desk.fidgeting-seated", "Fidget", .desk,
-                 "Fidget the way you would in a long meeting: shift in your seat, stretch, tap, adjust.",
-                 duration: 20, posture: .seatedLikely, arm: .fidgeting, tag: .fidgeting),
-            move("transition.sit-to-stand", "Stand up", .sitToStand,
-                 "Stay seated. When it buzzes, stand up at your normal speed and stay standing."),
-            step("posture.standing-quietly", "Stand", .posture,
-                 "Stand relaxed, as if you were waiting in a queue. Shift your weight or move your arms if you normally would.",
-                 duration: 70, posture: .uprightStationary),
-            move("transition.stand-to-sit", "Sit down", .standToSit,
-                 "Stay standing. When it buzzes, sit back down."),
-            move("transition.sit-to-stand-2", "Stand up again", .sitToStand,
-                 "Stay seated. When it buzzes, stand up, ready to go for a short walk."),
-            move("transition.walk-start", "Start walking", .walkStart,
-                 "Stand still. When it buzzes, start walking at your normal pace. Carry the phone in the hand without the strap so you can read each next step."),
-            step("locomotion.walking", "Walk", .locomotion,
-                 "Keep walking at your usual pace: around your home, along a corridor or outside. Turn whenever you need to.",
-                 duration: 75, locomotion: .walking),
-            step("locomotion.brisk-walking", "Walk briskly", .locomotion,
-                 "Speed up as if you were running a little late. Keep it comfortable.",
-                 duration: 45, locomotion: .briskWalking),
-            move("transition.walk-stop", "Stop", .walkStop,
-                 "Ease back to your normal pace. When it buzzes, stop and stand still."),
-            move("transition.walk-start-2", "Walk to a bed or sofa", .walkStart,
-                 "Stand still. When it buzzes, start walking towards a bed or sofa."),
-            move("transition.walk-stop-2", "Stop beside it", .walkStop,
-                 "Keep walking towards the bed or sofa. When it buzzes, stop beside it and stand still."),
-            move("transition.lying-down", "Lie down", .lyingDown,
-                 "Standing by the bed or sofa: when it buzzes, lie down on your back.", duration: 12),
-            step("posture.lying-down", "Rest lying down", .posture,
-                 "Lie relaxed, as if you were resting. Keep your arms wherever is comfortable.",
-                 duration: 40, posture: .recumbent),
-            move("transition.getting-up", "Get up", .gettingUp,
-                 "Stay lying down. When it buzzes, get up and stand next to the bed or sofa.", duration: 12),
-            move("transition.stand-to-sit-2", "Sit down to finish", .standToSit,
-                 "Stay standing. When it buzzes, sit down on the bed, sofa or a chair. That's the last step."),
-        ]
-        return ActivityCalibrationProtocolModel(version: "calibration-v2", tasks: tasks)
+        let lieDown = ActivityCalibrationActivity(
+            id: "lie-down", title: "Lie down and get up",
+            setup: "Sit on the edge of a bed or sofa you can lie down on.",
+            tasks: [
+                hold("lie-down.sit-1", "Sit", seated, 12, "Sit on the edge, relaxed."),
+                move("lie-down.lie-down-1", "Lie down", .lyingDown, to: lying, 12, "Lie down on your back, then stay still."),
+                hold("lie-down.lie-1", "Lie still", lying, 25, "Lie relaxed, as if resting. Arms wherever is comfortable."),
+                move("lie-down.sit-up-1", "Sit up", .gettingUp, to: seated, 12, "Sit up on the edge, then stay seated."),
+                hold("lie-down.sit-2", "Sit", seated, 12, "Sit on the edge, relaxed."),
+                move("lie-down.lie-down-2", "Lie down", .lyingDown, to: lying, 12, "Lie down again, on your back or side."),
+                hold("lie-down.lie-2", "Lie still", lying, 25, "Lie relaxed. A different arm position from last time."),
+                move("lie-down.get-up-2", "Get up and stand", .gettingUp, to: upright, 12, "Get up and stand next to the bed or sofa."),
+                hold("lie-down.stand-1", "Stand", upright, 12, "Stand still next to it. That's the last step."),
+            ])
+
+        return ActivityCalibrationProtocolModel(version: "calibration-v3", activities: [sitStand, lieDown])
     }()
 }
