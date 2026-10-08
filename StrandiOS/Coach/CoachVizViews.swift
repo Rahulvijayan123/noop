@@ -126,7 +126,9 @@ enum CoachVizFormat {
 
     static func date(_ iso: String?) -> Date? {
         guard let iso else { return nil }
-        return isoDay.date(from: iso)
+        // A calendar day, read in the local zone the axis labels are drawn in: parsing it at UTC midnight
+        // showed it a day early west of Greenwich.
+        return ChartDay.date(forKey: iso) ?? isoDay.date(from: iso)
     }
 }
 

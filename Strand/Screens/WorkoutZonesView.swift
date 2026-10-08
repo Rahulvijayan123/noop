@@ -27,6 +27,9 @@ struct WorkoutZonesView: View {
     @State private var estimating = true
     /// Sessions already read (with or without heart rate), so a range change never reads one twice.
     @State private var tried: Set<Int> = []
+    /// The zone definition the estimates above were binned with. Another HRmax or zone set means another
+    /// binning, so the cached estimates are dropped rather than shown against the wrong zones.
+    @State private var estimatedWith = ""
 
     /// How many sessions without an imported split one range reads from the strap. The reads are per
     /// workout (the detail page's own read), so a long range stops at the newest ones.
@@ -86,11 +89,17 @@ struct WorkoutZonesView: View {
     /// page calls it; nothing is stored.
     private func estimate(_ inRange: [WorkoutRow]) async {
         estimating = true
+        let zoneKey = "\(profile.hrMax)|\(String(describing: profile.hrZoneSet))"
+        if zoneKey != estimatedWith {
+            estimated = [:]
+            tried = []
+            estimatedWith = zoneKey
+        }
         let pending = inRange
             .filter { WorkoutZoneMath.minutes($0) == nil && !tried.contains($0.startTs) }
             .sorted { $0.startTs > $1.startTs }
             .prefix(Self.estimateCap)
-        var found = estimated
+        var found = zoneKey == estimatedWith ? estimated : [:]
         var read = tried
         for row in pending {
             if Task.isCancelled { return }
@@ -132,14 +141,16 @@ struct WorkoutZonesView: View {
 
     private func stats(sources: [ZoneSource], totals: [Double]) -> [StatItem] {
         let total = totals.reduce(0, +)
+        // Say so on the figures themselves when any of the minutes are binned from the strap.
+        let estimateNote: String? = sources.contains(where: \.isEstimate) ? String(localized: "Includes estimates") : nil
         let hard = totals.count == 5 ? totals[3] + totals[4] : 0
         let days = Set(sources.map { Calendar.current.startOfDay(for: $0.start) })
         return [
-            StatItem(String(localized: "Total"), value: WorkoutFormat.duration(minutes: total)),
+            StatItem(String(localized: "Total"), value: WorkoutFormat.duration(minutes: total), detail: estimateNote),
             StatItem(String(localized: "Per workout day"),
                      value: days.isEmpty ? nil : WorkoutFormat.duration(minutes: total / Double(days.count))),
             StatItem(String(localized: "Z4–5 share"), value: total > 0 ? "\(Int((hard / total * 100).rounded()))" : nil,
-                     unit: "%"),
+                     unit: "%", detail: estimateNote),
             StatItem(String(localized: "Active days"), value: "\(days.count)"),
         ]
     }
