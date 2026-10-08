@@ -33,8 +33,10 @@ public actor CloudTransportCoordinator {
     }
 
     public struct Policy: Sendable {
-        /// At most this many in-process uploads in flight. Two is the spec's measured starting point.
-        public var maxInFlight: Int = 2
+        /// At most this many in-process uploads in flight. The receiver spends about 3 s on each POST
+        /// whatever its size (object-store writes and a dozen database calls), and most of that is not under
+        /// any per-user lock, so several in flight overlap it. Four: three backlog plus one kept for fresh data.
+        public var maxInFlight: Int = 4
         /// At most this many OS-session uploads in flight. Counted apart from `maxInFlight`: a task the
         /// OS defers must not use up the slots that live data needs.
         public var maxBackgroundInFlight: Int = 2
@@ -43,8 +45,11 @@ public actor CloudTransportCoordinator {
         /// stayed connected to the strap all night uploaded nothing from 01:00 until it was unlocked.
         public var useBackgroundLaneWhenInactive: Bool = false
         /// At most this many of the in-flight uploads may be backlog; the rest stay free for fresh
-        /// data. A strap-history backlog sent at full concurrency overloaded the receiver's database.
-        public var maxBacklogInFlight: Int = 1
+        /// data. A strap-history backlog sent at full concurrency once overloaded the receiver's database,
+        /// because every POST waited on the per-user scoring lock. With one at a time an overnight backlog
+        /// (about 170 batches) took minutes to drain after the strap had handed it over; three overlap the
+        /// receiver's per-request I/O while staying well under its admission limits.
+        public var maxBacklogInFlight: Int = 3
         /// A batch older than this is "backlog" rather than "fresh"; one of each is admitted per pass
         /// so a long backlog can never starve newly captured data (and vice versa).
         public var freshWindowSeconds: Int = 30
@@ -57,7 +62,12 @@ public actor CloudTransportCoordinator {
         /// of seconds makes tiny files; when the receiver is slower than that, the records are better
         /// left in the journal, where they merge into fewer, larger files and nothing is lost.
         public var sealBackpressureBatches: Int = 8
-        public var sealMaxRecords: Int = 2_000
+        /// Records per sealed file: the protocol's per-batch maximum (`PushProtocolLimits.maxRecords`), up from
+        /// 2,000. The receiver's cost is per request, not per row (a 6 KB and a 70 KB batch took the same ~3 s),
+        /// so a bigger file moves more of a backlog per round trip. Every stream's 5,000 records stay well under
+        /// the receiver's 4 MiB decoded limit (gravity, the largest, is about 0.8 MB), and `CloudBatchBuilder`
+        /// cuts at that limit regardless.
+        public var sealMaxRecords: Int = PushProtocolLimits.maxRecords
         public var sealMaxBytes: Int = 1 << 20
         public var acceptedRetentionSeconds: Int = 7 * 24 * 3600
         public init() {}
@@ -346,7 +356,37 @@ public actor CloudTransportCoordinator {
         }
     }
 
-    /// Fill the in-flight budget with eligible batches, one backlog item and one fresh item per pass.
+    /// Which batches to start this pass, in order: the oldest backlog batch, then the newest fresh one, then
+    /// more backlog up to `maxBacklogInFlight`. Fresh data always gets a slot ahead of the second backlog
+    /// batch, so a long backlog cannot starve it, and the backlog drains several at a time instead of one.
+    /// `due` is oldest first, `newest` newest first; the caller still stops at the lane's free slots.
+    static func admissionQueue<Batch>(due: [Batch], newest: [Batch], id: (Batch) -> String,
+                                      createdAtMs: (Batch) -> Int, freshCutoffMs: Int,
+                                      backlogInFlight: Int, policy: Policy) -> [Batch] {
+        let backlog = due.filter { createdAtMs($0) < freshCutoffMs }
+        let fresh = newest.filter { createdAtMs($0) >= freshCutoffMs }
+        var backlogRoom = max(0, policy.maxBacklogInFlight - backlogInFlight)
+        var queue: [Batch] = []
+        var queued = Set<String>()
+        func take(_ batch: Batch) {
+            guard queued.insert(id(batch)).inserted else { return }
+            queue.append(batch)
+        }
+        var pendingBacklog = backlog[...]
+        if backlogRoom > 0, let oldest = pendingBacklog.popFirst() {
+            take(oldest)
+            backlogRoom -= 1
+        }
+        if let newestFresh = fresh.first { take(newestFresh) }
+        while backlogRoom > 0, let next = pendingBacklog.popFirst() {
+            take(next)
+            backlogRoom -= 1
+        }
+        if queue.isEmpty, policy.maxBacklogInFlight > backlogInFlight, let first = due.first { take(first) }
+        return queue
+    }
+
+    /// Fill the in-flight budget with eligible batches: backlog up to `maxBacklogInFlight`, plus fresh data.
     private func sendEligible(identity: CloudPushIdentity) async throws {
         let lane = CloudTransportCoordinator.lane(sceneIsActive: CloudTransportCoordinator.applicationIsActive(),
                                                   policy: policy)
@@ -363,15 +403,9 @@ public actor CloudTransportCoordinator {
                                                limit: policy.maxInFlight + promptLaneBatches.count,
                                                newestFirst: true).filter(notInFlight)
         let freshCutoff = nowMs - policy.freshWindowSeconds * 1000
-        let backlog = due.filter { $0.createdAtMs < freshCutoff }
-        let fresh = newest.filter { $0.createdAtMs >= freshCutoff }
-        let backlogHasRoom = promptLaneBatches.values.filter { $0 }.count < policy.maxBacklogInFlight
-        var queue: [CloudSealedBatch] = []
-        if backlogHasRoom, let oldestBacklog = backlog.first { queue.append(oldestBacklog) }
-        if let newestFresh = fresh.first, !queue.contains(where: { $0.batchId == newestFresh.batchId }) {
-            queue.append(newestFresh)
-        }
-        if queue.isEmpty, backlogHasRoom { queue = Array(due.prefix(1)) }
+        let queue = CloudTransportCoordinator.admissionQueue(
+            due: due, newest: newest, id: \.batchId, createdAtMs: \.createdAtMs, freshCutoffMs: freshCutoff,
+            backlogInFlight: promptLaneBatches.values.filter { $0 }.count, policy: policy)
 
         for batch in queue {
             guard CloudTransportCoordinator.hasRoom(lane: lane, inFlight: inFlight,

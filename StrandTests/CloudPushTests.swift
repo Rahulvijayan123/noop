@@ -444,6 +444,45 @@ final class CloudPushTests: XCTestCase {
                                                         backgroundInFlight: 0, policy: policy))
     }
 
+    func testBacklogDrainsSeveralAtATimeWithFreshDataAhead() {
+        struct B { let id: String; let at: Int }
+        let policy = CloudTransportCoordinator.Policy()
+        XCTAssertGreaterThanOrEqual(policy.maxBacklogInFlight, 3)
+        XCTAssertGreaterThan(policy.maxInFlight, policy.maxBacklogInFlight)   // a slot always left for fresh data
+        XCTAssertEqual(policy.sealMaxRecords, PushProtocolLimits.maxRecords)   // the protocol maximum, not 2,000
+        let backlog = (0..<6).map { B(id: "old\($0)", at: $0) }
+        let fresh = [B(id: "new1", at: 1_000), B(id: "new0", at: 900)]   // newest first
+        func queue(inFlight: Int) -> [String] {
+            CloudTransportCoordinator.admissionQueue(
+                due: backlog, newest: fresh, id: \.id, createdAtMs: \.at, freshCutoffMs: 500,
+                backlogInFlight: inFlight, policy: policy).map(\.id)
+        }
+        // Oldest backlog first, then the newest fresh batch, then more backlog up to the cap.
+        XCTAssertEqual(queue(inFlight: 0), ["old0", "new1", "old1", "old2"])
+        XCTAssertEqual(queue(inFlight: 2), ["old0", "new1"])
+        // A full backlog budget still lets fresh data through.
+        XCTAssertEqual(queue(inFlight: 3), ["new1"])
+        // No backlog at all: just the fresh batch.
+        XCTAssertEqual(CloudTransportCoordinator.admissionQueue(
+            due: [B](), newest: fresh, id: \.id, createdAtMs: \.at, freshCutoffMs: 500,
+            backlogInFlight: 0, policy: policy).map(\.id), ["new1"])
+    }
+
+    func testCatchUpWaitsForTheBacklogNotForLiveData() {
+        var stats = CloudJournalStats.empty
+        XCTAssertTrue(AppModel.cloudBacklogDrained(stats))
+        // Live data in flight (a few seconds of records, a fresh file or two) is not a backlog.
+        stats.pendingRecords = 120
+        stats.sealedBatches = 2
+        XCTAssertTrue(AppModel.cloudBacklogDrained(stats))
+        // The morning of 2026-10-08: the night was handed over, ~170 files still to send.
+        stats.sealedBatches = 8
+        XCTAssertFalse(AppModel.cloudBacklogDrained(stats))
+        stats.sealedBatches = 0
+        stats.pendingRecords = 40_000
+        XCTAssertFalse(AppModel.cloudBacklogDrained(stats))
+    }
+
     func testSealTargetRelaxesOffScreen() {
         // On screen: inside the worker's ~once-a-minute republish of the current day.
         XCTAssertEqual(CloudPushRuntime.sealTargetSeconds(sceneActive: true), 10)
