@@ -1,0 +1,418 @@
+{
+  "schema": "nara.spec03.eligibility/1",
+  "audited_utc": "2026-10-08T05:44:00Z",
+  "spec": "spec-03-optional-pretrained-models.md",
+  "baseline": {"branch": "feat/spec03-pretrained-models-20261007", "commit": "dab2124f3"},
+  "method": {
+    "production_access": "read-only (Droplet: ls/cat/sha256sum/systemctl show/ps/journalctl/free/df/sar; database: aggregate SELECTs with default_transaction_read_only=on set in-session)",
+    "training": "none",
+    "artifact_root": "research/spec03-artifacts/ (outside git, Untitled volume)",
+    "untrusted_data_rule": "nothing executed from downloads; Python reads with python -I from _build-scratch/spec03-eligibility/",
+    "status_vocabulary": ["pass", "fail", "unknown"]
+  },
+  "candidates": [
+    {
+      "id": "actinet_walmsley",
+      "priority": 1,
+      "name": "ActiNet native classifier (upstream default 'walmsley': sleep/sedentary/light/moderate-vigorous)",
+      "decision": "admitted_for_adapter_work",
+      "release_mode": "shadow",
+      "activation": "deferred",
+      "decision_reasons": [
+        "No Nara bundle supplies the Walmsley label space or a label output; the deployed actukb bundle has Nara posture/locomotion/arm/transition heads plus a log-only, not test-gated movement_intensity regression.",
+        "Complete 30-s windows of 100 Hz accelerometer in g exist (about 2,400 non-overlapping windows, 2026-10-05 to 10-08).",
+        "Part-time capture (60 s per 180 s) makes the upstream HMM, sleep correction and daily imputation inapplicable; window-level labels only.",
+        "Upstream parity is not yet shown (motion agent).",
+        "Licence scope for a service on beta testers' data is an owner decision (Oxford Academic Use Licence)."
+      ],
+      "gates": [
+        {
+          "item": "No already-working equivalent trained Nara head bundle",
+          "status": "pass",
+          "meaning": "no equivalent exists, so the candidate is not pre-empted",
+          "evidence": [
+            "host worker.env: FRWHOOP_INERTIA_ENABLED=1, FRWHOOP_INERTIA_MODE=candidate, FRWHOOP_INERTIA_BUNDLE_DIR=/var/lib/frwhoop/inertia-bundles/shadow-ncsa-primary-actukb, FRWHOOP_INERTIA_BUNDLE_SHA256=aba9a811c32c04c58afca23955597bdcfdaece8c3e25ed62d629bf3e81468b63, FRWHOOP_INERTIA_CHECKPOINT=/var/lib/frwhoop/actinet-weights/ssl-wearables-harnet30-ukb-v1.0.0.pt, FRWHOOP_INERTIA_THREADS=2",
+            "host ps: pid 431826 python -m activity_context.inertia.serve --bundle .../shadow-ncsa-primary-actukb --checkpoint .../ssl-wearables-harnet30-ukb-v1.0.0.pt --timeout 55 --expect-bundle-sha256 aba9a811...",
+            "host journal 2026-10-07 23:27:20: 'inertia candidate enabled (... pinned aba9a811..., timeout 60.0 s, job budget 600.0 s)'",
+            "host sha256: checkpoint 28f8bcd719735496588eefb7f80c83209576aca3068fa61e9eae9874278e73f8 (pinned); bundle manifest.json 59ced24f03a0c0a69c789fcbd026c668a252d0833bdfb93186016940b25165d7 (= local copy)",
+            "host /var/lib/frwhoop/actinet-weights holds only the UKB file: no c24 (Willetts) weights, no ActiNet classifier",
+            "DB activity_motion_heads_days at 05:44Z: only bundle shadow-ncsa-primary-actukb, encoder_kind actinet, tier candidate; candidate mode 4 rows (owner 2 rows / 3,807 windows / 414 OOD; one beta tester 2 rows / 2,575 windows / 174 OOD; days 2026-10-07..08; 4 candidate documents, 0 withheld); shadow mode 1 row (owner, 986 windows, 75 OOD, 2026-10-07)",
+            "no reader of activity_motion_heads_days in supabase/functions or the app (git grep)",
+            "actukb heads: posture, locomotion, arm_behavior, transition (Nara class orders, INERTIA1.md:226-233) + movement_intensity sigmoid target clip(ln(MET)/ln(12),0,1) (INERTIA1.md:204-211)",
+            "actukb test_gate.json covers only the 4 classifier heads; final statuses mostly abstain (strong: locomotion.vehicle_motion, posture.seated_likely)",
+            "actukb movement_intensity test: MAE 0.085 (constant 0.137), R2 0.627, Spearman 0.827, 80% coverage 0.794, n=96,146 public windows (95,579 Capture-24)",
+            "decoder: 'transition and movement_intensity are carried and logged only (v1)' (Packages/StrandAnalytics/Sources/StrandAnalytics/ActivityContextMotionHeadsFusion.swift:23; INERTIA1.md:390-391)",
+            "repo-pinned c24 encoder source ssl-ukb-c24-mw-30s-20260128 (Tools/ActivityContext/activity_context/inertia/actinet.py:41-49) = upstream 'willetts' classifier (md5 59a9492b..., labels bicycling/mixed/sit-stand/sleep/vehicle/walking by static UTF-32 scan); c24 bundle movement_intensity R2 -0.008 on in-sample Capture-24 test"
+          ]
+        },
+        {
+          "item": "Suitable raw accelerometer windows (window level)",
+          "status": "pass",
+          "evidence": [
+            "NPB1 rawImuSession: 600 i16 per 1-s record, axis-major ax,ay,az,gx,gy,gz, 100 Hz (Tools/CloudWorker/Sources/frwhoop-worker/Npb1ImuDecoder.swift:10-16,27-29)",
+            "accelerometer 1/4096 g per LSB, gyroscope 2000/32768 deg/s (Tools/ActivityContext/activity_context/preprocess.py:47-48)",
+            "worker decodes, splits runs at gaps > 1 s, never fills, sends columns_b64 per run (Tools/CloudWorker/Sources/frwhoop-worker/ActivityLane.swift:13-21,1946-1960)",
+            "DB (HART window grid, activity_encoder_windows): non-overlapping 30-s windows per day: owner 10-05 428, 10-06 509, 10-07 722, 10-08 92 (partial); beta tester A 10-06 19; beta tester B 10-07 528, 10-08 108",
+            "object_manifests rawImuSession: 1,076 ready objects, 5 users, 2026-09-08..2026-10-08; before 10-05 only 2,183 record-seconds"
+          ]
+        },
+        {
+          "item": "Contiguous runs for the documented temporal processing (HMM, sleep correction, daily summaries)",
+          "status": "fail",
+          "evidence": [
+            "capture default partTime: on for the first 60 s of every 180 s (Strand/Collect/ActivityImuCapture.swift:31-37); continuous mode not default, battery cost unmeasured (lines 10-12)",
+            "median contiguous run 52-56 s; inter-run gap percentiles p10/p25/p50/p75/p90 = 109/121/127/132/147 s",
+            "longest runs: 12,351 s (owner, 2026-10-05 16:43-20:09 local, daytime), 2,868 s (owner 10-07 daytime); longest overnight (22:00-08:00) runs 170, 96, 554 s; overnight coverage 28-30% of the window on 3 nights",
+            "upstream Viterbi runs across gaps, then hmm.py restore_labels_after_gaps restores the raw label on the first epoch after each gap; with 1-2 epochs per run the HMM is a no-op or smooths across 2-minute gaps",
+            "ActiNet methods page: daily imputation, and the 90-minute calibration and non-wear logic, are whole-recording steps"
+          ]
+        },
+        {
+          "item": "Frozen classifier with original preprocessing reproduces upstream output",
+          "status": "unknown",
+          "owner": "motion agent",
+          "evidence": [
+            "artifact ssl-ukb-c24-rw-30s-20260128.joblib.lzma, 40,902,237 B, sha256 07dfd7482350dc30f0d69a4d59216caf0835bcca2d71d8e10a1243c8f7697fba, md5 a829041ba84b18084b4b2897fb1b36a6 = actinet 0.7.2 __classifiers__['walmsley']; labels sleep/sedentary/light/moderate-vigorous by static UTF-32 scan (no unpickling)",
+            "upstream output type: argmax label per 30-s epoch then HMM Viterbi (sslmodel.predict(output_logits=False)); no calibrated probabilities published",
+            "upstream windowing: resample('30s', origin='start'); windows with >450/900 samples padded (code: np.pad mode='wrap'; docs: zero-padded); the adapter must emit complete windows only or flag padded ones"
+          ]
+        },
+        {
+          "item": "Licence allows the intended use (owner decision)",
+          "status": "unknown",
+          "owner": "owner",
+          "evidence": [
+            "actinet LICENSE.md (master, = sdists 0.5.2-0.7.2): University of Oxford Academic Use Licence, sha256 9a4f1846fcf3aaa94575f0b01c3ec9ad901d1c1b2d8fe48fb9e12ebe88e9ecf8, git blob b3b34d119778d22a124aba7eb6282c8086cb546c; clause 1.1(b) excludes use on behalf of a third party or to provide a service",
+            "ssl-wearables v1.0.0 LICENSE.md: Academic Use Licence (git blob 64ed9bef8cde6795d8fcc89bc4d38fdb025ba6a6); README v1.0.0 licence section: academic research only, commercial use via Oxford University Innovation (sha256 1323fc0640e30e239bd718de5526f893424fe801e2964fa18d8be5b09bd60c8c)",
+            "no CC BY text in any actinet/actipy sdist; actinet README and readthedocs point only to LICENSE.md",
+            "repo says CC BY-NC 4.0: Tools/ActivityContext/NOTICE.md:347, Tools/ActivityContext/activity_context/inertia/registry.py:37 (needs correction)",
+            "same question as ElderNet (Tools/ActivityContext/ELDERNET.md:12-20); production already runs ssl-wearables weights (actukb) and ElderNet (candidate) on one beta tester's account"
+          ]
+        }
+      ],
+      "remaining_gates": [
+        {"gate": "Upstream parity of the frozen walmsley classifier plus original preprocessing", "cleared_by": "motion agent"},
+        {"gate": "Named downstream consumer and shadow store for 4-class labels (labels, not probabilities)", "cleared_by": "lead and motion agent under Spec 01 authority rules"},
+        {"gate": "Out-of-sample comparison (GOTOV/PAMAP2 test splits for intensity, sleep-accel PSG for sleep vs wake, WHOOP labels) against actukb on final features, coverage and runtime; Capture-24 is in-sample", "cleared_by": "motion agent; more WHOOP labels from the owner"},
+        {"gate": "Licence scope for a service on beta testers' data; correct NOTICE.md and registry.py", "cleared_by": "owner (or an Oxford University Innovation licence)"}
+      ],
+      "adapter_constraints": [
+        "Window-level only on part-time data; run the HMM only inside contiguous runs and record when it was skipped.",
+        "Never treat upstream daily imputation as observed data; the sleep label never replaces canonical sleep staging.",
+        "Do not attach a new head to the 1024-d embeddings; use the complete upstream classifier.",
+        "Runtime reference: harnet30 encoder ~37 windows/s per thread on the VPS (INERTIA1.md:110-111)."
+      ],
+      "artifacts": [
+        {"name": "ssl-ukb-c24-rw-30s-20260128.joblib.lzma", "role": "walmsley 4-class classifier (target)", "url": "https://wearables-files.ndph.ox.ac.uk/files/models/actinet/ssl-ukb-c24-rw-30s-20260128.joblib.lzma", "size_bytes": 40902237, "sha256": "07dfd7482350dc30f0d69a4d59216caf0835bcca2d71d8e10a1243c8f7697fba", "published_hash": "md5:a829041ba84b18084b4b2897fb1b36a6", "local_path": "research/spec03-artifacts/actinet/model-ssl-ukb-c24-rw-30s-20260128/", "fetched_by": "motion agent", "verified_here": true},
+        {"name": "ssl-ukb-c24-mw-30s-20260128.joblib.lzma", "role": "willetts 6-class classifier (current repo pin source)", "url": "https://wearables-files.ndph.ox.ac.uk/files/models/actinet/ssl-ukb-c24-mw-30s-20260128.joblib.lzma", "size_bytes": 40905601, "sha256": "9034d6c944f6af005b1387c0774e559ae24722d367366c843669d6375cf24b4a", "published_hash": "md5:59a9492b50ee922c7a31f88888c5f14b", "local_path": "research/spec03-artifacts/actinet/model-ssl-ukb-c24-mw-30s-20260128/", "fetched_by": "motion agent", "verified_here": true},
+        {"name": "actinet LICENSE.md (master)", "url": "https://raw.githubusercontent.com/OxWearables/actinet/master/LICENSE.md", "size_bytes": 6176, "sha256": "9a4f1846fcf3aaa94575f0b01c3ec9ad901d1c1b2d8fe48fb9e12ebe88e9ecf8", "local_path": "research/spec03-artifacts/actinet/eligibility-actinet-LICENSE-master/LICENSE.md", "fetched_by": "eligibility agent"},
+        {"name": "ssl-wearables README.md @ v1.0.0", "url": "https://raw.githubusercontent.com/OxWearables/ssl-wearables/v1.0.0/README.md", "size_bytes": 6890, "sha256": "1323fc0640e30e239bd718de5526f893424fe801e2964fa18d8be5b09bd60c8c", "published_hash": "git-blob:c28f09783ebee2453835238139959359c3de9f7a", "local_path": "research/spec03-artifacts/actinet/eligibility-ssl-wearables-README-v1.0.0/README.md", "fetched_by": "eligibility agent"},
+        {"name": "host ssl-wearables-harnet30-ukb-v1.0.0.pt", "size_bytes": 41966691, "sha256": "28f8bcd719735496588eefb7f80c83209576aca3068fa61e9eae9874278e73f8", "local_path": "host:/var/lib/frwhoop/actinet-weights/", "fetched_by": "already deployed", "verified_here": true},
+        {"name": "bundle shadow-ncsa-primary-actukb", "bundle_sha256": "aba9a811c32c04c58afca23955597bdcfdaece8c3e25ed62d629bf3e81468b63", "manifest_sha256": "59ced24f03a0c0a69c789fcbd026c668a252d0833bdfb93186016940b25165d7", "local_path": "host:/var/lib/frwhoop/inertia-bundles/shadow-ncsa-primary-actukb and External SSD research/inertia-bundles/", "verified_here": true}
+      ]
+    },
+    {
+      "id": "wav2sleep_ppg",
+      "priority": 2,
+      "name": "wav2sleep, PPG only",
+      "decision": "deferred_entirely",
+      "activation": "deferred",
+      "decision_reasons": [
+        "No anchored PPG exists: every production v26 second lacks baseCode and is withheld missing_ppg_anchor.",
+        "The Spec 01 anchored transport is contract text only; no code yet.",
+        "No contiguous overnight waveform exists; there has been no PPG upload since 2026-09-22.",
+        "No PPG + PSG evaluation set is available.",
+        "Checkpoint identity is verified; keep the manifest entry blocked_input and unwired (no duplicate entry)."
+      ],
+      "existing_code_note": "The physiology agent wrote an unregistered, off-by-default shadow adapter (docs/pretrained-models/WAV2SLEEP.md). Under this result it must stay unregistered and disabled; keeping the code is the lead's call.",
+      "manifest_entry_quoted": {
+        "file": "Tools/InferenceWorker/models/manifest.json:136-170",
+        "id": "wav2sleep",
+        "revision": "278e30463c8149c4e6899b8784da492fec695bd9",
+        "status": "blocked_input",
+        "status_reason": "requires a raw ECG/PPG waveform at 1024 samples per 30 s epoch (34.133 Hz); the product stores only derived ppg_hr_samples (bpm, confidence) on the default path",
+        "wired": false,
+        "provider_id": "sleep_stage",
+        "artifacts": [
+          {"name": "state_dict.pth", "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/state_dict.pth", "size_bytes": 9666562, "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc"},
+          {"name": "config.yaml", "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/config.yaml", "size_bytes": 749, "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509"}
+        ]
+      },
+      "gates": [
+        {
+          "item": "Spec 01 PPG transport fixed",
+          "status": "fail",
+          "evidence": [
+            "worker: absolute = baseCode + cumulative deltas only when the anchor is present; wire records decode with baseCode == nil and are withheld missing_ppg_anchor (Tools/CloudWorker/Sources/frwhoop-worker/SensorBiomarkerInputs.swift:18-22,68,438-443)",
+            "sidecar withheld vocabulary includes missing_ppg_anchor (Tools/InferenceWorker/src/frwhoop_inference/sensor_biomarkers/__init__.py:61-63)",
+            "docs/sensor-biomarkers/validation.md:147-150: production wire carries no baseCode",
+            "Spec 01 branch feat/spec01-model-integration-20261007 at ff143411e (05:38Z): pins segment members run_id, config.identity, clock.packet_timing_verified, clock.samples_per_second (doc only); worktree spec01/ppg-transport-20261007 has no commits or edits",
+            "after code lands: phone build, receiver/worker deploy and re-upload of recoverable local records; old server deltas cannot be re-anchored (Spec 01 section 3)"
+          ]
+        },
+        {
+          "item": "Contiguous overnight waveform with verified clock and quality",
+          "status": "fail",
+          "evidence": [
+            "object_manifests ppgWaveformSample: 429 ready objects, 5 users, 2026-08-13..2026-09-22, nothing later; <= 7,366 record-seconds (2.05 h) per day, objects span up to ~41 h (sporadic)",
+            "v26 is strap-banked in some stretches of a night instead of v18 (Packages/WhoopProtocol/Sources/WhoopProtocol/PpgHr.swift:3-9); 24 samples per second (PpgHr.swift:28; SensorBiomarkerInputs.swift:52)",
+            "lean raw capture default on; the IMU-only arm requests no optical collection (Strand/Collect/ActivityImuCapture.swift:43-50; Strand/BLE/BLEManager.swift:2404-2409)",
+            "sensor_biomarker_days: 10 rows (2026-10-05..08), families movement and oscillation only, no PPG family",
+            "noop_ppg_hr_samples: 0 rows",
+            "clock: per-second integer ts + i/24 convention, not yet verified against packet timing (Spec 01 section 3)"
+          ]
+        },
+        {
+          "item": "CPU and memory budget",
+          "status": "pass",
+          "note": "headroom only; per-night wav2sleep cost not measured",
+          "evidence": [
+            "host: 4 vCPU; free -m total 7,941 MiB, available 4,059 MiB at check time; no swap",
+            "sar daily mean busy: 2.0% (10-04), 3.2% (10-05), 11.7% (10-06), 20.6% (10-07), 15.2% (10-08 partial); max 10-minute busy 81.2% (10-07); min kbavail 3,118,808 kB (10-07)",
+            "frwhoop-inference.service: MemoryCurrent 834,781,184 B, MemoryMax 3 GiB, CPUQuotaPerSec 1.5 s",
+            "frwhoop-worker.service cgroup 2.59 GB (worker 1.21 GB RSS; HART 0.50, Inertia 0.48, ElderNet 0.53 GB children); OMP_NUM_THREADS=2"
+          ]
+        },
+        {
+          "item": "Actual sleep-stage evaluation set with a PPG waveform",
+          "status": "fail",
+          "evidence": [
+            "research/psg/sleep-accel-1.0.0 (External SSD; the Untitled copy has empty dirs): 31 subjects, Apple Watch heart_rate (bpm), ~50 Hz acceleration in g, 30-s PSG labels; no PPG waveform; ODC-By",
+            "research/har-datasets/DOWNLOADS.md: activity datasets only; no PPG + PSG set anywhere under research/"
+          ]
+        },
+        {
+          "item": "HF source identity matches the manifest pin",
+          "status": "pass",
+          "note": "content matches; revision field mislabelled and URLs unpinned",
+          "evidence": [
+            "HF API tree main (= 8b6e46ab3ef6e3945282b81f631933c59db0b205, 2026-02-02): state_dict.pth LFS sha256 ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc, 9,666,562 B, last commit 18fc32f095f10c1f7a91a56298e7598d02c58529; config.yaml 749 B, git blob f5a5bcc1eaca8c35f36eccc3f7913f9e1b801353",
+            "HF API revision 278e30463c8149c4e6899b8784da492fec695bd9: HTTP 404 'Invalid rev id'; it is the GitHub joncarter1/wav2sleep main commit (2026-07-16, 'Update README')",
+            "first HF upload b0d9856cfcf4b3c4a48eea177c4d6eafc788750a had state_dict.pth 11,899,656 B, sha256 51605afc3205f93b2e74f636bde761911b046f241bb132789e6faa9e4c4f74cf",
+            "physiology agent's downloaded files hash to the manifest pins (research/spec03-artifacts/wav2sleep/{state_dict,config}-hf-18fc32f0/)",
+            "PPG contract: 1024 samples per 30-s epoch (src/wav2sleep/settings.py:17,23 at 278e3046; sha256 69c6e4d78a283a6bcf066b9c877ea2a13411be857a48d38042de434e459b28e6)"
+          ],
+          "recommended_fix": "pin URLs to https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/<file> and record 278e3046 as the code revision (Spec 01 owns manifest.json)"
+        }
+      ],
+      "domain_caveat": "Model rate 34.13 Hz exceeds WHOOP native 24 Hz; the resampled input holds nothing above 12 Hz. Keep the native rate explicit. An RSA waveform derived from the same PPG is not measured respiration.",
+      "remaining_gates": [
+        {"gate": "Anchored, versioned PPG transport + phone build + deploy + re-upload of recoverable records", "cleared_by": "Spec 01 PPG transport, then owner deploy"},
+        {"gate": "Contiguous overnight PPG with verified packet timing and quality", "cleared_by": "capture policy (owner); v26 is strap-driven"},
+        {"gate": "PPG + PSG sleep-stage evaluation set", "cleared_by": "owner (usual sources need registration or a data-use agreement; not attempted)"},
+        {"gate": "Manifest artifact URLs pinned to an HF revision", "cleared_by": "Spec 01 (manifest owner)"},
+        {"gate": "Per-night CPU and memory measurement", "cleared_by": "physiology agent"}
+      ],
+      "artifacts": [
+        {"name": "state_dict.pth", "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/state_dict.pth", "size_bytes": 9666562, "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc", "published_hash": "hf-lfs-oid:ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc", "local_path": "research/spec03-artifacts/wav2sleep/state_dict-hf-18fc32f0/", "fetched_by": "physiology agent", "verified_here": true},
+        {"name": "config.yaml", "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/config.yaml", "size_bytes": 749, "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509", "published_hash": "git-blob:f5a5bcc1eaca8c35f36eccc3f7913f9e1b801353", "local_path": "research/spec03-artifacts/wav2sleep/config-hf-18fc32f0/", "fetched_by": "physiology agent", "verified_here": true},
+        {"name": "settings.py @ 278e3046", "url": "https://raw.githubusercontent.com/joncarter1/wav2sleep/278e30463c8149c4e6899b8784da492fec695bd9/src/wav2sleep/settings.py", "size_bytes": 1817, "sha256": "69c6e4d78a283a6bcf066b9c877ea2a13411be857a48d38042de434e459b28e6", "local_path": "research/spec03-artifacts/wav2sleep/eligibility-settings-py-278e3046/settings.py", "fetched_by": "eligibility agent"}
+      ]
+    },
+    {
+      "id": "actitect_rbdisco",
+      "priority": 3,
+      "name": "ActiTect / RBDisco",
+      "decision": "deferred_entirely",
+      "activation": "deferred",
+      "decision_reasons": [
+        "There are no complete raw accelerometer nights; default capture is 1 minute in 3.",
+        "Upstream uniform resampling would nearest-interpolate the gaps, which the spec forbids.",
+        "Released model assets are acquired and byte-verified; the adapter brief is in ELIGIBILITY.md section 3."
+      ],
+      "source": {"repo": "https://github.com/bozeklab/actitect", "commit": "a088d8e97ac324c40755c8c28fa7a7227664c7f5", "commit_date": "2026-08-14", "latest_tag": {"v1.0.0": "736560cffac75b3be6556d1222c1de4daa575cc7"}, "paper": "https://www.nature.com/articles/s41746-026-02738-8"},
+      "licence": {"code": "PolyForm Noncommercial 1.0.0 with the Distribution section changed to forbid distribution", "models": "CC BY-NC-SA 4.0", "file_sha256": "929369ca02e97ade77843a5ab6fe874d1f0afa65916fd2d96979d73eaa5304c3", "consequence": "operator-fetch only; never commit code or weights"},
+      "upstream_contract": {
+        "input": "CSV with time (ISO8601 %Y-%m-%dT%H:%M:%S.%f%z) and x,y,z in g, or .cwa/.bin/.gt3x; API actitect.rbdisco.predict(data, model, return_level)",
+        "training_device": "Axivity AX6, 100 Hz, +-8 g, wrist, 6-7 consecutive nights per recording (paper)",
+        "preprocessing": "default_preprocessing.yaml (git blob d878e729ab957da36d5f0e2baf73904528c7b864): resample_rate infer, Butterworth 0.8-20 Hz, gravity calibration, non-wear detection, HDCZA sleep segmentation (processing/sleep.py:20-31: 5-s epochs, 375-s median, 10th percentile x15, min SPTW 30 min, merge gaps < 60 min, max 16 h, >= 3 h wear per noon-to-noon day)",
+        "movement_bouts": "threshold max(mean+std of |a| inside SPTW, 0.1) (processing/movements.py)",
+        "feature_order": "724 names: for each aggregation [mean,std,skew,kurt,mad,iqr,10th_percentile,90th_percentile] the 88 local features, then 20 global features (rbdisco/configs/external_test.yaml git blob 3f6e58617f2dadbdcc637c78ff876525a3763f4a); each model applies its stored hps.selected_features after robust scaling",
+        "model": "joblib.load(...)['model2'] = (CustomCalibratedClassifierCV(XGBClassifier, sigmoid), hps, processing, thresholds, meta); night probability predict_proba[:,1]; night threshold thresholds['night']",
+        "aggregation": "patient: mean night probability > 0.5 and majority vote (>= n/2 nights) combined per meta.patient_aggregation; evaluation configs min_patient_nights_eval 4 (processing/aggregation.py)",
+        "resampling_gap_behaviour": "resample_df_uniform reindexes the full span and interpolates (method nearest), filling any gap (processing/resampling.py)"
+      },
+      "gates": [
+        {
+          "item": "Complete compatible raw accelerometer nights",
+          "status": "fail",
+          "evidence": [
+            "0 complete nights in production or locally (research/user-night* are 1 Hz streams)",
+            "overnight (22:00-08:00 local) raw IMU covers 28-30% of the window on 3 nights (2 users); longest overnight runs 170, 96, 554 s",
+            "default capture partTime 60 s per 180 s (Strand/Collect/ActivityImuCapture.swift:31-37)"
+          ]
+        },
+        {
+          "item": "Units, placement and preprocessing checked",
+          "status": "pass",
+          "note": "on paper; axis frame and wrist-vs-bicep wear not verified",
+          "evidence": [
+            "WHOOP raw IMU 100 Hz, i16 at 4096 LSB/g (+-8 g), g after scaling, wrist strap; matches AX6 100 Hz +-8 g",
+            "HDCZA needs full-day distributions; the bandpass needs fs > 40 Hz (upstream caps lowpass at 0.95 x Nyquist since a088d8e9)"
+          ]
+        },
+        {
+          "item": "Released model assets acquired and verified",
+          "status": "pass",
+          "evidence": [
+            "4 joblib files in the source tarball at a088d8e9; size, sha256 and git blob ids match the GitHub tree API",
+            "static pickle scan (no unpickling): CustomCalibratedClassifierCV, xgboost.sklearn.XGBClassifier, sklearn.calibration._CalibratedClassifier, _SigmoidCalibration, StratifiedGroupKFold, joblib NumpyArrayWrapper; references actitect.rbdisco.core.manager, classification_threshold, actitect.config.config",
+            "load not attempted: pickle executes code; needs a pinned isolated environment (Python 3.9, xgboost 2.0.3 per README)"
+          ]
+        }
+      ],
+      "expose_first": [
+        "daily.sleep_analytics_v1.movement (Packages/StrandAnalytics/Sources/StrandAnalytics/SleepAnalyticsMovement.swift; fields SleepAnalyticsV1.swift:688-728) from the 1 Hz gravity stream: movement seconds/percentage/bout count/bouts per eligible hour, complete/censored immobility bouts, longest/median/p90, threshold_g, source_resolution gravity_1hz_adjacent. On nara/main (0190b35ba, 6636467be; DayScoring.swift:1416-1442); absent from production (0 of 13,879 snapshots computed in the last 7 days; live worker 10f5727 does not contain it).",
+        "sensor_biomarker_days movement (ENMO 5-s epochs, low-movement bouts) and oscillation (gyro 3-7 Hz power) families (Tools/InferenceWorker/src/frwhoop_inference/sensor_biomarkers/imu.py): live (10 rows, 2026-10-05..08) but day-level on part-time raw IMU, not joined to stages (Spec 02 section 4)."
+      ],
+      "remaining_gates": [
+        {"gate": "Complete raw IMU nights (continuous overnight capture; battery cost unmeasured)", "cleared_by": "capture policy (owner)"},
+        {"gate": "Pinned isolated environment and an upstream parity run on example.cwa", "cleared_by": "motion agent, after the input gate"},
+        {"gate": "Named consumer; research score labelling (not a REM event, not a diagnosis)", "cleared_by": "lead"}
+      ],
+      "artifacts": [
+        {"name": "actitect source tarball @ a088d8e9", "url": "https://codeload.github.com/bozeklab/actitect/tar.gz/a088d8e97ac324c40755c8c28fa7a7227664c7f5", "size_bytes": 4904780, "sha256": "c89d42e670e5d3e065b93aefc15348a49c10e9e36827bb7bcce252af21a513ba", "local_path": "research/spec03-artifacts/actitect/source-a088d8e97ac3/actitect-a088d8e97ac324c40755c8c28fa7a7227664c7f5.tar.gz", "fetched_by": "eligibility agent"},
+        {"name": "multiCenterCore.joblib", "url": "https://raw.githubusercontent.com/bozeklab/actitect/a088d8e97ac324c40755c8c28fa7a7227664c7f5/libs/actitect-rbdisco/src/actitect/rbdisco/models/pretrained/multiCenterCore.joblib", "size_bytes": 1146694, "sha256": "408433f2fe53b5fe947394a388c6274306116d09b9c86f098b317abd5c79d763", "published_hash": "git-blob:c6c1d5bd945fc6eb1ff6623879b4276b9bf934a3", "local_path": "research/spec03-artifacts/actitect/source-a088d8e97ac3/extracted/.../models/pretrained/", "fetched_by": "eligibility agent (in tarball)"},
+        {"name": "multiCenterExtended.joblib", "size_bytes": 929286, "sha256": "8cb1be61fcfd671060f870adc5d8da61b485b64ba0ca0da57470987fe57356c4", "published_hash": "git-blob:85ceb445c9dc0a20ea2fc98d9ed6d860c14b6e28", "local_path": "research/spec03-artifacts/actitect/source-a088d8e97ac3/extracted/.../models/pretrained/", "fetched_by": "eligibility agent (in tarball)"},
+        {"name": "singleCenterCore.joblib", "size_bytes": 845686, "sha256": "3c407f7235c09abd952a36448a103657fecb3c9543133382fdbcbb27c0ae189a", "published_hash": "git-blob:595e65fc4214f79152a32ab412d55143f1687f5b", "local_path": "research/spec03-artifacts/actitect/source-a088d8e97ac3/extracted/.../models/pretrained/", "fetched_by": "eligibility agent (in tarball)"},
+        {"name": "singleCenterExtended.joblib", "size_bytes": 966550, "sha256": "9fbc96781eb5b9043bfbc5b3a1de203f415de82bc736baa648fab54cb5f64ae4", "published_hash": "git-blob:1453eb1795b5dd95e9bb7c10233c3b9b00681494", "local_path": "research/spec03-artifacts/actitect/source-a088d8e97ac3/extracted/.../models/pretrained/", "fetched_by": "eligibility agent (in tarball)"},
+        {"name": "LICENSE @ a088d8e9", "url": "https://raw.githubusercontent.com/bozeklab/actitect/a088d8e97ac324c40755c8c28fa7a7227664c7f5/LICENSE", "size_bytes": 4465, "sha256": "929369ca02e97ade77843a5ab6fe874d1f0afa65916fd2d96979d73eaa5304c3", "published_hash": "git-blob:33ade8674f4edf45f7e1514347737ad47fe95c04", "local_path": "research/spec03-artifacts/actitect/eligibility-LICENSE-a088d8e97ac3/LICENSE", "fetched_by": "eligibility agent"},
+        {"name": "example.cwa (release v1.0.0)", "url": "https://github.com/bozeklab/actitect/releases/download/v1.0.0/example.cwa", "size_bytes": 337117184, "published_hash": "sha256:4f7ad878d6c24abbc59bb5e10f9e77eb6a9546d7c8f1726bf2c2b73c1b4e650f", "fetched_by": "not fetched (parity fixture for later)"}
+      ]
+    },
+    {
+      "id": "pulsewatch",
+      "priority": 4,
+      "name": "Pulsewatch pretrained classifier (NSR / AF / PAC-PVC windows)",
+      "decision": "deferred_entirely",
+      "activation": "deferred",
+      "decision_reasons": [
+        "The exact checkpoint needs a Google sign-in (blocked: owner action).",
+        "The 0.5-20 Hz band at 50 Hz cannot be reproduced from 24 Hz WHOOP PPG, and upsampling does not repair it.",
+        "No synchronized PPG + HR + ACC exists, and anchored PPG does not exist."
+      ],
+      "source": {"repo": "https://github.com/Cassey2016/PulsewatchRelease", "commit": "82ed0412ef3dcb7f55c4fc5903b7e53a435ec4a6", "licence": "MIT", "study": "https://pmc.ncbi.nlm.nih.gov/articles/PMC11661413/"},
+      "published_contract": {
+        "best_model": "PPG + HR + ACC + magHR (pretrainedmodels/README.md model 12 = model 2; train/README.md:9-17); data_dim 1D_PPG_HR_ACC_rescaleHR",
+        "classes": ["NSR", "AF", "PAC/PVC"],
+        "classes_evidence": "train/run_train_model_four_channels.py:23",
+        "architecture": "bidirectional GRU + dense (model/my_RNN_GRU_model.py:16-63)",
+        "window": "30 s at 50 Hz = 1500 samples per channel (utils/my_dataloader.py:18,175)",
+        "channels": {
+          "PPG": "pre-filtered 0.5-20 Hz (study), per-segment min-max to [0,1]",
+          "HR": "per-sample beat-derived HR (WEPD/Elgendi), (HR-30)/(220-30)",
+          "ACC": "magnitude in m/s2 (Samsung watch), divided by 20",
+          "magHR": "same HR, per-segment min-max"
+        },
+        "normalisation_evidence": "utils/my_dataloader.py:1509-1548",
+        "expected_checkpoint": "train_RNN_GRU_20240712_fold_1_epoch_0033_val_loss_0.1207.pt in Drive folder TestRNNGRU_HR_ACC_rescaleHR (utils/my_pathdef.py:175-181)",
+        "output_semantics": "window classes only; no individual ectopic beats, no separate PAC/PVC counts"
+      },
+      "gates": [
+        {
+          "item": "Exact checkpoint obtained",
+          "status": "fail",
+          "blocked": "needs owner action",
+          "evidence": [
+            "https://drive.google.com/drive/folders/1HubliJ6l6fQP3BpHVmC7KvGQVlVfFZP- (root), https://drive.google.com/drive/folders/107pCHkm7K8vcmIlLU5XHABjcIuMnu3vT (model 2/12) and the model 1/5/11 folders: HTTP 302 to accounts.google.com/ServiceLogin; drive embeddedfolderview: HTTP 401",
+            "requirement: Google account sign-in or access granted by the authors; not attempted"
+          ]
+        },
+        {
+          "item": "Architecture, classes and preprocessing reproduced",
+          "status": "fail",
+          "evidence": ["documented from code at 82ed0412 (see published_contract); cannot be reproduced without checkpoint bytes"]
+        },
+        {
+          "item": "Synchronized PPG, HR and ACC",
+          "status": "fail",
+          "evidence": [
+            "0 of 1,076 rawImuSession objects overlap any ppgWaveformSample object span (same user)",
+            "default IMU-only arm requests no optical collection (Strand/BLE/BLEManager.swift:2404-2409); PPG and IMU are separate per-second-stamped records",
+            "HR is the strap's 1 Hz hrSample stream, not per-sample beat HR; beat HR would need anchored PPG (absent)"
+          ]
+        },
+        {
+          "item": "Credible bandwidth and domain comparison",
+          "status": "fail",
+          "evidence": [
+            "WHOOP native 24 Hz (Nyquist 12 Hz); 41% of the 0.5-20 Hz passband lies above it",
+            "synthetic test (_build-scratch/spec03-eligibility/pulsewatch_band.py, deterministic): reference 12-20 Hz energy share 2.5%; after 24 Hz acquisition and upsampling to 50 Hz the 12-20 Hz energy relative to the reference is 0.9% (polyphase 25/12), 0.0% (FFT), 11.9% (linear, imaging)",
+            "correlation of the surviving 12-20 Hz component with the original: 0.08 (polyphase), -0.01 (linear)",
+            "NRMSE 0.16-0.20; peak upstroke slope 0.67-0.70 of the reference"
+          ]
+        }
+      ],
+      "remaining_gates": [
+        {"gate": "Access to the author Drive folder", "cleared_by": "owner (or authors)"},
+        {"gate": ">= 50 Hz PPG with 0.5-20 Hz content and synchronized ACC", "cleared_by": "not achievable from WHOOP native 24 Hz without retraining (out of scope)"},
+        {"gate": "Anchored PPG transport", "cleared_by": "Spec 01"}
+      ],
+      "artifacts": [
+        {"name": "PulsewatchRelease source tarball @ 82ed0412", "url": "https://codeload.github.com/Cassey2016/PulsewatchRelease/tar.gz/82ed0412ef3dcb7f55c4fc5903b7e53a435ec4a6", "size_bytes": 4110976, "sha256": "553896be9c5a5842b7b42794d9725214f43708238885899ea339ad6292b39a95", "local_path": "research/spec03-artifacts/pulsewatch/source-82ed0412ef3d/", "fetched_by": "eligibility agent"},
+        {"name": "checkpoint train_RNN_GRU_20240712_fold_1_epoch_0033_val_loss_0.1207.pt", "url": "https://drive.google.com/drive/folders/107pCHkm7K8vcmIlLU5XHABjcIuMnu3vT", "fetched_by": "not fetched (blocked: Google sign-in)"}
+      ]
+    }
+  ],
+  "excluded": {
+    "models": ["Pulse-PPG", "PaPaGei", "AnyPPG", "SIGMA-PPG"],
+    "running_integration_found": false,
+    "evidence": [
+      "git grep -i (pulse[-_ ]?ppg|papagei|anyppg|sigma[-_]?ppg) in the repository: no matches",
+      "host find (file names) under /opt, /var/lib/frwhoop, /etc/systemd/system, /srv, /home, /root and site-packages: no matches",
+      "host grep in /opt/frwhoop-inference, /opt/noop/Tools, /opt/frwhoop-anomaly, /opt/nara-metric-insight sources: no matches",
+      "inference sidecar editable install -> /opt/noop/Tools/InferenceWorker/src; providers/: __init__.py, hrv.py"
+    ],
+    "recommendation": "keep excluded; nothing to inventory or retire"
+  },
+  "production_snapshot": {
+    "droplet": {
+      "host": "frwhoop-worker-2",
+      "checked_utc": "2026-10-08T04:33Z..05:02Z",
+      "services": {
+        "frwhoop-worker": "active since 2026-10-07 23:27:17 UTC; ExecStart /opt/noop/Tools/CloudWorker/.build/release/frwhoop-worker; FRWHOOP_SOURCE_REVISION=10f5727+sensor-biomarkers-20261007-merge-uncommitted (a claim, not proof)",
+        "frwhoop-inference": "active since 2026-10-07 04:02:54 UTC; model root /opt/frwhoop-models/current -> revisions/ffc93db27d79 (manifest sha256 ffc93db27d7967198b2784fa5fce937e314e211448a7f04822fa358a0ef1641f; repo HEAD manifest 8d776cc45766b49bcc5f1f1f6374131f2d155c9fbb1c482d62fd3aa20aebe402); staged artifacts: sleepecg only; wav2sleep blocked_input, unwired",
+        "others": ["frwhoop-anomaly", "frwhoop-metric-insight", "frwhoop-worker-oura"]
+      },
+      "flags": {
+        "FRWHOOP_ACTIVITY_ENABLED": "1",
+        "FRWHOOP_CONTEXT_ENABLED": "1",
+        "FRWHOOP_SENSOR_BIOMARKERS_ENABLED": "1",
+        "FRWHOOP_INERTIA_ENABLED": "1",
+        "FRWHOOP_INERTIA_MODE": "candidate",
+        "FRWHOOP_INERTIA_BUNDLE_DIR": "/var/lib/frwhoop/inertia-bundles/shadow-ncsa-primary-actukb",
+        "FRWHOOP_INERTIA_BUNDLE_SHA256": "aba9a811c32c04c58afca23955597bdcfdaece8c3e25ed62d629bf3e81468b63",
+        "FRWHOOP_INERTIA_CHECKPOINT": "/var/lib/frwhoop/actinet-weights/ssl-wearables-harnet30-ukb-v1.0.0.pt",
+        "FRWHOOP_INERTIA_THREADS": "2",
+        "FRWHOOP_ELDERNET_ENABLED": "1",
+        "FRWHOOP_ELDERNET_MODE": "candidate",
+        "FRWHOOP_ELDERNET_MODEL_VERSION": "eldernet-437a38b",
+        "FRWHOOP_ELDERNET_WEIGHTS_SHA256": "01b2f982a0a2664f455a529a8c483a10106a7ddcd89c326e3d15e24fa4cf4ca6",
+        "FRWHOOP_ELDERNET_GAIT_PRIOR": "0.085",
+        "OMP_NUM_THREADS": "2",
+        "HF_HUB_OFFLINE": "1",
+        "TRANSFORMERS_OFFLINE": "1"
+      },
+      "secret_variables_not_read": ["FRWHOOP_DB_URL", "FRWHOOP_INGEST_SECRET", "FRWHOOP_B2_APPLICATION_KEY", "FRWHOOP_B2_KEY_ID", "FRWHOOP_INFERENCE_URL"],
+      "activity_children": ["activity_context.serve (HART)", "activity_context.inertia.serve (actukb, candidate)", "activity_context.eldernet.serve"]
+    },
+    "database": {
+      "checked_utc": "2026-10-08T04:36Z..05:44Z",
+      "activity_motion_heads_days": "5 rows, bundle shadow-ncsa-primary-actukb only (candidate 4: owner 2 / beta tester 2; shadow 1: owner)",
+      "activity_gait_windows_days": "5 rows (owner 2, one beta tester 3)",
+      "rawImuSession_objects": "1,076 ready + 24 pending; 5 users",
+      "ppgWaveformSample_objects": "429 ready; 5 users; last 2026-09-22",
+      "sensor_biomarker_days": "10 rows 2026-10-05..08; movement + oscillation families ok; no PPG family",
+      "sleep_analytics_v1_in_snapshots_last_7d": "0 of 13,879",
+      "activity_reference_labels": "activity_ground_truth_labels 12 rows (1 user); activity_stretch_feedback 40 rows (2 users); no intensity labels"
+    }
+  },
+  "incidental_findings": [
+    "PGOPTIONS='-c default_transaction_read_only=on' is ignored by the Supabase session pooler (show default_transaction_read_only returned off); set it in-session.",
+    "Tools/ActivityContext/NOTICE.md:342-348 and activity_context/inertia/registry.py:37 state CC BY-NC 4.0 for ActiNet/ssl-wearables; upstream says Oxford Academic Use Licence.",
+    "ElderNet and the ssl-wearables actukb lane run in candidate mode on one beta tester's account, although ELDERNET.md:17-19 says to wait for the owner's licence-scope decision.",
+    "docs/BACKEND.md:777-779 says candidate decodes run only for inertia1; the code and migration 20261007100000 also accept actinet.",
+    "Tools/InferenceWorker/models/manifest.json wav2sleep revision 278e3046 is a GitHub code commit, not an HF revision; artifact URLs use resolve/main.",
+    "The worker journal shows a 40001 serialization failure in scoring_legacy_claim_one about every 15 s (outside this spec)."
+  ]
+}
