@@ -593,10 +593,11 @@ final class PCEligibilityContextTests: XCTestCase {
         XCTAssertEqual(verdict(settling: settling([event(-60, .walkStop)])).state, .eligible)
     }
 
-    /// The settling gate places an event at its onset (`onsetTs ?? ts`, INT-C / D2-05): a change that began inside
-    /// the support but was flagged a few seconds after it still excludes, and one that began before the settling
-    /// window is outside it even if it was flagged just inside.
-    func testSettlingUsesTheEventOnsetWhenTheDecoderRecordedOne() {
+    /// The settling gate counts an event over its span `[onsetTs ?? ts, ts]` (INT-C / D2-05), so both window edges
+    /// stay conservative: a change that began inside the support but was flagged a few seconds after it still
+    /// excludes, and an onset earlier than the settling window never loosens an event flagged inside it (settling
+    /// runs from when the change finished, at or after detection).
+    func testSettlingCountsTheEventFromItsOnsetToItsDetection() {
         func onset(_ ts: Int, _ onset: Int?) -> PC.TransitionEventInput {
             PC.TransitionEventInput(ts: F.t0 + ts, kind: ActivityTransitionKind.standToSitLike.rawValue,
                                     probability: 0.8, revision: 1, onsetTs: onset.map { F.t0 + $0 }, source: "hsmm")
@@ -604,19 +605,31 @@ final class PCEligibilityContextTests: XCTestCase {
         // Flagged 3 s after the support ends, began 4 s before it ends.
         XCTAssertEqual(verdict(settling: settling([onset(303, nil)])).state, .eligible)
         XCTAssertEqual(verdict(settling: settling([onset(303, 296)])).state, .ineligible)
-        // Flagged 115 s before the support (inside the 120-s settling window), began 125 s before it.
+        // Flagged 3 s after the support ends and began after it too: outside the window.
+        XCTAssertEqual(verdict(settling: settling([onset(303, 301)])).state, .eligible)
+        // Flagged 115 s before the support (inside the 120-s settling window): excludes whatever its onset.
         XCTAssertEqual(verdict(settling: settling([onset(-115, nil)])).state, .ineligible)
-        XCTAssertEqual(verdict(settling: settling([onset(-115, -125)])).state, .eligible)
+        XCTAssertEqual(verdict(settling: settling([onset(-115, -125)])).state, .ineligible)
+        // Flagged before the settling window: outside it, whatever its onset.
+        XCTAssertEqual(verdict(settling: settling([onset(-121, -126)])).state, .eligible)
+        // Among several events the span scan still finds one that began before the window ends.
+        XCTAssertEqual(verdict(settling: settling([onset(-500, nil), onset(301, 301), onset(305, 299),
+                                                   onset(400, nil)])).state, .ineligible)
         // An onset is never after the detection second, nor more than maxOnsetLeadS before it.
         XCTAssertEqual(onset(50, 60).changeTs, F.t0 + 50)
         XCTAssertEqual(onset(50, -500).changeTs, F.t0 + 50 - ActivityTransitionEvent.maxOnsetLeadS)
-        // "Seconds since the last postural transition" is measured from the onset as well.
+        // "Seconds since the last postural transition" is measured from detection, never overstated by the onset.
         var activity = PC.IntervalAlgebra.composition(over: support, track: quiet)
         var preceding = PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet, lookbackS: 1800)
         PC.TransitionEvents.annotate(&activity, &preceding, support: support,
                                      events: PC.TransitionEvents.prepare([onset(-30, -38)], causalCutoff: nil),
                                      coverage: decoderCoverage)
-        XCTAssertEqual(preceding.secondsSinceLastPosturalTransition, 38)
+        XCTAssertEqual(preceding.secondsSinceLastPosturalTransition, 30)
+        // A change that began inside the support but was flagged after it is counted during the support.
+        PC.TransitionEvents.annotate(&activity, &preceding, support: support,
+                                     events: PC.TransitionEvents.prepare([onset(303, 296)], causalCutoff: nil),
+                                     coverage: decoderCoverage)
+        XCTAssertEqual(activity.transitionEvents?.postural, 1)
         // Causal availability is still the detection second: flagged after the cutoff, it is not known yet.
         XCTAssertTrue(PC.TransitionEvents.prepare([onset(303, 296)], causalCutoff: F.t0 + 300).isEmpty)
     }

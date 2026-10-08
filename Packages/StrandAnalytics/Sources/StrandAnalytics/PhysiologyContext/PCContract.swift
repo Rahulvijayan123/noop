@@ -464,9 +464,9 @@ extension PhysiologyContext {
             self.algorithmVersion = algorithmVersion; self.onsetTs = onsetTs; self.source = source
         }
 
-        /// The second the change began, which the settling and "since the last transition" measures use:
-        /// `onsetTs` when recorded (kept within `[ts - maxOnsetLeadS, ts]`), else `ts`. Causal availability is
-        /// still decided on `ts`: the event is not known before it was flagged.
+        /// The second the change began: `onsetTs` when recorded (kept within `[ts - maxOnsetLeadS, ts]`), else
+        /// `ts`. Windows count an event over its span `[changeTs, ts]` (`TransitionEvents.summary`); causal
+        /// availability and "seconds since the last transition" stay on `ts`, the detection second.
         public var changeTs: Int {
             guard let onset = onsetTs else { return ts }
             return max(ts - ActivityTransitionEvent.maxOnsetLeadS, min(ts, onset))
