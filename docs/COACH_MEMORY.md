@@ -380,6 +380,10 @@ All passes go through `callUtility` (`_shared/coach_llm.ts`).
 
 **Locale.** Model-written user-facing strings are in the user's `locale` language (BCP-47, default `en`).
 
+**Dates.**
+- Every date in a cheap-model prompt is the owner's calendar day (`YYYY-MM-DD`) in the IANA zone from their `profiles.timezone` (UTC when unset or unknown). This covers message lines, memory lines, thread lines, recall headers and notes, and the suggestions "Now".
+- Summaries and memories keep these dates permanently, so a Pacific-time evening message must not become the next UTC day.
+
 **Title**
 - Input: the first question (≤ 600 characters) and the first answer (≤ 1,200).
 - Output: `{"title"}`, 2–6 words, Title Case.
