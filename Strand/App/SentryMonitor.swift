@@ -44,8 +44,12 @@ enum SentryMonitor {
 
             options.tracesSampleRate = 1.0
             options.enableAutoPerformanceTracing = true
-            options.enableFileIOTracing = true
-            options.enableCoreDataTracing = true
+            // Off: file I/O tracing wraps every NSData/FileManager read and write in a span while a transaction is
+            // open, and UI transactions stay open up to 30 s. The strap log writes a line or two a second and the
+            // IMU and score caches write constantly, so it added work to those paths and buried the spans that
+            // matter. The app has no Core Data (it uses GRDB), so that integration had nothing to trace.
+            options.enableFileIOTracing = false
+            options.enableCoreDataTracing = false
             options.enableNetworkTracking = true
             #if os(iOS)
             options.enableUIViewControllerTracing = true

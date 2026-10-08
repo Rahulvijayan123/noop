@@ -142,6 +142,17 @@ enum UnitPrefs {
             ? true : UserDefaults.standard.bool(forKey: liftLiveActivityKey)
     }
 
+    /// Everyone who uses Nara is in the United States, so there is no unit choice: pounds, feet and inches,
+    /// miles and Fahrenheit everywhere. Runs once per launch before anything reads the preference; it
+    /// overrides an earlier "metric" (or a distance or temperature pin) that an older build let someone pick.
+    static func enforceUnitedStates(_ d: UserDefaults = .standard) {
+        if d.string(forKey: systemKey) != UnitSystem.imperial.rawValue {
+            d.set(UnitSystem.imperial.rawValue, forKey: systemKey)
+        }
+        d.removeObject(forKey: distanceSystemKey)
+        d.removeObject(forKey: temperatureKey)
+    }
+
     /// Resolve temperature, following body measurements when no explicit override is set.
     static func resolveTemperature(system: UnitSystem, override raw: String) -> TemperatureUnit {
         if let explicit = TemperatureUnit(rawValue: raw) { return explicit }

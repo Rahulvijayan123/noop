@@ -19,11 +19,11 @@ private struct ChartWidthKey: PreferenceKey {
 
 struct XiaomiBandView: View {
     @EnvironmentObject var repo: Repository
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
 

@@ -212,15 +212,46 @@ public final class PlacementCloudSync: Sendable {
     private let endpoint: @Sendable () -> URL?
     private let identity: @Sendable () -> CloudPushIdentity?
     private let store: @Sendable () -> PlacementStore?
+    private let localDevices: @Sendable () -> [LocalDevice]
+
+    /// A device id the phone declares placement under, with the id the cloud files that strap's data under
+    /// (`CloudDeviceIdentity.cloudId`): `my-whoop` locally is `whoop-<serial>` on the server once the serial
+    /// is known.
+    public struct LocalDevice: Equatable, Sendable {
+        public let local: String
+        public let cloud: String
+        public init(local: String, cloud: String) {
+            self.local = local
+            self.cloud = cloud
+        }
+    }
 
     public init(session: URLSession = .shared,
                 endpoint: @escaping @Sendable () -> URL? = { PlacementCloudSync.derivedEndpoint() },
                 identity: @escaping @Sendable () -> CloudPushIdentity? = { CloudPushIdentityStore.current() },
-                store: @escaping @Sendable () -> PlacementStore? = { nil }) {
+                store: @escaping @Sendable () -> PlacementStore? = { nil },
+                localDevices: @escaping @Sendable () -> [LocalDevice] = { [] }) {
         self.session = session
         self.endpoint = endpoint
         self.identity = identity
         self.store = store
+        self.localDevices = localDevices
+    }
+
+    /// The local id a server interval's device belongs under, so a pulled interval lands where the phone
+    /// reads it. The server answers with its own device ids: an installation-scoped
+    /// `installation:<source>:<local id>`, or the strap's canonical `whoop-<serial>` once the phone's id was
+    /// aliased to it. Reading them back unchanged filed every device-scoped placement under an id the phone
+    /// never looks up, so a reinstall showed "Not set". Ids this phone cannot place are kept as they are.
+    public static func localDeviceId(forServer serverId: String?, sourceId: String,
+                                     localDevices: [LocalDevice]) -> String? {
+        guard let serverId else { return nil }
+        let ownPrefix = "installation:\(sourceId.lowercased()):"
+        if serverId.lowercased().hasPrefix(ownPrefix) { return String(serverId.dropFirst(ownPrefix.count)) }
+        if let match = localDevices.first(where: { $0.cloud.caseInsensitiveCompare(serverId) == .orderedSame }) {
+            return match.local
+        }
+        return serverId
     }
 
     /// The `scores` edge host, derived from the configured push receiver by swapping the function
@@ -280,14 +311,35 @@ public final class PlacementCloudSync: Sendable {
         }
         guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let raw = obj["intervals"] as? [[String: Any]] else { return 0 }
-        let parsed = raw.compactMap(Self.decodeServerInterval)
+        let devices = localDevices()
+        let parsed = raw.compactMap(Self.decodeServerInterval).map { interval -> PlacementInterval in
+            var placed = interval
+            placed.deviceId = Self.localDeviceId(forServer: interval.deviceId, sourceId: id.sourceId,
+                                                 localDevices: devices)
+            return placed
+        }
         // Replace per-device groups so a multi-device pull reconciles every device, and a
         // device absent from the server pull gets its local model left alone.
         let byDevice = Dictionary(grouping: parsed, by: { $0.deviceId ?? "" })
         for (device, intervals) in byDevice {
-            try store.replaceIntervals(intervals, deviceId: device.isEmpty ? nil : device)
+            try store.replaceIntervals(Self.oneAtATime(intervals), deviceId: device.isEmpty ? nil : device)
         }
         return parsed.count
+    }
+
+    /// One strap is in one place at a time. Its declarations can sit under two server devices (the
+    /// installation-scoped id before its serial was confirmed, the canonical `whoop-<serial>` after), each
+    /// keeping its own open interval, and both map to the same local id. The later declaration therefore
+    /// ends the earlier one here; otherwise the older open interval answers `activePlacement` forever.
+    static func oneAtATime(_ intervals: [PlacementInterval]) -> [PlacementInterval] {
+        let ordered = intervals.sorted { ($0.effectiveStart, $0.revision) < ($1.effectiveStart, $1.revision) }
+        return ordered.enumerated().map { index, interval in
+            guard index + 1 < ordered.count else { return interval }
+            let next = ordered[index + 1].effectiveStart
+            var ended = interval
+            if ended.effectiveEnd.map({ $0 > next }) ?? true { ended.effectiveEnd = next }
+            return ended
+        }
     }
 
     private static func decodeServerInterval(_ row: [String: Any]) -> PlacementInterval? {

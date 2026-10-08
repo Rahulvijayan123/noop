@@ -993,6 +993,18 @@ final class CoachAPI: @unchecked Sendable {
         _ = try await send(try request("profile", method: "PUT", body: body, timeout: 15))
     }
 
+    /// The account-wide preferences (`SettingsCloudSync`), keyed as the route stores them. Nil until some
+    /// phone has saved one.
+    func settings() async throws -> [String: Any]? {
+        let reply = try JSONSerialization.jsonObject(with: try await send(try request("settings", timeout: 15)))
+        return (reply as? [String: Any])?["settings"] as? [String: Any]
+    }
+
+    /// Saves the given keys; the account keeps the others as they were.
+    func saveSettings(_ settings: [String: Any]) async throws {
+        _ = try await send(try request("settings", method: "PUT", body: settings, timeout: 15))
+    }
+
     // MARK: Conversation
 
     /// The latest `limit` messages across every thread, oldest first. Rows that fail to decode are dropped.

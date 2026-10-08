@@ -428,6 +428,50 @@ final class BackfillContinuationTests: XCTestCase {
             consecutiveCount: 0))
     }
 
+    // MARK: - a pass that reached the present
+
+    /// A worn, caught-up strap keeps banking, so each pass persists its last few seconds and the trim moves.
+    /// That pass reached the present: there is no backlog behind it, so it must not re-kick (2b used to, which
+    /// turned every minute-cadence sync into two to six offloads).
+    func testStopsWhenThePassReachedThePresent() {
+        XCTAssertFalse(BackfillContinuation.shouldAutoContinue(
+            stillConnected: true,
+            strapNewestTs: wallNow,
+            ourFrontierTs: wallNow,                  // live rows keep the frontier at now
+            wallNowUnix: wallNow,
+            persistedSensorRows: true,
+            sessionNewestPersistedTs: wallNow - 20,  // this pass handed over the last 20 s
+            lastTrimAdvanced: true,
+            consecutiveCount: 0))
+    }
+
+    /// A deep oldest-first backlog persists OLD rows until its final pass, so it keeps draining back to back,
+    /// even while live heart rate holds our frontier at now (2a cannot see that backlog; 2b does).
+    func testKeepsDrainingWhileThePassIsStillInThePast() {
+        XCTAssertTrue(BackfillContinuation.shouldAutoContinue(
+            stillConnected: true,
+            strapNewestTs: wallNow,
+            ourFrontierTs: wallNow,
+            wallNowUnix: wallNow,
+            persistedSensorRows: true,
+            sessionNewestPersistedTs: wallNow - 6 * 3600,   // this pass reached last night only
+            lastTrimAdvanced: true,
+            consecutiveCount: 3))
+    }
+
+    /// The boundary is the same 5-minute gap the backlog test uses.
+    func testReachedThePresentBoundary() {
+        let gap = BackfillContinuation.defaultBehindGapSeconds
+        func decide(reached: Int) -> Bool {
+            BackfillContinuation.shouldAutoContinue(
+                stillConnected: true, strapNewestTs: wallNow, ourFrontierTs: wallNow, wallNowUnix: wallNow,
+                persistedSensorRows: true, sessionNewestPersistedTs: reached,
+                lastTrimAdvanced: true, consecutiveCount: 0)
+        }
+        XCTAssertFalse(decide(reached: wallNow - gap))
+        XCTAssertTrue(decide(reached: wallNow - gap - 1))
+    }
+
     // MARK: - #1598 clock-correlation family gate
 
     /// A 5/MG must never chase or DERIVE a GET_CLOCK correlation: its records already carry real-unix

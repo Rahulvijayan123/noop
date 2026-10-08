@@ -59,10 +59,10 @@ struct FullDayChartView: View {
         Repository.TimelineMetric.allCases.filter { $0 != .ouraMovement }
     // Imperial/Metric temperature preference (#101) — mirrors MetricExplorerView so skin temp here
     // respects the same °C/°F override instead of always showing Celsius.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     private var temperatureUnit: TemperatureUnit {
-        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .imperial
         return UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
     }
     /// "Owned only" hides empty non-strap rows; "All sources" surfaces the disclosure (#574). The active

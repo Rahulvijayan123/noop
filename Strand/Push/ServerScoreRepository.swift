@@ -55,6 +55,12 @@ public struct ServerScoreSnapshot: Sendable, Equatable {
     /// Fetched-at (unix ms), from the cache envelope. 0 for a fresh network read.
     public let fetchedAtMs: Int
     public let rawJSON: Data
+    /// The hosted worker's own published result for this day, when the scores route attached one.
+    ///
+    /// Decoded once, where the snapshot is built (inside the repository actor), rather than on every read:
+    /// the payload is 100–150 KB and carries the activity-context, sleep-features and sleep-analytics
+    /// documents, and views read this property from their bodies and load tasks on the main actor.
+    public let hostedResult: HostedDayResult?
 
     public var rawObject: [String: Any]? {
         (try? JSONSerialization.jsonObject(with: rawJSON)) as? [String: Any]
@@ -175,16 +181,60 @@ public actor ServerScoreRepository {
                                               fetchedAtMs: fetchedAt)
     }
 
+    /// How long a network read of a day answers later asks for the same (owner, device, day). The app model's
+    /// sync, the Today card, the sleep sections, the activity pages and the biomarker store each read the same
+    /// day on their own schedule; inside this window they share one 100–150 KB response instead of each
+    /// downloading it again. Shorter than the app model's half-minute refresh, so that loop still reads anew.
+    public static let sharedReadWindowMs = 20_000
+
+    private struct DayReadKey: Hashable {
+        let ownerId: String
+        let deviceId: String
+        let day: String
+    }
+
+    /// Network reads in flight, so callers asking for the same day at the same time wait on one request.
+    private var dayReadsInFlight: [DayReadKey: Task<ServerScoreSnapshot, Error>] = [:]
+    /// The last network read of each day, for `sharedReadWindowMs`.
+    private var recentDayReads: [DayReadKey: (snapshot: ServerScoreSnapshot, atMs: Int)] = [:]
+
     /// Fetch one day from the server, validate it, then cache it. Throws `notConfigured` (touching no
     /// network) when this build carries no receiver.
+    ///
+    /// `maxAgeMs` is how old a read this repository already made may be and still answer: the default shares
+    /// one request between callers asking within `sharedReadWindowMs`; 0 always asks the server (a change the
+    /// server just reported).
     @discardableResult
-    public func refresh(day: String, deviceId: String) async throws -> ServerScoreSnapshot {
+    public func refresh(day: String, deviceId: String,
+                        maxAgeMs: Int = ServerScoreRepository.sharedReadWindowMs) async throws -> ServerScoreSnapshot {
         // "Configured" is decided by THIS instance's own endpoint, not by a global read: an unconfigured
         // build derives no endpoint (so this still fails fast and touches no network), while a caller
         // that injected one is configured by construction.
         guard let endpoint else { throw ReadError.notConfigured }
         guard let identity = identity() else { throw ReadError.missingIdentity }
 
+        let key = DayReadKey(ownerId: identity.ownerId.lowercased(), deviceId: deviceId.lowercased(), day: day)
+        // A forced read neither reuses nor joins an earlier request: one that left before the server published
+        // the change it is asking about would answer with the result it replaced.
+        if maxAgeMs > 0 {
+            if let recent = recentDayReads[key], now() - recent.atMs < maxAgeMs { return recent.snapshot }
+            if let running = dayReadsInFlight[key] { return try await running.value }
+        }
+        // Unstructured on purpose: a caller whose own task is cancelled (a view that went away) must not
+        // cancel the request the other callers are waiting on.
+        let read = Task { try await self.fetchDay(day: day, deviceId: deviceId, endpoint: endpoint,
+                                                  identity: identity) }
+        dayReadsInFlight[key] = read
+        defer { if dayReadsInFlight[key] == read { dayReadsInFlight[key] = nil } }
+        let snapshot = try await read.value
+        let readAtMs = now()
+        recentDayReads = recentDayReads.filter { readAtMs - $0.value.atMs < Self.sharedReadWindowMs }
+        recentDayReads[key] = (snapshot, readAtMs)
+        return snapshot
+    }
+
+    private func fetchDay(day: String, deviceId: String, endpoint: URL,
+                          identity: CloudPushIdentity) async throws -> ServerScoreSnapshot {
         var components = URLComponents(url: endpoint, resolvingAgainstBaseURL: false)
         components?.queryItems = [URLQueryItem(name: "day", value: day),
                                   URLQueryItem(name: "deviceId", value: deviceId)]
@@ -518,8 +568,12 @@ public actor ServerScoreRepository {
         let observed = (scoring["daily"] as? [String: Any])?["observed_through"] as? String
             ?? features.compactMap(\.observedThrough).max()
 
+        let resolvedDay = scoring["day"] as? String ?? day
+        let hosted = (scoring["hosted_snapshot"] as? [String: Any])
+            .flatMap { HostedDayResult(day: resolvedDay, object: $0) }
+
         return ServerScoreSnapshot(
-            day: scoring["day"] as? String ?? day,
+            day: resolvedDay,
             deviceId: deviceId,
             schemaVersion: (scoring["schema_version"] as? NSNumber)?.intValue,
             contractRevision: (scoring["contract_revision"] as? NSNumber)?.intValue,
@@ -533,7 +587,8 @@ public actor ServerScoreRepository {
             status: status,
             features: features,
             fetchedAtMs: fetchedAtMs,
-            rawJSON: raw)
+            rawJSON: raw,
+            hostedResult: hosted)
     }
 
     /// "2h ago" from an ISO-8601 timestamp. Returns nil for an unparseable or FUTURE time, so a
@@ -644,13 +699,6 @@ private extension String {
 
 // MARK: - hosted worker result
 
-extension ServerScoreSnapshot {
-    /// The hosted worker's own published result for this day, when the scores route attached one.
-    public var hostedResult: HostedDayResult? {
-        (rawObject?["hosted_snapshot"] as? [String: Any]).flatMap { HostedDayResult(day: day, object: $0) }
-    }
-}
-
 /// One 15-minute HRV reading from the hosted worker's intraday series.
 public struct HrvSeriesPoint: Equatable, Sendable {
     /// Slot start, unix seconds.
@@ -665,7 +713,7 @@ public struct HrvSeriesPoint: Equatable, Sendable {
 /// The worker runs the app's own `AnalyticsEngine.analyzeDay`, so each field maps one-to-one onto what
 /// a local scoring pass would have persisted. Nothing here derives a value: a key the worker left out
 /// stays nil, and a Charge the worker could not compute yet (no baseline) stays nil rather than zero.
-public struct HostedDayResult: Equatable {
+public struct HostedDayResult: Equatable, Sendable {
     public let day: String
     public let resultRevision: String
     public let computedAt: String?

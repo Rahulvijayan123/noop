@@ -319,6 +319,88 @@ async function profileRoute(req: Request, userId: string, { rest }: Deps): Promi
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
 }
 
+// The owner's Nara preferences (units, alerts, haptics, Sana), so they come back after a reinstall or on a
+// second phone. They live under `nara` in the owner's `user_settings.extra_settings`, which leaves the other
+// keys in that column (an earlier client's wear location) alone; `units` is mirrored to the typed column.
+// Every row is created at sign-up with the column defaults, which nobody chose, so only a value inside
+// `nara` counts as saved. Writing this table only broadcasts `settings_updated`: it never re-queues scoring.
+type SettingSpec = { kind: 'boolean' } | { kind: 'int'; min: number; max: number } | { kind: 'enum'; values: string[] };
+const BOOLEAN_SETTING: SettingSpec = { kind: 'boolean' };
+const SETTINGS_SPEC: Record<string, SettingSpec> = {
+  units: { kind: 'enum', values: ['metric', 'imperial'] },
+  sanaEnabled: BOOLEAN_SETTING,
+  wristAlerts: BOOLEAN_SETTING,
+  moveReminder: BOOLEAN_SETTING,
+  moveReminderMinutes: { kind: 'int', min: 15, max: 120 },
+  moveReminderRepeatMinutes: { kind: 'int', min: 15, max: 120 },
+  moveReminderBuzzes: { kind: 'int', min: 1, max: 4 },
+  moveReminderSetHours: BOOLEAN_SETTING,
+  moveReminderStartMinute: { kind: 'int', min: 0, max: 1439 },
+  moveReminderEndMinute: { kind: 'int', min: 0, max: 1439 },
+  batteryAlerts: BOOLEAN_SETTING,
+  batteryEarlyWarning: BOOLEAN_SETTING,
+  effortTarget: BOOLEAN_SETTING,
+  illnessSigns: BOOLEAN_SETTING,
+  hapticBreathing: BOOLEAN_SETTING,
+  hapticIntervals: BOOLEAN_SETTING,
+  hapticLiftRest: BOOLEAN_SETTING,
+  hapticLiveSession: BOOLEAN_SETTING,
+  hapticWorkout: BOOLEAN_SETTING,
+  zoneCoaching: BOOLEAN_SETTING,
+  stressCheckIns: BOOLEAN_SETTING,
+  stressAutoStart: BOOLEAN_SETTING,
+  stressQuietOvernight: BOOLEAN_SETTING,
+  stressResonancePace: BOOLEAN_SETTING,
+};
+
+function validSetting(spec: SettingSpec, v: unknown): boolean {
+  if (spec.kind === 'boolean') return typeof v === 'boolean';
+  if (spec.kind === 'int') return Number.isInteger(v) && (v as number) >= spec.min && (v as number) <= spec.max;
+  return typeof v === 'string' && spec.values.includes(v);
+}
+
+/** Known keys must be valid. Keys this server does not know yet (a newer app) are ignored rather than stored. */
+function settingsInput(body: any): Record<string, unknown> {
+  if (!isObject(body) || !Object.keys(body).length) throw fail('invalid_settings', 400);
+  const out: Record<string, unknown> = {};
+  for (const [key, value] of Object.entries(body)) {
+    const spec = SETTINGS_SPEC[key];
+    if (!spec) continue;
+    if (!validSetting(spec, value)) throw fail('invalid_settings', 400);
+    out[key] = value;
+  }
+  return out;
+}
+
+/** null until Nara has saved a preference for this owner. */
+function publicSettings(row: any): Record<string, unknown> | null {
+  const saved = isObject(row?.extra_settings) && isObject(row.extra_settings.nara) ? row.extra_settings.nara : null;
+  if (!saved) return null;
+  const out: Record<string, unknown> = {};
+  for (const [key, spec] of Object.entries(SETTINGS_SPEC)) {
+    if (key in saved && validSetting(spec, saved[key])) out[key] = saved[key];
+  }
+  return Object.keys(out).length ? out : null;
+}
+
+async function settingsRoute(req: Request, userId: string, { rest }: Deps): Promise<Response> {
+  const current = async () =>
+    (await rest.select('user_settings', `user_id=eq.${userId}&select=units,extra_settings`))[0];
+  if (req.method === 'GET') return Response.json({ settings: publicSettings(await current()) });
+  if (req.method === 'PUT') {
+    const input = settingsInput(await readJson(req));
+    const row = await current();
+    if (!Object.keys(input).length) return Response.json({ settings: publicSettings(row) });
+    const extra = isObject(row?.extra_settings) ? row.extra_settings : {};
+    const nara = isObject(extra.nara) ? extra.nara : {};
+    const payload: Record<string, unknown> = { user_id: userId, extra_settings: { ...extra, nara: { ...nara, ...input } } };
+    if (typeof input.units === 'string') payload.units = input.units;
+    const [saved] = await rest.upsert('user_settings', payload, { onConflict: 'user_id' });
+    return Response.json({ settings: publicSettings(saved) });
+  }
+  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}
+
 type Deps = CoachDeps;
 
 /** Runs after the answer has streamed. `route_only` returns just the routing decision so the app can show its placeholder. */
@@ -409,6 +491,7 @@ export async function handleCoachRequest(req: Request, deps: CoachRequestDeps): 
     if (route === 'suggestions' && req.method === 'POST') return await suggestionsRoute(req, identity.id, d);
     if (route === 'context') return await contextRoute(req, identity.id, sub, d);
     if (route === 'profile') return await profileRoute(req, identity.id, d);
+    if (route === 'settings') return await settingsRoute(req, identity.id, d);
     return Response.json({ error: 'not_found' }, { status: 404 });
   } catch (err: any) {
     if (err instanceof IdentityError) return Response.json({ error: err.code }, { status: err.status || 401 });

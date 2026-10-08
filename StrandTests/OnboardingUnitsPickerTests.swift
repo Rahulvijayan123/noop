@@ -44,4 +44,22 @@ final class OnboardingUnitsPickerTests: XCTestCase {
         XCTAssertNotEqual(UnitFormatter.heightFromCentimeters(cm, system: .imperial),
                           UnitFormatter.heightFromCentimeters(cm, system: .metric))
     }
+
+    /// Nara is US-only: whatever an earlier build stored (metric, a kilometre or Celsius pin), a launch
+    /// leaves pounds, feet and inches, miles and Fahrenheit.
+    func testLaunchEnforcesUSUnits() throws {
+        let suite = "nara-us-units-\(UUID().uuidString)"
+        let d = try XCTUnwrap(UserDefaults(suiteName: suite))
+        defer { UserDefaults.standard.removePersistentDomain(forName: suite) }
+        d.set("metric", forKey: UnitPrefs.systemKey)
+        d.set("metric", forKey: UnitPrefs.distanceSystemKey)
+        d.set("celsius", forKey: UnitPrefs.temperatureKey)
+
+        UnitPrefs.enforceUnitedStates(d)
+
+        let system = UnitSystem(rawValue: d.string(forKey: UnitPrefs.systemKey) ?? "")
+        XCTAssertEqual(system, .imperial)
+        XCTAssertEqual(UnitPrefs.resolveDistance(system: .imperial, override: d.string(forKey: UnitPrefs.distanceSystemKey) ?? ""), .imperial)
+        XCTAssertEqual(UnitPrefs.resolveTemperature(system: .imperial, override: d.string(forKey: UnitPrefs.temperatureKey) ?? ""), .fahrenheit)
+    }
 }

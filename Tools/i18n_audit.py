@@ -53,7 +53,7 @@ Reader = Callable[[Path], str | None]
 # false positives here just mean noise in the report, not a wrong fix.
 UNIVERSAL = {
     "", "-", "–", "—", "·", "•", "✓", "→", "↔",
-    "NOOP", "bpm", "BPM", "HRV", "SpO2", "SpO₂", "OK", "ID",
+    "NOOP", "Nara", "bpm", "BPM", "HRV", "SpO2", "SpO₂", "OK", "ID",
     # Training-load acronyms — universal training-science terms, identical in every language (like HRV).
     "CTL", "ATL", "TSB",
 }

@@ -31,8 +31,8 @@ struct LiftProgramEditorSheet: View {
     @State private var editingItem: ItemEditTarget?
     @State private var confirmingDelete = false
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
 
     @FocusState private var focused: Field?
     private enum Field: Hashable { case name, note }
@@ -113,7 +113,7 @@ struct LiftProgramEditorSheet: View {
 
             if items.isEmpty {
                 NoopCard {
-                    Text("No exercises yet. Add the first one below — you can type any name you like; NOOP remembers it for next time.")
+                    Text("No exercises yet. Add the first one below — you can type any name you like; Nara remembers it for next time.")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)

@@ -1088,11 +1088,11 @@ struct DayLogTodayButton: View {
 private struct BaselineVitalsCard: View {
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var store: BaselineStore
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
 
     private var fahrenheit: Bool {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw) == .fahrenheit
     }
 

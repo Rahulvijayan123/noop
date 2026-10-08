@@ -616,11 +616,11 @@ private struct MetricRow: View {
 
     // Trailing unit chip follows the Imperial/Metric preference (kg→lb, °C→°F) and the Effort scale
     // (/100→/21, #268).
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     private var unitLabel: String {
-        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .imperial
         let temp = UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
         let effort = UnitPrefs.resolveEffortScale(effortScaleRaw)
         return metric.displayUnit(system: system, temperature: temp, effortScale: effort)
@@ -702,7 +702,7 @@ struct MetricDetailView: View {
 
     // Imperial/Metric display preference (D#103). Display-only: weight (kg) and skin temp (°C) re-label
     // here; everything else is unit-agnostic and renders unchanged.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     // Effort display scale (#268) — routes the Effort metric's numbers + unit; display-only, the plotted
     // series stays 0–100. Every other metric is scale-agnostic (see MetricDescriptor.format).
@@ -715,7 +715,7 @@ struct MetricDetailView: View {
     /// (the default), or `SkinTempDisplay.Kind.deviation.rawValue` to lead with the ±baseline move.
     /// Same key as Today/Health/Settings; display-only, nothing stored ever changes.
     @AppStorage(UnitPrefs.skinTempDisplayKey) private var skinTempDisplayRaw = ""
-    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
+    private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
     private var temperatureUnit: TemperatureUnit {
         UnitPrefs.resolveTemperature(system: unitSystem, override: temperatureRaw)
     }

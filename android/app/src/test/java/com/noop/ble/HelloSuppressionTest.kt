@@ -361,4 +361,29 @@ class HelloSuppressionTest {
         assertFalse(helloOverrideBudgetRearms(optedInNow = false, optedInLastSeen = true))
         assertFalse(helloOverrideBudgetRearms(optedInNow = false, optedInLastSeen = false))
     }
+
+    // helloUnansweredIsEvidence — twin of the Swift HelloSuppressionTests cases.
+
+    @Test
+    fun theRefusalSignatureStillCounts() {
+        assertTrue(helloUnansweredIsEvidence(3_158L, 4))
+    }
+
+    @Test
+    fun edgeOfRangeDropsDoNotCount() {
+        assertFalse(helloUnansweredIsEvidence(600L, 0))
+        assertFalse(helloUnansweredIsEvidence(2_000L, 1))
+        assertFalse(helloUnansweredIsEvidence(4_000L, 0))
+        assertFalse(helloUnansweredIsEvidence(1_200L, 6))
+    }
+
+    @Test
+    fun noHelloOutstandingIsNeverEvidence() {
+        assertFalse(helloUnansweredIsEvidence(null, 50))
+    }
+
+    @Test
+    fun evidenceThresholdsAreInclusive() {
+        assertTrue(helloUnansweredIsEvidence(MIN_HELLO_OUTSTANDING_MS_FOR_REFUSAL, MIN_INBOUND_FRAMES_FOR_REFUSAL))
+    }
 }

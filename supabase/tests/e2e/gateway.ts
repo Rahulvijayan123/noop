@@ -1,5 +1,5 @@
 // One origin in front of the disposable end-to-end stack, so the app (and the tests) see a single Supabase-shaped
-// base URL: /functions/v1/{push,scores} -> the unmodified Edge functions running under Deno, /auth/v1 and /rest/v1
+// base URL: /functions/v1/{push,scores,coach} -> the unmodified Edge functions running under Deno, /auth/v1 and /rest/v1
 // -> the local Kong gateway (GoTrue and PostgREST), plus two test-only routes:
 //
 //   GET /__e2e/mail?to=<address>&since=<epoch ms>   the emails the Auth service handed to the SMTP sink, newest
@@ -18,6 +18,7 @@ const s3Port = Number(env('E2E_S3_PORT', '54432'));
 const kong = env('E2E_KONG_URL');
 const pushUrl = env('E2E_PUSH_URL');
 const scoresUrl = env('E2E_SCORES_URL');
+const coachUrl = env('E2E_COACH_URL');
 const mailDir = env('E2E_MAIL_DIR');
 
 const HOP = ['connection', 'keep-alive', 'transfer-encoding', 'upgrade', 'host', 'content-length'];
@@ -137,6 +138,9 @@ Deno.serve({ hostname: '127.0.0.1', port: gatewayPort, onListen: () => {} }, asy
     if (path === '/functions/v1/push' || path.startsWith('/functions/v1/push/')) return await forward(req, pushUrl);
     if (path === '/functions/v1/scores' || path.startsWith('/functions/v1/scores/')) {
       return await forward(req, scoresUrl);
+    }
+    if (coachUrl && (path === '/functions/v1/coach' || path.startsWith('/functions/v1/coach/'))) {
+      return await forward(req, coachUrl);
     }
     if (path.startsWith('/auth/v1/') || path.startsWith('/rest/v1/')) return await forward(req, kong);
     return new Response('not found', { status: 404 });

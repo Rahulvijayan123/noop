@@ -51,12 +51,12 @@ enum WatchdogTone {
 struct WatchdogLiveCard: View {
     @EnvironmentObject private var store: BaselineStore
     @EnvironmentObject private var repo: Repository
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     @State private var picked: WatchdogPick?
 
     private var temperatureUnit: TemperatureUnit {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw)
     }
 
@@ -953,7 +953,7 @@ private struct WatchdogLiveSnapshot {
 @MainActor
 struct WatchdogEventsCard: View {
     @EnvironmentObject private var store: BaselineStore
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     @State private var picked: WatchdogPick?
     @State private var showAll = false
@@ -961,7 +961,7 @@ struct WatchdogEventsCard: View {
     private static let collapsedCount = 5
 
     private var fahrenheit: Bool {
-        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+        UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
                                      override: temperatureRaw) == .fahrenheit
     }
 

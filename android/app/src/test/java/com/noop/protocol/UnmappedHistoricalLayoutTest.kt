@@ -158,36 +158,43 @@ class UnmappedHistoricalLayoutTest {
     // MARK: - v20 / v21 historical dispatch (ported from Swift)
 
     /**
-     * The guard the archive-filter change was landed for.
-     *
-     * v20 now DECODES on this platform, so it is no longer archived by the unmapped-layout rule and no
-     * longer archived for failing to decode. It must still reach the archive, because the record yields
-     * no heart rate and no gravity: those bytes are the input for working out what the optical channels
-     * mean, and the strap frees them on the next trim ack. Had the filter still asked "did it decode at
-     * all", this port would have silently stopped collecting them, on the only platform collecting them.
+     * v20 DECODES on this platform and carries no heart rate and no gravity by design. An INTACT one is no
+     * longer a reject: archiving every one cost about half of each chunk's frames during raw capture and
+     * kept the archive at its cap. The mapping corpus is now a bounded per-session sample taken by the
+     * Backfiller (`Backfiller.RAW_SENSOR_ARCHIVE_SAMPLE_BUDGET`), not this filter.
      */
     @Test
-    fun whoop5V20StillArchivedAfterItDecodes() {
+    fun whoop5IntactV20IsNotARejectButStillDecodes() {
         val frame = whoop5FrameWithVersion(20)
         val decoded = decodeHistorical(frame, DeviceFamily.WHOOP5)
         assertNotNull("v20 must decode now that the dispatch exists", decoded)
         assertNull("v20 carries no per-second heart rate", decoded!!["heart_rate"])
         assertNull("v20 carries no gravity vector", decoded["gravity_x"])
-        assertEquals(
-            "a v20 record that decodes into unread channels must still be archived",
-            1,
-            rejectedHistoricalRecords(listOf(frame), DeviceFamily.WHOOP5).size,
-        )
+        assertTrue(isIntactWhoop5RawSensorRecord(frame))
+        assertEquals(0, rejectedHistoricalRecords(listOf(frame), DeviceFamily.WHOOP5).size)
     }
 
-    /** v21 is the same story: it decodes, carries no scoreable signal, and is still archived. */
+    /** v21 is the same story. */
     @Test
-    fun whoop5V21StillArchivedAfterItDecodes() {
+    fun whoop5IntactV21IsNotAReject() {
         val frame = whoop5FrameWithVersion(21)
         val decoded = decodeHistorical(frame, DeviceFamily.WHOOP5)
         assertNotNull(decoded)
         assertNull(decoded!!["heart_rate"])
-        assertEquals(1, rejectedHistoricalRecords(listOf(frame), DeviceFamily.WHOOP5).size)
+        assertTrue(isIntactWhoop5RawSensorRecord(frame))
+        assertEquals(0, rejectedHistoricalRecords(listOf(frame), DeviceFamily.WHOOP5).size)
+    }
+
+    /** The skip is bound to the integrity verdict, like v26's: a corrupt v20/v21 is still archived. */
+    @Test
+    fun whoop5CorruptV2021IsStillArchived() {
+        for (v in listOf(20, 21)) {
+            val bad = whoop5FrameWithVersion(v).copyOf()
+            bad[bad.size - 1] = (bad[bad.size - 1].toInt() xor 0xFF).toByte()   // break the CRC32 trailer
+            assertFalse(isIntactWhoop5RawSensorRecord(bad))
+            assertEquals("corrupt v$v must be archived", 1,
+                rejectedHistoricalRecords(listOf(bad), DeviceFamily.WHOOP5).size)
+        }
     }
 
     /**

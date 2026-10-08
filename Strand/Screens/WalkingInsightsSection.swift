@@ -10,14 +10,14 @@ struct WalkingInsightsSection: View {
     /// The local calendar day ("yyyy-MM-dd") to open on.
     let day: String
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceRaw = ""
     @State private var offset = 0
     @State private var reading: WalkingDayReading?
     @State private var loaded = false
 
     private var system: UnitSystem {
-        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric, override: distanceRaw)
+        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial, override: distanceRaw)
     }
 
     private var dayStart: Date? {

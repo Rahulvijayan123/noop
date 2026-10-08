@@ -52,9 +52,10 @@ struct StrandiOSApp: App {
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
     /// kg vs lb for the Lift Log Live Activity's "8 x 30 kg" line — the app formats it, because the
     /// unit preference lives here and not in the widget extension.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
 
     init() {
+        UnitPrefs.enforceUnitedStates()
         SentryMonitor.start()
         // #1008: pin the pre-change Overnight-only default for existing installs before
         // anything reads it. Idempotent; a no-op on fresh installs and after the first launch.
@@ -467,7 +468,7 @@ struct StrandiOSApp: App {
     /// push — see `LiftLiveActivityController.update`.
     @MainActor
     private func pushLiftActivity(alert: Bool = false) {
-        let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
+        let system = UnitSystem(rawValue: unitSystemRaw) ?? .imperial
         guard let p = liftSession.presentation(system: system) else {
             liftActivity.update(state: nil)
             return

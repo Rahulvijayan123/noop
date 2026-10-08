@@ -171,7 +171,15 @@ public enum WhoopCommand: UInt8, CaseIterable {
     /// implemented in firmware.** Driven ONLY by `BLEManager.probeDeviceConfigValues()`. (#103)
     case getFeatureFlagValue = 128
     case toggleIMUMode         = 106
+    /// 107 — on WHOOP 5/MG this is OPTICAL SESSION SAVING (the name is historical): whether the strap
+    /// banks the raw optical (R20 / historical v20, 2140 B per second) records to flash while raw
+    /// collection runs. Revision-1 boolean body `[1, state]`. Sent only by the lean activity capture.
     case enableOpticalData     = 107
+    /// 105 — IMU SESSION SAVING: whether the strap banks raw IMU (R21 / historical v21, 1244 B per
+    /// second) to flash, independently of live IMU transport (106). Revision-1 boolean `[1, state]`.
+    case toggleIMUSaving       = 105
+    /// 108 — OPTICAL LIVE TRANSPORT: whether raw optical frames stream live. Revision-1 boolean.
+    case toggleOpticalLive     = 108
     /// SET_CONFIG / SET_FF_VALUE (0x78) — write one persistent device feature-flag. Used by the
     /// WHOOP 5.0/MG "enable R22 packets" sequence that switches on the deep biometric streams the
     /// strap otherwise withholds from third-party apps (documented independently by judes.club and
@@ -249,7 +257,9 @@ public enum WhoopCommand: UInt8, CaseIterable {
         case .getDeviceConfigValue:  return "Get Device Config Value"
         case .getFeatureFlagValue:   return "Get Feature Flag Value"
         case .toggleIMUMode:         return "Toggle IMU Mode"
-        case .enableOpticalData:     return "Enable Optical Data"
+        case .enableOpticalData:     return "Optical Session Saving"
+        case .toggleIMUSaving:       return "IMU Session Saving"
+        case .toggleOpticalLive:     return "Optical Live Transport"
         case .setConfig:             return "Set Config (R22 feature flag)"
         case .setDeviceConfig:       return "Set Device Config (broadcast HR)"
         case .runHapticsPattern:     return "Run Haptics Pattern"
