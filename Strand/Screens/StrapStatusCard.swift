@@ -22,7 +22,7 @@ struct StrapStatusCard: View {
     static func messageLines(for size: DynamicTypeSize) -> Int { size.isAccessibilitySize ? 6 : 4 }
 
     var body: some View {
-        StrandCard(padding: NoopMetrics.space4) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space3) {
                 pillRow
                 strapRow
@@ -37,7 +37,7 @@ struct StrapStatusCard: View {
 
     private var pillRow: some View {
         HStack(spacing: NoopMetrics.space2) {
-            StatePill("\(status.title)", tone: status.tone, pulsing: status.isBusy)
+            StatePill("\(status.title)", tone: status.tone)
                 .id(status.phase)
                 .transition(.opacity)
             Spacer(minLength: NoopMetrics.space2)
@@ -86,10 +86,8 @@ struct StrapStatusCard: View {
 
     private var strapRow: some View {
         let picking = Self.showsModelPicker(status.phase)
+        // No "Your strap" caption over the name: the card is the strap's, so the label only repeated it.
         return VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            ReservedText(text: picking ? String(localized: "Strap model") : String(localized: "Your strap"),
-                         alternatives: [String(localized: "Strap model"), String(localized: "Your strap")],
-                         font: StrandFont.caption)
             ZStack(alignment: .leading) {
                 modelPicker
                     .opacity(picking ? 1 : 0)

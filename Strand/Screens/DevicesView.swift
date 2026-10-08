@@ -21,20 +21,15 @@ struct DevicesView: View {
     // for `DevicesContent` and the Add-device wizard, so nothing downstream loses its live readout.
 
     var body: some View {
-        ScreenScaffold(title: "Devices",
-                       subtitle: "Pair and manage the bands NOOP reads from.",
-                       // The day-of-sky liquid backdrop, matching Today / Health / Sleep / Trends: a fixed,
-                       // full-bleed time-of-day sky behind the scroll content (it does not scroll).
-                       topBackground: liquidScaffoldSky()) {
-            if let registry = model.deviceRegistry {
-                DevicesContent(registry: registry)
-            } else {
-                // The registry is built once the on-device store opens (a beat after launch). Show a
-                // calm pending note rather than an empty screen in that brief window.
-                DataPendingNote(
-                    title: "Getting your devices ready",
-                    message: "NOOP is opening your on-device data. Your paired bands will appear here in a moment.",
-                    symbol: "badge.plus.radiowaves.right")
+        MorePaneNavigation {
+            ScreenScaffold(title: "Devices", isLoading: model.deviceRegistry == nil) {
+                if let registry = model.deviceRegistry {
+                    DevicesContent(registry: registry)
+                } else {
+                    // The registry is built once the on-device store opens (a beat after launch). Until then
+                    // the page shows a band card at its final size, redacted, so nothing jumps when it lands.
+                    DevicesPendingLayout()
+                }
             }
         }
     }
@@ -112,29 +107,28 @@ private struct DevicesContent: View {
         return (String(localized: "Clock latched: \(latched) · last frame \(frame)"), warning)
     }
 
-    /// #802: same shape and copy as `LiveView.reconnectGuideBanner`. Duplicated rather than hoisted
-    /// because the two live in different view files with no shared banner container today; the STRING is
-    /// shared, which is the part that must not drift.
+    /// #802: same copy as `LiveView.reconnectGuideBanner` (the STRING is shared, which is the part that must
+    /// not drift); drawn as the kit's one notice.
     private func repairGuideBanner(_ guide: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .foregroundStyle(StrandPalette.statusWarning)
-                .accessibilityHidden(true)
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Can't connect: your strap's pairing was reset")
-                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                Text(guide)
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 0)
+        InlineNotice(guide, title: String(localized: "Can't connect: your strap's pairing was reset"), tone: .warning)
+            .accessibilityLabel("Reconnect help: \(guide)")
+    }
+
+    /// The active strap's history-sync state, for the last line of its card: "Syncing…" or "Synced 4 min ago".
+    /// nil when there is nothing to say (the experimental-live note is on the device page).
+    private var syncLine: String? {
+        switch SyncChipState.resolve(live: live) {
+        case .syncing: return String(localized: "Syncing…")
+        case .synced(let agoText): return String(localized: "Synced \(agoText) ago")
+        case .experimentalLive, .hidden: return nil
         }
-        .padding(NoopMetrics.space3)
-        .background(NoopPanelSurface(cornerRadius: 18))
-        .overlay(RoundedRectangle(cornerRadius: 18, style: .continuous)
-            .strokeBorder(StrandPalette.statusWarning.opacity(0.5), lineWidth: 1))
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Reconnect help: \(guide)")
+    }
+
+    private var experimentalSyncNote: String? {
+        if case .experimentalLive = SyncChipState.resolve(live: live) {
+            return String(localized: "Connected; strap history sync is experimental on this strap")
+        }
+        return nil
     }
 
     var body: some View {
@@ -145,20 +139,18 @@ private struct DevicesContent: View {
             // with the guide already armed, because nothing on Devices said so. Same state and same string
             // as LiveView's banner; no new copy.
             if let guide = live.reconnectGuide { repairGuideBanner(guide) }
-            DeviceSyncStatusCard()
+            // Counts the paired bands so the multi-WHOOP reality reads at a glance.
+            SectionHeader("Your bands", trailing: activeDevices.count == 1
+                          ? String(localized: "1 paired")
+                          : String(localized: "\(activeDevices.count) paired"))
                 // #1300 tier 2: compute the two-strap comparison off the giant body-modifier chain (attaching
                 // .task to the whole `body` tips the iOS type-check budget on this already-heavy view).
                 .task(id: activeDevices.count) { await loadStrapCompare() }
-            // UPPERCASE overline section header, matching the liquid Today. Counts the paired bands so the
-            // multi-WHOOP reality reads at a glance.
-            sectionHead("Your bands", trailing: activeDevices.count == 1
-                        ? String(localized: "1 paired")
-                        : String(localized: "\(activeDevices.count) paired"))
             // #1300: a prominent switcher to flip which strap is active — the "switch, don't combine"
             // option for a user with two straps (e.g. a 4.0 + a 5/MG). Shown only with 2+ straps, so it
             // auto-collapses when one is forgotten. Reuses the existing active-strap confirmation.
             if activeDevices.count > 1 { strapSwitcher }
-            ForEach(Array(activeDevices.enumerated()), id: \.element.id) { idx, device in
+            ForEach(activeDevices, id: \.id) { device in
                 // Shared read-only probe gate (Test Centre → Connection + a live WHOOP), hoisted so the two
                 // probe closures below don't each re-inline a 4-term && chain — which tips the iOS Swift
                 // type-checker over its budget ("unable to type-check this expression in reasonable time").
@@ -264,27 +256,23 @@ private struct DevicesContent: View {
                     onEcgProbe: ecgGate ? { ecgProbeTarget = device } : nil,
                     // #103 device-config READ probe: read-only (asks for VALUES, writes none), both
                     // families. Same Test Centre → Connection gate.
-                    onDeviceConfigProbe: probeGate ? { deviceConfigProbeTarget = device } : nil)
-                    .staggeredAppear(index: idx)
+                    onDeviceConfigProbe: probeGate ? { deviceConfigProbeTarget = device } : nil,
+                    syncLine: device.status == .active ? syncLine : nil,
+                    syncNote: device.status == .active ? experimentalSyncNote : nil)
             }
 
             addButton
-                .staggeredAppear(index: activeDevices.count)
 
             // #1300 tier 2: read-only "compare straps" card — how the two straps' most recent shared day
             // lines up per metric (agree / a little different / conflict), reusing the fusion tolerances.
             // Never mixes into a score (I2). Shown only when 2 WHOOP straps share a readable day.
-            if let strapCompare { compareCard(strapCompare) }
+            if let strapCompare { compareRow(strapCompare) }
 
             if !removedDevices.isEmpty { removedSection }
 
-            // Hosted-compute ("cloud") account. Device/account-scoped, so it belongs with the devices.
-            // Shown ONLY when this build actually carries a receiver and an Auth project: a clean checkout
-            // has neither, and offering a sign-in that cannot work would be a lie. Nothing is uploaded
-            // until someone signs in, so this row changes nothing by existing.
-            if CloudPushSettings.isConfigured { cloudSection }
+            dataSection
 
-            whoopFirstFooter
+            AboutDisclosure("About devices", paragraphs: [whoopFirstNote])
         }
         // Add a device — guided, branching wizard (asks the device TYPE first, then runs the right
         // scan/register path: WHOOP present-scan for WHOOP families, StandardHRSource for HR straps).
@@ -328,7 +316,7 @@ private struct DevicesContent: View {
             Button("Cancel", role: .cancel) { removeTarget = nil }
             Button("Remove", role: .destructive) { confirmRemove(device) }
         } message: { device in
-            Text("Remove \(device.displayName)? NOOP will stop connecting to it. Its recorded data is kept and you can re-add it any time.")
+            Text("Remove \(device.displayName)? Nara will stop connecting to it. Its recorded data is kept and you can re-add it any time.")
         }
         // Restart strap confirm (#166)
         .alert("Restart this strap?",
@@ -435,8 +423,8 @@ private struct DevicesContent: View {
     }
 
     private var removedSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-            sectionHead("Removed", trailing: String(localized: "Data kept"))
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Removed")
             ForEach(removedDevices) { device in
                 DeviceCard(
                     device: device,
@@ -453,54 +441,35 @@ private struct DevicesContent: View {
         }
     }
 
-    /// Entry point for the hosted-compute path. The account screen owns sign-in and the sync switch;
-    /// this only routes to it.
-    private var cloudSection: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-            sectionHead("CLOUD", trailing: CloudPushSettings.isEnabled
-                        ? String(localized: "On")
-                        : String(localized: "Off"))
+    /// Where the bands' data comes from and goes: the one-time imports, and the hosted-compute ("cloud")
+    /// account. The cloud row is shown ONLY when this build actually carries a receiver and an Auth project:
+    /// a clean checkout has neither, and offering a sign-in that cannot work would be a lie. Nothing is
+    /// uploaded until someone signs in, so the row changes nothing by existing.
+    private var dataSection: some View {
+        NoopListSection("Data") {
             NavigationLink {
-                NaraAccountView()
+                DataSourcesView()
             } label: {
-                NoopCard {
-                    HStack(spacing: NoopMetrics.gap) {
-                        Image(systemName: "arrow.up.heart")
-                            .font(.title3)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Cloud upload")
-                                .font(.headline)
-                            Text("Sign in to your Nara account to send measured strap data to your own space, where recovery, strain and sleep are computed. Nothing is sent until you are signed in.")
-                                .font(.caption)
-                                .foregroundStyle(.secondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: 0)
-                        Image(systemName: "chevron.right")
-                            .font(.caption.weight(.semibold))
-                            .foregroundStyle(.tertiary)
-                    }
-                }
+                NoopListRow(icon: "tray.and.arrow.down", iconColor: StrandPalette.accent, title: "Data sources")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("Cloud upload")
+            if CloudPushSettings.isConfigured {
+                NoopListDivider(leadingInset: NoopListDivider.iconRowInset)
+                NavigationLink {
+                    NaraAccountView()
+                } label: {
+                    NoopListRow(icon: "arrow.up.heart", iconColor: StrandPalette.accent, title: "Cloud upload",
+                                value: CloudPushSettings.isEnabled ? String(localized: "On") : String(localized: "Off"))
+                }
+                .accessibilityLabel("Cloud upload")
+            }
         }
+        .buttonStyle(.plain)
     }
 
-    private var whoopFirstFooter: some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "info.circle")
-                .foregroundStyle(StrandPalette.textTertiary)
-                .accessibilityHidden(true)
-            Text("WHOOP is NOOP's primary, fully-supported band. Other heart-rate straps are an early, in-development addition: they stream live heart rate and HRV, but not WHOOP's deeper sleep and recovery data.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
+    private var whoopFirstNote: String {
+        String(localized: "WHOOP is Nara's primary, fully supported band. Other heart-rate straps are an early addition: they stream live heart rate and HRV, but not WHOOP's deeper sleep and recovery data.")
     }
 
-    /// UPPERCASE overline section header with tracking + a muted trailing note, matching the liquid Today's
-    /// `sectionHead`. Keeps every page's section chrome identical.
     // #1300 tier 2: the computed two-strap comparison for the compare card. nil until loaded / when there
     // aren't two WHOOP straps sharing a readable day.
     @State private var strapCompare: StrapCompareData?
@@ -568,43 +537,21 @@ private struct DevicesContent: View {
 
     // Copy held in LocalizedStringKey vars (like `metricLabel`) — still localizable, but not scanned as an
     // inline Text literal by the i18n gate.
-    private var compareTitle: LocalizedStringKey { "HOW YOUR STRAPS COMPARE" }
     private var compareFootnote: LocalizedStringKey {
         "A read-only look at your last shared day — not a combined score. Different devices read a little differently, so a difference isn't necessarily wrong."
     }
 
-    @ViewBuilder private func agreementPill(_ a: AgreementState) -> some View {
-        switch a {
-        case .agree:      StatePill("match", tone: .positive, showsDot: false)
-        case .minorDelta: StatePill("close", tone: .neutral, showsDot: false)
-        case .conflict:   StatePill("differs", tone: .warning, showsDot: false)
-        case .single:     StatePill("one strap", tone: .neutral, showsDot: false)
-        }
-    }
-
-    @ViewBuilder private func compareCard(_ c: StrapCompareData) -> some View {
-        StrandCard(padding: 18, tint: StrandPalette.accent) {
-            VStack(alignment: .leading, spacing: 12) {
-                Text(compareTitle).strandOverline()
-                HStack {
-                    Text(c.aName).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
-                    Spacer()
-                    Text(c.bName).font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
-                }
-                ForEach(c.rows, id: \.metric) { row in
-                    HStack(spacing: 10) {
-                        Text(metricLabel(row.metric)).font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text(compareValue(row.a)).font(StrandFont.captionNumber)
-                        Text(compareValue(row.b)).font(StrandFont.captionNumber)
-                        agreementPill(row.agreement)
-                    }
-                }
-                Text(compareFootnote)
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
+    /// The two straps' last shared day, one tap down: a row here, the table on its own page.
+    private func compareRow(_ c: StrapCompareData) -> some View {
+        NoopListSection {
+            NavigationLink {
+                StrapComparePage(data: c, metricLabel: metricLabel, compareValue: compareValue,
+                                 footnote: compareFootnote)
+            } label: {
+                NoopListRow(icon: "rectangle.split.2x1", iconColor: StrandPalette.accent, title: "Compare straps",
+                            value: MoreFormat.day(c.day))
             }
+            .buttonStyle(.plain)
         }
     }
 
@@ -613,35 +560,19 @@ private struct DevicesContent: View {
     /// history preserved). Switching-not-combining: scores stay single-owner-per-day, this just picks the
     /// owner. Collapses automatically when only one strap remains (the caller gates on count > 1).
     private var strapSwitcher: some View {
-        HStack(spacing: 6) {
-            ForEach(activeDevices, id: \.id) { device in
-                let isActive = device.status == .active
-                Button { if !isActive { switchTarget = device } } label: {
-                    Text(device.displayName)
-                        .font(StrandFont.caption)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 7)
-                        .background(isActive ? StrandPalette.accent.opacity(0.18) : Color.clear,
-                                    in: Capsule(style: .continuous))
-                        .overlay(Capsule(style: .continuous).strokeBorder(
-                            isActive ? StrandPalette.accent.opacity(0.45) : StrandPalette.hairline, lineWidth: 1))
-                        .foregroundStyle(isActive ? StrandPalette.accent : StrandPalette.textSecondary)
-                }
-                .buttonStyle(.plain)
-                .disabled(isActive)
-            }
-        }
-        .padding(.horizontal, 2)
-    }
-
-    private func sectionHead(_ title: LocalizedStringKey, trailing: String) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            Text(title).font(StrandFont.overline).foregroundStyle(StrandPalette.textTertiary)
-            Spacer()
-            Text(trailing).font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-        }
-        .padding(.horizontal, 2)
+        // The control shows the active strap; picking another opens the confirmation, which does the switch.
+        let activeId = activeDevices.first(where: { $0.status == .active })?.id ?? activeDevices.first?.id ?? ""
+        let names = Dictionary(activeDevices.map { ($0.id, $0.displayName) }, uniquingKeysWith: { a, _ in a })
+        return SegmentedPillControl(
+            activeDevices.map(\.id),
+            selection: Binding(get: { activeId },
+                               set: { id in
+                                   if id != activeId, let device = activeDevices.first(where: { $0.id == id }) {
+                                       switchTarget = device
+                                   }
+                               }),
+            fillsAvailableWidth: true
+        ) { names[$0] ?? $0 }
     }
 
     // MARK: Logic
@@ -671,69 +602,90 @@ private struct DevicesContent: View {
     }
 }
 
-// MARK: - Strap-history sync card
+// MARK: - Strap comparison page
 
-/// The sync status formerly shown as a compact control in the Today header. Devices is the natural home
-/// for this device-level state, and the full card gives the status enough room to read without crowding
-/// Today's primary actions. This remains display-only and resolves through the existing shared state.
-private struct DeviceSyncStatusCard: View {
-    @EnvironmentObject private var live: LiveState
+/// The two straps' most recent shared day, metric by metric, with how far apart they are. Read-only; it is
+/// never a combined score (#1300).
+private struct StrapComparePage: View {
+    let data: DevicesContent.StrapCompareData
+    let metricLabel: (MetricArbitrationPolicy.MetricKind) -> LocalizedStringKey
+    let compareValue: (Double?) -> String
+    let footnote: LocalizedStringKey
 
     var body: some View {
-        switch SyncChipState.resolve(live: live) {
-        case .syncing:
-            statusCard(
-                systemImage: "arrow.triangle.2.circlepath",
-                detail: String(localized: "Syncing…"),
-                tint: StrandPalette.accent,
-                accessibility: String(localized: "Syncing strap history")
-            )
-        case .synced(let agoText):
-            statusCard(
-                systemImage: "checkmark.circle.fill",
-                detail: String(localized: "Synced \(agoText) ago"),
-                tint: StrandPalette.statusPositive,
-                accessibility: String(localized: "Strap history synced \(agoText) ago")
-            )
-        case .experimentalLive:
-            statusCard(
-                systemImage: "checkmark.circle.fill",
-                detail: String(localized: "Connected; strap history sync is experimental on this strap"),
-                tint: StrandPalette.textSecondary,
-                accessibility: String(localized: "Connected; strap history sync is experimental on this strap")
-            )
-        case .hidden:
-            EmptyView()
+        ScreenScaffold(title: "Compare straps", dateLine: MoreFormat.day(data.day), titleDisplay: .navigationBar) {
+            NoopCard(padding: 0) {
+                VStack(spacing: 0) {
+                    HStack(spacing: NoopMetrics.space3) {
+                        Spacer(minLength: 0)
+                        Text(data.aName).frame(width: 72, alignment: .trailing)
+                        Text(data.bName).frame(width: 72, alignment: .trailing)
+                        Color.clear.frame(width: 76, height: 1)
+                    }
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .lineLimit(1)
+                    .padding(.horizontal, NoopMetrics.cardPadding)
+                    .padding(.vertical, NoopMetrics.space3)
+                    ForEach(data.rows, id: \.metric) { row in
+                        NoopListDivider()
+                        HStack(spacing: NoopMetrics.space3) {
+                            Text(metricLabel(row.metric))
+                                .font(StrandFont.body)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Text(compareValue(row.a)).frame(width: 72, alignment: .trailing)
+                            Text(compareValue(row.b)).frame(width: 72, alignment: .trailing)
+                            agreementPill(row.agreement).frame(width: 76, alignment: .trailing)
+                        }
+                        .font(StrandFont.bodyNumber)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .frame(minHeight: NoopMetrics.listRowMinHeight)
+                    }
+                }
+            }
+            Text(footnote)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textTertiary)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
-    private func statusCard(
-        systemImage: String,
-        detail: String,
-        tint: Color,
-        accessibility: String
-    ) -> some View {
-        NoopCard(tint: tint) {
-            HStack(alignment: .center, spacing: NoopMetrics.space3) {
-                Image(systemName: systemImage)
-                    .font(.system(size: 18, weight: .semibold))
-                    .foregroundStyle(tint)
-                    .frame(width: 24)
-                    .accessibilityHidden(true)
-                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
-                    Text("Strap history")
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text(detail)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Spacer(minLength: 0)
-            }
+    @ViewBuilder private func agreementPill(_ a: AgreementState) -> some View {
+        switch a {
+        case .agree:      StatePill("Match", tone: .positive, showsDot: false)
+        case .minorDelta: StatePill("Close", tone: .neutral, showsDot: false)
+        case .conflict:   StatePill("Differs", tone: .warning, showsDot: false)
+        case .single:     StatePill("One strap", tone: .neutral, showsDot: false)
         }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(Text(accessibility))
+    }
+}
+
+/// The Devices page before the device registry opens: one band card at its final size, redacted.
+private struct DevicesPendingLayout: View {
+    var body: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            SectionHeader("Your bands", trailing: String(localized: "1 paired"))
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    HStack(spacing: NoopMetrics.space3) {
+                        Image(systemName: "applewatch.side.right")
+                            .font(StrandFont.icon(.row))
+                            .frame(width: 28)
+                        VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                            Text(verbatim: "WHOOP").font(StrandFont.headline)
+                            Text(verbatim: "WHOOP 4.0").font(StrandFont.subhead)
+                        }
+                        Spacer(minLength: 0)
+                        StatePill("Active", tone: .positive)
+                    }
+                    Text(verbatim: "Last seen 5 min ago")
+                        .font(StrandFont.footnote)
+                }
+            }
+            NoopButton("Add a device", systemImage: "plus", kind: .primary, fullWidth: true) {}
+        }
     }
 }
 
@@ -826,56 +778,46 @@ private struct DeviceCard: View {
     /// Hard-delete: purge the registry entry itself (and its data), so a duplicate/stale strap can be
     /// removed from the list for good rather than lingering in "Removed" forever (#1193). Archived-only.
     var onForget: (() -> Void)? = nil
+    /// The active strap's history-sync line ("Synced 4 min ago"), folded into the card's status line.
+    var syncLine: String? = nil
+    /// "Connected; strap history sync is experimental on this strap", shown on the device page.
+    var syncNote: String? = nil
 
-    /// The card's visible content. The required `body` wraps this in the whole-card liquid press button +
-    /// the ⋮ menu overlay.
+    /// The card's visible content: name, model and state on one row, one status line under it, and only the
+    /// warnings that need acting on. What the band records, its firmware and its clock are on the device page.
     private var cardContent: some View {
-        StrandCard(padding: 18, tint: isActive ? StrandPalette.accent : nil) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                HStack(alignment: .top, spacing: NoopMetrics.space3) {
+                HStack(alignment: .center, spacing: NoopMetrics.space3) {
                     Image(systemName: icon)
-                        .font(StrandFont.title2)
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(isActive ? StrandPalette.accent : StrandPalette.textSecondary)
                         .frame(width: 28)
                         .accessibilityHidden(true)
-
-                    VStack(alignment: .leading, spacing: 3) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
                         Text(device.displayName)
                             .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
+                            .foregroundStyle(dimmed ? StrandPalette.textSecondary : StrandPalette.textPrimary)
+                            .lineLimit(1)
                         Text(profile.displayModel)
                             .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
+                            .foregroundStyle(dimmed ? StrandPalette.textTertiary : StrandPalette.textSecondary)
+                            .lineLimit(1)
                     }
-                    Spacer()
+                    Spacer(minLength: NoopMetrics.space2)
                     // Locally-adopted Oura is Beta: a non-dot Beta chip sits beside the usual state pill.
                     if device.sourceKind == .oura {
                         StatePill("Beta", tone: .warning, showsDot: false)
                     }
                     statePill
+                    // Room for the ⋯ menu, which sits over the card so its taps never open the device page.
+                    Color.clear.frame(width: 28, height: 28)
                 }
 
-                // Honest local-takeover state row for an adopted Oura ring that is paired but not the
-                // active+connected source right now. States the single-owner reality plainly (if the ring
-                // was reset again or re-claimed in the Oura app, NOOP no longer owns it) without faking a
-                // live reading. Suppressed for the active+connected ring and for removed rings.
+                // Honest local-takeover state for an adopted Oura ring that is paired but not the
+                // active+connected source right now (the single-owner reality, no fabricated reading).
                 if device.sourceKind == .oura && !isLiveConnected && device.status == .paired {
                     ouraLocalStateNote
-                }
-
-                // What this device CAPTURES — honest, per-model (not the generic stored set, which would
-                // mislabel e.g. a "Blood oxygen" chip when no SpO₂ % ever comes off the strap).
-                capabilityRow(symbol: "waveform.path.ecg", text: profile.captures,
-                              tint: StrandPalette.textSecondary)
-                // What NOOP USES it for — the scores/screens this device drives.
-                capabilityRow(symbol: "bolt.fill", text: profile.powers,
-                              tint: StrandPalette.textSecondary)
-                // Honest footnote: the "*" estimates + the SpO₂/steps caveats.
-                if !profile.footnote.isEmpty {
-                    Text(profile.footnote)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
                 }
 
                 // #221: the full #78 pairing-refusal guidance, self-service right on the card instead of
@@ -883,142 +825,78 @@ private struct DeviceCard: View {
                 if bondRefused, let hint = pairingHint {
                     Text(hint)
                         .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.statusWarning)
+                        .foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
+                        .padding(NoopMetrics.space3)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .background(NoopInsetSurface())
                         .accessibilityLabel(hint)
                 }
-
-                // Live battery for the active+connected device, shown as a liquid tube that fills to the
-                // charge — same surface for WHOOP / strap / FTMS. The tube reads the charge band's colour.
-                if let pct = liveBatteryPct {
-                    batteryTube(pct)
-                }
-
-                // #987: strap clock state for the active+connected strap - "clock latched" + frame
-                // freshness, with the plain amber 1970/71 warning when the RTC was never set (the strap
-                // banks no history in that state, which otherwise looks like a NOOP sync bug).
-                if let clockLine = liveClockLine {
-                    Text(clockLine)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .accessibilityLabel(clockLine)
-                }
+                // #987: the plain-words 1970/71 RTC warning (the strap banks no history in that state).
                 if let warning = liveClockWarning {
-                    Text(warning)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.statusWarning)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .accessibilityLabel(warning)
+                    Label {
+                        Text(warning).fixedSize(horizontal: false, vertical: true)
+                    } icon: {
+                        Image(systemName: "exclamationmark.triangle")
+                            .foregroundStyle(StrandPalette.statusWarning)
+                    }
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .accessibilityLabel(warning)
                 }
 
-                HStack(spacing: 6) {
-                    Text(lastSeenLine)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                    // Firmware version for the active+connected strap, read on connect.
-                    if let fw = liveFirmware {
-                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                        Text("FW \(fw)")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .accessibilityLabel("Firmware version \(fw)")
-                    }
-                    // #592: strap pack voltage beside the percent, when the battery event has reported it.
-                    if let mv = liveBatteryMv {
-                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                        Text("\(Double(mv) / 1000.0, specifier: "%.2f") V")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .accessibilityLabel("Battery voltage \(Double(mv) / 1000.0, specifier: "%.2f") volts")
-                    }
-                    if let layout = liveHistoryLayout {
-                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                        Text("v\(layout) history")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .accessibilityLabel("Historical record layout v\(layout)")
-                    }
-                    // The whole-card tap hint sits on the left; the ⋮ menu is a bottom-trailing overlay above
-                    // the press button (so its own taps win). No hint on the active card (no make-active),
-                    // nor on a removed card whose re-add is menu-only.
-                    if let hint = primaryActionHint {
-                        Text("·").font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                        Text(hint)
-                            .font(StrandFont.overlineScaled(10))
-                            .foregroundStyle(StrandPalette.accent)
-                        Image(systemName: "chevron.right").font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(StrandPalette.accent)
-                            .accessibilityHidden(true)
-                    }
-                    Spacer(minLength: 44)   // leave room for the ⋮ menu overlay at the bottom-trailing
-                }
+                statusLine
             }
         }
-        .opacity(dimmed ? 0.6 : 1)
         .accessibilityElement(children: .contain)
     }
 
-    /// The whole-card liquid press wrapper: tapping the card performs its PRIMARY action (make active for a
-    /// paired band, re-add for a removed one), with the settle-in `LiquidPressStyle`. The ⋮ menu is layered
-    /// on top as an overlay so it captures its own taps; cards with no primary action (the active one, or a
-    /// removed one whose re-add is menu-only) fall back to a plain container so nothing taps by accident.
-    var body: some View {
-        Group {
-            if let action = primaryAction {
-                Button(action: action) { cardContent }
-                    .buttonStyle(LiquidPressStyle())
-            } else {
-                cardContent
+    /// "Connected now · 82 % · Synced 4 min ago", in the metadata role.
+    private var statusLine: some View {
+        HStack(spacing: NoopMetrics.space1) {
+            Text(lastSeenLine)
+            if let pct = liveBatteryPct {
+                Text(verbatim: "·")
+                Image(systemName: batterySymbol(pct))
+                    .foregroundStyle(pct < 15 ? StrandPalette.statusCritical : StrandPalette.textTertiary)
+                    .accessibilityHidden(true)
+                Text(verbatim: "\(pct) %")
+                    .monospacedDigit()
+                    .accessibilityLabel("Battery \(pct) percent")
+            }
+            if let syncLine {
+                Text(verbatim: "·")
+                Text(syncLine)
             }
         }
-        .overlay(alignment: .bottomTrailing) {
+        .font(StrandFont.footnote)
+        .foregroundStyle(StrandPalette.textTertiary)
+        .lineLimit(1)
+        .minimumScaleFactor(0.8)
+        // Under the name, past the icon column.
+        .padding(.leading, 28 + NoopMetrics.space3)
+    }
+
+    /// Tapping a band opens its page; the ⋯ menu over the card holds every action (make active, rename,
+    /// restart, the diagnostics probes, remove), so nothing happens to a band by a stray tap on its card.
+    var body: some View {
+        NavigationLink {
+            DeviceDetailView(device: device, profile: profile, pillLabel: pillState.label, pillTone: pillState.tone,
+                             lastSeen: lastSeenLine, batteryPct: liveBatteryPct, batteryMv: liveBatteryMv,
+                             firmware: liveFirmware, historyLayout: liveHistoryLayout, clockLine: liveClockLine,
+                             clockWarning: liveClockWarning, syncLine: syncLine, syncNote: syncNote,
+                             bondHint: bondRefused ? pairingHint : nil)
+        } label: {
+            cardContent
+        }
+        .buttonStyle(StrandPressableButtonStyle(cornerRadius: NoopMetrics.cardRadius))
+        .overlay(alignment: .topTrailing) {
             actionsMenu
-                .padding(18)
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                .padding(.top, NoopMetrics.cardPadding - 2)
+                .padding(.trailing, NoopMetrics.space2)
         }
-    }
-
-    /// The card's primary tap action, or nil when there isn't one. A paired-but-not-active band → make it
-    /// active; a removed band → re-add it as active. The active band and any card without those callbacks
-    /// have no whole-card tap (their controls live entirely in the ⋮ menu). I-1: an import source (Oura
-    /// cloud import, file imports) never offers activation — it's a data partition, not a live device;
-    /// making it "active" would demote whatever live device drives BLE routing + day-owner priority 0.
-    private var primaryAction: (() -> Void)? {
-        if device.isImportSource { return nil }
-        if device.status == .archived { return onReAdd }
-        if !isActive { return onMakeActive }
-        return nil
-    }
-
-    /// Short accent hint mirroring the primary tap, shown in the footer row. nil when the card has no
-    /// whole-card action (active band / menu-only removed band / I-1 import source).
-    private var primaryActionHint: String? {
-        if device.isImportSource { return nil }
-        if device.status == .archived { return onReAdd == nil ? nil : String(localized: "Make active") }
-        if !isActive { return String(localized: "Make active") }
-        return nil
-    }
-
-    /// The live battery as a liquid tube (fills to the charge, coloured by band) with a trailing percent.
-    /// Static-posed so it costs nothing per frame — one of many small liquid elements on the screen.
-    private func batteryTube(_ pct: Int) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: batterySymbol(pct))
-                .font(StrandFont.caption)
-                .foregroundStyle(batteryTint(pct))
-                .frame(width: 18)
-                .accessibilityHidden(true)
-            LiquidTube(frac: Double(pct) / 100, tint: batteryTint(pct), height: 8, animated: false)
-            Text("\(pct)%")
-                .font(StrandFont.captionNumber)
-                .foregroundStyle(StrandPalette.textSecondary)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("Battery \(pct) percent")
-    }
-
-    /// The charge-band colour for the battery tube/icon (mirrors the menu-bar battery buckets).
-    private func batteryTint(_ pct: Int) -> Color {
-        pct < 15 ? StrandPalette.statusCritical : pct < 35 ? StrandPalette.statusWarning : StrandPalette.chargeColor
+        .accessibilityHint("Opens the device page")
     }
 
     /// The pure `DevicePillState.resolve` priority (#221): reboot's "Reconnecting…" beats a bond refusal's
@@ -1032,8 +910,8 @@ private struct DeviceCard: View {
 
     private var statePill: some View {
         let state = pillState
-        return StatePill(LocalizedStringKey(state.label), tone: state.tone,
-                          showsDot: state.showsDot, pulsing: state.pulsing)
+        // Never pulsing: a pill is a state word, and the only thing allowed to loop is a live heart rate.
+        return StatePill(LocalizedStringKey(state.label), tone: state.tone, showsDot: state.showsDot)
     }
 
     private var actionsMenu: some View {
@@ -1111,8 +989,10 @@ private struct DeviceCard: View {
             }
         } label: {
             Image(systemName: "ellipsis.circle")
-                .font(StrandFont.headline)
+                .font(StrandFont.icon(.row))
                 .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                .contentShape(Rectangle())
         }
         .menuStyle(.borderlessButton)
         .fixedSize()
@@ -1132,21 +1012,6 @@ private struct DeviceCard: View {
     /// The honest, per-model capability + function summary for this device's card.
     private var profile: DeviceCapabilityProfile { .make(for: device) }
 
-    /// One icon-prefixed info row (captures / powers), matching the card's caption style.
-    private func capabilityRow(symbol: String, text: String, tint: Color) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Image(systemName: symbol)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .frame(width: 14)
-                .accessibilityHidden(true)
-            Text(text)
-                .font(StrandFont.caption)
-                .foregroundStyle(tint)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
     private var lastSeenLine: String {
         if device.status == .archived { return String(localized: "Removed · data kept") }
         // No "tap ⋯" pointer here (#221 review) — the full how-to-fix guidance is already inline on the
@@ -1163,13 +1028,13 @@ private struct DeviceCard: View {
     private var ouraLocalStateNote: some View {
         HStack(alignment: .top, spacing: 6) {
             Image(systemName: "info.circle")
-                .font(StrandFont.caption)
+                .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.statusWarning)
                 .frame(width: 14)
                 .accessibilityHidden(true)
-            Text("Paired locally. NOOP owns this ring while it holds the key. If you reset it again or set it up in the Oura app, NOOP no longer owns it and you would re-add it to take it over.")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.statusWarning)
+            Text("Paired locally. Nara owns this ring while it holds the key. If you reset it or set it up in the Oura app again, re-add it here.")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
@@ -1220,7 +1085,7 @@ struct DeviceCapabilityProfile {
                 displayModel: String(localized: "\(d.brand) (experimental)"),
                 captures: String(localized: "Heart rate (live, best-effort)"),
                 powers: String(localized: "Powers the live console + Effort. No Charge, Rest or Sleep"),
-                footnote: String(localized: "Experimental: live heart rate where the band exposes it. Some bands need a pairing we can't do yet. NOOP will say so honestly and never show a made-up number. No sleep, recovery, skin temp, SpO₂ or steps."))
+                footnote: String(localized: "Experimental: live heart rate where the band exposes it. Some bands need a pairing we can't do yet. Nara will say so honestly and never show a made-up number. No sleep, recovery, skin temp, SpO₂ or steps."))
         }
         // EXPERIMENTAL locally-adopted Oura ring (gen 3/4/5). The gen is carried on `model` ("Oura Ring
         // 3/4/5") and recovered with OuraRingGen.from(model:). NOOP reads the ring's OWN raw signals + open
@@ -1403,7 +1268,7 @@ private struct ForgetDeviceSheet: ViewModifier {
                     target = nil
                 }
             } message: { _ in
-                Text("NOOP removes this device from your list and deletes its recorded data here. You can re-pair the strap to pull its recent history back.")
+                Text("Nara removes this device from your list and deletes its recorded data here. You can re-pair the strap to pull its recent history back.")
             }
     }
 }
@@ -1789,9 +1654,7 @@ struct DeviceCardCatalog: View {
     }
 
     var body: some View {
-        ScreenScaffold(title: "Devices",
-                       subtitle: "What each band captures (and what NOOP uses it for).",
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Devices") {
             VStack(spacing: NoopMetrics.gap) {
                 DeviceCard(device: Self.dev("whoop-4d", "WHOOP", "4.0", Self.whoopCaps),
                            isActive: true, isLiveConnected: true,
@@ -1832,9 +1695,7 @@ struct DeviceCardCatalog: View {
 /// so it can reach it. Stripped from Release.
 struct OuraDeviceDemoScreen: View {
     var body: some View {
-        ScreenScaffold(title: "Devices",
-                       subtitle: "A locally-adopted Oura ring, in beta.",
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Devices") {
             VStack(spacing: NoopMetrics.gap) {
                 // Active + connected so the card shows "Active · Live" + a live battery readout.
                 DeviceCard(device: DeviceCardCatalog.oura("Oura Ring 3"),
@@ -1850,14 +1711,28 @@ struct OuraDeviceDemoScreen: View {
     }
 }
 
+/// DEBUG-only: `--demo-screen devicedetail`, the device page for a connected WHOOP 5.0 / MG with every
+/// connection detail filled in, so the page can be screenshotted with no strap.
+struct DeviceDetailDemoScreen: View {
+    var body: some View {
+        let device = PairedDevice(id: "whoop-5-demo", brand: "WHOOP", model: "5.0 MG", nickname: nil,
+                                  peripheralId: nil, sourceKind: .liveBLE,
+                                  capabilities: WhoopLiveCapabilities.metrics(forModel: "5.0 MG"),
+                                  status: .active, addedAt: 0, lastSeenAt: 0)
+        DeviceDetailView(device: device, profile: .make(for: device), pillLabel: "Active · Live", pillTone: .positive,
+                         lastSeen: "Connected now", batteryPct: 82, batteryMv: 3912,
+                         firmware: "50.40.1.0", historyLayout: 18,
+                         clockLine: "Clock latched: yes · last frame 4 s ago",
+                         syncLine: "Synced 4 min ago")
+    }
+}
+
 /// DEBUG-only: just the WHOOP 5/MG bond-refused card, so `--demo-screen bondrefused` can screenshot the
 /// "Connected · not paired" pill + the self-service #78 pairing guidance (#221) WITHOUT reproducing the
 /// bond refusal on real hardware. Same file as `DeviceCard` so it can reach it. Stripped from Release.
 struct BondRefusedDemoScreen: View {
     var body: some View {
-        ScreenScaffold(title: "Devices",
-                       subtitle: "A WHOOP 5/MG whose encrypted bond was refused (#78).",
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Devices") {
             DeviceCard(device: PairedDevice(id: "whoop-5-refused-solo", brand: "WHOOP", model: "5.0 MG",
                                             nickname: nil, peripheralId: nil, sourceKind: .liveBLE,
                                             capabilities: WhoopLiveCapabilities.metrics(forModel: "5.0 MG"),
