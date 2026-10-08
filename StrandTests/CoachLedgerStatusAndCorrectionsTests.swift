@@ -148,7 +148,7 @@ final class CoachLedgerStatusAndCorrectionsTests: XCTestCase {
     // MARK: Metric explorer
 
     func testTheActivityLineCoversEveryNightlyHero() {
-        XCTAssertEqual(MetricExplorerView.activityMetrics, ActivityContextSelection.nightlyMetrics)
-        XCTAssertTrue(MetricExplorerView.activityMetrics.isSuperset(of: ["rhr", "skin_temp"]))
+        XCTAssertEqual(MetricDetailView.activityMetrics, ActivityContextSelection.nightlyMetrics)
+        XCTAssertTrue(MetricDetailView.activityMetrics.isSuperset(of: ["rhr", "skin_temp"]))
     }
 }
