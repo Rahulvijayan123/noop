@@ -402,3 +402,34 @@ def test_every_metric_has_curated_findings_its_example_searches_reach():
         for query in re.findall(r"'([^']+)'", text):
             found = literature.search(query, key)
             assert found and all(r["source"] == "seed" for r in found), (key, query)
+
+
+def test_a_finding_on_wearable_accuracy_may_back_the_uncertainty_section():
+    found = {"lit:accuracy": {"id": "lit:accuracy", "topic": "wearable_accuracy", "peer_reviewed": True,
+                              "finding": "consumer wearables differ from reference measurements"},
+             "lit:alcohol": {"id": "lit:alcohol", "topic": "alcohol", "peer_reviewed": True,
+                             "finding": "alcohol raises heart rate"}}
+    limits = ["Wrist readings can differ from a clinical measurement."]
+    ok = answer(interpretation=[SUPPORT], uncertainty=limits, citations=["lit:accuracy"])
+    assert validate.check(ok, EVIDENCE, found).ok, validate.check(ok, EVIDENCE, found).errors
+    # only measurement limits: a pattern about the person still needs an interpretation sentence
+    other = answer(interpretation=[SUPPORT], uncertainty=["Alcohol was not recorded, so its role is unknown."],
+                   citations=["lit:alcohol"])
+    assert any("is about alcohol" in e for e in validate.check(other, EVIDENCE, found).errors)
+
+
+def test_a_source_whose_title_the_app_would_refuse_is_never_offered():
+    from nara_metric_insight import litsearch
+    from nara_metric_insight.literature import CORPUS
+    from nara_metric_insight.literature import ALARMING_TITLE
+    flagged = [e for e in litsearch.load_corpus(CORPUS) if validate.forbidden_term(e["citation"]["title"] or "")
+               or ALARMING_TITLE.search(e["citation"]["title"] or "")]
+    assert flagged, "the corpus has such titles (fever, pre-symptomatic, symptoms, COVID-19)"
+    literature = Literature()
+    for e in flagged:
+        for metric in ("resting_hr", "heart_rate", "hrv_rmssd", "resp_rate"):
+            try:
+                found = literature.search(" ".join(e["keywords"][:4]), metric, limit=10)
+            except ValueError:
+                continue
+            assert f"lit:{e['id']}" not in {r["id"] for r in found}

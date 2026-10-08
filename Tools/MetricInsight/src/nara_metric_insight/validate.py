@@ -98,7 +98,7 @@ TOPIC_WORDS: dict[str, tuple[str, ...]] = {
     "seasonality": ("season", "winter", "summer"), "age": ("age",),
     "normal_range": ("usual", "range", "normal", "typical", "vary", "variation", "differ"),
     "day_to_day_variability": ("night-to-night", "day-to-day", "vary", "variation", "common", "usual"),
-    "wearable_accuracy": ("measure", "measurement", "sensor", "device", "wear", "accuracy"),
+    "wearable_accuracy": ("measure", "measurement", "sensor", "device", "wear", "accuracy", "estimat", "strap"),
     "posture": ("posture", "standing", "lying", "supine", "upright", "sitting"),
     "physical_activity": ("activity", "movement", "moving", "walk", "walking", "steps", "exercise"),
     "sleep_architecture": ("deep sleep", "rem", "sleep stage", "slow-wave", "sleep"),
@@ -163,6 +163,7 @@ MAX_SENTENCE = 280
 MAX_TOTAL = 1200
 MAX_ITEMS = 3
 MIN_CITATIONS = 1  # every explanation carries at least one peer-reviewed source to check it against
+LIMIT_TOPICS = frozenset({"wearable_accuracy"})  # findings about the measurement itself, not the person
 # Window lengths the tools state in words ("the last 7 nights", "up to 30 nights", "90 days").
 WINDOW_NUMBERS = (7, 14, 30, 90)
 
@@ -845,16 +846,24 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     # topic without negating it ("no alcohol was recorded" is not a reason to cite alcohol research). A topic word
     # counts at the start of a word ("walked" for walk, not "average" for age), and the explained metric's own name
     # is not a topic (every steps explanation says "steps", every wrist temperature one "temperature").
-    supported = " ".join(clause for s in sections["interpretation"] for clause in _CLAUSE.split(s)
-                         if not _NEGATION.search(clause)).lower()
-    for name in sorted(ALIASES.get(str(f.metric), ()), key=len, reverse=True):
-        supported = re.sub(rf"\b{re.escape(name)}\b", " ", supported)
+    # How far a wearable's reading can be trusted is what the uncertainty section is for: a finding on it may back
+    # a sentence there too.
+    def supported(items: list[str]) -> str:
+        text = " ".join(clause for s in items for clause in _CLAUSE.split(s) if not _NEGATION.search(clause)).lower()
+        for name in sorted(ALIASES.get(str(f.metric), ()), key=len, reverse=True):
+            text = re.sub(rf"\b{re.escape(name)}\b", " ", text)
+        return text
+    interpreted = supported(sections["interpretation"])
+    limits = supported(sections["interpretation"] + sections["uncertainty"])
     for cited in (c for c in citations if c in retrieved):
-        words = TOPIC_WORDS.get(str(retrieved[cited].get("topic")))
+        topic = str(retrieved[cited].get("topic"))
+        words = TOPIC_WORDS.get(topic)
+        text, where = (limits, "interpretation or uncertainty") if topic in LIMIT_TOPICS else (
+            interpreted, "interpretation")
         if not words:
             errors.append(f"citations:{cited} has no verified topic and cannot be cited")
-        elif not any(re.search(rf"\b{re.escape(word)}", supported) for word in words):
-            errors.append(f"citations:{cited} is about {retrieved[cited].get('topic')}, which no interpretation "
-                          "sentence says is present for this person")
+        elif not any(re.search(rf"\b{re.escape(word)}", text) for word in words):
+            errors.append(f"citations:{cited} is about {topic}, which no {where} sentence says is present for this "
+                          "person")
     answer = {"headline": headline, **sections, "citations": list(dict.fromkeys(citations))}
     return Result(not errors, answer, list(dict.fromkeys(errors)))

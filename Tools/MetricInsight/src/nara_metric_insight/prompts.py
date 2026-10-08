@@ -142,7 +142,9 @@ their latest value and its history. The {latest} is {latest_day}: {value}.{note}
    - which movement came before or during it: movement_patterns lists the bouts the evening before the night and
      on the day (local times, minutes) and how long before sleep the last one ended; also workout_context,
      activity_context, gait_context, sleep_context, recent_events and user_context;
-   - the most likely explanation in the data, said with care ("likely because…", "this can happen after…");
+   - the most likely explanation in the data, said with care ("likely because…", "this can happen after…"); when
+     nothing in the data explains it, say how much this measure usually varies for people (from the research), not
+     only that nothing explains it;
    - what limits confidence (missing {period}s, a short history, estimated signals, the comparison status).
 3. Search peer-reviewed research for the pattern your interpretation names, in generic scientific words that
    name that pattern and the metric (for example {examples}):
@@ -174,7 +176,9 @@ Rules the reply is checked against:
 
 RETRY_HINTS = {
     "citations": "For citations: call search_literature again with words for the pattern your interpretation names "
-                 "(alcohol, a late workout, short sleep, ...) and cite one of the new results about it.",
+                 "(alcohol, a late workout, short sleep, ...) and cite one of the new results about it. When nothing "
+                 "in the data explains it, say in an interpretation sentence how much this measure usually varies "
+                 "from one night or day to the next, and cite a finding about that variation.",
     "grounding": "Copy numbers, dates and times exactly as the tools give them (21:30, or 9:30 p.m.).",
     "usual": "Say within or outside your usual range only as metric_summary.assessment.state says (and each "
              "vital's state in related_metrics.night_vitals).",

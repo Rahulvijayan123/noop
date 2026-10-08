@@ -19,6 +19,11 @@ from .validate import FORBIDDEN_TERMS, TOPIC_WORDS, forbidden_term
 CORPUS = Path(__file__).resolve().parent / "data" / "literature_seed.json"
 REMOTE = {"pubmed": litsearch.search_pubmed, "europepmc": litsearch.search_europepmc}
 EXCLUDED_TOPICS = frozenset({"acute_illness", "vaccination", "psychological_stress", "medication", "long_term_risk"})
+# Words a source's title must not carry: the card shows the title under the person's own data, where "COVID-19
+# detection" or "mortality" reads as a hint about them (the app's forbidden terms are checked as well).
+ALARMING_TITLE = re.compile(r"\b(covid\w*|sars\w*|virus\w*|viral|flu|influenza|fever\w*|disease\w*|infect\w*|"
+                            r"illness\w*|sick\w*|symptom\w*|mortality|death\w*|cancer\w*|treatment\w*|diagnos\w*)\b",
+                            re.I)
 # The curated corpus' metric tag of each explained metric (metrics.InsightMetric.literature).
 CORPUS_METRIC = {k: m.literature for k, m in INSIGHT_METRICS.items() if m.literature}
 # Words every query shares ("resting heart rate"): they rank nothing, so a hit must match the query's topic words.
@@ -99,6 +104,11 @@ class Literature:
         out, seen = [], set()
         for record in records:
             if not peer_reviewed(record):
+                continue
+            # The card shows each source's title: never one the app's guard would refuse (it would hide the whole
+            # card) or one that reads as a hint of an illness.
+            title = str(record.get("title") or "")
+            if forbidden_term(title) or ALARMING_TITLE.search(title):
                 continue
             if record.get("source") != "seed":  # remote records: no curated topic, unvetted wording
                 text = f"{record.get('title') or ''} {record.get('abstract_snippet') or ''}"
