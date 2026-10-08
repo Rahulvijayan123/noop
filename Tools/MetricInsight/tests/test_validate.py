@@ -433,3 +433,23 @@ def test_a_source_whose_title_the_app_would_refuse_is_never_offered():
             except ValueError:
                 continue
             assert f"lit:{e['id']}" not in {r["id"] for r in found}
+
+
+def test_a_negated_sentence_does_not_void_the_next_ones_topic():
+    evidence = json.loads(json.dumps(EVIDENCE))
+    evidence["get_metric_summary"] = {"metric": "skin_temp", "units": "°C", "estimated": False,
+                                      "latest": {"day": "2026-10-06", "value": 34.6},
+                                      "baseline": {"call": {"state": "learning"}}}
+    found = {"lit:onset": {"id": "lit:onset", "topic": "sleep_architecture", "peer_reviewed": True,
+                           "finding": "wrist temperature rises after sleep onset"},
+             "lit:rhythm": {"id": "lit:rhythm", "topic": "circadian", "peer_reviewed": True,
+                            "finding": "wrist temperature follows a daily rhythm"}}
+    base = dict(headline="Wrist temperature 34.6 °C on Oct 6",
+                observed=["Your wrist temperature was 34.6 °C on Oct 6, and Nara is still learning your usual."])
+    two = answer(**base, interpretation=["The available data does not explain the rise. Wrist temperature naturally "
+                                         "rises around sleep onset and falls around waking."],
+                 citations=["lit:onset"])
+    assert validate.check(two, evidence, found).ok, validate.check(two, evidence, found).errors
+    rhythm = answer(**base, interpretation=["It can vary with the body's daily temperature rhythm."],
+                    citations=["lit:rhythm"])
+    assert validate.check(rhythm, evidence, found).ok, validate.check(rhythm, evidence, found).errors

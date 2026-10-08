@@ -32,6 +32,9 @@ from .tools import REQUIRED, JobTools
 
 log = logging.getLogger("nara_metric_insight")
 MAX_RELATED = 4
+# A rejected answer goes back to the model with the reasons at most this often in one run (a real model fixes most
+# rejections on the first retry, nearly all by the second); then the job fails and the queue backs off.
+VALIDATION_RETRIES = 2
 
 
 class AnalysisRejected(RuntimeError):
@@ -138,10 +141,10 @@ async def analyse(cfg: Config, db: Database, job: dict[str, Any], literature: Li
         text = await session.ask(prompts.task(metric, summary["latest"]["day"], summary["latest"]["value"]))
         attempts = 1
         result = validate.check(text, tools.validation_evidence(), tools.retrieved, called=set(tools.calls), required=REQUIRED)
-        if not result.ok:
-            rejected = result.codes
+        while not result.ok and attempts <= VALIDATION_RETRIES:
+            rejected = list(dict.fromkeys(rejected + result.codes))
             text = await session.ask(prompts.retry(result.errors))
-            attempts = 2
+            attempts += 1
             result = validate.check(text, tools.validation_evidence(), tools.retrieved, called=set(tools.calls), required=REQUIRED)
         stats = session.stats()
     if not result.ok or result.answer is None:

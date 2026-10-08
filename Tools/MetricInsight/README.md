@@ -102,7 +102,7 @@ forbidden terms (kept identical to `PhysiologyContextWording.forbiddenTerms`, in
 diagnostic or certainty wording; absolute dates only; every number checked by unit against the tool results the
 model received (a value "on Oct 6" must be Oct 6's value, a direction word must match the sign of the change, zero
 is never a measurement, number words and clock times count); "estimated" wherever a person's estimated signal is
-stated; citations only from this job's retrieval, each backing an interpretation of something present. One retry
+stated; citations only from this job's retrieval, each backing an interpretation of something present. Up to two retries
 with the reasons, then the job fails (backoff, dead letter at 3). The app re-checks wording before rendering.
 
 ## Literature

@@ -169,6 +169,7 @@ def test_an_answer_that_never_validates_fails_the_job(pg, stub, worker):
     assert request(pg, USER_A)["status"] == "pending"
     outcome = worker.once()
     assert outcome.startswith("rejected:") and "wording" in outcome
+    assert stub.decisions.count("retry-answer") == 2  # VALIDATION_RETRIES, then the job fails
     state = job(pg)
     assert state["consecutive_failures"] == 1 and state["last_error"].startswith("validation:")
     assert request(pg, USER_A)["insight"] is None  # nothing unvalidated ever reaches the app

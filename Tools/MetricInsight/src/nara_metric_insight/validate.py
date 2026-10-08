@@ -102,7 +102,7 @@ TOPIC_WORDS: dict[str, tuple[str, ...]] = {
     "posture": ("posture", "standing", "lying", "supine", "upright", "sitting"),
     "physical_activity": ("activity", "movement", "moving", "walk", "walking", "steps", "exercise"),
     "sleep_architecture": ("deep sleep", "rem", "sleep stage", "slow-wave", "sleep"),
-    "circadian": ("circadian", "time of day", "night", "daytime", "evening", "morning"),
+    "circadian": ("circadian", "rhythm", "body clock", "time of day", "night", "daytime", "evening", "morning"),
 }
 UNITS: dict[str, str] = {
     "bpm": "bpm", "beats per minute": "bpm", "ms": "ms", "millisecond": "ms", "milliseconds": "ms",
@@ -753,15 +753,16 @@ def _estimated_errors(sentence: str, f: Facts) -> list[str]:
     lowered = sentence.lower()
     if "estimat" in lowered:
         return []
+    quoted = f"'{sentence[:60]}…'" if len(sentence) > 60 else f"'{sentence}'"  # which sentence, for the retry
     for group in sorted(f.estimated):
         verb = _YOU_VERB.get(group)
         if verb and (m := verb.search(lowered)):
-            return [f"estimated:a sentence saying you {m.group(1)} must say the {group} data is estimated"]
+            return [f"estimated:{quoted} says you {m.group(1)}; it must say the {group} data is estimated"]
         for alias in ALIASES.get(group, ()):
             a = re.escape(alias)
             if (re.search(rf"\byour\s+(?:\w+\s+){{0,2}}{a}\b", lowered)
                     or (alias not in YOUR_ONLY and re.search(rf"\b{a}\b\W+(?:\w+\W+){{0,6}}?\d", lowered))):
-                return [f"estimated:a sentence stating your {alias} must say it is estimated"]
+                return [f"estimated:{quoted} states your {alias}; it must say it is estimated"]
     return []
 
 
@@ -848,8 +849,9 @@ def check(text: str, evidence: dict[str, Any], retrieved: dict[str, dict[str, An
     # is not a topic (every steps explanation says "steps", every wrist temperature one "temperature").
     # How far a wearable's reading can be trusted is what the uncertainty section is for: a finding on it may back
     # a sentence there too.
-    def supported(items: list[str]) -> str:
-        text = " ".join(clause for s in items for clause in _CLAUSE.split(s) if not _NEGATION.search(clause)).lower()
+    def supported(items: list[str]) -> str:  # one sentence, then one clause, at a time
+        clauses = (c for s in items for sentence in _SENTENCE_END.split(s) for c in _CLAUSE.split(sentence))
+        text = " ".join(c for c in clauses if not _NEGATION.search(c)).lower()
         for name in sorted(ALIASES.get(str(f.metric), ()), key=len, reverse=True):
             text = re.sub(rf"\b{re.escape(name)}\b", " ", text)
         return text
