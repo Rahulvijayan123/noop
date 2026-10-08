@@ -144,8 +144,10 @@ One request per (device, contiguous chunk-group); the lane is responsible for ch
          "samples": [ ... absolute reconstructed ADC counts ... ],
          "sample_count_per_second": 25,
          "run_id": "ppg-1780917232",
-         "config": {"stable": true, "identity": "unknown", "known": false},
-         "clock": {"source": "...", "grid": "...", "endpoint": "...",
+         "config": {"stable": true, "identity": "unknown", "known": false, "burst_index": 1},
+         "clock": {"source": "strap_record_second", "grid": "uniform-25hz-v26-continuity",
+                   "endpoint": "own_record", "record_period_s": 1, "phase_s": null,
+                   "sample_time": "start_unix + phase_s + k/25", "grid_evidence": "...",
                    "samples_per_second": 25, "packet_timing_verified": false}}
       ]
     },
