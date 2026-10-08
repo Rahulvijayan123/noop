@@ -727,6 +727,11 @@ private struct OverlayChart: View {
         let title: String
         let date: Date
         let norm: Double
+        /// The run of consecutive days this point belongs to: a missing day starts a new run, so the line
+        /// breaks there instead of joining the readings on either side.
+        var run: Int = 0
+        /// A run of one day: a line cannot draw it, so it gets a dot.
+        var isolated: Bool = false
     }
 
     /// Everything `body` derives from `series`, computed ONCE per data change instead
@@ -776,6 +781,8 @@ private struct OverlayChart: View {
                 densest = max(densest, s.rows.count)
                 var pts: [Plot] = []
                 pts.reserveCapacity(s.rows.count)
+                var run = 0
+                var previous: Date?
                 for row in s.rows {
                     byDay[row.day, default: [:]][s.id] = row.value
                     let d: Date
@@ -787,8 +794,13 @@ private struct OverlayChart: View {
                     } else {
                         continue // unparseable day: not plottable (as before)
                     }
-                    pts.append(Plot(title: s.metric.title, date: d, norm: s.normalized(row.value)))
+                    // More than a day and a half since the last reading: a day is missing, so start a new run.
+                    if let previous, d.timeIntervalSince(previous) > 1.5 * 86_400 { run += 1 }
+                    previous = d
+                    pts.append(Plot(title: s.metric.title, date: d, norm: s.normalized(row.value), run: run))
                 }
+                let runSizes = Dictionary(grouping: pts, by: \.run).mapValues(\.count)
+                for i in pts.indices where runSizes[pts[i].run] == 1 { pts[i].isolated = true }
                 if let row = s.rows.last, let d = dateCache[row.day] ?? parseCompareDay(row.day) {
                     caps.append(Plot(title: s.metric.title, date: d, norm: s.normalized(row.value)))
                 }
@@ -892,7 +904,8 @@ private struct OverlayChart: View {
         Chart(model.plots) { p in
             LineMark(
                 x: .value("Date", p.date),
-                y: .value("Normalized", p.norm)
+                y: .value("Normalized", p.norm),
+                series: .value("Run", "\(p.title)#\(p.run)")
             )
             .interpolationMethod(.monotone)
             .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
@@ -901,7 +914,7 @@ private struct OverlayChart: View {
             // Per-point dots are only legible on sparse series; on a dense window they
             // overlap into the line while still costing a mark each (same gate as
             // TrendChart). The line carries the data past the gate.
-            if model.showsPointMarks {
+            if model.showsPointMarks || p.isolated {
                 PointMark(
                     x: .value("Date", p.date),
                     y: .value("Normalized", p.norm)
