@@ -23,7 +23,7 @@ import uuid
 import numpy as np
 
 from . import __version__, candidates as cand, features
-from .calibration import MIN_REFERENCE, MultiChannel
+from .calibration import MIN_REFERENCE, MultiChannel, SustainedCalibrator
 from .config import Config
 from .db import Database
 from .state import UserState
@@ -34,8 +34,10 @@ REREAD_SECONDS = 3 * 3600
 DATA_SETTLE_SECONDS = 5 * 60
 JOB_DEADLINE_SECONDS = 25 * 60
 BACKFILL_SECONDS = 30 * 3600
-RECENT_SECONDS = 12 * 3600
+RECENT_SECONDS = 18 * 3600          # ≥ 2 × quarantine + a window: flags on both sides of a candidate window
+REF_QUARANTINE_SECONDS = 6 * 3600
 BUCKETS = ("rest", "sleep")
+SUSTAINED_K = 4                      # 2 h of 30-minute windows
 
 
 def sd_notify(msg: str) -> None:
@@ -225,10 +227,13 @@ class Service:
         # A window [s, s+W) was scored by the previous job iff s + W ≤ wm: the first one not yet scored starts at wm
         # aligned DOWN (the window that was still incomplete at wm). Each window is scored once.
         f = max(f, wm - wm % W)
-      refs = [st.load_ref(scorer.name, b) for b in BUCKETS]
-      if any(r.shape[0] < MIN_REFERENCE for r in refs):
-        done = 0 if all(r.size == 0 for r in refs) else int(seen.get(scorer.name, 0))   # 0: new / re-trained
-        f = min(f, max(floor, score_to - BACKFILL_SECONDS, done + cand.WINDOW_S))
+      gen = str(getattr(scorer, "generation", lambda _st: "0")(st))
+      mine = seen.get(scorer.name) if isinstance(seen.get(scorer.name), dict) else {}
+      if mine.get("gen") != gen:                                   # new scorer or re-trained prompt
+        mine = {"gen": gen, "last": 0}
+      seen[scorer.name] = mine
+      if any(st.load_ref(scorer.name, b).shape[0] < MIN_REFERENCE for b in BUCKETS):
+        f = min(f, max(floor, score_to - BACKFILL_SECONDS, int(mine["last"]) + cand.WINDOW_S))
       froms[scorer.name] = f
     score_from = min(froms.values()) if froms else score_to
     if score_to - score_from < cand.WINDOW_S:
@@ -249,20 +254,22 @@ class Service:
         mine = [r for r in out if r.window.bucket == bucket]
         if not mine:
           continue
-        mc = MultiChannel(st.load_ref(scorer.name, bucket))
+        mc = MultiChannel(st.load_ref(scorer.name, bucket), st.load_ref_starts(scorer.name, bucket), cand.WINDOW_S)
         if mc.ready:
           p, per = mc.pvalue(np.stack([r.channel_scores for r in mine]))
           for r, pi, cp in zip(mine, p, per):
             r.p, r.channel_p, r.flagged = float(pi), cp, bool(pi < cand.ALPHA)
+            r.rule = "window" if r.flagged else None
         else:
           for r in mine:
             r.calibrating = True
       if out:
-        seen[scorer.name] = max(int(seen.get(scorer.name, 0)), max(r.window.start for r in out))
+        seen[scorer.name]["last"] = max(int(seen[scorer.name]["last"]), max(r.window.start for r in out))
       results[scorer.name] = out
     self._save_json(st, "seen.json", seen)
     self.counters["windows"] += len(ws)
     combined, kept = self._load_recent(st, frame, results, score_to)
+    self._sustained(st, combined, results)
     self._grow_references(st, combined, score_to)
     candidates = cand.form_candidates(combined, frame, versions)
     self._carry_run_keys(candidates, kept)
@@ -271,19 +278,58 @@ class Service:
     return {"scored_from": iso(score_from), "scored_to": iso(score_to), "candidates": candidates,
             "window_scores": cand.window_score_rows(results, withheld)}
 
+  @staticmethod
+  def _sustained(st: UserState, combined: dict, results: dict) -> None:
+    """The k-window rule for the windows scored now: mean channel score over this window and the k−1 before it
+    (same model and bucket, current + persisted results, spanning ≤ k+1 windows) against SustainedCalibrator."""
+    K, W = SUSTAINED_K, cand.WINDOW_S
+    for model, rs in results.items():
+      seq_all = sorted(combined.get(model, []), key=lambda r: r.window.start)
+      for bucket in BUCKETS:
+        mine = [r for r in rs if r.window.bucket == bucket and not r.calibrating]
+        if not mine:
+          continue
+        sc = SustainedCalibrator(st.load_ref(model, bucket), st.load_ref_starts(model, bucket), K, W)
+        if not sc.ready:
+          continue
+        seq = [r for r in seq_all if r.window.bucket == bucket]
+        pos = {r.window.start: i for i, r in enumerate(seq)}
+        for r in mine:
+          i = pos.get(r.window.start)
+          if i is None or i + 1 < K:
+            continue
+          span = seq[i + 1 - K:i + 1]
+          if span[-1].window.start - span[0].window.start > K * W:
+            continue
+          T = cand.nanmean_rows(np.stack([x.channel_scores for x in span]).T)
+          p, per = sc.pvalue(T[None, :])
+          r.p_sustained = float(p[0])
+          if p[0] < cand.ALPHA and not r.flagged:
+            r.flagged, r.rule, r.evidence_from = True, "sustained", int(span[0].window.start)
+            r.channel_p = per[0] if r.channel_p is None else np.minimum(r.channel_p, per[0])
+
   def _grow_references(self, st: UserState, combined: dict, score_to: int) -> None:
-    """Windows are scored when complete but join a model's calibration reference only once ≥ 1 h old (from the
-    persisted recent results), so a run still building up is never absorbed into "normal"; flagged windows never
-    join. Each window is considered once (refmeta "last")."""
+    """Quarantined reference growth (no silent drift into "normal"). A scored window joins its model's calibration
+    reference only when (a) it is ≥ REF_QUARANTINE_SECONDS old, (b) it was not flagged, and (c) no window of ANY
+    model was flagged within REF_QUARANTINE_SECONDS of it. So the slowly-building onset of an event that is flagged
+    later (a fever ramp) never becomes "normal". Under the null flags are ~1e-3 per window, so (c) removes almost
+    nothing. Each window is considered once (refmeta "last")."""
+    Q = REF_QUARANTINE_SECONDS
+    flagged = np.array(sorted({r.window.start for rs in combined.values() for r in rs if r.flagged}), dtype=np.int64)
     for model, rs in combined.items():
       for bucket in BUCKETS:
         name = f"refmeta_{model}_{bucket}.json"
         last = self._load_json(st, name).get("last", 0)
         old = [r for r in rs if r.window.bucket == bucket and r.window.start > last
-               and r.window.start + cand.WINDOW_S <= score_to - 3600]
-        new_rows = [r for r in old if not r.flagged and np.isfinite(r.channel_scores).any()]
+               and r.window.start + cand.WINDOW_S <= score_to - Q]
+        def near_flag(s0: int) -> bool:
+          return bool(len(flagged)) and bool(np.any(np.abs(flagged - s0) <= Q))
+        new_rows = [r for r in old if not r.flagged and not near_flag(r.window.start)
+                    and np.isfinite(r.channel_scores).any()]
         if new_rows:
-          st.append_ref(model, bucket, np.stack([r.channel_scores for r in sorted(new_rows, key=lambda r: r.window.start)]))
+          new_rows.sort(key=lambda r: r.window.start)
+          st.append_ref(model, bucket, np.stack([r.channel_scores for r in new_rows]),
+                        starts=[r.window.start for r in new_rows])
         if old:
           self._save_json(st, name, {"last": max(r.window.start for r in old)})
 
@@ -327,7 +373,7 @@ class Service:
       combined.setdefault(x["model"], []).append(cand.ModelWindowResult(
         model=x["model"], window=w[0], channel_scores=nan(x["scores"]), signed_mean=nan(x["signed"]),
         p=x["p"], channel_p=None if x["channel_p"] is None else nan(x["channel_p"]), flagged=x["flagged"],
-        calibrating=x["calibrating"]))
+        calibrating=x["calibrating"], p_sustained=x.get("p_sus"), rule=x.get("rule"), evidence_from=x.get("ev")))
     return combined, kept
 
   @staticmethod
@@ -355,7 +401,8 @@ class Service:
     rows = [dict(x, run=run_of.get(x["start"]) if x["flagged"] else None) for x in kept]
     rows += [{"model": m, "start": int(r.window.start), "p": r.p, "flagged": r.flagged,
               "calibrating": r.calibrating, "scores": fin(r.channel_scores), "signed": fin(r.signed_mean),
-              "channel_p": fin(r.channel_p), "run": run_of.get(int(r.window.start)) if r.flagged else None}
+              "channel_p": fin(r.channel_p), "run": run_of.get(int(r.window.start)) if r.flagged else None,
+              "p_sus": r.p_sustained, "rule": r.rule, "ev": r.evidence_from}
              for m, rs in results.items() for r in rs if r.window.start >= keep_from]
     self._save_json(st, "recent.json", {"rows": rows})
 

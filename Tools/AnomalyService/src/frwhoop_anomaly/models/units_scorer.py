@@ -170,6 +170,11 @@ class UniTSScorer:
         out[b:b + len(ee)] = np.where(M[:, WIN - SCORE:, :U], r, np.nan)
     return out.reshape(-1, U)
 
+  def generation(self, state) -> str:
+    """Changes when this user's prompt is (re-)trained; the service then re-runs its calibration backfill."""
+    user = self._prepared[1] if getattr(self, "_prepared", (None,))[0] == state.dir else self._load_user(state)
+    return "untrained" if user is None else f"{user['meta'].get('trained_at', 0):.0f}"
+
   def prepare(self, frame, state) -> None:
     """Load (or train) this user's prompt before the service decides what to score; a re-train clears this
     model's calibration references, so the service's thin-reference backfill must see that first."""

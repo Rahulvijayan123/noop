@@ -163,3 +163,30 @@ def test_no_measured_minutes_and_too_short_spans_return_an_empty_publishable_res
   g = make_frame(600, np.full(600, 60.0))
   out = svc.score_frame(g, st, 600 * 60 - 600, 600 * 60)          # watermark 10 min ago: nothing complete
   assert out["candidates"] == [] and out["scored_to"] > out["scored_from"]
+
+
+def test_onset_of_a_flagged_event_never_joins_the_reference(tmp_path):
+  # Slow 8 h ramp to +15 bpm on day 6: early ramp windows are unflagged but within 6 h of flagged ones.
+  rs = np.random.default_rng(7)
+  n = 7 * 1440
+  hr = 60 + rs.normal(size=n)
+  a = 5 * 1440 + 360
+  hr[a:a + 480] += np.linspace(0, 15, 480)
+  stub, seen, st = run(tmp_path, hr)
+  assert any(a * 60 - 1800 <= int(k.split(":")[1]) <= (a + 480) * 60 for k in seen)
+  ref = st.load_ref("stub", "rest")
+  hr_scores = ref[:, 0]
+  # No reference window carries the ramp (stub HR score ≈ (hr − 60) / 2 → ramp windows ≥ ~1.5).
+  assert np.max(hr_scores) < 1.5, np.sort(hr_scores)[-5:]
+
+
+def test_a_moderate_sustained_shift_is_caught_by_the_sustained_rule(tmp_path):
+  # +3 bpm for 4 h: each window's HR score ≈ 1.5 (window rule needs far more), the 2 h mean is extreme.
+  rs = np.random.default_rng(11)
+  n = 9 * 1440
+  hr = 60 + rs.normal(size=n)
+  a = 8 * 1440 + 600
+  hr[a:a + 240] += 3
+  _, seen, _ = run(tmp_path, hr)
+  hits = [v[-1][1] for k, v in seen.items() if a * 60 - 3 * 3600 <= int(k.split(":")[1]) <= (a + 240) * 60]
+  assert hits and "sustained" in hits[0]["context"]["rules"], seen.keys()

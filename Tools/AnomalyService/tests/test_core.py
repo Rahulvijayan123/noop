@@ -110,3 +110,48 @@ def test_state_merge_new_minutes_win(tmp_path):
   assert list(back.minutes) == list(merged.minutes) and back.context[0] == "still"
   ref = st.append_ref("timesfm-3.0", "rest", np.ones((3, 5)))
   assert ref.shape == (3, 5)
+
+
+def test_sustained_calibrator_uses_only_contiguous_reference_spans():
+  from frwhoop_anomaly.calibration import SustainedCalibrator
+  rs = np.random.default_rng(9)
+  ref = rs.normal(size=(400, 5))
+  starts = np.arange(400) * 1800.0
+  starts[200:] += 10 * 86400            # one big gap: spans crossing it are dropped
+  sc = SustainedCalibrator(ref, starts, 4)
+  assert sc.n == 400 - 3 - 3
+  assert sc.channel[0].n_eff < sc.n / 3                          # overlapping means: far fewer independent rows
+  assert not SustainedCalibrator(ref, np.full(400, np.nan), 4).ready   # unknown times: rule stays off
+  # Null rate of the 4-window mean of AR(1) window scores, calibrated on the same process.
+  rates = []
+  for seed in range(10):
+    g = np.random.default_rng(seed)
+    def ar(n):
+      x = np.zeros((n, 5)); e = g.normal(size=(n, 5))
+      for i in range(1, n):
+        x[i] = 0.6 * x[i - 1] + 0.8 * e[i]
+      return x
+    r = ar(800)
+    sc = SustainedCalibrator(r, np.arange(800) * 1800.0, 4)
+    x = ar(20000)
+    roll = np.stack([x[i:i + 4].mean(axis=0) for i in range(len(x) - 3)])
+    p, _ = sc.pvalue(roll)
+    rates.append([np.mean(p < 1e-2), np.mean(p < 1e-3)])
+  r = np.mean(rates, axis=0)
+  assert r[0] <= 0.011 and r[1] <= 1.2e-3, r
+
+
+def test_window_calibration_holds_alpha_for_autocorrelated_windows():
+  rates = []
+  for seed in range(10):
+    g = np.random.default_rng(100 + seed)
+    def ar(n):
+      x = np.zeros((n, 5)); e = g.normal(size=(n, 5))
+      for i in range(1, n):
+        x[i] = 0.7 * x[i - 1] + 0.71 * e[i]
+      return x
+    mc = MultiChannel(ar(300), np.arange(300) * 1800.0)
+    p, _ = mc.pvalue(ar(20000))
+    rates.append([np.mean(p < 1e-2), np.mean(p < 1e-3)])
+  r = np.mean(rates, axis=0)
+  assert r[0] <= 0.011 and r[1] <= 1.2e-3, r

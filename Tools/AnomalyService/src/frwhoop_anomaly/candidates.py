@@ -6,8 +6,11 @@
   measured windows are withheld with a reason (the phone's activity and quality
   checks would fail them anyway; the models are not asked to explain exercise).
 * Context bucket: "sleep" when ≥ 50 % of the minutes are asleep, else "rest". Calibration references are per bucket.
-* Each model's window p = min-p over channels, re-calibrated on the user's own reference (calibration.MultiChannel).
-  A model FLAGS a window at p < ALPHA (1e-3). Until a bucket has MIN_REFERENCE windows the model is "calibrating":
+* Each model's window p: per-channel empirical p against the user's own reference, Bonferroni over channels
+  (calibration.MultiChannel). A model FLAGS a window at p < ALPHA (1e-3) — the "window" rule — or when the mean of
+  its last SUSTAINED_K windows (same bucket, ≤ 1 window gap) reaches p < ALPHA against rolling means of the same
+  reference — the "sustained" rule (calibration.SustainedCalibrator): a 2 h moderate shift (fever ramp, HRV
+  collapse) that never makes one window extreme. Until a bucket has MIN_REFERENCE windows the model is "calibrating":
   scores are stored, nothing is flagged.
 * A candidate = a run of consecutive flagged windows (either model). channels = channels with per-channel p < 0.01 in
   any flagging model; direction = sign of the strongest such channel's directional z. severity "strong" when both
@@ -90,6 +93,14 @@ class ModelWindowResult:
   channel_p: np.ndarray | None = None
   flagged: bool = False
   calibrating: bool = False
+  p_sustained: float | None = None    # k-window (sustained) rule, see service.SUSTAINED_K
+  rule: str | None = None             # "window" | "sustained" when flagged
+  evidence_from: int | None = None    # first window start of the evidence (sustained span)
+
+  @property
+  def p_eff(self) -> float | None:
+    ps = [x for x in (self.p, self.p_sustained) if x is not None]
+    return min(ps) if ps else None
 
 
 def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions: dict[str, str],
@@ -110,8 +121,8 @@ def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions
     rs = [r for s in run for r in by_start[s]]
     flagging = [r for r in rs if r.flagged]
     flagged_by = sorted({r.model for r in flagging})
-    model_p = {m: float(min(r.p for r in rs if r.model == m and r.p is not None)) for m in {r.model for r in rs}
-               if any(r.p is not None for r in rs if r.model == m)}
+    model_p = {m: float(min(r.p_eff for r in rs if r.model == m and r.p_eff is not None)) for m in {r.model for r in rs}
+               if any(r.p_eff is not None for r in rs if r.model == m)}
     chan_idx: set[int] = set()
     best = (0.0, 0, 0)  # (|z|, channel, sign)
     for r in flagging:
@@ -150,7 +161,10 @@ def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions
       "observed": {CHANNEL_NAMES[k]: (float(np.nanmedian(frame.data[k][first.minute_idx]))
                                       if np.isfinite(frame.data[k][first.minute_idx]).any() else None)
                    for k in TARGETS},
-      "context": {"bucket": first.bucket, "mix": first.context_mix, "windows": len(run)},
+      "context": {"bucket": first.bucket, "mix": first.context_mix, "windows": len(run),
+                  "rules": sorted({r.rule for r in flagging if r.rule}),
+                  "evidence_from": dt.datetime.fromtimestamp(min([r.evidence_from or r.window.start for r in flagging]),
+                                                             tz=dt.timezone.utc).isoformat()},
       "quality": {"hr_coverage": float(np.mean(frame.data["hr_n"][first.minute_idx] >= 30))},
       "model_versions": versions,
       "status": "candidate",
@@ -166,7 +180,7 @@ def window_score_rows(results: dict[str, list[ModelWindowResult]], withheld: lis
       rows.append({"window_start": iso(r.window.start), "window_end": iso(r.window.start + WINDOW_S),
                    "channel_group": "all", "model": model,
                    "score": float(np.nanmax(r.channel_scores)) if np.isfinite(r.channel_scores).any() else None,
-                   "p": r.p, "context_kind": r.window.bucket, "usable": True,
+                   "p": r.p_eff, "context_kind": r.window.bucket, "usable": True,
                    "withheld_reason": "calibrating" if r.calibrating else None})
   for w in withheld:
     rows.append({"window_start": iso(w.start), "window_end": iso(w.start + WINDOW_S), "channel_group": "all",

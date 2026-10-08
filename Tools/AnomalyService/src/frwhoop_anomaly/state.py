@@ -85,15 +85,31 @@ class UserState:
     except (OSError, ValueError):
       return np.zeros((0, 0))
 
-  def append_ref(self, model: str, bucket: str, rows: np.ndarray) -> np.ndarray:
+  def load_ref_starts(self, model: str, bucket: str) -> np.ndarray:
+    """Window start of each reference row (NaN where unknown); aligned with load_ref."""
     ref = self.load_ref(model, bucket)
+    path = os.path.join(self.dir, f"ref_{model}_{bucket}_t.npy")
+    try:
+      t = np.load(path, allow_pickle=False) if os.path.exists(path) else None
+    except (OSError, ValueError):
+      t = None
+    if t is None or len(t) != len(ref):
+      return np.full(len(ref), np.nan)
+    return t.astype(np.float64)
+
+  def append_ref(self, model: str, bucket: str, rows: np.ndarray, starts=None) -> np.ndarray:
+    ref = self.load_ref(model, bucket)
+    old_t = self.load_ref_starts(model, bucket)
     rows = np.atleast_2d(rows)
+    new_t = np.full(len(rows), np.nan) if starts is None else np.asarray(starts, dtype=np.float64)
     if ref.size and ref.shape[1] == rows.shape[1]:
       ref = np.concatenate([ref, rows])
+      t = np.concatenate([old_t, new_t])
     else:
-      ref = rows
-    ref = ref[-self.ref_cap:]
+      ref, t = rows, new_t
+    ref, t = ref[-self.ref_cap:], t[-self.ref_cap:]
     self._atomic_npy(f"ref_{model}_{bucket}.npy", ref)
+    self._atomic_npy(f"ref_{model}_{bucket}_t.npy", t)
     return ref
 
   def _atomic_npz(self, name: str, arrays: dict) -> None:
