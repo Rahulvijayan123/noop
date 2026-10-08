@@ -42,7 +42,7 @@ enum SleepSection: String, CaseIterable, Identifiable {
         switch self {
         case .sleepMarks:      return String(localized: "Sleep marks")
         case .stages:          return String(localized: "Stages")
-        case .bodyClock:       return String(localized: "Body clock")
+        case .bodyClock:       return String(localized: "Heart-rate rhythm")
         case .nightDetail:     return String(localized: "Night detail")
         case .sleepDebt:       return String(localized: "Sleep-debt ledger")
         case .stagesVsTypical: return String(localized: "Stages vs typical")

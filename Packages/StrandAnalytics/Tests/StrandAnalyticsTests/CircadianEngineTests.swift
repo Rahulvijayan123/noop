@@ -38,7 +38,7 @@ final class CircadianEngineTests: XCTestCase {
         let est = CircadianEngine.estimatePhase(bins: bins, daysObserved: 20, habitualWakeHour: 7)!
         XCTAssertEqual(est.confidence, .solid)
         // Acrophase 15:00 → derived temp-min ≈ 15 − 12 = 03:00.
-        XCTAssertEqual(est.tempMinHour, 3, accuracy: 1e-6)
+        XCTAssertEqual(est.hrRhythmReferenceHour, 3, accuracy: 1e-6)
     }
 
     func testThinDataIsWideOrUnreadable() {
@@ -55,11 +55,66 @@ final class CircadianEngineTests: XCTestCase {
         XCTAssertEqual(est.confidence, .unreadable)
     }
 
-    func testObservedTempMinOverridesDerived() {
+    /// Legacy (deprecated) override: a supplied temperature minimum still replaces the reference hour, but
+    /// the estimate now SAYS so via `basis`, keeping it distinct from the heart-rate heuristic.
+    @available(*, deprecated)
+    func testSuppliedTempMinOverrideIsLabelled() {
         let bins = profile(mesor: 50, amp: 30, acrophase: 15)
         let est = CircadianEngine.estimatePhase(
             bins: bins, daysObserved: 20, habitualWakeHour: 7, observedTempMinHour: 4.5)!
-        XCTAssertEqual(est.tempMinHour, 4.5, accuracy: 1e-9)
+        XCTAssertEqual(est.hrRhythmReferenceHour, 4.5, accuracy: 1e-9)
+        XCTAssertEqual(est.tempMinHour, 4.5, accuracy: 1e-9)      // source-compatible alias
+        XCTAssertEqual(est.basis, .suppliedTemperatureMinimum)
+    }
+
+    // MARK: - spec-02 §3: an observed heart-rate rhythm heuristic, not a body clock
+
+    /// Every production estimate (hourly mean HR in, no supplied temperature) is labelled as the
+    /// heart-rate heuristic, and its reference hour is exactly the HR acrophase − 12 h.
+    func testProductionEstimateIsTheHeartRateHeuristic() {
+        // Hourly mean HR peaking at 16:00 with a 6 bpm swing on a 62 bpm mesor.
+        let est = CircadianEngine.estimatePhase(bins: profile(mesor: 62, amp: 6.5, acrophase: 16),
+                                                daysObserved: 14, habitualWakeHour: 7)!
+        XCTAssertEqual(est.basis, .heartRateRhythmHeuristic)
+        XCTAssertEqual(est.basis.rawValue, "observed_heart_rate_rhythm_heuristic")
+        XCTAssertEqual(est.acrophaseHours, 16, accuracy: 1e-6)
+        XCTAssertEqual(est.hrRhythmReferenceHour,
+                       CircadianEngine.wrap24(est.acrophaseHours - CircadianEngine.acrophaseAfterCbtMinHours),
+                       accuracy: 1e-12)
+        // Schedule comparison: reference 04:00 vs 07:00 − 2.5 h = 04:30 → 30 min earlier.
+        XCTAssertEqual(est.offsetVsScheduleMinutes, -30, accuracy: 1e-6)
+    }
+
+    /// The engine's own copy never claims a body clock, chronotype, temperature minimum or melatonin.
+    func testEngineCopyMakesNoBodyClockClaims() {
+        let banned = ["body clock", "body-clock", "chronotype", "night-owl", "lark", "temperature minimum",
+                      "melatonin", "circadian clock", "cbt"]
+        var notes: [String] = []
+        for (acro, wake) in [(16.0, 7.0), (20.0, 7.0), (12.0, 9.0)] {
+            notes.append(CircadianEngine.estimatePhase(bins: profile(mesor: 60, amp: 10, acrophase: acro),
+                                                       daysObserved: 20, habitualWakeHour: wake)!.note)
+        }
+        notes.append(CircadianEngine.estimatePhase(bins: profile(mesor: 60, amp: 10, acrophase: 16),
+                                                   daysObserved: 2, habitualWakeHour: 7)!.note)
+        notes.append(CircadianEngine.planShift(shiftHours: 0.1, currentSleepHour: 23, currentWakeHour: 7).note)
+        XCTAssertTrue(notes.contains { $0.contains("heart-rate rhythm") })
+        for note in notes {
+            for word in banned { XCTAssertFalse(note.lowercased().contains(word), "\(note) says \(word)") }
+        }
+    }
+
+    /// The deprecated `tempMinHour:` entry points still compute the same numbers (source compatibility).
+    @available(*, deprecated)
+    func testDeprecatedAliasesMatchTheRenamedApi() {
+        XCTAssertEqual(CircadianEngine.chronotype(tempMinHour: 23.5), CircadianEngine.chronotype(referenceHour: 23.5))
+        XCTAssertEqual(CircadianEngine.sleepWindowOffsetHours(tempMinHour: 4.5, actualWakeHour: 8),
+                       CircadianEngine.sleepWindowOffsetHours(referenceHour: 4.5, actualWakeHour: 8))
+        XCTAssertEqual(CircadianEngine.idealSleepWindow(tempMinHour: 4.5, durationHours: 8)?.bedHour,
+                       CircadianEngine.idealSleepWindow(referenceHour: 4.5, durationHours: 8)?.bedHour)
+        let old = CircadianEngine.PhaseEstimate(tempMinHour: 3, acrophaseHours: 15, offsetVsScheduleMinutes: 0,
+                                                confidence: .solid, note: "")
+        XCTAssertEqual(old.hrRhythmReferenceHour, 3)
+        XCTAssertEqual(old.basis, .heartRateRhythmHeuristic)
     }
 
     // MARK: - Jet-lag / shift planner: direction + light rule + no supplements
@@ -202,7 +257,7 @@ final class CircadianEngineTests: XCTestCase {
             (28.5, .intermediate), (-1.0, .morning),
         ]
         for (hour, expected) in cases {
-            XCTAssertEqual(CircadianEngine.chronotype(tempMinHour: hour), expected,
+            XCTAssertEqual(CircadianEngine.chronotype(referenceHour: hour), expected,
                            "tempMinHour \(hour)")
         }
     }
@@ -211,7 +266,7 @@ final class CircadianEngineTests: XCTestCase {
     /// for the strongest tier — unlike the continuous offset the card already shows at `.wide`.
     func testChronotypeIsNamedOnlyForASolidFit() {
         func estimate(_ confidence: CircadianEngine.PhaseConfidence) -> CircadianEngine.PhaseEstimate {
-            CircadianEngine.PhaseEstimate(tempMinHour: 23.5, acrophaseHours: 11.5,
+            CircadianEngine.PhaseEstimate(hrRhythmReferenceHour: 23.5, acrophaseHours: 11.5,
                                           offsetVsScheduleMinutes: 0, confidence: confidence, note: "")
         }
         XCTAssertEqual(CircadianEngine.chronotype(estimate(.solid)), .morning)
@@ -225,7 +280,7 @@ final class CircadianEngineTests: XCTestCase {
     /// ~0 — while being strongly evening-type by the clock.
     func testConsistentLateSleeperIsEveningTypeDespiteAZeroScheduleOffset() {
         let alignedButLate = CircadianEngine.PhaseEstimate(
-            tempMinHour: 8.0, acrophaseHours: 20.0, offsetVsScheduleMinutes: 0,
+            hrRhythmReferenceHour: 8.0, acrophaseHours: 20.0, offsetVsScheduleMinutes: 0,
             confidence: .solid, note: "")
         XCTAssertEqual(CircadianEngine.chronotype(alignedButLate), .evening)
     }
@@ -241,7 +296,7 @@ final class CircadianEngineTests: XCTestCase {
             (4.5, 0.0, nil), (4.5, -1.0, nil), (4.5, 24.0, nil),
         ]
         for (tempMin, duration, expected) in cases {
-            let w = CircadianEngine.idealSleepWindow(tempMinHour: tempMin, durationHours: duration)
+            let w = CircadianEngine.idealSleepWindow(referenceHour: tempMin, durationHours: duration)
             if let expected {
                 XCTAssertEqual(w?.bedHour ?? -1, expected.0, accuracy: 1e-12, "bed for \(tempMin)/\(duration)")
                 XCTAssertEqual(w?.wakeHour ?? -1, expected.1, accuracy: 1e-12, "wake for \(tempMin)/\(duration)")
@@ -254,8 +309,8 @@ final class CircadianEngineTests: XCTestCase {
     /// The ideal arc takes the night's OWN length, so the dial compares PHASE alone — which keeps a sleep
     /// DEBT from rendering as a body-clock problem.
     func testIdealWindowSharesTheWakeAnchorAcrossDurations() {
-        let short = CircadianEngine.idealSleepWindow(tempMinHour: 4.5, durationHours: 5)
-        let long = CircadianEngine.idealSleepWindow(tempMinHour: 4.5, durationHours: 10)
+        let short = CircadianEngine.idealSleepWindow(referenceHour: 4.5, durationHours: 5)
+        let long = CircadianEngine.idealSleepWindow(referenceHour: 4.5, durationHours: 10)
         XCTAssertEqual(short?.wakeHour, long?.wakeHour)
         XCTAssertNotEqual(short?.bedHour, long?.bedHour)
     }
@@ -268,7 +323,7 @@ final class CircadianEngineTests: XCTestCase {
             (23.0, 2.5, 1.0), (1.0, 23.0, -4.5), (4.5, 19.0, 12.0),
         ]
         for (tempMin, wake, expected) in cases {
-            XCTAssertEqual(CircadianEngine.sleepWindowOffsetHours(tempMinHour: tempMin, actualWakeHour: wake),
+            XCTAssertEqual(CircadianEngine.sleepWindowOffsetHours(referenceHour: tempMin, actualWakeHour: wake),
                            expected, accuracy: 1e-12, "tempMin \(tempMin) wake \(wake)")
         }
     }
@@ -276,10 +331,10 @@ final class CircadianEngineTests: XCTestCase {
     /// The dial's caption and the card's existing headline measure DIFFERENT things: a consistent late
     /// sleeper is well-aligned with their own schedule while sleeping hours from what their clock wants.
     func testWindowOffsetAndScheduleOffsetAreDifferentQuantities() {
-        let windowOffset = CircadianEngine.sleepWindowOffsetHours(tempMinHour: 8.0, actualWakeHour: 6.5)
+        let windowOffset = CircadianEngine.sleepWindowOffsetHours(referenceHour: 8.0, actualWakeHour: 6.5)
         XCTAssertEqual(windowOffset, -4.0, accuracy: 1e-12)
         let scheduleAligned = CircadianEngine.PhaseEstimate(
-            tempMinHour: 8.0, acrophaseHours: 20.0, offsetVsScheduleMinutes: 0,
+            hrRhythmReferenceHour: 8.0, acrophaseHours: 20.0, offsetVsScheduleMinutes: 0,
             confidence: .solid, note: "")
         XCTAssertEqual(scheduleAligned.offsetVsScheduleMinutes, 0)
         XCTAssertGreaterThan(abs(windowOffset), 1.0)
