@@ -1093,7 +1093,8 @@ struct ActivityLane {
                                                           generatedAt: context.generatedAt,
                                                           expectedModelVersion: eldernet.expectedModelVersion,
                                                           expectedWeightsDigest: eldernet.expectedWeightsDigest,
-                                                          gaitPrior: eldernet.gaitPrior)
+                                                          gaitPrior: eldernet.gaitPrior, config: context.config,
+                                                          lookback: context.lookback)
         var report: GaitQualityTrackReport?
         switch candidate {
         case .notRequested: break
@@ -1148,7 +1149,8 @@ struct ActivityLane {
         guard let heads = collector.trackInput else { return nil }
         let candidate = ActivityMotionHeadsDays.candidate(mode: inertia.mode, heads: heads, input: context.input,
                                                          generatedAt: context.generatedAt,
-                                                         expectedBundleSHA256: inertia.expectedBundleSHA256)
+                                                         expectedBundleSHA256: inertia.expectedBundleSHA256,
+                                                         config: context.config, lookback: context.lookback)
         var report: MotionHeadsTrackReport?
         switch candidate {
         case .notRequested: break
