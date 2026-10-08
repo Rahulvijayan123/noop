@@ -1,4 +1,5 @@
 import Foundation
+#if canImport(CoreML)
 import CoreML
 
 /// Process-wide TimesFM-style forecast student. Inference only; never trained on device.
@@ -91,3 +92,17 @@ final class TimesFMStudentSession: @unchecked Sendable {
         }
     }
 }
+#else
+/// No Core ML on Linux (the frwhoop-worker build, which never runs the Watchdog). The session never has a model,
+/// so a caller gets nil and takes its hold path, as on a bundle without the compiled student.
+final class TimesFMStudentSession: Sendable {
+    static let shared = TimesFMStudentSession()
+
+    var isLoaded: Bool { false }
+
+    func predict(history: [[Double]], prompt: [Double], occupancy: [Double],
+                 presentMask: [[Double]] = []) -> [[Double]]? {
+        nil
+    }
+}
+#endif
