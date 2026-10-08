@@ -318,6 +318,8 @@ struct CandidateStage {
         var skippedDemoted = 0
         /// Sidecar `busy` answers. Never recorded; the work stays pending.
         var busy = 0
+        /// Answers for a provider the sidecar has quarantined (nothing ran). Never recorded.
+        var quarantined = 0
         var writeFailures = 0
         /// Active-mode substitutions produced. Zero while every metric is `off`.
         var activeSubstitutions = 0
@@ -472,6 +474,7 @@ struct CandidateStage {
     func heartbeatCounters() -> [String: Int] {
         var out: [String: Int] = [
             "candidate_busy": stats.busy,
+            "candidate_provider_quarantined": stats.quarantined,
             "candidate_skipped_demoted": stats.skippedDemoted,
             "candidate_pending_enqueued": stats.pendingEnqueued,
             "candidate_pending_claimed": stats.pendingClaimed,
@@ -548,9 +551,34 @@ struct CandidateStage {
         }
         lastBacklogAt = now
         guard let store = activePendingStore() else { return }
-        let before = stats.pendingClaimed
+        let before = backlogProgress
         drainPending(store, current: nil, assembler: assembler)
-        lastBacklogFoundWork = stats.pendingClaimed > before
+        // Skip the idle throttle only after real progress. A drain that only re-queued its head
+        // (budget, deadline, awaiting assembly) waits out the interval like an empty one.
+        lastBacklogFoundWork = backlogProgress > before
+    }
+
+    /// Calls made, items settled for good, and inputs assembled: what counts as backlog progress.
+    private var backlogProgress: Int {
+        stats.calls + stats.pendingDone + stats.pendingWithheld + stats.pendingSuperseded + stats.reassembled
+    }
+
+    /// Re-assembled inputs kept across drains. A whole-day re-assembly can use up a drain's
+    /// wall-clock cap before the call starts; the next drain then calls with these inputs
+    /// instead of assembling the same day again (which would never leave time to call).
+    private var assemblyCache: [(key: String, assembly: CandidateAssembly)] = []
+    static let assemblyCacheLimit = 2
+
+    private mutating func cacheAssembly(_ key: String, _ assembly: CandidateAssembly) {
+        assemblyCache.removeAll { $0.key == key }
+        assemblyCache.append((key, assembly))
+        if assemblyCache.count > Self.assemblyCacheLimit {
+            assemblyCache.removeFirst(assemblyCache.count - Self.assemblyCacheLimit)
+        }
+    }
+
+    private mutating func evictAssembly(_ key: String) {
+        assemblyCache.removeAll { $0.key == key }
     }
 
     /// Read the queue's stats for the heartbeat, at most once per `statsIntervalSeconds`.
@@ -622,6 +650,9 @@ struct CandidateStage {
         if let current {
             assembled[Self.assemblyKey(current.inputs.userId, current.inputs.deviceId,
                                        current.inputs.day, current.inputs.inputRevision)] = current
+        }
+        for entry in assemblyCache where assembled[entry.key] == nil {
+            assembled[entry.key] = entry.assembly
         }
         var assemblies = 0
         var claims = 0
@@ -718,8 +749,10 @@ struct CandidateStage {
             }
             assemblies += 1
             do {
-                assembled[key] = try assembler.assemble(userId: item.userId, deviceId: item.deviceId,
-                                                        day: item.day, inputRevision: item.inputRevision)
+                let fresh = try assembler.assemble(userId: item.userId, deviceId: item.deviceId,
+                                                   day: item.day, inputRevision: item.inputRevision)
+                assembled[key] = fresh
+                cacheAssembly(key, fresh)
                 stats.reassembled += 1
                 freshlyAssembled = true
             } catch {
@@ -741,6 +774,8 @@ struct CandidateStage {
                                                                        day: item.day),
                invalidatedAt > inputs.claimSealedAt {
                 stats.skippedStaleDebt += 1
+                // Kept inputs that are now stale are dropped, so the next look re-assembles.
+                evictAssembly(key)
                 settle(pending, item, .retry(reason: "stale_debt", countAttempt: false, retryAfterSeconds: 30))
                 return true
             }
@@ -785,6 +820,21 @@ struct CandidateStage {
                                          retryAfterSeconds: failure.retryAfterSeconds
                                             ?? InferenceClient.defaultBusyRetryAfterSeconds))
             return false
+        }
+        if call.isBudgetCutTimeout {
+            // The drain's cap ended the attempt, not the provider: wait with reason `deadline`,
+            // uncounted, so a short drain can never turn into `attempts_exhausted:timeout`.
+            stats.skippedDeadline += 1
+            settle(pending, item, .retry(reason: "deadline", countAttempt: false, retryAfterSeconds: 0))
+            return false
+        }
+        if let after = call.quarantineRetryAfterSeconds {
+            // Nothing ran: the sidecar is resting a provider that kept overrunning. Its real
+            // trials are what count toward the attempt bound.
+            stats.quarantined += 1
+            settle(pending, item, .retry(reason: "provider_quarantined", countAttempt: false,
+                                         retryAfterSeconds: after))
+            return true
         }
         if let reason = Self.transientReason(call) {
             if item.attempts + 1 < pendingMaxAttempts {
@@ -919,7 +969,6 @@ struct CandidateStage {
                 continue
             }
             runsRemaining -= 1
-            lastRunAt[metric] = Date()
             guard let call = callSidecar(metric: metric, selection: selection, input: input, claim: claim,
                                          inputs: inputs, attemptsAllowed: maxAttempts) else { continue }
             if let failure = call.failure, failure.isBusy {
@@ -928,6 +977,17 @@ struct CandidateStage {
                 sidecarBusy = true
                 return
             }
+            if call.isBudgetCutTimeout {
+                // The drain ran out of time, not the provider: no row, the next pass retries.
+                stats.skippedDeadline += 1
+                return
+            }
+            if call.quarantineRetryAfterSeconds != nil {
+                stats.quarantined += 1
+                continue
+            }
+            // Only a call that reached a result moves the metric back in the fairness order.
+            lastRunAt[metric] = Date()
             _ = record(call, metric: metric, selection: selection, claim: claim, inputs: inputs, extra: [:])
         }
     }
@@ -950,6 +1010,27 @@ struct CandidateStage {
         let failure: InferenceClientError?
         let attempts: Int
         let elapsedMS: Int
+        /// The last attempt ran with less than the client's full timeout (the drain's
+        /// wall-clock cap cut it short).
+        var budgetCut = false
+
+        /// A client timeout of an attempt the drain cap cut short: the drain ran out of time,
+        /// the provider was never given its full budget, so it is not a provider outcome.
+        var isBudgetCutTimeout: Bool {
+            guard budgetCut, let failure else { return false }
+            if case .timeout = failure { return true }
+            return false
+        }
+
+        /// Seconds until a quarantined provider takes a real trial again, when the sidecar
+        /// answered without dispatching (`provider_quarantined`); nil otherwise.
+        var quarantineRetryAfterSeconds: Int? {
+            guard let response, response.isWithheld,
+                  response.withheldReason == CandidateWithheldReason.timeout.rawValue,
+                  response.diagnostics?.member("withheld_detail")?.stringValue == "provider_quarantined"
+            else { return nil }
+            return max(1, response.diagnostics?.member("retry_after_s")?.doubleValue.map { Int($0) } ?? 300)
+        }
     }
 
     /// Call the sidecar with at most `attemptsAllowed` attempts (one transient retry with
@@ -985,12 +1066,14 @@ struct CandidateStage {
         var response: InferenceResponse?
         var failure: InferenceClientError?
         var elapsedMS = 0
+        var budgetCut = false
         while attempts < max(1, attemptsAllowed) {
             // R4: never start an attempt that the drain cap cannot accommodate,
             // and never let one attempt outlive the cap.
             let remaining = drainDeadline.timeIntervalSinceNow
             guard remaining >= CandidateStage.minAttemptSeconds else { break }
             let attemptBudgetMS = min(client.timeoutMS, Int(remaining * 1000))
+            budgetCut = attemptBudgetMS < client.timeoutMS
             attempts += 1
             let started = Date()
             do {
@@ -1025,7 +1108,7 @@ struct CandidateStage {
         stats.lastRuntimeMS = elapsedMS
         if let failure { stats.lastError = failure.description }
         return SidecarCall(request: request, inputSHA: inputSHA, response: response, failure: failure,
-                           attempts: attempts, elapsedMS: elapsedMS)
+                           attempts: attempts, elapsedMS: elapsedMS, budgetCut: budgetCut)
     }
 
     enum RecordOutcome: Equatable {
