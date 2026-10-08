@@ -42,40 +42,34 @@ enum DayFineLabels {
     }
 }
 
-/// Coloured chips for the labels on screen, under the lane.
+/// The labels on screen under a lane: a dot in the family colour, the label and its time. Plain text, no
+/// tinted chips, so the colour belongs to the data.
 struct FineLabelLegend: View {
     let shares: [FineLabelShare]
     var showsPositionChanges = false
 
     var body: some View {
         let shown = Array(shares.prefix(8))
-        FlowLayout(spacing: 6) {
+        FlowLayout(spacing: NoopMetrics.space3) {
             ForEach(shown) { share in
                 let family = ActivityFamily.of(share.label)
-                HStack(spacing: 5) {
+                HStack(spacing: NoopMetrics.space1) {
                     Circle().fill(family.color).frame(width: 7, height: 7)
                     Text(share.label)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textPrimary)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
                     Text(StretchFormat.duration(share.seconds))
-                        .font(StrandFont.caption)
+                        .font(StrandFont.footnote.monospacedDigit())
                         .foregroundStyle(StrandPalette.textTertiary)
-                        .monospacedDigit()
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(family.color.opacity(0.12)))
             }
             if showsPositionChanges {
-                HStack(spacing: 5) {
-                    RoundedRectangle(cornerRadius: 1).fill(StrandPalette.metricAmber).frame(width: 3, height: 10)
+                HStack(spacing: NoopMetrics.space1) {
+                    RoundedRectangle(cornerRadius: 1).fill(StrandPalette.metricAmber).frame(width: 2, height: 9)
                     Text("Position change")
-                        .font(StrandFont.caption)
+                        .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
                 }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(StrandPalette.metricAmber.opacity(0.10)))
             }
         }
         .accessibilityElement(children: .combine)
@@ -201,9 +195,12 @@ extension WearSignalState {
         case .motionArtifact: return StrandPalette.metricRose
         case .offWrist: return StrandPalette.textTertiary
         case .sensorDropout: return StrandPalette.metricPurple
-        case .unknown: return StrandPalette.surfaceInset
+        case .unknown: return StrandPalette.textTertiary.opacity(0.5)
         }
     }
+
+    /// No trustworthy signal: drawn hatched on a lane and on the heart-rate graph.
+    var isGap: Bool { self == .offWrist || self == .sensorDropout || self == .unknown }
 
     static let displayOrder: [WearSignalState] = [.onWristGood, .onWristLoose, .motionArtifact, .sensorDropout,
                                                   .offWrist, .unknown]
@@ -239,88 +236,21 @@ struct StrapSignalDay: Equatable {
     }
 }
 
-struct StrapSignalCard: View {
-    let dayStart: Date
-    let window: ClosedRange<Date>
+// MARK: Server readings for a day
+//
+// The strap-signal and walking readings come from raw motion sessions the server has processed. These are
+// the loads the day cards used to run from their own `.task`, moved here unchanged so the Heart rate page,
+// its Walking and Strap signal pages and the older cards all read them the same way. Main-actor isolated, as
+// the view methods they came from were, so `update` lands on the main actor between the same awaits.
 
-    @State private var reading: StrapSignalDay?
-    @State private var loaded = false
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            HStack(spacing: 8) {
-                Image(systemName: "waveform.path.ecg")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(StrandPalette.metricCyan)
-                Text("Strap signal")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Spacer(minLength: 8)
-                if !loaded { ProgressView().controlSize(.small) }
-            }
-            if let reading, !reading.spans.isEmpty {
-                lane(reading)
-                breakdown(reading)
-                Text("How well the strap could read you, every 30 seconds, from the motion sessions the server has processed. Loose fit and motion noise make heart rate and activity less certain.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if loaded {
-                Text("No strap-signal reading for this day yet. It appears once the server has processed a raw motion session from your strap.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
-        .task(id: dayStart) { await load() }
-    }
-
-    private func lane(_ reading: StrapSignalDay) -> some View {
-        Chart(reading.spans) { span in
-            RectangleMark(
-                xStart: .value("Start", Date(timeIntervalSince1970: TimeInterval(span.start))),
-                xEnd: .value("End", Date(timeIntervalSince1970: TimeInterval(span.end))),
-                yStart: .value("Bottom", 0.0),
-                yEnd: .value("Top", 1.0)
-            )
-            .foregroundStyle(span.state.color)
-        }
-        .chartXScale(domain: window)
-        .chartYScale(domain: 0.0...1.0)
-        .chartYAxis(.hidden)
-        .chartXAxis(.hidden)
-        .chartPlotStyle { $0.clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous)) }
-        .frame(height: 18)
-        .accessibilityLabel(Text("Strap signal across the day"))
-    }
-
-    private func breakdown(_ reading: StrapSignalDay) -> some View {
-        let total = max(1, reading.seconds.values.reduce(0, +))
-        return FlowLayout(spacing: 6) {
-            ForEach(WearSignalState.displayOrder.filter { (reading.seconds[$0] ?? 0) > 0 }, id: \.self) { state in
-                let s = reading.seconds[state] ?? 0
-                HStack(spacing: 5) {
-                    Circle().fill(state.color).frame(width: 7, height: 7)
-                    Text(state.displayName)
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("\(Int((Double(s) / Double(total) * 100).rounded()))%")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .monospacedDigit()
-                }
-                .padding(.horizontal, 8)
-                .padding(.vertical, 4)
-                .background(Capsule().fill(state.color.opacity(0.12)))
-            }
-        }
-    }
-
-    private func load() async {
-        defer { loaded = true }
+@MainActor
+enum DayCloudReadings {
+    /// The day's per-30-s strap reading: the cached copy first (`update` is called with it at once), then
+    /// the fresh one.
+    static func strapSignal(dayStart: Date, update: (StrapSignalDay) -> Void) async {
+        #if DEBUG
+        if let demo = DemoActivityExtras.strapSignal(dayStart: dayStart) { update(demo); return }
+        #endif
         guard CloudPushIdentityStore.current() != nil,
               let repository = CloudPushRuntime.shared.scoreRepository() else { return }
         let formatter = DateFormatter()
@@ -330,197 +260,198 @@ struct StrapSignalCard: View {
         let deviceIds = await IntradaySeriesStore.shared.readCandidates
         if let cached = await repository.cachedDay(day: day, deviceIds: deviceIds),
            let epochs = cached.hostedResult?.activityContext?.epochs {
-            reading = StrapSignalDay(epochs: epochs)
+            update(StrapSignalDay(epochs: epochs))
         }
         if let fresh = try? await repository.refresh(day: day, deviceIds: deviceIds),
            let epochs = fresh.hostedResult?.activityContext?.epochs {
-            reading = StrapSignalDay(epochs: epochs)
-        }
-    }
-}
-
-// MARK: Walking (ElderNet gait quality)
-
-/// The day's walking as the server's gait model read it from raw motion: how long, how many steps, at what
-/// cadence, speed and stride, how even the steps were, and each walk on a lane.
-struct WalkingQualityCard: View {
-    let dayStart: Date
-    let window: ClosedRange<Date>
-
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
-    @AppStorage(UnitPrefs.distanceSystemKey) private var distanceRaw = ""
-    @State private var reading: WalkingDayReading?
-    @State private var loaded = false
-
-    private var system: UnitSystem {
-        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric, override: distanceRaw)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            HStack(spacing: 8) {
-                Image(systemName: "figure.walk")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(ActivityFamily.walking.color)
-                Text("Walking")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Spacer(minLength: 8)
-                if !loaded { ProgressView().controlSize(.small) }
-            }
-            if let reading, !reading.isEmpty {
-                headline(reading)
-                metrics(reading)
-                if !reading.bouts.isEmpty { lane(reading) }
-                Text("From the strap's raw motion, read every 5 seconds by a gait model (ElderNet). Steps, speed and stride are wrist estimates; they are steadiest on longer, unhurried walks.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            } else if loaded {
-                Text(reading == nil
-                     ? "No gait reading for this day yet. It appears once the server has processed a raw motion session from your strap."
-                     : "No walking detected in the motion the server has processed for this day.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-        }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 20))
-        .task(id: dayStart) { await load() }
-    }
-
-    private func headline(_ r: WalkingDayReading) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 18) {
-            stat(StretchFormat.duration(r.walkingSeconds), "walking")
-            if let steps = r.steps { stat(Int(steps.rounded()).formatted(), "steps") }
-            if r.briskSeconds > 0 { stat(StretchFormat.duration(r.briskSeconds), "brisk") }
+            update(StrapSignalDay(epochs: epochs))
         }
     }
 
-    private func stat(_ value: String, _ caption: LocalizedStringKey) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Text(value)
-                .font(StrandFont.number(20))
-                .foregroundStyle(StrandPalette.textPrimary)
-            Text(caption)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-    }
-
-    private func metrics(_ r: WalkingDayReading) -> some View {
-        FlowLayout(spacing: 6) {
-            if let c = r.cadenceSpm { chip("Cadence", "\(Int(c.rounded())) steps/min") }
-            if let s = r.speedMps { chip("Speed", speed(s)) }
-            if let s = r.strideM { chip("Stride", UnitFormatter.distanceFromMeters(s, system: system)) }
-            if let g = r.regularity { chip("Step evenness", "\(Int((g * 100).rounded()))%") }
-            if !r.bouts.isEmpty {
-                chip("Walks", "\(r.bouts.count) · longest \(StretchFormat.duration(r.bouts.map(\.seconds).max() ?? 0))")
-            }
-        }
-    }
-
-    private func chip(_ label: LocalizedStringKey, _ value: String) -> some View {
-        HStack(spacing: 5) {
-            Text(label)
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.textSecondary)
-            Text(value)
-                .font(StrandFont.caption.weight(.semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .monospacedDigit()
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 4)
-        .background(Capsule().fill(ActivityFamily.walking.color.opacity(0.12)))
-    }
-
-    private func speed(_ mps: Double) -> String {
-        system == .imperial
-            ? String(format: "%.1f mph", mps * 2.236_94)
-            : String(format: "%.1f km/h", mps * 3.6)
-    }
-
-    /// Each walk on the day's axis, brighter for a brisker cadence.
-    private func lane(_ r: WalkingDayReading) -> some View {
-        Chart(r.bouts) { bout in
-            RectangleMark(
-                xStart: .value("Start", Date(timeIntervalSince1970: TimeInterval(bout.start))),
-                xEnd: .value("End", Date(timeIntervalSince1970: TimeInterval(bout.end))),
-                yStart: .value("Bottom", 0.0),
-                yEnd: .value("Top", 1.0)
-            )
-            .foregroundStyle(ActivityFamily.walking.color.opacity(
-                (bout.cadenceSpm ?? 0) >= WalkingDayReading.briskCadenceSpm ? 1.0 : 0.55))
-        }
-        .chartXScale(domain: window)
-        .chartYScale(domain: 0.0...1.0)
-        .chartYAxis(.hidden)
-        .chartXAxis {
-            AxisMarks(values: .stride(by: .hour, count: 6)) { _ in
-                AxisValueLabel(format: .dateTime.hour())
-            }
-        }
-        .chartPlotStyle { $0.background(StrandPalette.surfaceInset).clipShape(RoundedRectangle(cornerRadius: 6, style: .continuous)) }
-        .frame(height: 34)
-        .accessibilityLabel(Text("\(r.bouts.count) walks across the day"))
-    }
-
-    private func load() async {
-        defer { loaded = true }
+    /// The day's walking as the server's gait model read it, or nil when nothing has been processed.
+    static func walking(dayStart: Date) async -> WalkingDayReading? {
+        #if DEBUG
+        if let demo = DemoActivityExtras.walking(dayStart: dayStart) { return demo }
+        #endif
         guard let identity = CloudPushIdentityStore.current(),
               let repository = CloudPushRuntime.shared.scoreRepository(),
-              let device = await IntradaySeriesStore.shared.readCandidates.first else { return }
+              let device = await IntradaySeriesStore.shared.readCandidates.first else { return nil }
         let from = Int(dayStart.timeIntervalSince1970)
         let to = Int((Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400))
             .timeIntervalSince1970)
         let days = ActivityEncoderWindowStore.utcDays(from: from, to: to)
         guard let columns = try? await GaitWindowsCache.shared.columns(
             utcDays: days, deviceId: device, ownerId: identity.ownerId, repository: repository),
-              !columns.isEmpty else { return }
-        reading = WalkingDayReading(days: columns, from: from, to: to)
+              !columns.isEmpty else { return nil }
+        return WalkingDayReading(days: columns, from: from, to: to)
+    }
+}
+
+extension StrapSignalDay {
+    /// Share of the assessed time with good contact, 0...1, or nil when nothing was assessed.
+    var goodShare: Double? {
+        let assessed = assessedSeconds
+        guard assessed > 0 else { return nil }
+        return Double(seconds[.onWristGood] ?? 0) / Double(assessed)
+    }
+
+    /// "92 % good contact", for a list row.
+    var summary: String? {
+        goodShare.map { String(localized: "\(Int(($0 * 100).rounded())) % good contact") }
+    }
+}
+
+extension WalkingDayReading {
+    /// "42 min · 4,210 steps", for a list row.
+    var summary: String? {
+        guard !isEmpty else { return nil }
+        let time = StretchFormat.duration(walkingSeconds)
+        guard let steps else { return time }
+        return "\(time) · \(String(localized: "\(Int(steps.rounded()).formatted()) steps"))"
+    }
+}
+
+// MARK: Strap signal (compact card)
+
+/// How well the strap could read the wearer through the day, as one lane and a legend. The full reading
+/// (shares, the timeline on the day's axis, the method) is `StrapSignalDayView`.
+struct StrapSignalCard: View {
+    let dayStart: Date
+    let window: ClosedRange<Date>
+
+    @State private var reading: StrapSignalDay?
+    @State private var loaded = false
+
+    var body: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Strap signal")
+                    .font(StrandFont.headline)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                TimelineRibbon(lanes: [StrapSignalLane.lane(reading, loaded: loaded, height: TimelineRibbon.laneHeight, symbol: nil)],
+                               window: window, gutterText: "",
+                               accessibilityLabel: String(localized: "Strap signal across the day"))
+                if let reading, !reading.spans.isEmpty {
+                    ChartLegend(StrapSignalLane.legend(reading))
+                }
+            }
+        }
+        .task(id: dayStart) { await load() }
+    }
+
+    private func load() async {
+        defer { loaded = true }
+        await DayCloudReadings.strapSignal(dayStart: dayStart) { reading = $0 }
+    }
+}
+
+/// The strap-signal states as one ribbon lane, shared by the card, the Heart rate page and its page.
+enum StrapSignalLane {
+    /// `quietGood` draws good contact as a neutral fill, so on the Heart rate page's ribbon only the time the
+    /// strap read poorly stands out (and never in the same colour as a kind of activity above it).
+    static func lane(_ reading: StrapSignalDay?, loaded: Bool, height: CGFloat = TimelineRibbon.thinLaneHeight,
+                     symbol: String? = "sensor.tag.radiowaves.forward", quietGood: Bool = false) -> TimelineRibbon.Lane {
+        let quiet = StrandPalette.textTertiary.opacity(0.35)
+        let segments: [TimelineRibbon.Segment] = (reading?.spans ?? []).map { span in
+            let color: Color = (quietGood && span.state == .onWristGood) ? quiet : span.state.color
+            return TimelineRibbon.Segment(id: "strap-\(span.start)",
+                                          start: Date(timeIntervalSince1970: TimeInterval(span.start)),
+                                          end: Date(timeIntervalSince1970: TimeInterval(span.end)),
+                                          color: color, hatched: span.state.isGap)
+        }
+        let state: ChartState = !loaded && reading == nil ? .loading
+            : segments.isEmpty ? .empty(String(localized: "No reading")) : .ready
+        return TimelineRibbon.Lane(id: "strap", symbol: symbol, title: String(localized: "Strap signal"),
+                                   segments: segments, height: height, state: state)
+    }
+
+    /// The states the reading holds, in the fixed display order.
+    static func legend(_ reading: StrapSignalDay) -> [ChartLegendItem] {
+        WearSignalState.displayOrder
+            .filter { (reading.seconds[$0] ?? 0) > 0 }
+            .map { ChartLegendItem($0.isGap ? .hatched($0.color) : .swatch($0.color), $0.displayName) }
+    }
+}
+
+// MARK: Walking (compact card)
+
+/// The day's walking as the server's gait model read it, in brief. The full reading is `WalkingDayView`.
+struct WalkingQualityCard: View {
+    let dayStart: Date
+    let window: ClosedRange<Date>
+
+    @State private var reading: WalkingDayReading?
+    @State private var loaded = false
+
+    var body: some View {
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Walking")
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer(minLength: NoopMetrics.space2)
+                    Text(reading?.summary ?? "—")
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .loadingPlaceholder(!loaded)
+                }
+                TimelineRibbon(lanes: [WalkingLane.lane(reading, loaded: loaded, height: TimelineRibbon.laneHeight, symbol: nil)],
+                               window: window, gutterText: "",
+                               accessibilityLabel: String(localized: "\(reading?.bouts.count ?? 0) walks across the day"))
+            }
+        }
+        .task(id: dayStart) { await load() }
+    }
+
+    private func load() async {
+        defer { loaded = true }
+        reading = await DayCloudReadings.walking(dayStart: dayStart)
+    }
+}
+
+/// Each walk as a ribbon segment, brisk walks in the full walking colour and slower ones lighter.
+enum WalkingLane {
+    static func lane(_ reading: WalkingDayReading?, loaded: Bool, height: CGFloat = TimelineRibbon.thinLaneHeight,
+                     symbol: String? = "shoeprints.fill") -> TimelineRibbon.Lane {
+        let segments = (reading?.bouts ?? []).map { bout in
+            TimelineRibbon.Segment(id: "walk-\(bout.start)",
+                                   start: Date(timeIntervalSince1970: TimeInterval(bout.start)),
+                                   end: Date(timeIntervalSince1970: TimeInterval(bout.end)),
+                                   color: isBrisk(bout) ? ActivityFamily.walking.color
+                                                        : ActivityFamily.walking.color.opacity(0.45))
+        }
+        let state: ChartState = !loaded && reading == nil ? .loading
+            : segments.isEmpty ? .empty(String(localized: "No walks")) : .ready
+        return TimelineRibbon.Lane(id: "walks", symbol: symbol, title: String(localized: "Walks"),
+                                   segments: segments, height: height, state: state)
+    }
+
+    static func isBrisk(_ bout: WalkingDayReading.Bout) -> Bool {
+        (bout.cadenceSpm ?? 0) >= WalkingDayReading.briskCadenceSpm
     }
 }
 
 // MARK: Guided calibration
 
-/// Entry to the guided sessions that give the detector labelled examples of the wearer's own movements.
+/// Entry to the guided sessions that give the detector labelled examples of the wearer's own movements: one
+/// list row, with how many examples there are so far. The explanation lives on the calibration page.
 struct ActivityCalibrationEntry: View {
     @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop5mg.rawValue
-    @State private var labelledCount = 0
+    @State private var labelledCount: Int?
+
+    /// Whether the entry applies (the guided sessions need a 5/MG's motion stream).
+    static func isAvailable(selectedModelRaw: String) -> Bool {
+        selectedModelRaw == WhoopModel.whoop5mg.rawValue
+    }
 
     var body: some View {
-        if selectedWhoopModelRaw == WhoopModel.whoop5mg.rawValue {
+        if Self.isAvailable(selectedModelRaw: selectedWhoopModelRaw) {
             NavigationLink {
                 ActivityCalibrationView()
             } label: {
-                HStack(alignment: .center, spacing: 12) {
-                    Image(systemName: "figure.mind.and.body")
-                        .font(.system(size: 18, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                        .frame(width: 36, height: 36)
-                        .background(Circle().fill(StrandPalette.accent.opacity(0.14)))
-                    VStack(alignment: .leading, spacing: 3) {
-                        Text("Teach activity detection")
-                            .font(StrandFont.subhead.weight(.semibold))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text(subtitle)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 8)
-                    Image(systemName: "chevron.right")
-                        .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                }
-                .padding(.horizontal, NoopMetrics.space3)
-                .padding(.vertical, 12)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .background(NoopPanelSurface(cornerRadius: 14))
-                .contentShape(Rectangle())
+                NoopListRow(icon: "figure.mind.and.body", title: "Activity calibration",
+                            value: labelledCount.flatMap(Self.examplesText))
             }
             .buttonStyle(.plain)
             .task {
@@ -531,10 +462,8 @@ struct ActivityCalibrationEntry: View {
         }
     }
 
-    private var subtitle: String {
-        let n = labelledCount
-        return n == 0
-            ? String(localized: "Five guided minutes of sitting, standing and lying down so Nara learns how you change position.")
-            : String(localized: "\(n) labelled examples so far. Add more to sharpen sitting, standing and position changes.")
+    /// "12 examples", or nil before the first one (the row then reads as its title alone).
+    static func examplesText(_ n: Int) -> String? {
+        n == 0 ? nil : n == 1 ? String(localized: "1 example") : String(localized: "\(n) examples")
     }
 }

@@ -3,23 +3,22 @@ import StrandAnalytics
 import StrandDesign
 import WhoopStore
 
-// MARK: - Deep Timeline (full-day, full-resolution metric viewer) — #575
+// MARK: - Heart rate day and Deep Timeline (full-day, full-resolution metric viewer) — #575
 //
-// The headline tap-through from Explore: a whole-day line for one metric that the user can ZOOM and PAN
-// down to the raw per-second signal. The hard problem — never drawing ~86k points for a worn 24h — is
-// solved in the read layer (`Repository.timelineSeries` picks coarse SQL buckets at day scale and raw
-// seconds when zoomed in), so this screen only ever receives ~targetPoints points regardless of zoom.
+// Two pages share this view and its reads.
 //
-// Reuses the existing `OverviewHRChart` (its `.chartXScale(domain:)` already pins the axis); the chart's
-// zoom binding drives the visible window, and re-reads at the new resolution as the window changes. macOS
-// adds scroll-to-zoom (no pinch); both platforms drag-to-pan. Serves #574 (owned-source filter / honest
-// "Other sources" disclosure) and is the detail surface behind #582.
+// The Heart rate day page (`showsActivityTimeline: true`, Today's heart-rate card) is a glance: the day's
+// heart rate on a real clock axis (kit `IntradayChart`: gaps break the line, sleep / workout / no-signal
+// spans as bands, the resting rule, a scrub that drives the `ValueReadout`), the activity ribbon on the
+// same axis inside the same card, the day's numbers, and rows into the deeper pages (`HeartRateDaySections`).
+// Tapping a stretch's "Show on the heart rate graph" narrows the window to it.
 //
-// #979 spin-offs: (1) annotation parity with the classic Today whole-day chart — the main night's sleep
-// band + a sport glyph at each workout, fed through the SAME OverviewHRChart layers Today uses (this
-// screen previously drew a bare line, despite being sold as "the whole-day trend with bands"); (2) an
-// iPhone touch-and-hold scrub (`touchScrub: true`) so the crosshair readout the Mac pointer hover gets
-// is reachable on touch too.
+// The Deep Timeline (`showsActivityTimeline: false`) is the zoomable whole-day line for one metric, down to
+// the raw per-second signal. The hard problem — never drawing ~86k points for a worn 24h — is solved in
+// the read layer (`Repository.timelineSeries` picks coarse SQL buckets at day scale and raw seconds when
+// zoomed in), so this screen only ever receives ~targetPoints points regardless of zoom. It keeps
+// `OverviewHRChart` for pinch/drag zoom (macOS adds scroll-to-zoom), with the main night's sleep band and a
+// sport glyph at each workout (#979), and a touch-and-hold scrub that drives the page's readout.
 
 struct FullDayChartView: View {
     @EnvironmentObject var repo: Repository
@@ -65,8 +64,8 @@ struct FullDayChartView: View {
         let system = UnitSystem(rawValue: unitSystemRaw) ?? .metric
         return UnitPrefs.resolveTemperature(system: system, override: temperatureRaw)
     }
-    /// "Owned only" hides empty non-strap rows; "All sources" surfaces the disclosure (#574). The active
-    /// device is always the owned source, so this currently scopes the empty-state copy rather than swapping reads.
+    /// "Owned only" scoped the empty-state copy to the active device (#574); it never swapped reads, so its
+    /// toggle is gone (the "Other sources" disclosure is in the Deep Timeline's About). Kept in the read key.
     @State private var ownedOnly = true
     /// What the source row calls the owned source: the active device's registry display name (nickname,
     /// else "Brand Model"), so an active Oura ring reads "Oura …" over the ring's own series instead of
@@ -104,51 +103,33 @@ struct FullDayChartView: View {
     /// The currently-visible window (zoomed or the whole day).
     private var visibleWindow: ClosedRange<Date> { zoomDomain ?? dayBounds }
 
+    // MARK: Heart rate day state (presentation of reads made below)
+
+    /// The decoded activity, derived once per document (`DayActivitySnapshot`).
+    @State private var activity = DayActivitySnapshot.empty
+    /// The day's 5-minute buckets with their lowest and highest sample (#2032), for the true Low / High and
+    /// the faint min–max envelope at day scale. The same read the Today heart-rate card makes.
+    @State private var hrDayBuckets: [HRBucket] = []
+    /// The day's resting heart rate (the nightly score's own number).
+    @State private var restingHr: Int?
+    /// The server's walking and strap-signal readings for the shown day.
+    @State private var walking: WalkingDayReading?
+    @State private var walkingLoaded = false
+    @State private var strap: StrapSignalDay?
+    @State private var strapLoaded = false
+    /// True once the open-on-latest-day decision is made, so the page never shows Today's empty state and
+    /// then jumps to the day that has data.
+    @State private var landingDecided = false
+    /// Bumped by `zoomTo`, so the page scrolls back up to the graph it just narrowed.
+    @State private var zoomRequest = 0
+    /// The Deep Timeline's scrub selection (its readout follows it).
+    @State private var deepSelection: Date?
+
+    private static let chartAnchor = "fullDayChart.chart"
+
     var body: some View {
-        ScreenScaffold(title: showsActivityTimeline ? "Heart rate" : "Deep Timeline",
-                       subtitle: showsActivityTimeline ? "Your whole day, and what you were doing."
-                                                       : "Every second of your day, zoomable.",
-                       lockHorizontalScroll: showsActivityTimeline) {
-            if !showsActivityTimeline { metricPills }
-            dayNav
-            if !showsActivityTimeline { sourcePill }
-            #if DEBUG
-            if !demoHidesGraph {
-                chartCard
-                zoomHint
-            }
-            #else
-            chartCard
-            zoomHint
-            #endif
-            if showsActivityTimeline {
-                #if DEBUG
-                if !DemoLayout.hidesActivity {
-                    DayStretchesSection(timeline: timeline, window: visibleWindow, dayStart: dayStart, onOpen: open, onZoom: zoomTo)
-                        .id(Int(dayStart.timeIntervalSince1970))
-                }
-                #else
-                DayStretchesSection(timeline: timeline, window: visibleWindow, dayStart: dayStart, onOpen: open, onZoom: zoomTo)
-                    .id(Int(dayStart.timeIntervalSince1970))
-                #endif
-                NavigationLink {
-                    StretchFeedbackHistoryView()
-                } label: {
-                    StretchFeedbackLinkRow()
-                }
-                .buttonStyle(.plain)
-                NavigationLink(value: TabRoute.fullDayChart) {
-                    HStack {
-                        Text("Other metrics in the Deep Timeline")
-                        Spacer()
-                        Image(systemName: "chevron.right")
-                    }
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.accent)
-                    .padding(.horizontal, NoopMetrics.space1)
-                }
-                .buttonStyle(.plain)
-            }
+        Group {
+            if showsActivityTimeline { heartRateDayPage } else { deepTimelinePage }
         }
         .task(id: taskKey) { await reload() }
         .task(id: annotationKey) { await reloadAnnotations() }
@@ -156,6 +137,19 @@ struct FullDayChartView: View {
             guard showsActivityTimeline else { return }
             timeline.request(dayStart: dayStart, repo: repo)
         }
+        .task(id: annotationKey) {
+            guard showsActivityTimeline else { return }
+            await reloadDayExtremes()
+        }
+        .task(id: Int(dayStart.timeIntervalSince1970)) {
+            guard showsActivityTimeline else { return }
+            await reloadWalking()
+        }
+        .task(id: Int(dayStart.timeIntervalSince1970)) {
+            guard showsActivityTimeline else { return }
+            await reloadStrapSignal()
+        }
+        .onReceive(timeline.$activityContext) { activity = DayActivitySnapshot(document: $0) }
         #if DEBUG
         .task(id: "\(timeline.statesBusy)|\(timeline.activityBusy)") {
             guard (try? await Task.sleep(nanoseconds: 5_000_000_000)) != nil else { return }
@@ -173,6 +167,291 @@ struct FullDayChartView: View {
             availableMetrics = repo.timelineMetrics()
             if !availableMetrics.contains(metric) { metric = .hr }
         }
+        .onChangeCompat(of: metric) { _ in deepSelection = nil }
+    }
+
+    /// The real layout, redacted, until the landing decision and the shown day's first read are in.
+    private var pageReady: Bool { landingDecided && !(loading && series.points.isEmpty) }
+
+    private var statColumns: Int {
+        #if os(macOS)
+        return 4
+        #else
+        return 2
+        #endif
+    }
+
+    // MARK: Heart rate day page
+
+    private var heartRateDayPage: some View {
+        ScreenScaffold(title: "Heart rate", titleDisplay: .navigationBar, isLoading: !pageReady,
+                       lockHorizontalScroll: true) {
+            ScrollViewReader { proxy in
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    dayNav
+                    #if DEBUG
+                    if !demoHidesGraph {
+                        heartRateChartBlock.id(Self.chartAnchor)
+                        StatGrid(hrStatItems, columns: statColumns, isLoading: !pageReady)
+                    }
+                    #else
+                    heartRateChartBlock.id(Self.chartAnchor)
+                    StatGrid(hrStatItems, columns: statColumns, isLoading: !pageReady)
+                    #endif
+                    #if DEBUG
+                    if !DemoLayout.hidesActivity { activitySections }
+                    #else
+                    activitySections
+                    #endif
+                    AboutDisclosure("About heart rate", paragraphs: heartRateDayAbout)
+                }
+                .onChangeCompat(of: zoomRequest) { _ in
+                    withAnimation(StrandMotion.interactive) { proxy.scrollTo(Self.chartAnchor, anchor: .top) }
+                }
+            }
+        }
+    }
+
+    @ViewBuilder private var activitySections: some View {
+        HeartRateDayActivitySection(snapshot: activity, isBusy: timeline.activityBusy, timeline: timeline,
+                                    onZoom: zoomTo)
+            .id(Int(dayStart.timeIntervalSince1970))
+        HeartRateDayMoreSection(dayStart: dayStart, window: visibleWindow, snapshot: activity, timeline: timeline,
+                                deviceId: repo.deviceId, walking: walking, walkingLoaded: walkingLoaded,
+                                strap: strap, strapLoaded: strapLoaded, onZoom: zoomTo)
+    }
+
+    private var heartRateChartBlock: some View {
+        let window = visibleWindow
+        let samples = hrSamples
+        let hasPoints = samples.contains { window.contains($0.time) }
+        let state: ChartState = !pageReady ? .loading
+            : hasPoints ? .ready
+            : loading ? .loading
+            : .empty(String(localized: "No heart rate recorded"))
+        let snapshot = activity
+        let workouts = workoutSpans
+        let sleep = sleepSpan
+        return HeartRateDayChartBlock(
+            samples: samples,
+            bucketSeconds: series.isRaw ? 5 : max(1, series.bucketSeconds),
+            resolution: series.points.isEmpty ? nil : resolutionSubtitle,
+            window: window,
+            zoomed: zoomDomain != nil,
+            bands: hrBands,
+            // The resting rule is named in the legend rather than labelled in the plot, where its label sat on
+            // the evening's line (the value itself is in the stat grid).
+            references: restingHr.map { [ChartReference(Double($0))] } ?? [],
+            state: state,
+            lanes: ribbonLanes,
+            legend: hrLegend,
+            isLoading: !pageReady,
+            context: { date in
+                if workouts.contains(where: { $0.start <= date && date <= $0.end }) { return String(localized: "Workout") }
+                if let ep = snapshot.episode(at: date) { return ep.label }
+                if let sleep, sleep.start <= date, date <= sleep.end { return String(localized: "Asleep") }
+                return nil
+            },
+            onRibbonTap: { _, date in
+                if let ep = snapshot.episode(at: date) { open(.activity(ep)) }
+            },
+            onResetZoom: { withAnimation(StrandMotion.interactive) { zoomDomain = nil } }
+        )
+    }
+
+    /// The line's samples; at day scale each 5-minute bucket carries its lowest and highest sample for the
+    /// envelope (the same buckets the line averages, so the two never disagree).
+    private var hrSamples: [IntradayChart.Sample] {
+        let extremes: [Int: HRBucket] = (!series.isRaw && series.bucketSeconds == 300)
+            ? Dictionary(hrDayBuckets.map { ($0.ts, $0) }, uniquingKeysWith: { a, _ in a }) : [:]
+        return displayPoints.map { p in
+            let b = extremes[Int(p.date.timeIntervalSince1970)]
+            return IntradayChart.Sample(time: p.date, value: p.value, low: b?.minBpm, high: b?.maxBpm)
+        }
+    }
+
+    /// Sleep, workouts and no-signal time as spans behind the line. No-signal time comes from the server's
+    /// strap reading when there is one, else from the decoder's off-wrist stretches.
+    private var hrBands: [IntradayChart.Band] {
+        var bands: [IntradayChart.Band] = []
+        if let s = sleepSpan {
+            bands.append(.init(id: "sleep", start: s.start, end: s.end, color: ActivityFamily.asleep.color,
+                               label: String(localized: "Asleep")))
+        }
+        for (i, w) in workoutSpans.enumerated() {
+            bands.append(.init(id: "workout-\(i)", start: w.start, end: w.end, color: StrandPalette.effortColor,
+                               label: String(localized: "Workout")))
+        }
+        if let strap, !strap.spans.isEmpty {
+            for span in strap.spans where (span.state == .offWrist || span.state == .sensorDropout) && span.end - span.start >= 120 {
+                bands.append(.init(id: "gap-\(span.start)", start: Date(timeIntervalSince1970: TimeInterval(span.start)),
+                                   end: Date(timeIntervalSince1970: TimeInterval(span.end)),
+                                   color: StrandPalette.textTertiary, label: span.state.displayName, hatched: true))
+            }
+        } else {
+            for (i, span) in activity.offWristSpans().enumerated() {
+                bands.append(.init(id: "off-\(i)", start: span.start, end: span.end, color: StrandPalette.textTertiary,
+                                   label: ActivityFamily.offWrist.title, hatched: true))
+            }
+        }
+        return bands
+    }
+
+    /// The activity lane, then a lane for walks and for strap signal when the server has read them.
+    private var ribbonLanes: [TimelineRibbon.Lane] {
+        // A document can exist and hold nothing (a day with no motion): that is the empty lane, not a blank one.
+        let state: ChartState = !activity.segments.isEmpty ? .ready
+            : timeline.activityBusy ? .loading
+            : .empty(String(localized: "No motion data"))
+        var lanes = [TimelineRibbon.Lane(id: "activity", symbol: "figure.walk", title: String(localized: "Activity"),
+                                         segments: activity.segments, ticks: activity.ticks, state: state)]
+        if let walking, !walking.bouts.isEmpty { lanes.append(WalkingLane.lane(walking, loaded: true)) }
+        if let strap, !strap.spans.isEmpty { lanes.append(StrapSignalLane.lane(strap, loaded: true, quietGood: true)) }
+        // One lane needs no glyph to say which it is.
+        if lanes.count == 1 { lanes[0].symbol = nil }
+        return lanes
+    }
+
+    /// One legend for the card: the kinds of activity on screen, then the spans behind the line that are not
+    /// labelled inside it.
+    private var hrLegend: [ChartLegendItem] {
+        let window = visibleWindow
+        var items = activity.families(in: window).map(\.legendItem)
+        var seen = Set(items.map(\.label))
+        func add(_ item: ChartLegendItem) {
+            guard !seen.contains(item.label) else { return }
+            seen.insert(item.label)
+            items.append(item)
+        }
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        for band in hrBands {
+            let start = max(band.start, window.lowerBound), end = min(band.end, window.upperBound)
+            guard end > start, let label = band.label else { continue }
+            // The chart labels a band inside it when the band is wide enough for the word (IntradayChart's
+            // rule, at its assumed 300 pt plot); only the others need the legend.
+            let width = span > 0 ? end.timeIntervalSince(start) / span * 300 : 0
+            let fitsInside = !band.hatched && width >= Double(label.count) * 6.5 + 12
+            if !fitsInside { add(ChartLegendItem(band.hatched ? .hatched(band.color) : .band(band.color), label)) }
+        }
+        if restingHr != nil { add(ChartLegendItem(.line(NaraChartStyle.referenceColor, dashed: true), String(localized: "Resting"))) }
+        return items
+    }
+
+    /// Resting, Average, Low and High for the visible window. Low and High are single samples (#2032), not
+    /// the 5-minute means the line draws; the average is of the line's points.
+    private var hrStatItems: [StatItem] {
+        let window = visibleWindow
+        let points = series.points.filter { window.contains($0.date) }
+        let average = points.isEmpty ? nil : points.map(\.value).reduce(0, +) / Double(points.count)
+        let buckets = hrDayBuckets.filter { window.contains(Date(timeIntervalSince1970: TimeInterval($0.ts))) }
+        let low: (Double, Date)? = buckets.min(by: { $0.minBpm < $1.minBpm })
+            .map { ($0.minBpm, Date(timeIntervalSince1970: TimeInterval($0.ts))) }
+            ?? points.min(by: { $0.value < $1.value }).map { ($0.value, $0.date) }
+        let high: (Double, Date)? = buckets.max(by: { $0.maxBpm < $1.maxBpm })
+            .map { ($0.maxBpm, Date(timeIntervalSince1970: TimeInterval($0.ts))) }
+            ?? points.max(by: { $0.value < $1.value }).map { ($0.value, $0.date) }
+        let bpm = { (v: Double) in String(Int(v.rounded())) }
+        return [
+            StatItem(String(localized: "Resting"), value: restingHr.map(String.init), unit: "bpm"),
+            StatItem(String(localized: "Average"), value: average.map(bpm), unit: "bpm"),
+            StatItem(String(localized: "Low"), value: low.map { bpm($0.0) }, unit: "bpm",
+                     detail: low.map { StretchFormat.clock($0.1) }),
+            StatItem(String(localized: "High"), value: high.map { bpm($0.0) }, unit: "bpm",
+                     detail: high.map { StretchFormat.clock($0.1) }),
+        ]
+    }
+
+    private var heartRateDayAbout: [String] {
+        [
+            String(localized: "The line is your heart rate through the day: an average over a few minutes for the whole day, every second when you look closer. A break in the line is time the strap recorded nothing; hatched time had no trustworthy signal."),
+            String(localized: "Low and high are the lowest and highest single readings, not the averages the line draws. Resting is your resting heart rate for the day."),
+            String(localized: "The bar under the graph is what the strap's motion suggests you were doing. Hatched stretches are less sure, and ticks under the bar are position changes. A wrist can't see height, so sitting and standing are best guesses."),
+            String(localized: "Tap the bar to see a stretch up close and say whether it is right. Show on the heart rate graph narrows the graph to that stretch."),
+        ]
+    }
+
+    // MARK: Deep Timeline page
+
+    private var deepTimelinePage: some View {
+        ScreenScaffold(title: "Deep Timeline", titleDisplay: .navigationBar, isLoading: !landingDecided) {
+            metricPills
+            dayNav
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                #if DEBUG
+                if !demoHidesGraph { deepReadout }
+                #else
+                deepReadout
+                #endif
+                chartCard
+            }
+            StatGrid(deepStatItems, columns: 3, isLoading: loading && series.points.isEmpty)
+            AboutDisclosure("About the Deep Timeline", paragraphs: deepTimelineAbout)
+        }
+    }
+
+    private var deepReadout: some View {
+        let points = displayPoints
+        let selected = deepSelection.flatMap { date in
+            ChartSelection.nearestIndex(to: date, in: points.map(\.date)).map { points[$0] }
+        }
+        let shown = selected ?? points.last
+        let source = sourceName ?? String(localized: "My WHOOP")
+        let context = selected == nil
+            ? (series.points.isEmpty ? source : "\(source) · \(resolutionSubtitle)")
+            : nil
+        let content = ReadoutContent(
+            dateLine: shown.map { ReadoutContent.dateLine($0.date, period: .time) }
+                ?? ReadoutContent.dateLine(dayStart, period: .day),
+            value: shown.map { format($0.value) },
+            unit: shown == nil ? nil : axisUnit,
+            context: context)
+        return ValueReadout(content, isScrubbing: selected != nil, isLoading: loading && series.points.isEmpty)
+            .overlay(alignment: .bottomTrailing) {
+                if zoomDomain != nil && selected == nil {
+                    Button("Whole day") { withAnimation(StrandMotion.interactive) { zoomDomain = nil } }
+                        .font(StrandFont.subhead)
+                        .foregroundStyle(StrandPalette.accent)
+                        .buttonStyle(.plain)
+                        .frame(minHeight: NoopMetrics.minimumHitTarget)
+                        .contentShape(Rectangle())
+                }
+            }
+    }
+
+    private var deepStatItems: [StatItem] {
+        let v = displayPoints.map(\.value)
+        let unit = axisUnit
+        guard !v.isEmpty else {
+            return [StatItem(String(localized: "Low"), value: nil), StatItem(String(localized: "Average"), value: nil),
+                    StatItem(String(localized: "High"), value: nil)]
+        }
+        return [
+            StatItem(String(localized: "Low"), value: format(v.min() ?? 0), unit: unit),
+            StatItem(String(localized: "Average"), value: format(v.reduce(0, +) / Double(max(1, v.count))), unit: unit),
+            StatItem(String(localized: "High"), value: format(v.max() ?? 0), unit: unit),
+        ]
+    }
+
+    private var deepTimelineAbout: [String] {
+        var paragraphs: [String] = []
+        #if os(macOS)
+        paragraphs.append(String(localized: "Scroll to zoom and drag to pan. Double-click to go back to the whole day."))
+        #else
+        paragraphs.append(String(localized: "Pinch to zoom, drag to pan, and touch and hold to read a value. Double-tap to go back to the whole day."))
+        #endif
+        paragraphs.append(String(localized: "The line is averaged over a few minutes for a whole day and shows the raw seconds when you zoom in. A break in the line is time with no readings."))
+        switch metric {
+        case .spo2 where strapIsWhoop5:
+            paragraphs.append(String(localized: "Your strap measures SpO₂ only while you sleep, so there are no readings for this part of the day. Check the night around it."))
+        case .respiration:
+            paragraphs.append(String(localized: "Breathing is estimated from your heartbeat rhythm, and nothing steady enough was recorded in this window. It reads best while you are still, such as asleep."))
+        case .sdnn:
+            paragraphs.append(String(localized: "SDNN needs several minutes of clean heartbeat timing, and this window doesn’t have enough."))
+        default:
+            break
+        }
+        paragraphs.append(String(localized: "Other sources don’t offload raw per-second data on-device."))
+        return paragraphs
     }
 
     private func open(_ target: StretchTarget) {
@@ -182,6 +461,7 @@ struct FullDayChartView: View {
 
     private func zoomTo(_ range: ClosedRange<Date>) {
         withAnimation(StrandMotion.interactive) { zoomDomain = range }
+        zoomRequest += 1
     }
 
     #if DEBUG
@@ -249,56 +529,16 @@ struct FullDayChartView: View {
     private var metricPills: some View {
         ScrollView(.horizontal, showsIndicators: false) {
             SegmentedPillControl(availableMetrics, selection: $metric) { $0.title }
-                .padding(.vertical, NoopMetrics.space1 / 2)
+                .padding(.vertical, NoopMetrics.spaceHalf)
         }
     }
 
-    @ViewBuilder private var sourcePill: some View {
-        HStack(spacing: NoopMetrics.rowSpacing) {
-            Image(systemName: "dot.radiowaves.left.and.right")
-                .font(StrandFont.footnote.weight(.medium))
-                .foregroundStyle(StrandPalette.textTertiary)
-            Group {
-                if let sourceName { Text(verbatim: sourceName) } else { Text("My WHOOP") }
-            }
-            .font(StrandFont.footnote)
-            .foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
-            // #574 — owned-source scope. The active device is the owned source; "All sources" reveals the honest
-            // disclosure that other sources' raw per-second streams aren't offloaded on-device.
-            SegmentedPillControl([true, false], selection: $ownedOnly) { $0 ? String(localized: "Owned") : String(localized: "All") }
-                .fixedSize()
-        }
-        .padding(.horizontal, NoopMetrics.space1)
-    }
-
-    /// Day stepper — move the whole timeline back/forward a day so a user can reach the days that actually
-    /// hold their data, not just today (#597). Forward is clamped at today (no future days).
+    /// Day stepper — move the whole page back/forward a day so a user can reach the days that actually hold
+    /// their data, not just today (#597). Forward is clamped at today (no future days).
     private var dayNav: some View {
-        HStack(spacing: NoopMetrics.cardInnerSpacing) {
-            Button { stepDay(-1) } label: {
-                Image(systemName: "chevron.left").font(StrandFont.headline.weight(.semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(StrandPalette.accent)
-            .accessibilityLabel("Previous day")
-
-            Spacer()
-            Text(dayLabel)
-                .font(StrandFont.headline)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .monospacedDigit()
-            Spacer()
-
-            Button { stepDay(1) } label: {
-                Image(systemName: "chevron.right").font(StrandFont.headline.weight(.semibold))
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(isOnLatestDay ? StrandPalette.textTertiary : StrandPalette.accent)
-            .disabled(isOnLatestDay)
-            .accessibilityLabel("Next day")
-        }
-        .padding(.horizontal, NoopMetrics.space1)
+        PeriodStepper(title: dayLabel, subtitle: daySubtitle,
+                      canGoBack: true, canGoForward: !isOnLatestDay,
+                      onBack: { stepDay(-1) }, onForward: { stepDay(1) })
     }
 
     private var isOnLatestDay: Bool { dayStart >= Repository.logicalDayStart(Date()) }
@@ -314,36 +554,38 @@ struct FullDayChartView: View {
         }
     }
 
+    private var isTodayOrYesterday: Bool {
+        let today = Repository.logicalDayStart(Date())
+        return Calendar.current.isDate(dayStart, inSameDayAs: today)
+            || Calendar.current.isDate(dayStart, inSameDayAs: today.addingTimeInterval(-86_400))
+    }
+
     private var dayLabel: String {
         let today = Repository.logicalDayStart(Date())
         if Calendar.current.isDate(dayStart, inSameDayAs: today) { return String(localized: "Today") }
         if Calendar.current.isDate(dayStart, inSameDayAs: today.addingTimeInterval(-86_400)) { return String(localized: "Yesterday") }
-        return Self.dayFmt.string(from: dayStart)
+        return ReadoutContent.dateLine(dayStart, period: .day)
     }
 
-    private static let dayFmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "EEE d MMM"; f.locale = Locale(identifier: "en_US_POSIX"); return f
-    }()
+    /// The date beside "Today" / "Yesterday"; another day's title is already its date.
+    private var daySubtitle: String? {
+        isTodayOrYesterday ? ReadoutContent.dateLine(dayStart, period: .day) : nil
+    }
 
-    // MARK: Chart
+    // MARK: Chart (Deep Timeline)
 
     @ViewBuilder private var chartCard: some View {
-        ChartCard(
-            title: LocalizedStringKey(metric.title),
-            subtitle: resolutionSubtitle,
-            trailing: latestReadout,
-            height: 280,
-            tint: StrandPalette.metricRose
-        ) {
-            if loading && series.points.isEmpty {
-                loadingState
-            } else if series.points.isEmpty {
-                emptyState
-            } else {
-                chart
+        NoopCard {
+            Group {
+                if loading && series.points.isEmpty {
+                    ChartPlaceholder(height: NoopMetrics.chartHeightPrimary)
+                } else if series.points.isEmpty {
+                    EmptyChartMessage(String(localized: "Nothing recorded in this window"),
+                                      height: NoopMetrics.chartHeightPrimary)
+                } else {
+                    chart
+                }
             }
-        } footer: {
-            if !series.points.isEmpty { statsFooter }
         }
     }
 
@@ -359,9 +601,41 @@ struct FullDayChartView: View {
         }
     }
 
+    /// The displayed points with a segment per unbroken run, so the line lifts across a gap instead of
+    /// drawing a straight ramp through time the strap recorded nothing.
+    private var segmentedPoints: [TrendPoint] {
+        let pts = displayPoints
+        let ids = Self.gapSegments(dates: pts.map(\.date), bucketSeconds: series.bucketSeconds, isRaw: series.isRaw)
+        return zip(pts, ids).map { TrendPoint(date: $0.date, value: $0.value, segment: $1) }
+    }
+
+    /// Run ids for a timeline series. Bucketed series break where a bucket is skipped (`hrGapSegments`). Raw
+    /// series (one row per reading) break where a step is more than three times the series' typical step, and
+    /// never under five seconds, so a dropped second of 1 Hz heart rate does not split the line. Pure.
+    static func gapSegments(dates: [Date], bucketSeconds: Int, isRaw: Bool) -> [String] {
+        let ts = dates.map { Int($0.timeIntervalSince1970.rounded()) }
+        guard ts.count > 1 else { return ts.map { _ in "0" } }
+        if !isRaw, bucketSeconds > 1 { return hrGapSegments(bucketTs: ts, bucketSeconds: bucketSeconds) }
+        let steps = zip(ts.dropFirst(), ts).map { $0 - $1 }.filter { $0 > 0 }.sorted()
+        let typical = steps.isEmpty ? 1 : steps[steps.count / 2]
+        return hrGapSegments(bucketTs: ts, bucketSeconds: max(5, typical * 3))
+    }
+
+    /// How the Deep Timeline draws the current metric: a percentage read in short windows as points on a
+    /// fixed axis, a non-negative magnitude (wrist motion, ring movement) as bars from zero, the band's sleep
+    /// state codes as points (a code is a level, not a quantity to join), everything else as a line.
+    private var chartMark: OverviewHRChart.Mark {
+        switch metric {
+        case .spo2: return Self.spo2IsPercent(displayPoints.last?.value) ? .points : .line
+        case .motion, .ouraMovement: return .bars
+        case .bandSleepState: return .points
+        default: return .line
+        }
+    }
+
     private var chart: some View {
         OverviewHRChart(
-            points: displayPoints,
+            points: segmentedPoints,
             // #979 spin-off — the same sleep-band + workout-glyph layers the classic Today feeds. Passed
             // on EVERY metric track (they're time annotations, so "when was I asleep / training" reads
             // against skin temp or HRV just as it does against HR); the glyph anchors at the shown
@@ -371,19 +645,21 @@ struct FullDayChartView: View {
             gradient: gradientFor(metric),
             valueRange: valueRange(displayPoints),
             xRange: dayBounds,
-            height: 280,
-            // #979 spin-off — iPhone touch scrub: hold to pin the crosshair, drag to read values under
-            // the finger (the Mac pointer hover's readout, made reachable on touch). Opt-in here only.
-            // Not on the Heart rate day page: the gesture claims the touch, so a finger that lands on this
-            // large chart cannot scroll the page (measured with injected touches: those drags never scroll).
-            touchScrub: !showsActivityTimeline,
+            height: NoopMetrics.chartHeightPrimary,
+            // #979 spin-off — iPhone touch scrub: hold to pin the rule, drag to read values under the
+            // finger; it drives the page's readout (the Mac pointer hover does the same).
+            touchScrub: true,
+            workoutTint: StrandPalette.effortColor,
             zoomDomain: $zoomDomain,
-            // #986: Deep Timeline pans across a rolling 3-day window. The Heart rate day page is one fixed day,
-            // so its chart takes no drag-to-pan or pinch and a finger that lands on it scrolls the page.
-            // Tapping an activity below still sets the window through the `zoomDomain` binding.
-            zoomBounds: showsActivityTimeline ? nil : panBounds,
+            // #986: Deep Timeline pans across a rolling 3-day window.
+            zoomBounds: panBounds,
             valueFormat: { format($0) },
-            dateFormat: { Self.timeFmt.string(from: $0) }
+            dateFormat: { Self.timeFmt.string(from: $0) },
+            mark: chartMark,
+            unit: axisUnit,
+            color: seriesColor(metric),
+            accessibilityTitle: metric.title,
+            selection: $deepSelection
         )
         #if os(macOS)
         // macOS has no pinch here, so wheel/trackpad scroll zooms about the cursor-agnostic centre.
@@ -396,103 +672,13 @@ struct FullDayChartView: View {
         #endif
     }
 
-    // MARK: States
-
-    private var loadingState: some View {
-        VStack(spacing: NoopMetrics.rowSpacing) {
-            ProgressView().controlSize(.large)
-            Text("Loading the day…")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-    }
-
-    /// Honest empty/dash state — a window the strap offloaded nothing for (a not-yet-synced stretch, an
-    /// off-wrist gap, or a metric this device doesn't record). Never a fabricated flat line.
-    private var emptyState: some View {
-        VStack(spacing: NoopMetrics.space2) {
-            Image(systemName: "waveform.slash")
-                .font(.system(size: 26, weight: .regular))
-                .foregroundStyle(StrandPalette.textTertiary)
-            Text("No \(metric.title.lowercased()) here")
-                .font(StrandFont.body)
-                .foregroundStyle(StrandPalette.textSecondary)
-            Text(emptyReason)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-                .multilineTextAlignment(.center)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .padding(.horizontal, NoopMetrics.space6)
-    }
-
-    /// On a 5.0/MG the strap writes its SpO₂ estimate only while the wearer sleeps and lies still, in short
-    /// windows, so a daytime (or any awake) window is legitimately empty. Say that instead of a generic
-    /// "nothing offloaded" that reads as broken. Strap view only (ownedOnly). (#623 used to say the strap
-    /// "doesn't send SpO₂ over Bluetooth", which stopped being true once the estimate was plotted.)
-    ///
-    /// Respiration and SDNN are read from the heartbeat rhythm, so an empty window there means the beats were
-    /// not steady enough to read (movement, loose fit, a sync gap), not that the strap lacks the channel.
-    private var emptyReason: String {
-        if ownedOnly, strapIsWhoop5, metric == .spo2 {
-            return String(localized: "Your strap measures SpO₂ only while you sleep, so there are no readings for this part of the day. Check the night around it.")
-        }
-        if ownedOnly, metric == .respiration {
-            return String(localized: "Breathing is estimated from your heartbeat rhythm, and nothing steady enough was recorded in this window. It reads best while you are still, such as asleep.")
-        }
-        if ownedOnly, metric == .sdnn {
-            return String(localized: "SDNN needs several minutes of clean heartbeat timing, and this window doesn’t have enough.")
-        }
-        return ownedOnly
-            ? String(localized: "Nothing offloaded for this window yet.")
-            : String(localized: "Other sources don’t offload raw per-second data on-device.")
-    }
-
-    @ViewBuilder private var zoomHint: some View {
-        HStack(spacing: NoopMetrics.space2) {
-            Image(systemName: zoomDomain == nil ? "arrow.up.left.and.arrow.down.right" : "arrow.down.right.and.arrow.up.left")
-                .font(StrandFont.footnote.weight(.semibold))
-            #if os(macOS)
-            Text(zoomDomain == nil ? "Scroll to zoom · drag to pan" : "Zoomed in. Drag to pan")
-            #else
-            // #979 spin-off: name the hold-to-scrub affordance — a hidden gesture nobody tries is a
-            // feature that doesn't exist. (On the Mac the pointer hover is self-discovering.)
-            if showsActivityTimeline {
-                Text(zoomDomain == nil ? "Tap an activity below to see it up close" : "Zoomed in")
-            } else {
-                Text(zoomDomain == nil ? "Pinch to zoom · drag to pan · hold to read" : "Zoomed in. Drag to pan · hold to read")
-            }
-            #endif
-            Spacer()
-            if zoomDomain != nil {
-                Button("Reset") { withAnimation(StrandMotion.interactive) { zoomDomain = nil } }
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.accent)
-                    .buttonStyle(.plain)
-            }
-        }
-        .font(StrandFont.footnote)
-        .foregroundStyle(StrandPalette.textTertiary)
-        .padding(.horizontal, NoopMetrics.space1)
-        .padding(.top, NoopMetrics.space1 / 2)
-    }
-
-    private var statsFooter: some View {
-        let v = displayPoints.map(\.value)
-        return ChartFooter([
-            ("Min", format(v.min() ?? 0)),
-            ("Avg", format(v.reduce(0, +) / Double(max(1, v.count)))),
-            ("Max", format(v.max() ?? 0)),
-        ])
-    }
-
     // MARK: Read
 
     /// One-shot on first open: if today has no data but an earlier day does (the classic just-synced-history
     /// case, #597), land the timeline on that most-recent day so the user sees their data instead of an empty
     /// today. Skipped when the caller pinned an explicit day, and never fights manual navigation afterwards.
     private func landOnLatestDayIfNeeded() async {
+        defer { landingDecided = true }
         guard !didLandOnLatest else { return }
         didLandOnLatest = true
         if let latest = await repo.latestDataDayStart(), latest < dayStart {
@@ -543,6 +729,40 @@ struct FullDayChartView: View {
         workoutSpans = OverviewHRChart.workouts(workoutCandidates, overlapping: dayBounds)
     }
 
+    /// The Heart rate day page's true Low / High and envelope: the shown day's 5-minute buckets with the
+    /// lowest and highest sample in each (#2032), the read the Today heart-rate card makes. Day-scoped, like
+    /// the annotations, so a zoom never re-queries; the resting rate is the day's own nightly row.
+    private func reloadDayExtremes() async {
+        let key = Repository.localDayKey(dayStart)
+        restingHr = repo.days.last(where: { $0.day == key })?.restingHr
+        let buckets = await repo.hrBuckets(from: Int(dayBounds.lowerBound.timeIntervalSince1970),
+                                           to: Int(dayBounds.upperBound.timeIntervalSince1970) - 1,
+                                           bucketSeconds: 300)
+        guard !Task.isCancelled else { return }
+        hrDayBuckets = buckets
+    }
+
+    /// The server's walking reading for the shown day (`DayCloudReadings.walking`, the Walking card's load).
+    private func reloadWalking() async {
+        walking = nil
+        walkingLoaded = false
+        defer { if !Task.isCancelled { walkingLoaded = true } }
+        let reading = await DayCloudReadings.walking(dayStart: dayStart)
+        guard !Task.isCancelled else { return }
+        walking = reading
+    }
+
+    /// The server's strap-signal reading for the shown day, cached copy first (the Strap signal card's load).
+    private func reloadStrapSignal() async {
+        strap = nil
+        strapLoaded = false
+        defer { if !Task.isCancelled { strapLoaded = true } }
+        await DayCloudReadings.strapSignal(dayStart: dayStart) { reading in
+            guard !Task.isCancelled else { return }
+            strap = reading
+        }
+    }
+
     /// "H:MM" for a duration in seconds (e.g. a 6h06m night → "6:06") — mirrors TodayView.hoursMinutes
     /// so the band label reads identically on both whole-day charts.
     private static func hoursMinutes(_ seconds: Int) -> String {
@@ -561,8 +781,10 @@ struct FullDayChartView: View {
                       : String(localized: "\(series.bucketSeconds)-second average")
     }
 
-    private var latestReadout: String? {
-        displayPoints.last.map { "\(format($0.value))\(unitSuffix)" }
+    /// The unit above the value axis and beside the readout's value ("bpm", "°C", "%"); nil when unitless.
+    private var axisUnit: String? {
+        let u = unitSuffix.trimmingCharacters(in: .whitespaces)
+        return u.isEmpty ? nil : u
     }
 
     private var unitSuffix: String {
@@ -617,15 +839,46 @@ struct FullDayChartView: View {
         }
     }
 
-    /// Padded value range so the line never sits flush against an edge (mirrors MetricExplorer/TodayView).
+    /// The value axis's domain. Heart rate gets a floor and a minimum span so a calm day does not fill the
+    /// plot like a hard one; SpO₂ as a percentage sits on its fixed 85–100 % scale; magnitudes start at
+    /// zero; the band's state codes span their four levels. Everything else is padded so the line never sits
+    /// flush against an edge (mirrors MetricExplorer/TodayView).
     private func valueRange(_ pts: [TrendPoint]) -> ClosedRange<Double> {
         let vals = pts.map(\.value)
         guard let lo = vals.min(), let hi = vals.max() else {
             return metric == .hr ? 40...120 : 0...1
         }
+        switch metric {
+        case .hr:
+            let low = min(50, ((lo - 5) / 10).rounded(.down) * 10)
+            let high = max(low + 60, ((hi + 5) / 10).rounded(.up) * 10)
+            return max(30, low)...high
+        case .spo2 where Self.spo2IsPercent(hi):
+            return min(85, (lo - 1).rounded(.down))...max(100, hi.rounded(.up))
+        case .motion, .ouraMovement:
+            return 0...max(hi * 1.1, hi + 0.001)
+        case .bandSleepState:
+            return -0.3...3.3
+        default:
+            break
+        }
         if hi <= lo { return (lo - 1)...(hi + 1) }
         let pad = (hi - lo) * 0.12
         return (lo - pad)...(hi + pad)
+    }
+
+    /// One flat colour per metric (the line's colour; no value gradient).
+    private func seriesColor(_ m: Repository.TimelineMetric) -> Color {
+        switch m {
+        case .hr: return StrandPalette.metricRose
+        case .skinTemp: return StrandPalette.metricAmber
+        case .hrv: return StrandPalette.metricPurple
+        case .spo2: return StrandPalette.metricCyan
+        case .sdnn: return StrandPalette.metricCyan
+        case .respiration, .motion, .ouraMovement: return StrandPalette.textSecondary
+        // #175: the band-state track uses the deep-sleep hue so it reads as a distinct sleep track.
+        case .bandSleepState: return StrandPalette.sleepDeep
+        }
     }
 
     private func gradientFor(_ m: Repository.TimelineMetric) -> Gradient {
@@ -646,8 +899,9 @@ struct FullDayChartView: View {
         }
     }
 
+    /// The selected sample's time for VoiceOver, in the wearer's own clock format.
     private static let timeFmt: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm"; f.locale = Locale(identifier: "en_US_POSIX"); return f
+        let f = DateFormatter(); f.dateStyle = .none; f.timeStyle = .short; return f
     }()
 }
 
