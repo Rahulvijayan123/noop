@@ -278,11 +278,86 @@
     }
    },
    "night_id": "sleep-d-1791154800",
+   "prv_nonlinear": {
+    "config": {
+     "dfa_order": 1,
+     "dfa_overlap": false,
+     "dfa_scales": [
+      4,
+      16
+     ],
+     "max_segments": 24,
+     "min_segments": 3,
+     "sampen_delay": 1,
+     "sampen_dimension": 2,
+     "sampen_tolerance_sd": 0.2,
+     "segment_beats": 300,
+     "splice_tolerance_s": 3.0,
+     "time_budget_s": 0.4
+    },
+    "dfa_alpha1": {
+     "iqr": null,
+     "median": null,
+     "segments": 0
+    },
+    "method_version": "prv-nonlinear-1",
+    "neurokit2": "0.2.13",
+    "notes": "Secondary optical pulse-rate-variability research statistics on equal-length gap-free segments; not ECG HRV and not a measure of autonomic disease, fitness or exercise thresholds.",
+    "reasons": [
+     "insufficient_segments"
+    ],
+    "sample_entropy": {
+     "iqr": null,
+     "median": null,
+     "segments": 0
+    },
+    "secondary": true,
+    "segments_available": 88,
+    "segments_evaluated": 24,
+    "segments_rejected": 24,
+    "segments_used": 0,
+    "source": "prv_optical",
+    "status": "withheld"
+   },
    "respiratory_variability": {
     "algorithm_source": "SleepStager.respBreathTrack(rr)",
+    "config": {
+     "distribution_min_windows": 2,
+     "distribution_percentiles": [
+      5,
+      10,
+      25,
+      50,
+      75,
+      90,
+      95
+     ],
+     "stable_max_cv_interval": 0.25,
+     "stable_min_intervals": 20,
+     "stable_min_run_coverage": 0.8,
+     "stable_window_s": 300
+    },
     "cv_interval": 0.0,
     "estimate_source": "rsa_derived_rr",
+    "interval_distribution": {
+     "iqr_s": 0.0,
+     "median_s": 4.0,
+     "n_intervals": 6674,
+     "p05_s": 4.0,
+     "p10_s": 4.0,
+     "p25_s": 4.0,
+     "p75_s": 4.0,
+     "p90_s": 4.0,
+     "p95_s": 4.0,
+     "quantile_method": "linear_interpolation",
+     "reasons": [],
+     "source": "consecutive_intervals_within_usable_runs",
+     "status": "available",
+     "unit": "s",
+     "usable_windows": 89
+    },
     "intervals_valid": 6674,
+    "method_version": "resp-variability-2",
     "notes": "RSA-derived estimates; weak RSA, ectopics, medication or missing R-R can erase estimated breaths without airflow stopping; an unobserved breath is not an apnea; not measured ventilation/tidal volume/respiratory effort.",
     "outlier_fraction_vs_personal": {
      "fraction": null,
@@ -300,29 +375,84 @@
     "reasons": [],
     "rmssd_interval_s": 0.0,
     "sd_interval_s": 0.0,
+    "stable_modulation": {
+     "criteria": {
+      "max_cv_interval": 0.25,
+      "min_intervals": 20.0,
+      "min_run_coverage": 0.8,
+      "window_s": 300.0
+     },
+     "definition_version": "stable-resp-modulation-1",
+     "evaluated_minutes": 445.0,
+     "night_minutes": 480.0,
+     "reasons": [
+      "unknown_time_never_stable"
+     ],
+     "stable_fraction_of_evaluated": 1.0,
+     "stable_fraction_of_night": 0.9270833333333334,
+     "stable_minutes": 445.0,
+     "status": "available",
+     "unit": "min",
+     "unknown_minutes": 35.0,
+     "windows_evaluated": 89,
+     "windows_stable": 89,
+     "windows_total": 96
+    },
     "stage_conditioned": {
      "deep": {
       "cv_interval": 0.0,
+      "iqr_interval_s": 0.0,
+      "median_interval_s": 4.0,
       "rate_bpm": 15.0,
+      "rmssd_interval_s": 0.0,
+      "sd_interval_s": 0.0,
+      "true_intervals": 450,
       "windows": 6
      },
      "light": {
       "cv_interval": 0.0,
+      "iqr_interval_s": 0.0,
+      "median_interval_s": 4.0,
       "rate_bpm": 15.0,
+      "rmssd_interval_s": 0.0,
+      "sd_interval_s": 0.0,
+      "true_intervals": 5474,
       "windows": 73
      },
      "rem": {
       "cv_interval": 0.0,
+      "iqr_interval_s": 0.0,
+      "median_interval_s": 4.0,
       "rate_bpm": 15.0,
+      "rmssd_interval_s": 0.0,
+      "sd_interval_s": 0.0,
+      "true_intervals": 600,
       "windows": 8
      },
      "wake": {
       "cv_interval": 0.0,
+      "iqr_interval_s": 0.0,
+      "median_interval_s": 4.0,
       "rate_bpm": 15.0,
+      "rmssd_interval_s": 0.0,
+      "sd_interval_s": 0.0,
+      "true_intervals": 150,
       "windows": 2
      }
     },
     "status": "available",
+    "supported_range": {
+     "detector_band_bpm": [
+      6.0,
+      24.0
+     ],
+     "display_rate_range_bpm": [
+      8.0,
+      25.0
+     ],
+     "min_peak_spacing_s": 2.5,
+     "source": "SleepStager.respBreathTrack"
+    },
     "unobserved_breath_is_not_apnea": true,
     "valid_run_min": 444.98333333333335
    },
@@ -1795,20 +1925,59 @@
     "observed_skin_temp_rhythm": {
      "acrophase_h": null,
      "amplitude_c": null,
+     "config": {
+      "amplitude_floor_c": 0.05,
+      "amplitude_min_se_ratio": 2.0,
+      "daytime_local_hours": [
+       6,
+       18
+      ],
+      "drift_min_days": 5,
+      "hour_min_valid_minutes": 30,
+      "hr_amplitude_floor_bpm": 1.0,
+      "l5_hours": 5,
+      "m10_hours": 10,
+      "max_acrophase_se_h": 1.5,
+      "max_daily_phase_circular_sd_h": 3.0,
+      "min_clock_shift_h": 0.5,
+      "realignment_min_days_after": 1,
+      "realignment_min_days_before": 2,
+      "rest_activity_day_coverage": 0.8,
+      "rest_activity_min_days": 5,
+      "sleep_midpoint_min_nights": 5
+     },
+     "coverage": null,
      "daily_amplitude_c": null,
+     "days_evaluated": null,
      "fit_quality": null,
+     "history_revision_digest": null,
      "is": null,
      "iv": null,
+     "iv_definition": "consecutive_valid_hour_pairs_across_midnight",
      "mesor_c": null,
+     "method_version": "skin-temp-rhythm-1",
      "notes": [
       "acrophase is skin-temperature acrophase, not DLMO or core-temperature minimum",
-      "IS/IV use the spec's population-moment formulas; other packages may use sample-variance conventions and differ slightly at finite n."
+      "Wrist skin temperature also follows room temperature, bedding, clothing and activity; the observed rhythm describes the wrist channel only and implies no endogenous clock phase, melatonin timing or cause.",
+      "is / iv here are TEMPERATURE regularity on hourly skin-temperature bins (local clock hours for IS; consecutive valid UTC hours across midnight for IV), not rest-activity regularity.",
+      "Uncertainty is the larger of the OLS delta-method SE and a delete-one-day jackknife; hourly residuals are autocorrelated, so the OLS SE alone would be optimistic."
      ],
+     "phase_drift": null,
+     "phase_relations": null,
      "phase_stability_h": null,
+     "phase_status": {
+      "reasons": [
+       "multi_day_history_not_requested"
+      ],
+      "status": "unavailable"
+     },
+     "qualifying_days": null,
      "reasons": [
       "multi_day_history_not_requested"
      ],
-     "status": "withheld"
+     "regularity_name": "temperature_regularity",
+     "status": "withheld",
+     "uncertainty": null
     },
     "peak_latency_min": 440.0,
     "pre_wake_slope_c_min": 0.011999999999999863,
@@ -1833,6 +2002,58 @@
    "user_edited": false
   }
  ],
+ "rebound": {
+  "after_fragmented": {
+   "next_night_asleep_diff_min": {
+    "iqr": null,
+    "median": null,
+    "segments": 0
+   },
+   "next_night_awake_diff_min": {
+    "iqr": null,
+    "median": null,
+    "segments": 0
+   },
+   "pair_days": [],
+   "pairs": 0
+  },
+  "after_short": {
+   "next_night_asleep_diff_min": {
+    "iqr": null,
+    "median": null,
+    "segments": 0
+   },
+   "next_night_awake_diff_min": {
+    "iqr": null,
+    "median": null,
+    "segments": 0
+   },
+   "pair_days": [],
+   "pairs": 0
+  },
+  "definition_version": "sleep-rebound-1",
+  "descriptive_only": true,
+  "history_revision_digest": null,
+  "notes": "Descriptive next-night differences from your own usual night after short or fragmented nights in the history window. Not a cause, a prediction or a probability; nights are as the published snapshot measured them.",
+  "pairs_evaluated": 0,
+  "personal_reference": {
+   "days_evaluated": 9,
+   "median_asleep_min": null,
+   "median_awake_min": null,
+   "nights": 0
+  },
+  "reasons": [
+   "history_nights_not_in_request"
+  ],
+  "rules": {
+   "fragmented_above_reference_min": 30.0,
+   "min_pairs": 3.0,
+   "min_reference_nights": 7.0,
+   "short_below_reference_min": 60.0
+  },
+  "status": "withheld",
+  "unit": "min"
+ },
  "regularity": {
   "clock_profile": {
    "adjacent_night_phase_shift_min": {
@@ -1953,6 +2174,63 @@
    "value": null
   },
   "status": "partial"
+ },
+ "rest_activity_rhythm": {
+  "binarized": false,
+  "config": {
+   "amplitude_floor_c": 0.05,
+   "amplitude_min_se_ratio": 2.0,
+   "daytime_local_hours": [
+    6,
+    18
+   ],
+   "drift_min_days": 5,
+   "hour_min_valid_minutes": 30,
+   "hr_amplitude_floor_bpm": 1.0,
+   "l5_hours": 5,
+   "m10_hours": 10,
+   "max_acrophase_se_h": 1.5,
+   "max_daily_phase_circular_sd_h": 3.0,
+   "min_clock_shift_h": 0.5,
+   "realignment_min_days_after": 1,
+   "realignment_min_days_before": 2,
+   "rest_activity_day_coverage": 0.8,
+   "rest_activity_min_days": 5,
+   "sleep_midpoint_min_nights": 5
+  },
+  "count_threshold": null,
+  "days_used": 0,
+  "deferred": [
+   "lids",
+   "kra_kar",
+   "24h_align"
+  ],
+  "epoch_seconds": 3600,
+  "gate": ">= 5 days with movement supported in >= 80% of local hours (an hour needs >= 30 worn minutes with >= 30 one-second gravity adjacencies) and every 6-hour local quadrant observed",
+  "history_revision_digest": null,
+  "hours_used": 0,
+  "is": null,
+  "iv": null,
+  "iv_definition": "consecutive_valid_hour_pairs_across_midnight",
+  "iv_valid_pairs": 0,
+  "l5": null,
+  "l5_start_h": null,
+  "m10": null,
+  "m10_start_h": null,
+  "method_version": "rest-activity-1",
+  "movement_threshold_g": null,
+  "notes": [
+   "Signal: seconds per minute whose 1 Hz gravity vector changed by at least the threshold from the previous second (an orientation-change proxy that only sees motion surviving the strap's 1 Hz downsample). It is not an activity count: no count threshold and no binarisation are applied.",
+   "Hours without worn movement evidence stay missing; activity-decoder labels never fill observation gaps.",
+   "LIDS, kRA/kAR and 24hAlign are deferred."
+  ],
+  "ra": null,
+  "reasons": [
+   "multi_day_history_not_requested"
+  ],
+  "signal": "gravity_movement_seconds_per_minute",
+  "status": "withheld",
+  "unit": "s/min"
  },
  "schema_version": 1,
  "status": "available",
