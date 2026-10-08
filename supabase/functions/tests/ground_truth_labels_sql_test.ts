@@ -21,7 +21,9 @@ import {
 //     and 16 KiB of jsonb text;
 //  6. everything the TypeScript validator accepts is storable (the CHECK constraints never reject it);
 //  7. 20261007090001_activity_stretch_feedback_corrections.sql replaces the unnamed inline
-//     corrected_label check with a named one that accepts the extended vocabulary.
+//     corrected_label check with a named one that accepts the extended vocabulary;
+//  8. 20261008100500_activity_ground_truth_confirmation_source.sql adds source='confirmation' (short,
+//     posture-only, no transition), everything the validator accepts for it is storable, and it re-applies.
 
 const OWN_DEVICE = '33333333-3333-4333-8333-333333333333';
 const OTHER_DEVICE = '44444444-4444-4444-8444-444444444444';
@@ -591,6 +593,45 @@ Deno.test('ground truth labels: schema, privileges, RLS, the last-writer-wins up
       await assert.rejects(() => insert(6, 'nonsense'), /violates check constraint/);
       assert.equal(await countStretch(`stretch_key like 'activity_context:400000000%'`), 5);
       await db.sql(`delete from public.activity_stretch_feedback where stretch_key like 'activity_context:400000000%'`);
+    });
+
+    await t.step('20261008100500: confirmation answers are stored; the CHECKs refuse what the validator refuses', async () => {
+      const confirmation = (key: string, over: Record<string, unknown> = {}) => {
+        const result = validateGroundTruthLabelItem({
+          id: CLIENT_ID, label_key: key, source: 'confirmation', start_ts: T0, end_ts: T0 + 60,
+          posture: 'seated_likely', label_confidence: 1, client_updated_at: '2026-10-07T16:05:00Z', ...over,
+        });
+        assert.ok(result.ok, `${key} must validate: ${JSON.stringify((result as any).rejection)}`);
+        return { ...result.item, device_id: null };
+      };
+      // Before the migration the old source CHECK refuses it.
+      await assert.rejects(() => upsert(USER_A, [confirmation('confirmation:prompt:5000000000')]));
+      await apply('20261008100500_activity_ground_truth_confirmation_source.sql');
+      const result: any = await upsert(USER_A, [
+        confirmation('confirmation:prompt:5000000001'),
+        confirmation('confirmation:prompt:5000000002', { posture: 'upright_stationary' }),
+        confirmation('confirmation:prompt:5000000003', { posture: 'unknown', end_ts: T0 + 120 }),
+      ]);
+      assert.equal(result.saved.length, 3);
+      const bad = (over: Record<string, unknown>) =>
+        upsert(USER_A, [{ ...confirmation('confirmation:prompt:5000000009'), ...over }]);
+      for (const over of [{ end_ts: T0 + 121 }, { posture: null }, { posture: 'recumbent' },
+        { transition_kind: 'sit_to_stand' }, { transition_ts: T0 + 30 }, { source: 'sleep' }]) {
+        await assert.rejects(() => bad(over), /check constraint/, JSON.stringify(over));
+      }
+      assert.equal(await count(`source = 'confirmation'`), 3);
+      // Other sources keep their rules: long, transition-bearing guided labels still store.
+      const guided: any = await upsert(USER_A, [entry({ label_key: 'guided:a:5100000001' })]);
+      assert.equal(guided.saved.length, 1);
+      // Idempotent: re-applying keeps the rows and the rules.
+      await apply('20261008100500_activity_ground_truth_confirmation_source.sql');
+      assert.equal(await count(`source = 'confirmation'`), 3);
+      await assert.rejects(() => bad({ end_ts: T0 + 121 }), /check constraint/);
+      const checks = await db.sql(`select conname from pg_constraint
+        where conrelid='public.activity_ground_truth_labels'::regclass and contype='c'
+          and pg_get_constraintdef(oid) like '%source%' order by conname`);
+      assert.equal(checks.trim().split('\n').join(','),
+        'activity_ground_truth_labels_confirmation_shape,activity_ground_truth_labels_source_check');
     });
   } finally {
     await db.close();

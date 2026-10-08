@@ -5,7 +5,12 @@ import type { SupabaseRest } from './rest.ts';
 /**
  * Validation, normalisation and submission for `POST /scores/ground-truth-labels`: what a person
  * actually did over an interval, captured during guided calibration (`source='guided'`), from a
- * stretch-feedback correction (`source='stretch_feedback'`) or imported (`source='imported'`).
+ * stretch-feedback correction (`source='stretch_feedback'`), imported (`source='imported'`) or an
+ * in-the-moment "Right now: sitting / standing / neither?" answer (`source='confirmation'`).
+ *
+ * A confirmation carries only the posture head: `seated_likely` (sitting), `upright_stationary`
+ * (standing) or `unknown` (neither: a certain negative for both, not an abstain), with no transition
+ * and an interval of at most 120 s (20261008100500_activity_ground_truth_confirmation_source.sql).
  *
  * Pure for the validation half: no I/O. The envelope is all-or-nothing (a malformed envelope throws
  * a 400); every item is judged on its own, so one bad item comes back in `rejected` with a short
@@ -26,7 +31,11 @@ export const GROUND_TRUTH_LABELS_MAX_JSON_DEPTH = 32;
 export const GROUND_TRUTH_LABELS_MIN_START_TS = 946_684_800;
 export const GROUND_TRUTH_LABELS_MAX_SPAN_SECONDS = 86_400;
 
-export const GROUND_TRUTH_SOURCES = ['guided', 'stretch_feedback', 'imported'] as const;
+export const GROUND_TRUTH_SOURCES = ['guided', 'stretch_feedback', 'imported', 'confirmation'] as const;
+/** Longest interval a `confirmation` answer may cover. */
+export const GROUND_TRUTH_CONFIRMATION_MAX_SPAN_SECONDS = 120;
+/** The posture answers a `confirmation` may carry: sitting, standing, neither. */
+export const GROUND_TRUTH_CONFIRMATION_POSTURES = ['seated_likely', 'upright_stationary', 'unknown'] as const;
 export const GROUND_TRUTH_POSTURES = [
   'recumbent', 'seated_likely', 'upright_stationary', 'postural_transition', 'unknown',
 ] as const;
@@ -272,6 +281,14 @@ export function validateGroundTruthLabelItem(raw: unknown):
   }
   const semanticTag = optionalOneOf(raw.semantic_tag, GROUND_TRUTH_SEMANTIC_TAGS);
   if (!semanticTag.ok) return reject('invalid_semantic_tag');
+  if (source.value === 'confirmation') {
+    if (end.value - start.value > GROUND_TRUTH_CONFIRMATION_MAX_SPAN_SECONDS) return reject('invalid_confirmation_span');
+    if (posture.value === null
+        || !(GROUND_TRUTH_CONFIRMATION_POSTURES as readonly string[]).includes(posture.value)) {
+      return reject('invalid_confirmation_posture');
+    }
+    if (transitionKind.value !== null || transitionTs !== null) return reject('invalid_confirmation_transition');
+  }
 
   let confidence: number | null = null;
   if (raw.label_confidence !== undefined && raw.label_confidence !== null) {
