@@ -394,6 +394,10 @@ struct LaneSnapshot {
     var lastActivityAt: Date?
     /// True when the lane could not reach the database on its last cycle.
     var dbBlocked = false
+    /// What the lane has actually loaded or is talking to (model and artifact digests, a child's
+    /// reported versions), as measured by the lane rather than claimed by configuration. Empty
+    /// until the lane has something to report. See docs/model-integration/README.md.
+    var identity: [String: String] = [:]
 }
 
 final class LaneState {
@@ -1157,6 +1161,7 @@ func heartbeat(final: Bool = false) {
         if let at = lane.lastActivityAt {
             entry["last_activity_at"] = ISO8601DateFormatter().string(from: at)
         }
+        if !lane.identity.isEmpty { entry["identity"] = lane.identity }
         return entry
     }
     let firstLaneError = lanes.compactMap { $0.lastError }.first

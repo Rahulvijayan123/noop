@@ -37,6 +37,7 @@ from .artifacts import (
     default_manifest_path,
     load_manifest,
     manifest_summary,
+    pin_model_root,
     verify_manifest,
 )
 from .contract import (
@@ -58,6 +59,7 @@ from .features import ALGORITHM_VERSION as FEATURES_ALGORITHM_VERSION
 from .features.compute import compute as features_compute
 from .features.contract import MAX_BODY_BYTES as FEATURES_MAX_BODY_BYTES
 from .features.contract import parse_request as features_parse_request
+from .identity import runtime_identity
 from .providers import Provider, ProviderRegistry, default_providers
 
 LOOPBACK_HOSTS = ("127.0.0.1", "::1", "localhost")
@@ -206,6 +208,7 @@ class Application:
                 "failed_checks": [c.to_wire() for c in self.manifest.checks if c.failed],
             },
             "providers": {pid: state.to_wire() for pid, state in self.provider_states.items()},
+            "identity": runtime_identity(self),
             "counters": {
                 "inference": self.inference_count,
                 "withheld": self.withheld_count,
@@ -231,6 +234,7 @@ class Application:
             "providers": out,
             "models": manifest_summary(self.manifest),
             "artifact_checks": [c.to_wire() for c in self.manifest.checks],
+            "identity": runtime_identity(self),
         }
 
 
@@ -744,6 +748,10 @@ def build_arg_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
+    # Pin the artifact root before anything reads it (the parser defaults and the optional
+    # providers both read FRWHOOP_MODEL_ROOT/FRWHOOP_MANIFEST), so a model-root switch takes
+    # effect only on restart.
+    pin_model_root(os.environ)
     args = build_arg_parser().parse_args(argv)
     if not is_loopback_host(args.host) and not args.allow_non_loopback:
         sys.stderr.write(

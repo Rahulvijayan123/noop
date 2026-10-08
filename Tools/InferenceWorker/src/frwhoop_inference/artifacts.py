@@ -245,6 +245,52 @@ def manifest_summary(state: ManifestState) -> list[dict[str, Any]]:
     return out
 
 
+@dataclass(frozen=True)
+class PinnedModelRoot:
+    """The artifact root a process uses for its whole lifetime.
+
+    ``configured`` is what the operator set (normally ``/opt/frwhoop-models/current``, a symlink);
+    ``resolved`` is where it pointed when the process started. A later switch of the symlink takes
+    effect only on restart, so the bytes a provider loads are the bytes verified at startup.
+    """
+
+    configured_root: str
+    resolved_root: str
+    configured_manifest: str
+    resolved_manifest: str
+    #: ``revisions/<id>`` directory name when the resolved root is a staged revision, else None.
+    revision: str | None
+
+
+def pin_model_root(environ: "os._Environ[str] | dict[str, str]") -> PinnedModelRoot:
+    """Resolve ``FRWHOOP_MODEL_ROOT``/``FRWHOOP_MANIFEST`` once and write the resolved paths back.
+
+    Called by the sidecar entrypoint before any provider is constructed: the optional providers
+    read these variables themselves, so pinning them here keeps every provider on one revision.
+    """
+    configured_root = environ.get("FRWHOOP_MODEL_ROOT") or DEFAULT_MODEL_ROOT
+    configured_manifest = environ.get("FRWHOOP_MANIFEST") or default_manifest_path()
+    resolved_root = os.path.realpath(configured_root)
+    resolved_manifest = os.path.realpath(configured_manifest)
+    revision = None
+    if os.path.basename(os.path.dirname(resolved_root)) == "revisions":
+        revision = os.path.basename(resolved_root)
+    environ["FRWHOOP_MODEL_ROOT"] = resolved_root
+    environ["FRWHOOP_MANIFEST"] = resolved_manifest
+    global _PINNED
+    _PINNED = PinnedModelRoot(configured_root, resolved_root, configured_manifest, resolved_manifest,
+                              revision)
+    return _PINNED
+
+
+_PINNED: PinnedModelRoot | None = None
+
+
+def pinned_model_root() -> PinnedModelRoot | None:
+    """What ``pin_model_root`` recorded for this process (None when it never ran, as in tests)."""
+    return _PINNED
+
+
 def default_manifest_path(package_root: str | None = None) -> str:
     """``<repo>/Tools/InferenceWorker/models/manifest.json`` from the package path."""
     here = package_root or os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
