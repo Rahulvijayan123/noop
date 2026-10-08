@@ -27,7 +27,6 @@ final class ActivityContextCoordinator {
     private let timeZone: () -> TimeZone
     private let horizonDays: Int
     private let smooth: Smoother
-    private let smoothedEmpty: RetrospectiveEmptyMarks
 
     /// The retrospective smoother (D8-10): `ActivityContextPersistence.retrospectiveIntervals` in production;
     /// injectable so a test can drive a final day whose smoothing yields nothing.
@@ -70,8 +69,7 @@ final class ActivityContextCoordinator {
          remind: @escaping (_ loops: UInt8, _ windowMinutes: Int) -> Void,
          log: @escaping (String) -> Void,
          timeZone: @escaping () -> TimeZone = { .current },
-         smooth: @escaping Smoother = ActivityContextCoordinator.defaultSmoother,
-         retrospectiveMarks: UserDefaults = .standard) {
+         smooth: @escaping Smoother = ActivityContextCoordinator.defaultSmoother) {
         self.repo = repo
         self.horizonDays = horizonDays
         self.isWorn = isWorn
@@ -79,7 +77,6 @@ final class ActivityContextCoordinator {
         self.log = log
         self.timeZone = timeZone
         self.smooth = smooth
-        self.smoothedEmpty = RetrospectiveEmptyMarks(defaults: retrospectiveMarks)
     }
 
     // MARK: - Stand reminder
@@ -206,15 +203,11 @@ final class ActivityContextCoordinator {
             }
             // Rule 7 is on: `materialize` writes retrospective rows for every final day it derives, so a final
             // day without this smoother's rows is derived once more (and, once it has them, never re-planned).
-            // A final day whose smoothing at this version, from this input, already came out empty is done: the store
-            // cannot record an empty result (`replaceActivityContext` sets the ledger's version to nil without
-            // rows), so the phone remembers it instead and rule 7 is off for that day.
-            let ledger = ledgers[owner.deviceId]?[day.start]
-            let smoothedToNothing = ledger.map { smoothedEmpty.covers($0, deviceId: owner.deviceId) } ?? false
-            candidates.append(.init(day: day, ledger: ledger,
+            // A final day smoothed to nothing records the version too ("smoothed, empty"), so it is not re-planned.
+            candidates.append(.init(day: day, ledger: ledgers[owner.deviceId]?[day.start],
                                     newestHeartRateTs: owner.newestHeartRateTs, lastCheck: checks[day.start],
                                     inputFingerprint: fingerprints[day.start], configTag: configTag,
-                                    retrospectiveVersion: smoothedToNothing ? nil : ActivityContextRetrospective.version))
+                                    retrospectiveVersion: ActivityContextRetrospective.version))
         }
 
         // A day that still has stored context but no heart rate under any id (samples moved out, a device's data
@@ -290,7 +283,6 @@ final class ActivityContextCoordinator {
             let settled = ledger.isFinal ? ActivityContextDayRow.final : finality
             let needsRetrospective = settled == ActivityContextDayRow.final
                 && ledger.retrospectiveVersion != ActivityContextRetrospective.version
-                && !smoothedEmpty.covers(ledger, deviceId: owner.deviceId)
             if !needsRetrospective {
                 if ledger.finality != settled {
                     _ = try? await store.updateActivityContextDayStatus(deviceId: owner.deviceId, dayStart: ledger.dayStart,
@@ -357,8 +349,11 @@ final class ActivityContextCoordinator {
                                                     computedAt: document.generatedAt, dayEnd: day.end,
                                                     configTag: configTag, inputFingerprint: inputFingerprint,
                                                     writtenAt: startedAt,
-                                                    retrospectiveVersion: retrospective.isEmpty
-                                                        ? nil : ActivityContextRetrospective.version)
+                                                    // On a final day the smoother's result is recorded even when it is
+                                                    // empty ("smoothed, nothing to store"); the store keeps no version
+                                                    // for a day that is not final.
+                                                    retrospectiveVersion: finality == ActivityContextDayRow.final
+                                                        ? ActivityContextRetrospective.version : nil)
         // The decoder's typed events (a 10 s stand the interval builder folds into sitting still leaves one),
         // written with the intervals they belong to.
         let transitions = ActivityContextPersistence.transitionRows(document.events, from: day.start, to: day.end,
@@ -383,14 +378,8 @@ final class ActivityContextCoordinator {
                                                        clearingOtherIds: ids)
             }
             failures[day.start] = nil
-            // A final day smoothed to nothing is a result too: remember it (the ledger cannot), so a relaunch does not
-            // decode the day again only to smooth it to nothing again. A refused write is not remembered: that day is
-            // tried again at most once per launch (rule 7 stops once this process has looked at it after it settled).
-            if row.isFinal && smoothedRows.isEmpty {
-                smoothedEmpty.mark(deviceId: owner.deviceId, dayStart: day.start, inputFingerprint: inputFingerprint)
-            } else {
-                smoothedEmpty.clear(deviceId: owner.deviceId, dayStart: day.start)
-            }
+            // A refused smoother write leaves the version nil: that day is tried again at most once per launch (rule 7
+            // stops once this process has looked at it after it settled).
             if !smoothedRows.isEmpty {
                 log("Activity context: \(smoothedRows.count) retrospective intervals (\(ActivityContextRetrospective.version)) for \(day.key)")
             }
@@ -413,35 +402,5 @@ final class ActivityContextCoordinator {
                                                   dayEnd: Date(timeIntervalSince1970: TimeInterval(day.end))),
               let document = await repo.activityContext(from: streams, lane: .background) else { return nil }
         return LoadedDay(streams: streams, document: document)
-    }
-}
-
-/// Final days whose retrospective smoothing came out empty, per device, day, input fingerprint and smoother version
-/// (D8-10). The store's ledger can only name a smoother version when it holds that smoother's rows, so an empty
-/// result is kept here; without it rule 7 would re-decode such a day on every launch. A different input or smoother
-/// version no longer matches, and the day is smoothed again.
-struct RetrospectiveEmptyMarks {
-    let defaults: UserDefaults
-    static let prefix = "activityContext.retrospectiveEmpty."
-
-    private static func key(_ deviceId: String, _ dayStart: Int) -> String { "\(prefix)\(deviceId).\(dayStart)" }
-    private static func value(_ inputFingerprint: String?) -> String {
-        "\(ActivityContextRetrospective.version)|\(inputFingerprint ?? "")"
-    }
-
-    /// True when `ledger` is final, holds no smoother rows, and was smoothed to nothing from the same input by the
-    /// current smoother.
-    func covers(_ ledger: ActivityContextDayRow, deviceId: String) -> Bool {
-        guard ledger.isFinal, ledger.retrospectiveVersion == nil,
-              let stored = defaults.string(forKey: Self.key(deviceId, ledger.dayStart)) else { return false }
-        return stored == Self.value(ledger.inputFingerprint)
-    }
-
-    func mark(deviceId: String, dayStart: Int, inputFingerprint: String?) {
-        defaults.set(Self.value(inputFingerprint), forKey: Self.key(deviceId, dayStart))
-    }
-
-    func clear(deviceId: String, dayStart: Int) {
-        defaults.removeObject(forKey: Self.key(deviceId, dayStart))
     }
 }

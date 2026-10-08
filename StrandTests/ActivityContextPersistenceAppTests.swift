@@ -185,9 +185,6 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         let (repo, store, id) = try await fixture()
         let day = oldDay
         _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
-        let suite = "acx-retro-empty-\(UUID().uuidString)"
-        let marks = try XCTUnwrap(UserDefaults(suiteName: suite))
-        addTeardownBlock { UserDefaults(suiteName: suite)?.removePersistentDomain(forName: suite) }
         final class Calls: @unchecked Sendable {
             private let lock = NSLock()
             private var n = 0
@@ -201,7 +198,7 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         }
         func run(_ logs: @escaping (String) -> Void = { _ in }) async {
             await ActivityContextCoordinator(repo: repo, horizonDays: 5, isWorn: { true }, remind: { _, _ in },
-                                             log: logs, smooth: nothing, retrospectiveMarks: marks)
+                                             log: logs, smooth: nothing)
                 .drainMaterialization(pauseNs: 0)
         }
 
@@ -209,7 +206,8 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         let firstRow = try await store.activityContextDay(deviceId: id, day: day.key)
         let first = try XCTUnwrap(firstRow)
         XCTAssertEqual(first.finality, "final")
-        XCTAssertNil(first.retrospectiveVersion, "the store names no smoother without rows")
+        XCTAssertEqual(first.retrospectiveVersion, ActivityContextRetrospective.version,
+                       "an empty smoothing result is recorded in the ledger: smoothed, nothing to store")
         let smoothed = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end,
                                                                 reading: .retrospective)
         XCTAssertTrue(smoothed.isEmpty)
