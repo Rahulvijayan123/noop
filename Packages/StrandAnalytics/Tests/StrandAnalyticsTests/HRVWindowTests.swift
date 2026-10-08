@@ -288,7 +288,7 @@ final class HRVWindowTests: XCTestCase {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                       gravity: still(t0, 300),
-                                                      activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      activity: awakeSitting(t0 - 1_800, t0 + 600),
                                                       transitionEvents: []).first)
         XCTAssertNil(w.secondsSinceTransition)
         XCTAssertTrue(w.transitionEventsAvailable)
@@ -314,7 +314,16 @@ final class HRVWindowTests: XCTestCase {
                                                            rr: rr, gravity: still(t0, 300), activity: lookup,
                                                            transitionEvents: [], eventsCoverFrom: t0 - 300).first)
         XCTAssertEqual(vouched.phase, .steadyState)
-        XCTAssertTrue(vouched.eligibleForBaseline)
+        // ...but not for activity: the lookup shows nothing before the window, so a run just before it (a
+        // 1800 s wake) cannot be ruled out. With 30 min of lookup history behind the window it is eligible.
+        XCTAssertEqual(vouched.locomotionHistoryS, 0)
+        XCTAssertEqual(vouched.ineligibleReason, .unknownLocomotionHistory)
+        let longer = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300,
+                                                          rr: rr, gravity: still(t0, 300),
+                                                          activity: awakeSitting(t0 - 1_800, t0 + 600),
+                                                          transitionEvents: []).first)
+        XCTAssertEqual(longer.locomotionHistoryS, 1_800)
+        XCTAssertTrue(longer.eligibleForBaseline)
     }
 
     func testNoEventDataIsUnknownPhaseNotSteadyState() throws {
@@ -356,7 +365,8 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertFalse(w2.eligibleForBaseline)
 
         // Explicitly awake over exactly half the window is known awake (same boundary as wear).
-        let halfAwake = ActivityContextLookup(intervals: [interval(t0, t0 + 150, .sitting, sleep: .awake),
+        let halfAwake = ActivityContextLookup(intervals: [interval(t0 - 1_800, t0, .sitting, sleep: .awake),
+                                                          interval(t0, t0 + 150, .sitting, sleep: .awake),
                                                           interval(t0 + 150, t0 + 300, .sitting, sleep: .unknown)])
         let w3 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                        gravity: still(t0, 300), activity: halfAwake,
@@ -466,7 +476,7 @@ final class HRVWindowTests: XCTestCase {
 
     func testWindowInsideSleepIsEligibleOnlyForTheAsleepRegime() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
-        let night = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .sleeping, sleep: .asleep)])
+        let night = ActivityContextLookup(intervals: [interval(t0 - 1_800, t0 + 600, .sleeping, sleep: .asleep)])
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                       gravity: still(t0, 300), activity: night,
                                                       transitionEvents: []).first)
@@ -479,7 +489,7 @@ final class HRVWindowTests: XCTestCase {
 
     func testAwakeInBedIsItsOwnRegime() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
-        var lyingInBed = interval(t0 - 600, t0 + 600, .lyingDown, sleep: .awake)
+        var lyingInBed = interval(t0 - 1_800, t0 + 600, .lyingDown, sleep: .awake)
         lyingInBed.inBed = true
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                       gravity: still(t0, 300),
@@ -511,13 +521,94 @@ final class HRVWindowTests: XCTestCase {
         }
     }
 
+    func testWindowThatWakesUpPartWayIsMixedNotAsleep() throws {
+        // Review fix: one asleep second used to make the whole window `.asleep`. Asleep over [t0-600, t0+30),
+        // then awake lying in bed over [t0+30, t0+900) with no change of position (waking up still lying
+        // down): the window is 90% awake and belongs to no regime's population.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        var awakeInBed = interval(t0 + 30, t0 + 900, .lyingDown, sleep: .awake)
+        awakeInBed.inBed = true
+        let lookup = ActivityContextLookup(intervals: [interval(t0 - 2_400, t0 + 30, .sleeping, sleep: .asleep),
+                                                       awakeInBed])
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: lookup,
+                                                      transitionEvents: []).first)
+        XCTAssertNil(w.asleep, "mixed asleep/awake is not known asleep")
+        XCTAssertNotEqual(w.regime, .asleep)
+        XCTAssertEqual(w.regime, .unknown)
+        for regime in HRVWindowRegime.allCases {
+            XCTAssertNotNil(HRVWindowBuilder.ineligibility(w, regime: regime), "\(regime)")
+        }
+        // Asleep over 90% of it (270 of 300 s) is still the asleep regime.
+        let mostly = ActivityContextLookup(intervals: [interval(t0 - 2_400, t0 + 270, .sleeping, sleep: .asleep),
+                                                       interval(t0 + 270, t0 + 900, .lyingDown, sleep: .awake)])
+        let m = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: mostly,
+                                                      transitionEvents: []).first)
+        XCTAssertEqual(m.regime, .asleep)
+        XCTAssertNil(HRVWindowBuilder.ineligibility(m, regime: .asleep))
+    }
+
+    // MARK: Coverage breaks inside the lookup (review fix)
+
+    func testAGapInTheMiddleOfTheDayRestartsTheEventCoverage() throws {
+        // Sitting over [t0-3600, t0-1200), nothing decoded until t0-60 (the strap was charging, or the offload
+        // lost the span), sitting again from t0-60. No event is known, but a transition in the gap was never
+        // looked for: the first window after it is unknown, not steady.
+        let rr = beats(constantMs: 800, from: t0, seconds: 900)
+        let lookup = ActivityContextLookup(intervals: [interval(t0 - 3_600, t0 - 1_200, .sitting),
+                                                       interval(t0 - 60, t0 + 900, .sitting)])
+        let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 900, rr: rr,
+                                             gravity: still(t0, 900), activity: lookup, transitionEvents: [])
+        XCTAssertEqual(windows.count, 3)
+        XCTAssertEqual(windows[0].phase, .unknown, "60 s of coverage behind it")
+        XCTAssertFalse(windows[0].eligibleForBaseline)
+        XCTAssertEqual(windows[0].ineligibleReason, .notSteadyState)
+        XCTAssertEqual(windows[1].phase, .steadyState, "360 s of coverage: past the 300 s HRV recovery")
+        XCTAssertTrue(windows[1].eligibleForBaseline, "a 1140 s gap cannot hide a 30-min bout")
+        // A gap of a few seconds (a dropped packet) does not break coverage.
+        let blip = ActivityContextLookup(intervals: [interval(t0 - 3_600, t0 - 65, .sitting),
+                                                     interval(t0 - 60, t0 + 900, .sitting)])
+        let b = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: blip,
+                                                      transitionEvents: []).first)
+        XCTAssertTrue(b.eligibleForBaseline)
+        // An explicit eventsCoverFrom does not paper over a break inside the lookup.
+        let vouched = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300,
+                                                           rr: rr, gravity: still(t0, 300), activity: lookup,
+                                                           transitionEvents: [], eventsCoverFrom: t0 - 3_600).first)
+        XCTAssertEqual(vouched.phase, .unknown)
+    }
+
+    func testAnOffWristStretchLongEnoughToHideARunLeavesTheHistoryUnknown() throws {
+        // Off the wrist for 40 min (a run done without the strap shows as exactly this), then sitting: no
+        // locomotion shows, but a long bout's 1800 s wake cannot be ruled out until 30 min after re-wear.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        func window(rewornAt: Int) throws -> HRVWindow {
+            let lookup = ActivityContextLookup(intervals: [
+                interval(t0 - 9_000, rewornAt - 2_400, .sitting),
+                interval(rewornAt - 2_400, rewornAt, .offWrist, wear: .offWrist),
+                interval(rewornAt, t0 + 600, .sitting)])
+            return try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                         gravity: still(t0, 300), activity: lookup,
+                                                         transitionEvents: []).first)
+        }
+        let soon = try window(rewornAt: t0 - 900)
+        XCTAssertEqual(soon.phase, .steadyState, "900 s since re-wear: past the postural recovery")
+        XCTAssertEqual(soon.locomotionHistoryS, 900)
+        XCTAssertEqual(soon.ineligibleReason, .unknownLocomotionHistory)
+        let later = try window(rewornAt: t0 - 1_800)
+        XCTAssertEqual(later.locomotionHistoryS, 1_800)
+        XCTAssertTrue(later.eligibleForBaseline)
+    }
+
     // MARK: Motion fails closed (D9-04)
 
     func testMissingMotionFailsClosedWithAnExplicitReason() throws {
         // Clean R-R, awake, on-wrist, settled, but no gravity row reached the window (the phone's gravity
         // offload lags HR/RR): stillness was never shown, so the window is not a resting observation.
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
-        let lookup = awakeSitting(t0 - 600, t0 + 600)
+        let lookup = awakeSitting(t0 - 1_800, t0 + 600)
         let blind = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
                                                           activity: lookup, transitionEvents: []).first)
         XCTAssertNil(blind.motionRmsG)

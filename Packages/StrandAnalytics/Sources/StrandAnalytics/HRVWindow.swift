@@ -77,13 +77,15 @@ public struct HRVSignalQuality: Equatable, Sendable {
 /// materially different populations (overnight RMSSD typically runs well above daytime RMSSD), so a
 /// baseline must never mix them, and a window whose regime is not known belongs to none of them (D9-04).
 public enum HRVWindowRegime: String, Equatable, Sendable, CaseIterable {
-    /// Any part of the window was explicitly asleep.
+    /// Explicitly asleep over (nearly) the whole window: `HRVWindowBuilder.Config.minRegimeCoverage` of it.
     case asleep
     /// Known awake, but in bed (inside a detected night's in-bed window or a sleep session).
     case inBedAwake = "in_bed_awake"
     /// Known awake, out of bed.
     case awake
-    /// Sleep state not known over the window (no lookup, `sleep == .unknown` stretches, mostly uncovered).
+    /// Sleep state not known over the window (no lookup, `sleep == .unknown` stretches, mostly uncovered), or
+    /// MIXED: part asleep and part not, such as the minutes of waking up still lying down. A mixed window
+    /// belongs to no regime's population.
     case unknown
 }
 
@@ -102,6 +104,10 @@ public enum HRVWindowIneligibility: String, Equatable, Sendable, CaseIterable {
     case wearNotOnWrist = "wear_not_on_wrist"
     case tooSoonAfterLocomotion = "too_soon_after_locomotion"
     case tooSoonAfterExercise = "too_soon_after_exercise"
+    /// No locomotion shows in the lookup behind the window, but the lookup's history there is shorter than a
+    /// long bout's recovery: the lookup starts, or a gap / off-wrist stretch long enough to hide a long bout
+    /// ends, too close before the window to rule one out (see `HRVWindow.locomotionHistoryS`).
+    case unknownLocomotionHistory = "unknown_locomotion_history"
     case artifacts
     case untrustworthySignal = "untrustworthy_signal"
     case offWristLabel = "off_wrist_label"
@@ -191,10 +197,11 @@ public struct HRVWindow: Equatable, Sendable {
     public var transitionEventsAvailable: Bool
     /// Where this window sits relative to the nearest known transition, measured from its start.
     public var phase: ActivityPhysiologyPhase
-    /// `true` when any part of the window was explicitly asleep (decoder sleep state or a `sleeping`
-    /// stretch); `false` only when explicitly AWAKE stretches cover at least half of it (the same
-    /// coverage rule as `wear`); nil otherwise, i.e. sleep unknown (no lookup, `sleep == .unknown`
-    /// stretches such as the live day's, or mostly uncovered seconds).
+    /// `true` when explicitly asleep stretches (decoder sleep state or a `sleeping` stretch) cover at least
+    /// `Config.minRegimeCoverage` of the window; `false` only when NO part of it was asleep and explicitly
+    /// AWAKE stretches cover at least half of it (the same coverage rule as `wear`); nil otherwise, i.e. sleep
+    /// unknown (no lookup, `sleep == .unknown` stretches such as the live day's, mostly uncovered seconds) or
+    /// mixed (some asleep seconds, but not nearly all of them).
     public var asleep: Bool?
     /// Wear over the window from the activity lookup: `.offWrist` if any stretch was off-wrist,
     /// `.onWrist` if on-wrist stretches cover at least half of it, otherwise `.unknown`; nil without a
@@ -219,6 +226,13 @@ public struct HRVWindow: Equatable, Sendable {
     public var precedingLocomotionBoutS: Int?
     /// Whether that bout included running.
     public var precedingLocomotionRunning: Bool
+    /// Seconds of activity-lookup history behind the window start since the last break that could hide a
+    /// long locomotion bout: the lookup's first stretch, or the end of a gap / off-wrist stretch of
+    /// `recovery.longBoutS` or more (a run done with the strap off shows as exactly that). When no locomotion
+    /// shows in that history and it is shorter than `recovery.longBoutRecoveryS`, a long bout's wake cannot be
+    /// ruled out and the window is not a resting observation. nil without a lookup (and on hand-built windows
+    /// that do not state it, which this gate then does not check).
+    public var locomotionHistoryS: Int?
     /// The first gate the window failed for the resting awake baseline, nil when it is eligible (or for a
     /// hand-built window nobody evaluated). `eligibleForBaseline == (ineligibleReason == nil)` for windows
     /// from `HRVWindowBuilder.build`.
@@ -227,7 +241,8 @@ public struct HRVWindow: Equatable, Sendable {
     /// Whether this window should be folded into the resting AWAKE physiological baseline. False whenever
     /// `rmssd` is nil, whenever `phase != .steadyState` (a transition, recovery or unknown-phase window
     /// is real physiology but not resting physiology), whenever its regime is not known `.awake` or its
-    /// wear is not known on-wrist, whenever it is too soon after locomotion/exercise, whenever no motion
+    /// wear is not known on-wrist, whenever it is too soon after locomotion/exercise (or the lookup's history
+    /// is too short to rule a long bout out), whenever no motion
     /// reading shows the wrist was still, and whenever motion/wear data say it was not. See
     /// `HRVWindowBuilder.ineligibility` (and `ineligibleReason` for which gate failed).
     public var eligibleForBaseline: Bool
@@ -243,7 +258,7 @@ public struct HRVWindow: Equatable, Sendable {
                transitionsInWindow: Int = 0, transitionEventsAvailable: Bool = false,
                asleep: Bool? = nil, wear: WearContextState? = nil, inBed: Bool? = nil,
                precedingLocomotionBoutS: Int? = nil, precedingLocomotionRunning: Bool = false,
-               ineligibleReason: HRVWindowIneligibility? = nil) {
+               locomotionHistoryS: Int? = nil, ineligibleReason: HRVWindowIneligibility? = nil) {
         self.kind = kind; self.start = start; self.end = end
         self.rmssd = rmssd; self.sdnn = sdnn; self.meanNN = meanNN; self.medianNN = medianNN
         self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount; self.nnM2 = nnM2
@@ -265,6 +280,7 @@ public struct HRVWindow: Equatable, Sendable {
         self.inBed = inBed
         self.precedingLocomotionBoutS = precedingLocomotionBoutS
         self.precedingLocomotionRunning = precedingLocomotionRunning
+        self.locomotionHistoryS = locomotionHistoryS
         self.ineligibleReason = ineligibleReason
     }
 }
@@ -307,6 +323,14 @@ public enum HRVWindowBuilder {
         /// onset (≈2-7 s). An event flagged up to this long after a window's end is treated as having
         /// started inside it.
         public var eventDetectionLagS = 7
+        /// Share of a window explicitly asleep stretches must cover for it to be the `.asleep` regime. A window
+        /// with fewer asleep seconds than this but some is mixed (`asleep == nil`, regime `.unknown`).
+        public var minRegimeCoverage = 0.9
+        /// Two lookup stretches further apart than this break the lookup's coverage: the seconds between them
+        /// had no decoded state, so a transition in them was never looked for. A window whose start is less than
+        /// `recovery.requiredLookbackS` after such a break, with no event behind it, reads phase `.unknown`.
+        /// Off-wrist stretches break coverage the same way.
+        public var coverageGapToleranceS = 10
         public init() {}
     }
 
@@ -346,7 +370,9 @@ public enum HRVWindowBuilder {
     ///     than `config.recovery.requiredLookbackS` after it, with no event behind it, reads phase
     ///     `.unknown` rather than steady (a transition just before the data began cannot be ruled out).
     ///     nil: the start of the activity lookup (the decoder that produced the lookup produced the events),
-    ///     else `dayStart`.
+    ///     else `dayStart`. A break INSIDE the lookup (stretches more than `config.coverageGapToleranceS`
+    ///     apart, or an off-wrist stretch) restarts that coverage for the windows after it: nothing was
+    ///     decoded in the break, so a transition there was never looked for.
     ///   - sleepSpans: sleep sessions / in-bed spans overlapping the span. A known-awake window inside one
     ///     is `.inBedAwake`, never `.awake`.
     ///   - wearSignal: the window's six-state wear-signal interpretation context
@@ -464,11 +490,18 @@ public enum HRVWindowBuilder {
             bout = locomotionBout(endingBefore: end, in: activity, joinGapS: config.boutJoinGapS)
             let overlapping = activity.intervals(from: start, to: end)
             inBed = overlapping.contains { $0.inBed == true && $0.sleep != .asleep }
-            if overlapping.contains(where: { $0.sleep == .asleep || $0.activityClass == .sleeping }) {
+            func covered(_ predicate: (ActivityContextInterval) -> Bool) -> Int {
+                overlapping.filter(predicate).reduce(0) { $0 + max(0, min($1.end, end) - max($1.start, start)) }
+            }
+            // By coverage, never by "any second" (review fix): a window that is asleep for 30 s and then
+            // awake in bed for the rest is mixed, not a sleep observation.
+            let asleepS = covered { $0.sleep == .asleep || $0.activityClass == .sleeping }
+            if Double(asleepS) >= config.minRegimeCoverage * Double(end - start) {
                 asleep = true
+            } else if asleepS > 0 {
+                asleep = nil
             } else {
-                let awakeS = overlapping.filter { $0.sleep == .awake }
-                    .reduce(0) { $0 + max(0, min($1.end, end) - max($1.start, start)) }
+                let awakeS = covered { $0.sleep == .awake }
                 asleep = 2 * awakeS >= end - start ? false : nil
             }
             if overlapping.contains(where: { $0.wear == .offWrist || $0.activityClass == .offWrist }) {
@@ -500,9 +533,22 @@ public enum HRVWindowBuilder {
             }
             return .init(kind: e.kind, secondsBefore: start - e.ts, boutS: boutS, running: running)
         }
+        // Event coverage for THIS window: a break in the lookup before it restarts the coverage, because the
+        // decoder saw nothing in the break (review fix: one coverage start per build let the first window
+        // after a mid-day charging or offload gap read steady with no history behind it).
+        var coverFrom = eventsCoverFrom
+        var locomotionHistoryS: Int?
+        if let activity {
+            let tol = max(0, config.coverageGapToleranceS)
+            let events = lookupCoverage(before: start, in: activity.intervals, breakLongerThanS: tol)
+            if events.bounded { coverFrom = max(coverFrom, events.start) }
+            let history = lookupCoverage(before: start, in: activity.intervals,
+                                   breakLongerThanS: max(tol, config.recovery.longBoutS - 1))
+            locomotionHistoryS = start - history.start
+        }
         let phase = ActivityTransitionProximity.windowPhase(preceding: preceding, transitionsInWindow: inWindow,
                                                             eventsAvailable: transitionEvents != nil,
-                                                            lookbackS: start - eventsCoverFrom,
+                                                            lookbackS: start - coverFrom,
                                                             policy: config.recovery)
 
         var window = HRVWindow(
@@ -515,7 +561,8 @@ public enum HRVWindowBuilder {
             wearSignal: wearSignal, secondsSincePosturalTransition: sincePostural,
             secondsSinceLocomotionTransition: sinceLocoEvent, transitionsInWindow: inWindow,
             transitionEventsAvailable: transitionEvents != nil, asleep: asleep, wear: wear, inBed: inBed,
-            precedingLocomotionBoutS: bout?.seconds, precedingLocomotionRunning: bout?.running ?? false)
+            precedingLocomotionBoutS: bout?.seconds, precedingLocomotionRunning: bout?.running ?? false,
+            locomotionHistoryS: locomotionHistoryS)
         window.ineligibleReason = ineligibility(window, config: config)
         window.eligibleForBaseline = window.ineligibleReason == nil
         return window
@@ -555,6 +602,12 @@ public enum HRVWindowBuilder {
             if s < floor { return .tooSoonAfterLocomotion }
         }
         if let s = w.secondsSinceExercise, s < config.minSinceExerciseS { return .tooSoonAfterExercise }
+        // Nothing seen is only "no locomotion" when the history behind the window is long enough to have shown
+        // a long bout's wake (a run just before the lookup starts, or done with the strap off, is invisible).
+        if let h = w.locomotionHistoryS, h < config.recovery.longBoutRecoveryS {
+            let seen = [w.secondsSinceLocomotion, w.secondsSinceExercise].contains { $0.map { $0 <= h } ?? false }
+            if !seen { return .unknownLocomotionHistory }
+        }
         guard (w.artifactFraction ?? 1) <= config.maxArtifactFraction else { return .artifacts }
         guard w.signalQuality.trustworthy else { return .untrustworthySignal }
         guard w.activityContext != .offWrist else { return .offWristLabel }
@@ -615,6 +668,28 @@ public enum HRVWindowBuilder {
     }
 
     // MARK: Lookback
+
+    /// Where the lookup's unbroken coverage behind `start` begins. Coverage is the lookup's stretches that are
+    /// not off-wrist, clipped at `start`; it breaks wherever two of them are more than `breakLongerThanS` apart
+    /// (or the last one ends more than that before `start`, which puts the restart at `start` itself).
+    /// `bounded == false` when the coverage runs back unbroken to the lookup's first stretch (or the lookup has
+    /// nothing before `start`): the break there is the lookup's own start, which the caller may know more about.
+    private static func lookupCoverage(before start: Int, in intervals: [ActivityContextInterval],
+                                 breakLongerThanS: Int) -> (start: Int, bounded: Bool) {
+        var segStart: Int?, segEnd = Int.min, bounded = false
+        for iv in intervals where iv.start < start && iv.wear != .offWrist && iv.activityClass != .offWrist {
+            let e = min(iv.end, start)
+            if segStart != nil, iv.start - segEnd <= breakLongerThanS {
+                segEnd = max(segEnd, e)
+            } else {
+                if segStart != nil { bounded = true }
+                segStart = iv.start; segEnd = e
+            }
+        }
+        guard let segStart else { return (start, false) }
+        if start - segEnd > breakLongerThanS { return (start, true) }
+        return (segStart, bounded)
+    }
 
     /// Seconds from the latest event (flagged before `end + lag`) to the window START; 0 when that event
     /// falls inside the window. nil when there is none.

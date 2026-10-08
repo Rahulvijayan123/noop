@@ -135,7 +135,7 @@ public enum ActivityTransitionProximity {
 
         /// The history a caller must have looked through, with no event found, before "no event" can be read
         /// as steady state: the longest recovery an UNDOSED event could still be in. A long-bout wake is not
-        /// covered here; the activity lookup's locomotion lookback guards that (see `HRVWindowBuilder`).
+        /// covered here; the activity lookup's locomotion history guards that (`HRVWindow.locomotionHistoryS`).
         public var requiredLookbackS: Int { max(posturalRecoveryS, locomotionStopRecoveryS) }
     }
 

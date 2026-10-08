@@ -98,9 +98,10 @@ final class WearSignalPhysiologyGatingTests: XCTestCase {
     /// A decoded, awake, on-wrist context with no transitions: since D3-03/D6-03 `build` refuses
     /// baseline eligibility without decoded context (no event data → phase unknown; no lookup → sleep
     /// and wear unknown; since D9-04 also no motion reading → unknown motion), so the build-level wear tests
-    /// below supply it explicitly.
+    /// below supply it explicitly. It starts 30 min before the window: a shorter lookup cannot rule out a long
+    /// bout's wake just before it (`HRVWindow.locomotionHistoryS`).
     private var awake: ActivityContextLookup {
-        ActivityContextLookup(intervals: [ActivityContextInterval(start: t0 - 600, end: t0 + 600,
+        ActivityContextLookup(intervals: [ActivityContextInterval(start: t0 - 1_800, end: t0 + 600,
                                                                   activityClass: .sitting, confidence: 0.9,
                                                                   sleep: .awake, wear: .onWrist)])
     }
