@@ -136,7 +136,7 @@ struct BaselineVitalPage: View {
         if noNights { return .empty("No nights yet") }
         if nightPoints.isEmpty {
             let need = store.nightsNeeded(for: series)
-            return .empty(need > 0 ? "Needs \(need) more night\(need == 1 ? "" : "s")" : "No readings in this window")
+            return .empty(need > 0 ? "Needs \(need) more \(period(need))" : "No readings in this window")
         }
         return .ready
     }
@@ -186,12 +186,18 @@ struct BaselineVitalPage: View {
             context = "\(usual == .long && frozen ? "Expected" : "Usual") \(MonitorLabels.range(band.lowerBound, band.upperBound, unit: unit)) · \(MonitorLabels.verdict(verdict))"
         } else {
             let need = store.nightsNeeded(for: series)
-            context = need > 0 ? "Needs \(need) more night\(need == 1 ? "" : "s") for a usual" : MonitorLabels.verdict(verdict)
+            context = need > 0 ? "Needs \(need) more \(period(need)) for a usual" : MonitorLabels.verdict(verdict)
         }
         return ReadoutContent(dateLine: date, value: fmt(scoredValue.map(show)), unit: unit, context: context)
     }
 
     // MARK: Statistics
+
+    /// "night" for the sleep context, "day" for the waking contexts (at rest, active, all day).
+    private func period(_ n: Int) -> String {
+        if store.context == .sleep { return n == 1 ? "night" : "nights" }
+        return n == 1 ? "day" : "days"
+    }
 
     private var stats: [StatItem] {
         let off = offPoints.count
@@ -202,8 +208,8 @@ struct BaselineVitalPage: View {
             StatItem("Range", value: band.map { "\(MonitorLabels.number($0.lowerBound, unit: unit))–\(MonitorLabels.number($0.upperBound, unit: unit))" },
                      unit: unit),
             StatItem("Confidence", value: MonitorLabels.confidence(confidencePct),
-                     detail: nights.map { "\($0) night\($0 == 1 ? "" : "s")" }),
-            StatItem("Off usual", value: band == nil ? nil : "\(off)", unit: band == nil ? nil : (off == 1 ? "night" : "nights")),
+                     detail: nights.map { "\($0) \(period($0))" }),
+            StatItem("Off usual", value: band == nil ? nil : "\(off)", unit: band == nil ? nil : period(off)),
         ]
     }
 
