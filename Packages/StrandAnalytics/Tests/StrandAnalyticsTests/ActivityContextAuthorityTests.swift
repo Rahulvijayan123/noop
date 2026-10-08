@@ -372,4 +372,62 @@ final class ActivityContextAuthorityTests: XCTestCase {
         XCTAssertGreaterThan(diff.reference.seconds, 0)
         XCTAssertNoThrow(try json(diff))
     }
+
+    // MARK: - Row authority block
+
+    /// The block a producer stores round-trips, and a consumer that rebuilds its source from a stored row reaches the
+    /// producer's decision; a row without a block (or one whose block claims more than the row) is never raised.
+    func testTheRowAuthorityBlockRebuildsTheProducersSourceAndNeverRaisesIt() throws {
+        let (input, walk) = day()
+        let produced = gaitSource(input, walk: walk, release: .candidate)
+        let selection = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], gaitQuality: [produced])
+        let decision = try XCTUnwrap(selection.decision(for: .gaitQuality))
+        XCTAssertEqual(decision.use, .candidate)
+        let block = ActivityExpertAuthority(decision: decision, mode: .candidate, pinnedModelVersion: pinVersion,
+                                            pinnedWeightsDigest: pinDigest, gaitPrior: 0.085)
+        let text = try json(block)
+        XCTAssertTrue(text.contains("\"input_revision\":\"7\""), "int64 travels as a decimal string")
+        XCTAssertTrue(text.contains("\"pinned_model_version\""))
+        XCTAssertFalse(text.contains("pinned_bundle_sha256"), "a gait block names no bundle")
+        let decoded = try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(text.utf8))
+        XCTAssertEqual(decoded, block)
+
+        // The consumer's rebuild selects exactly what the producer did.
+        let rebuilt = ActivityExpertAuthority.gaitSource(decoded, track: produced.track, recordedRelease: .candidate,
+                                                         inputRevision: 7, day: "2025-10-09")
+        XCTAssertEqual(rebuilt, produced)
+        let again = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], gaitQuality: [rebuilt])
+        XCTAssertEqual(again.digest, selection.digest)
+
+        // No block (an older row): no pins, so shadow; the canonical decode is HART alone.
+        let bare = ActivityExpertAuthority.gaitSource(nil, track: produced.track, recordedRelease: .candidate,
+                                                      inputRevision: 7, day: "2025-10-09")
+        let bareSelection = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], gaitQuality: [bare])
+        XCTAssertEqual(bareSelection.use(of: .gaitQuality), .none)
+        XCTAssertEqual(bareSelection.decision(for: .gaitQuality)?.reason, "model_not_pinned")
+
+        // A block that claims production on a shadow-mode row decodes as shadow, and cannot lift a shadow row.
+        let claim = text.replacingOccurrences(of: "\"release_mode\":\"candidate\"", with: "\"release_mode\":\"production\"")
+            .replacingOccurrences(of: "\"mode\":\"candidate\"", with: "\"mode\":\"shadow\"")
+        let lifted = try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(claim.utf8))
+        XCTAssertEqual(lifted.releaseMode, .shadow)
+        let unknown = text.replacingOccurrences(of: "\"release_mode\":\"candidate\"", with: "\"release_mode\":\"released\"")
+        XCTAssertEqual(try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(unknown.utf8)).releaseMode, .shadow)
+        let shadowRow = ActivityExpertAuthority.gaitSource(decoded, track: produced.track, recordedRelease: .shadow,
+                                                           inputRevision: 7, day: "2025-10-09")
+        XCTAssertEqual(shadowRow.releaseMode, .shadow)
+
+        // Motion heads: the same rebuild.
+        let motion = motionSource(input, walk: walk, mode: .candidate)
+        let ms = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], motionHeads: [motion])
+        let mBlock = ActivityExpertAuthority(decision: try XCTUnwrap(ms.decision(for: .motionHeads)), mode: .candidate,
+                                             pinnedBundleSHA256: motion.expectedBundleSHA256)
+        let mText = try json(mBlock)
+        XCTAssertTrue(mText.contains("pinned_bundle_sha256") && !mText.contains("gait_prior"))
+        let mDecoded = try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(mText.utf8))
+        XCTAssertEqual(ActivityExpertAuthority.motionSource(mDecoded, track: motion.track, recordedRelease: .candidate,
+                                                            inputRevision: 7, day: "2025-10-09"), motion)
+        XCTAssertNil(ActivityExpertAuthority.motionSource(nil, track: motion.track, recordedRelease: .candidate,
+                                                          inputRevision: 7, day: "2025-10-09").expectedBundleSHA256)
+    }
 }
