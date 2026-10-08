@@ -328,7 +328,9 @@ struct CoachToolExecutor {
         let from = to - Self.int(args["hours"], default: 6, max: 168) * 3_600
         // With each day's ledger standing, so 'provisional' / 'from an older model' come from the ledger, and
         // with the user's stretch corrections applied (D9-07).
-        let stored = await repo.storedActivityContextWithStatus(from: from, to: to)
+        // A look back over past days, never a baseline: finished days read their retrospective (smoothed) rows where
+        // they have them (D8-10); today and any provisional day stay causal.
+        let stored = await repo.storedActivityContextWithStatus(from: from, to: to, reading: .historical)
         return CoachActivityContext.describe(intervals: stored.intervals, from: from, to: to, activity: activity,
                                              storedThrough: stored.through, days: stored.days, now: now)
     }
