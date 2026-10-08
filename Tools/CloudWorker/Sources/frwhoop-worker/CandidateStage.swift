@@ -444,6 +444,79 @@ struct CandidateStage {
         min(3_600, 30 * (1 << min(7, max(0, attempts - 1))))
     }
 
+    /// Persisted-scheduling knobs (docs/model-integration/runtime-bounds.md). `store` is used
+    /// unless `FRWHOOP_CANDIDATE_SCHEDULER=memory`; out-of-range values are clamped.
+    mutating func configurePending(_ store: CandidatePendingStore?, environment: [String: String],
+                                   owner: String) {
+        func int(_ key: String, _ fallback: Int, _ range: ClosedRange<Int>) -> Int {
+            let raw = (environment[key] ?? "").trimmingCharacters(in: .whitespaces)
+            return min(range.upperBound, max(range.lowerBound, Int(raw) ?? fallback))
+        }
+        let scheduler = (environment["FRWHOOP_CANDIDATE_SCHEDULER"] ?? "").trimmingCharacters(in: .whitespaces)
+        pending = scheduler.lowercased() == "memory" ? nil : store
+        pendingOwner = owner.isEmpty ? "frwhoop-worker" : String(owner.prefix(200))
+        pendingMaxAttempts = int("FRWHOOP_CANDIDATE_MAX_ATTEMPTS", 4, 1...20)
+        reassemblyBudget = int("FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET", 1, 0...4)
+        pendingLeaseSeconds = int("FRWHOOP_CANDIDATE_LEASE_SECONDS", 300, 60...3600)
+    }
+
+    /// `persisted` (pending store in use), `in_memory` (no store, or the migration is absent),
+    /// `unknown` (configured, not probed yet).
+    var schedulingMode: String {
+        guard pending != nil else { return "in_memory" }
+        guard let available = stats.pendingStoreAvailable else { return "unknown" }
+        return available ? "persisted" : "in_memory"
+    }
+
+    /// Scheduling counters for the scoring lane's heartbeat counters (additive keys).
+    func heartbeatCounters() -> [String: Int] {
+        var out: [String: Int] = [
+            "candidate_busy": stats.busy,
+            "candidate_skipped_demoted": stats.skippedDemoted,
+            "candidate_pending_enqueued": stats.pendingEnqueued,
+            "candidate_pending_claimed": stats.pendingClaimed,
+            "candidate_pending_done": stats.pendingDone,
+            "candidate_pending_withheld": stats.pendingWithheld,
+            "candidate_pending_superseded": stats.pendingSuperseded,
+            "candidate_pending_retried": stats.pendingRetried,
+            "candidate_pending_settle_refused": stats.pendingSettleRefused,
+            "candidate_reassembled": stats.reassembled,
+            "candidate_reassembly_failures": stats.reassemblyFailures,
+        ]
+        if let queue = stats.pendingQueue {
+            out["candidate_pending_queue"] = queue.pending
+            out["candidate_pending_due"] = queue.due
+            out["candidate_pending_oldest_age_s"] = queue.oldestPendingAgeSeconds
+        }
+        return out
+    }
+
+    /// Scheduling state and per-metric modes for `meta.inference.candidate` (additive keys).
+    func heartbeatMeta() -> [String: Any] {
+        var out: [String: Any] = [
+            "scheduling": schedulingMode,
+            "busy": stats.busy,
+            "skipped_demoted": stats.skippedDemoted,
+        ]
+        if let queue = stats.pendingQueue {
+            out["pending"] = [
+                "pending": queue.pending, "due": queue.due, "leased": queue.leased,
+                "oldest_pending_age_s": queue.oldestPendingAgeSeconds,
+                "withheld_24h": queue.withheldLast24h, "superseded_24h": queue.supersededLast24h,
+                "by_metric": queue.byMetric, "by_reason": queue.byReason,
+            ] as [String: Any]
+        }
+        if !stats.modes.isEmpty {
+            out["modes"] = stats.modes.mapValues { report -> [String: Any] in
+                var entry: [String: Any] = ["requested": report.requested, "effective": report.effective,
+                                            "provider_id": report.providerId]
+                if let reason = report.reason { entry["reason"] = reason }
+                return entry
+            }
+        }
+        return out
+    }
+
     /// The pending store when it can be used now; records availability for the heartbeat.
     private mutating func activePendingStore() -> CandidatePendingStore? {
         guard let pending else { return nil }
@@ -587,6 +660,13 @@ struct CandidateStage {
                                   assembled: inout [String: CandidateAssembly], assemblies: inout Int,
                                   assembler: CandidateInputAssembling?) -> Bool {
         let backoff = CandidateStage.pendingBackoffSeconds(attempts: item.attempts + 1)
+        // Runs whose lease expired unsettled (the worker died mid-run) are counted by the claim.
+        // A row that keeps doing that reaches the bound here instead of running again.
+        if item.attempts >= pendingMaxAttempts {
+            settle(pending, item, .withheld(reason: "attempts_exhausted:\(item.lastReason ?? "lease_expired")",
+                                            candidateId: nil))
+            return true
+        }
         do {
             guard try store.candidateOwnerIsLive(userId: item.userId, deviceId: item.deviceId) else {
                 stats.skippedDeletedUser += 1
@@ -622,9 +702,12 @@ struct CandidateStage {
         var freshlyAssembled = false
         if assembled[key] == nil {
             guard let assembler, assemblies < reassemblyBudget else {
-                // Strict oldest-first: the next item would need the same, so stop here.
+                // Strict oldest-first: the next item would need the same, so stop here. With
+                // re-assembly off the item waits for its day to be re-scored, so it is not
+                // claimed again on every idle drain.
+                let canAssemble = assembler != nil && reassemblyBudget > 0
                 settle(pending, item, .retry(reason: "awaiting_input_assembly", countAttempt: false,
-                                             retryAfterSeconds: 0))
+                                             retryAfterSeconds: canAssemble ? 0 : 300))
                 return false
             }
             if let current = try? pending.currentRevision(userId: item.userId, deviceId: item.deviceId,
@@ -1499,8 +1582,9 @@ final class PostgresCandidatePendingStore: CandidatePendingStore {
         if let probed, probed.available || Date().timeIntervalSince(probed.at) < probeTTL {
             return probed.available
         }
-        let present = (try? db.query(PhysiologyCandidatePendingSQL.probe, []))?.first?["present"]
-        let available = isTrue(present)
+        // A failed probe (database unreachable) is not cached: only a real "absent" answer is.
+        guard let rows = try? db.query(PhysiologyCandidatePendingSQL.probe, []) else { return false }
+        let available = isTrue(rows.first?["present"])
         probed = (available, Date())
         if !available {
             FileHandle.standardError.write(
