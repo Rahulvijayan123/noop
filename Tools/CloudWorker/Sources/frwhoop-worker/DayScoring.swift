@@ -449,17 +449,74 @@ struct DayScorer {
     /// to be, not a resting baseline: wrist R-R is much noisier awake than asleep (posture, motion, talking),
     /// so it must not feed Charge or the nightly baseline, and `cleanBeats` is there so a reader can weigh it.
     static func hrvSlots(rr: [RRInterval], from: Int, to: Int) -> [[Any]] {
+        hrvSlotReadings(rr: rr, from: from, to: to).map(\.point)
+    }
+
+    /// One published intraday HRV slot, with what its context flags need beyond the point itself.
+    struct HrvSlotReading: Equatable {
+        var slotStart: Int
+        /// RMSSD rounded to 0.1 ms, as published.
+        var rmssd: Double
+        var cleanBeats: Int
+        /// Mean clean NN interval (ms); nil only if the analyzer could not give one.
+        var meanNN: Double?
+
+        /// The published `[slotStartUnix, rmssdMs, cleanBeats]` point.
+        var point: [Any] { [slotStart, rmssd, cleanBeats] }
+    }
+
+    /// The slots `hrvSlots` publishes, as readings. Same gates, same order.
+    static func hrvSlotReadings(rr: [RRInterval], from: Int, to: Int) -> [HrvSlotReading] {
         var bySlot: [Int: [RRInterval]] = [:]
         for beat in rr where beat.ts >= from && beat.ts < to {
             bySlot[beat.ts / hrvSlotSeconds, default: []].append(beat)
         }
-        return bySlot.keys.sorted().compactMap { slot -> [Any]? in
+        return bySlot.keys.sorted().compactMap { slot -> HrvSlotReading? in
             let beats = bySlot[slot] ?? []
             let ms = beats.map { Double($0.rrMs) }
             guard HRVAnalyzer.rrCoverage(tsSec: beats.map(\.ts), rrMs: ms) <= HRVAnalyzer.coveragePlausibleCeiling else { return nil }
             let r = HRVAnalyzer.analyze(rawRR: ms, maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction)
             guard let rmssd = r.rmssd, r.nClean >= hrvSlotMinCleanBeats else { return nil }
-            return [slot * hrvSlotSeconds, (rmssd * 10).rounded() / 10, r.nClean]
+            return HrvSlotReading(slotStart: slot * hrvSlotSeconds, rmssd: (rmssd * 10).rounded() / 10,
+                                  cleanBeats: r.nClean, meanNN: r.meanNN)
+        }
+    }
+
+    // MARK: - Intraday HRV slot context (audit D6-14)
+    //
+    // A published slot is a valid measurement, so it is never dropped here. What changes is how much a reader
+    // should lean on it: a slot taken mostly while walking, one whose activity context mostly abstained, or one
+    // built from a few minutes of clean beats is flagged `weak` with the reasons, and the app draws it
+    // de-emphasised and leaves it out of the line and the "latest" read-out.
+
+    /// Moving (walking + running + other movement) share of the slot at or above which the slot is flagged
+    /// `movement`. A quarter of the slot is about four minutes of motion-perturbed beats pooled into the RMSSD.
+    static let hrvSlotMovingShareLimit = 0.25
+    /// Unknown (abstained / uncovered) share of the slot at or above which it is flagged `unknown_context`;
+    /// the same 0.5 the app's activity line uses before it says "Activity unavailable".
+    static let hrvSlotUnknownShareLimit = 0.5
+    /// Clean-beat time (clean beats x mean NN) as a share of the slot below which it is flagged `sparse_beats`:
+    /// one third of 15 minutes is the 5-minute window the canonical HRV series is defined on.
+    static let hrvSlotMinCleanCoverage = 1.0 / 3.0
+
+    /// One context entry per reading, same order: `{slot_s, weak, reasons, moving_share, unknown_share,
+    /// clean_coverage, post_activity}`. Shares come from the shared duration-weighted join
+    /// (`ActivityContextJoin.hrvSlotContexts`, the same fold as `contexts.hrv_slots`). With no published
+    /// activity epochs every slot's context is unknown, and it says so rather than passing as still.
+    static func hrvSlotContext(readings: [HrvSlotReading], epochs: [ActivityEpoch]) -> [[String: Any]] {
+        let contexts = ActivityContextJoin.hrvSlotContexts(slots: readings.map(\.slotStart), epochs: epochs,
+                                                           slotSeconds: hrvSlotSeconds)
+        return zip(readings, contexts).map { reading, ctx in
+            let moving = ["walking", "running", "other_movement"].reduce(0.0) { $0 + (ctx.shares[$1] ?? 0) }
+            let coverage = reading.meanNN.map { Double(reading.cleanBeats) * $0 / (Double(hrvSlotSeconds) * 1000) } ?? 0
+            var reasons: [String] = []
+            if moving >= hrvSlotMovingShareLimit { reasons.append("movement") }
+            if ctx.unknownShare >= hrvSlotUnknownShareLimit { reasons.append("unknown_context") }
+            if coverage < hrvSlotMinCleanCoverage { reasons.append("sparse_beats") }
+            func r3(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
+            return ["slot_s": reading.slotStart, "weak": !reasons.isEmpty, "reasons": reasons,
+                    "moving_share": r3(moving), "unknown_share": r3(ctx.unknownShare),
+                    "clean_coverage": r3(min(coverage, 1)), "post_activity": ctx.postActivity] as [String: Any]
         }
     }
 
@@ -1396,9 +1453,13 @@ struct DayScorer {
         Self.recordHeldBaselines(baselinesHeld, in: &daily)
         Self.recordHeldBaselines(baselinesHeld, in: &snapshotDaily)
         // Free-form snapshot jsonb only: the legacy daily row has no slot for it.
-        let slots = Self.hrvSlots(rr: rr, from: dayStart, to: dayEnd)
+        let slotReadings = Self.hrvSlotReadings(rr: rr, from: dayStart, to: dayEnd)
+        let slots = slotReadings.map(\.point)
         if !slots.isEmpty {
-            snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots] as [String: Any]
+            // `context` is additive (one entry per point, same order); readers that predate it ignore it.
+            snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots,
+                                           "context": Self.hrvSlotContext(readings: slotReadings,
+                                                                          epochs: publishedActivity.epochs)] as [String: Any]
         }
         snapshotDaily.merge(Self.spo2EstimateKeys(sessions: result.sleepSessions, readings: spo2Estimates)) { _, new in new }
         // Optional activity context (C10): attach the day's latest published
