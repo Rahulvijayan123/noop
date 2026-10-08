@@ -945,18 +945,28 @@ extension PhysiologyContext {
 
         public static let `default` = Policy()
 
+        /// Whether the post-exertion respiratory return (`BoutRecovery.respiratoryRecovery`, spec-02) computes in
+        /// this build. While false its version is kept out of `fingerprint` and `versions`. The respiratory owner
+        /// flips it in the commit that makes the detector compute.
+        public static let respiratoryRecoveryComputes = false
+
         public var versions: PolicyVersions {
             PolicyVersions(contract: PhysiologyContext.contractVersion, join: join.version,
                            validity: validity.version, eligibility: eligibility.version, sleep: sleep.version,
                            exertion: exertion.version, exposure: exposure.version, reference: reference.version,
                            change: change.version, functional: functional.version,
                            featureRegistry: FeatureRegistry.version, pulse: pulse.version,
-                           respiratoryRecovery: exertion.respiratoryRecoveryVersion)
+                           respiratoryRecovery: Policy.respiratoryRecoveryComputes
+                               ? exertion.respiratoryRecoveryVersion : nil)
         }
 
         /// FNV-1a 64 over the canonical (sorted-key) JSON of the policy plus the feature registry version.
+        /// Config nothing reads stays out (BRIEF rule 6): until the post-exertion respiratory return computes,
+        /// its version is blanked so it neither moves the key nor claims a product that does not exist.
         public var fingerprint: String {
-            let data = (try? PhysiologyContext.encoder().encode(self)) ?? Data()
+            var keyed = self
+            if !Policy.respiratoryRecoveryComputes { keyed.exertion.respiratoryRecoveryVersion = "" }
+            let data = (try? PhysiologyContext.encoder().encode(keyed)) ?? Data()
             return PhysiologyContext.fnv1a(data + Data(FeatureRegistry.version.utf8))
         }
     }

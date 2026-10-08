@@ -253,10 +253,11 @@ extension PhysiologyContext {
                                        episodes: episodesOut, multiSignal: multiSignal, functional: functional,
                                        features: features, dependence: dependence, selection: selection)
             // Sustained high / low pulse episodes over qualified inactive HR (spec-02). Heart-rate independent
-            // qualification: the HART / strap tracks, never the HR-reading decoder track.
+            // qualification: the HART / strap tracks, never the HR-reading decoder track. Earlier days' bouts too:
+            // the detector reads the evening before the day, and a bout's follow-up is never inactive.
             document.pulseEpisodes = PulseEpisodes.summarize(identity: identity, observations: observations,
                                                              hart: hart, strap: strap, episodes: episodes,
-                                                             bouts: bouts, mode: mode,
+                                                             bouts: allBouts, mode: mode,
                                                              cutoff: input.availabilityCutoff, config: policy.pulse)
             return document
         }
