@@ -3,7 +3,7 @@
 -- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents),
 -- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface) and
 -- 20261004150000_activity_context_canonical_class.sql (section 14, the canonical class columns) and
--- 20261007120000_activity_context_current_lineage_and_versions.sql (section 15, the current-lineage view
+-- 20261008100000_activity_context_current_lineage_and_versions.sql (section 15, the current-lineage view
 -- and version-driven re-derivation) applied. Every fixture change rolls back; no deployed credentials or data are touched.
 -- Statement timeout keeps a misbehaving assertion from hanging a disposable cluster.
 --
@@ -12,7 +12,7 @@
 --        -f ../../migrations/20261003130000_activity_context_days.sql \
 --        -f ../../migrations/20261003140000_activity_context_stream_days.sql \
 --        -f ../../migrations/20261004150000_activity_context_canonical_class.sql \
---        -f ../../migrations/20261007120000_activity_context_current_lineage_and_versions.sql \
+--        -f ../../migrations/20261008100000_activity_context_current_lineage_and_versions.sql \
 --        -f activity_context_contract.sql
 -- (the migrations must apply to a fully migrated Supabase-style schema first; the fixtures here
 -- only need base_schema, production_persistence, scoring_service_state, physiology_revisions,
@@ -1941,7 +1941,7 @@ do $$ begin raise notice 'PASS 14.4 owner isolation of the class columns'; end $
 
 rollback;
 
--- 15. Current lineage and version-driven re-derivation (20261007120000). History stays in
+-- 15. Current lineage and version-driven re-derivation (20261008100000). History stays in
 -- activity_context_epochs; activity_context_epochs_current is the newest publish of each UTC day; the
 -- worker's registered versions and the day's settled state are folded into both day fingerprints; a bounded
 -- sweep re-derives the days whose fingerprint is not today's; an older build never takes the registry back.

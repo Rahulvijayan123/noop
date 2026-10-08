@@ -8,10 +8,14 @@
 -- is correct without the index.
 --
 -- Named `_rows`, distinct from `activity_context_epochs_day_revision` (user, device, day, result_revision desc)
--- that 20261007120000_activity_context_current_lineage_and_versions.sql (WP4) creates for the current-lineage
+-- that 20261008100000_activity_context_current_lineage_and_versions.sql (WP4) creates for the current-lineage
 -- view: with one shared name, whichever migration ran second would silently do nothing. This index's leading
 -- columns also serve that per-day maximum (a b-tree is scanned backwards), so once both are applied one of the
 -- two can be dropped.
+--
+-- Drafted as 20261007130000; renamed so it sorts after every migration production has already applied
+-- (20261007140000 .. 20261008000000): `supabase db push` refuses a local version older than the remote's
+-- newest one. No migration between the old and the new timestamp touches these objects.
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '300s';

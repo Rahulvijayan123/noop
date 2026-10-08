@@ -181,7 +181,7 @@ enum ContextSQL {
     /// at or before the cutoff — what a reader at the cutoff would have read. Older lineages are never merged in:
     /// the publish keeps every fingerprint's rows, and an older lineage would fill seconds the newest one dropped
     /// (D3-02). This is per UTC day, never one revision across the whole read window (each day is its own publish).
-    /// The per-day probe walks `activity_context_epochs_day_revision_rows` (20261007130000) when it exists; without
+    /// The per-day probe walks `activity_context_epochs_day_revision_rows` (20261008100100) when it exists; without
     /// that index the query is still correct, only slower. Reading one revision instead of every lineage removes
     /// the ~85x row amplification measured in production.
     static let activityEpochs = """

@@ -48,6 +48,10 @@
 -- Rollback: drop reconcile_activity_context_versions, the view, the registry table and the helpers, and
 -- re-create the three replaced functions from 20261003120000_activity_context.sql and
 -- 20261003140000_activity_context_stream_days.sql.
+--
+-- Drafted as 20261007120000; renamed so it sorts after every migration production has already applied
+-- (20261007140000 .. 20261008000000): `supabase db push` refuses a local version older than the remote's
+-- newest one. No migration between the old and the new timestamp touches these objects.
 begin;
 set local lock_timeout = '5s';
 set local statement_timeout = '120s';

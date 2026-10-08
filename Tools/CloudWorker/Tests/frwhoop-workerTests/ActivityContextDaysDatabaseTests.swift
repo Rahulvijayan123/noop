@@ -498,7 +498,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
         let present = try f.db.query(
             "select to_regclass('public.activity_context_lane_versions') is not null as present", [])
         guard present.first?["present"] == "t" else {
-            throw XCTSkip("apply 20261007120000_activity_context_current_lineage_and_versions.sql")
+            throw XCTSkip("apply 20261008100000_activity_context_current_lineage_and_versions.sql")
         }
         // The registry is one row per lane for the whole database: put back whatever was there.
         let previous = try f.db.query("""
