@@ -578,6 +578,10 @@ extension GaitQualityResponse {
 public struct GaitQualityTrackInput: Equatable, Sendable {
     public var model: GaitQualityModelInfo
     public var windows: [GaitQualityWindow]
+    /// The release the stored windows carry (`ActivityExpertSelection` sets it from the row). A production config
+    /// accepts only production windows, and no config accepts windows recorded as shadow; nil (windows built in
+    /// memory, a replay) is accepted by a candidate config only.
+    public var releaseMode: ActivityReleaseMode? = nil
 
     public init(model: GaitQualityModelInfo, windows: [GaitQualityWindow]) {
         self.model = model; self.windows = windows
