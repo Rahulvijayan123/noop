@@ -73,7 +73,7 @@ settling, breathing, rhythm, rebound and the secondary PRV statistics from `slee
 
 ## 4. `daily.sleep_analytics_v1` (Swift, `SleepAnalyticsV1.swift` types are root-owned)
 
-Version: `algorithm_version` stays `nara-sleep-analytics-1` and `config_version` `v1` until the first spec-02 change that alters a meaning lands (the thermal post-wake slope, §4.2); that change bumps both to `-2` / `v2`. `schema_version` stays 1.
+Version: `algorithm_version` `nara-sleep-analytics-2`, `config_version` `v2` (bumped with the thermal post-wake slope repair, §4.2). `schema_version` stays 1, so `-1` documents keep decoding. `SleepAnalyticsConfig.v1` is a source-compatible alias that reports `v2`. The morning gates are in `gateFingerprint`; pNN50 has no tunable (50 ms is its definition), so the foundation's `prvPnn50ThresholdMs` was removed.
 
 ### 4.1 PRV diagnostics: pNN50 (owner: cardiac)
 
@@ -182,8 +182,9 @@ breaths, stable time or episodes. No tachypnea/bradypnea/pause/apnea counts.
 
 Status, reasons, `method_version` `prv-nonlinear-1`, `neurokit2` version, `source` `prv_optical`, `secondary`
 true, `config` (`segment_beats` 300, `sampen_dimension` 2, `sampen_tolerance_sd` 0.2, `dfa_scales` [4, 16],
-`min_segments` 3), `segments_used`, `segments_rejected`, `sample_entropy` and `dfa_alpha1` (`median`, `iqr`,
-`segments`). Segments are non-overlapping runs of exactly `segment_beats` consecutive true-adjacent cleaned
+`min_segments` 3, `max_segments` 24, `dfa_overlap` false, `time_budget_s` 0.4 CPU seconds), `segments_available`,
+`segments_evaluated`, `segments_used`, `segments_rejected`, `sample_entropy` and `dfa_alpha1` (`median`, `iqr`,
+`segments`). DFA uses every box size 4–16, non-overlapping (Peng 1995), not NeuroKit's default `DFA_alpha1`. Segments are non-overlapping runs of exactly `segment_beats` consecutive true-adjacent cleaned
 intervals inside the main night; nothing is concatenated across gaps and only equal-length segments are pooled.
 
 ### 5.4 Rhythm (owner: temperature)
@@ -194,15 +195,23 @@ intervals inside the main night; nothing is concatenated across gaps and only eq
 `coverage` (`day_hours_supported`, `night_hours_supported`, `quadrants_observed`), `uncertainty`
 (`acrophase_se_h`, `amplitude_se_c`, `method`), `phase_status` (`available` | `unavailable` + reason
 `zero_amplitude` | `unstable_phase` | `mixed_devices` | `insufficient_days` | `insufficient_daytime_temperature`),
-`iv_definition` (`consecutive_valid_hour_pairs_across_midnight`), `phase_relations`
-(`hr_minus_temp_acrophase_h`, `sleep_midpoint_minus_temp_acrophase_h`, each with both components and status) and
+`iv_definition` (`consecutive_valid_hour_pairs_across_midnight`), `regularity_name` (temperature regularity),
+`phase_relations` (`hr_minus_temp`, `sleep_midpoint_minus_temp` as emitted; the app decoder also accepts the
+earlier `*_acrophase_h` spellings; each with both components and status) and
 `phase_drift` (`utc_drift_h_per_day`, `daily_phases`, `clock_changes`, `observed_realignment`). Gate: ≥ 5
 qualifying days, each ≥ 80 % of its hours supported, every 6-hour local quadrant observed. Night-only data is
 `insufficient_daytime_temperature`. Naps carry `not_applicable`.
 
 `rest_activity_rhythm` (document level): status, reasons, `method_version` `rest-activity-1`, `signal`
 (`gravity_movement_seconds_per_minute`), `epoch_seconds` 3600, `is`, `iv`, `l5`, `m10`, `l5_start_h`,
-`m10_start_h`, `ra`, `days_used`, gate description. Withheld with a precise reason when movement history is absent.
+`m10_start_h`, `ra`, `days_used`, gate description. Computed: the 1 Hz gravity stream is stored all day (only the
+100 Hz raw stream is duty-cycled), measured at 24/24 h on the owner's device. Withheld with a precise reason when
+movement history is absent, sleep-only or incomplete.
+
+`SleepMetricStatus` gains `unavailable` (used by `phase_status`).
+
+The worker publishes each day's hourly bins in its own snapshot under the top-level key `rhythmDay` (~3 KB); a later
+day's `rhythm_history` is one indexed read of the past 34 days' newest `rhythmDay`, never a raw re-aggregation.
 
 ### 5.5 `rebound` (document level, owner: respiratory)
 
@@ -213,7 +222,9 @@ Status, reasons, `definition_version` `sleep-rebound-1`, `history_revision_diges
 ## 6. Physiology context (root-owned contract: `PCContract.swift`, `PCEngine.swift`)
 
 - `PolicyVersions.pulse` (`pc-pulse-1`) and `PolicyVersions.respiratoryRecovery` (`pc-resp-recovery-1`), both
-  optional on decode. `Policy.pulse: PulseEpisodeConfig`. Every version enters `Policy.fingerprint`.
+  optional on decode. `Policy.pulse: PulseEpisodeConfig`. Every version and every pulse / respiratory-recovery
+  parameter enters `Policy.fingerprint` (both detectors compute, so nothing is excluded). `SleepConfig` gains
+  `dayNightHeartRateVersion` (`pc-day-night-hr-1`).
 - `DayDocument.pulseEpisodes: PulseEpisodeSummary?` (owner: cardiac, `PCPulseEpisodes.swift`).
 - `SleepRhythmSummary.dayNightHeartRate: DayNightHeartRate?` (owner: cardiac, `PCSleepRhythm.swift`).
 - `BoutRecovery.respiratoryRecovery: RespiratoryRecovery?` (owner: respiratory, `PCExertionBouts.swift`);
@@ -228,6 +239,7 @@ New reason codes are declared in the owner's `reasonCodes` array and must be map
 | cardiac (pulse) | `pulse_episode_high`, `pulse_episode_low`, `hr_acceleration_with_movement`, `episode_censored_gap`, `episode_censored_qualification`, `qualified_inactive_hr_insufficient`, `cause_not_attributed`, `not_rhythm_classification` |
 | cardiac (day/night) | `percent_dip_definition`, `awake_hr_insufficient`, `sleep_hr_insufficient` |
 | respiratory | `respiratory_reference_unavailable`, `respiratory_observations_resumed`, `respiratory_returned_by_first_observation`, `respiratory_not_returned_in_follow_up`, `respiratory_follow_up_unobserved`, `stable_awake_respiration_window` |
+| added during implementation | `episode_censored_window` (pulse), `respiratory_return_unconfirmed` (respiratory) |
 
 ## 7. Ownership and integration protocol
 
