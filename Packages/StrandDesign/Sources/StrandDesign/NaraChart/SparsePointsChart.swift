@@ -73,7 +73,8 @@ public struct SparsePointsChart: View {
                 y: ChartValueAxis, selection: Binding<Date?>,
                 height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                 calendar: Calendar = .current) {
-        let sorted = points.filter { $0.value.isFinite }.sorted { $0.day < $1.day }
+        // One reading per local day (two weigh-ins on one day draw as their mean).
+        let sorted = points.normalisedDays(calendar)
         let windowed = sorted.inWindow(window)
         // Smoothed over the whole history so the first readings in the window keep their context.
         let smoothed = windowed.count >= 3
@@ -202,7 +203,7 @@ public struct SparsePointsChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: .day, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,
