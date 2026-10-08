@@ -33,6 +33,8 @@ enum PhysiologyContextReasonRegistries {
         "respiratory_reference_unavailable", "respiratory_observations_resumed",
         "respiratory_returned_by_first_observation", "respiratory_not_returned_in_follow_up",
         "respiratory_follow_up_unobserved", "stable_awake_respiration_window",
+        // Seen on the producer branches while this branch was built (not yet in CONTRACT §6).
+        "episode_censored_window", "respiratory_return_unconfirmed",
     ]
 
     /// Every registered code, once.

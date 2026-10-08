@@ -604,6 +604,36 @@ enum SleepFeatureWording {
         // Rebound
         "no_short_nights": String(localized: "no short nights in this period"),
         "no_fragmented_nights": String(localized: "no broken nights in this period"),
+        // Codes seen on the producer branches (respiration.py, rebound.py, rhythm.py) at integration time
+        "insufficient_usable_windows": String(localized: "too few usable stretches of breathing estimate"),
+        "no_evaluable_windows": String(localized: "no stretches could be evaluated"),
+        "no_true_intervals_in_usable_windows": String(localized: "no consecutive breaths to compare"),
+        "unknown_time_never_stable": String(localized: "time without an estimate never counts as steady"),
+        "history_nights_not_in_request": String(localized: "earlier nights were not sent"),
+        "history_nights_without_minutes_excluded": String(localized: "earlier nights without sleep times were left out"),
+        "insufficient_reference_nights": String(localized: "not enough earlier nights for your usual night"),
+        "no_consecutive_night_pairs": String(localized: "no pairs of consecutive nights"),
+        "pair_spans_timezone_change": String(localized: "a pair of nights spans a time-zone change"),
+        "descriptive_only": String(localized: "a description only, not a cause or prediction"),
+        "duplicate_history_day_resolved": String(localized: "a repeated day was counted once"),
+        "movement_history_absent": String(localized: "needs several days of movement data"),
+        "insufficient_days_around_clock_change": String(localized: "not enough days around the clock change"),
+        "insufficient_daytime": String(localized: "not enough daytime data"),
+        "insufficient_daytime_heart_rate": String(localized: "not enough daytime heart rate"),
+        "insufficient_daytime_movement": String(localized: "not enough daytime movement data"),
+        "insufficient_sleep_periods": String(localized: "not enough sleep periods"),
+        "incomplete_daily_profile": String(localized: "the days are not fully covered"),
+        "no_clock_change": String(localized: "no clock change in this period"),
+        "no_consecutive_hour_pairs": String(localized: "no consecutive hours to compare"),
+        "not_main_night": String(localized: "does not apply to this night"),
+        "phase_unavailable": String(localized: "the peak time could not be found"),
+        "quadrant_unobserved": String(localized: "part of the day was never observed"),
+        "temperature_phase_unavailable": String(localized: "the temperature peak time could not be found"),
+        "unstable_sleep_midpoint": String(localized: "the middle of sleep changed too much between nights"),
+        "zero_activity": String(localized: "no movement was recorded"),
+        "zero_variance": String(localized: "the values did not vary"),
+        "fit_failed": String(localized: "could not be computed"),
+        "invalid_timezone_days": String(localized: "some days had an unreadable time zone"),
     ]
 
     /// Clinical or causal words no sleep-feature wording may use.
@@ -630,9 +660,9 @@ enum SleepFeatureWording {
     /// The name of one side of a phase relation (`a_label` / `b_label`).
     static func phaseLabel(_ label: String?) -> String {
         switch label {
-        case "hr_acrophase", "hr": return "Heart-rate peak"
+        case "hr_acrophase", "heart_rate_acrophase", "hr": return "Heart-rate peak"
         case "temp_acrophase", "skin_temp_acrophase", "temp": return "Temperature peak"
-        case "sleep_midpoint", "midsleep": return "Sleep midpoint"
+        case "sleep_midpoint", "sleep_period_midpoint", "midsleep": return "Sleep midpoint"
         case let other?: return other.replacingOccurrences(of: "_", with: " ").capitalized
         case nil: return "Phase"
         }

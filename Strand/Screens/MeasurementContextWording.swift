@@ -523,6 +523,7 @@ enum PhysiologyContextWording {
         "hr_acceleration_with_movement": String(localized: "heart rate rose quickly together with movement"),
         "episode_censored_gap": String(localized: "a gap in the heart-rate data"),
         "episode_censored_qualification": String(localized: "time that did not count as inactive"),
+        "episode_censored_window": String(localized: "the edge of the day's data"),
         "qualified_inactive_hr_insufficient": String(localized: "too little inactive time with heart-rate data"),
         "cause_not_attributed": String(localized: "no cause is attributed to it"),
         "not_rhythm_classification": String(localized: "a description of heart-rate readings, not a heart-rhythm classification"),
@@ -536,6 +537,7 @@ enum PhysiologyContextWording {
         "respiratory_returned_by_first_observation": String(localized: "breathing rate was already near the earlier level at the first reading"),
         "respiratory_not_returned_in_follow_up": String(localized: "breathing rate was not back near the earlier level in the time observed"),
         "respiratory_follow_up_unobserved": String(localized: "no breathing-rate readings after the activity"),
+        "respiratory_return_unconfirmed": String(localized: "too few readings to confirm the breathing rate was back"),
     ]
 
     /// Developer detail: how inputs were cleaned, which estimator or detector ran, provenance of a daily value.
