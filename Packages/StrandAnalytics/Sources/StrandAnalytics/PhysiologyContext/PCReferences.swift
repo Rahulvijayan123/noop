@@ -32,7 +32,13 @@ extension PhysiologyContext {
         public var stableAwakeMinWindows = 3
         /// Window length of the stable-awake series (5-minute windows); other lengths are not pooled with them.
         public var stableAwakeWindowS = 300
-        public var stableAwakeMetrics: [MetricKind] = [.hrvRmssd, .hrvSdnn, .heartRate]
+        /// `.respiratoryRate` enters through its explicit adapter (`respiratoryStableAwakeValues`): its estimates are
+        /// 2-minute RSA windows, pooled into the same aligned 5-minute windows before the daily median (spec-02).
+        public var stableAwakeMetrics: [MetricKind] = [.hrvRmssd, .hrvSdnn, .heartRate, .respiratoryRate]
+        /// Respiratory stable-awake adapter: a local-grid 5-minute window takes a value only when it holds at least
+        /// this many non-overlapping eligible, valid respiratory estimates wholly inside it (2 x 120 s covers 240 of
+        /// its 300 s).
+        public var stableAwakeRespMinEstimatesPerWindow = 2
         /// Nightly snapshot metrics. SpO2 is never a comparison input; nightly SDNN is admitted only as an index
         /// (mean of fixed windows) because whole-session SDNN grows with session length.
         public var nightlyMetrics: [MetricKind] = [.hrvRmssd, .hrvSdnn, .restingHeartRate, .respiratoryRate,
@@ -354,6 +360,9 @@ extension PhysiologyContext {
         public static let contextUnsupportedParentOnly: ReasonCode = "context_unsupported_parent_only"
         public static let parentInsufficientChildOnly: ReasonCode = "parent_insufficient_child_only"
         public static let noPopulationPrior: ReasonCode = "no_population_prior"
+        /// The stable-awake respiratory value pools shorter RSA estimates into aligned 5-minute windows
+        /// (`respiratoryStableAwakeValues`); see `ReferenceConfig.stableAwakeRespMinEstimatesPerWindow`.
+        public static let stableAwakeRespirationWindow: ReasonCode = "stable_awake_respiration_window"
 
         public static let reasonCodes: [ReasonCode] = [
             nightlySnapshot, stableAwakeWindows, timeBandStratum, degradedValidityIncluded, multipleNightlyValues,
@@ -365,6 +374,7 @@ extension PhysiologyContext {
             frozenRegisteredThisRun, frozenNotRegistered, frozenRegistersInOtherMode, frozenScaleRefloored,
             pooledTowardParent, contextUnsupportedParentOnly, parentInsufficientChildOnly, noPopulationPrior,
             frozenWindowNotCompleteForDay, frozenCreatedAfterDayIgnored, scaleFloorDefault, partialDayComposition,
+            stableAwakeRespirationWindow,
         ]
 
         /// Marker between a parent series key and its local-time-band stratum (`<parent>.band_06_12`).
@@ -416,7 +426,7 @@ extension PhysiologyContext {
 
             // Stable-awake windows.
             var windows: [String: [MeasurementEnvelope]] = [:]
-            for e in envelopes where !e.method.id.hasPrefix("snapshot.")
+            for e in envelopes where !e.method.id.hasPrefix("snapshot.") && e.metric != .respiratoryRate
                 && config.stableAwakeMetrics.contains(e.metric) && e.method.windowS == config.stableAwakeWindowS {
                 guard let series = stableAwakeSeriesKey(metric: e.metric, config: config),
                       let v = e.value, v.isFinite, e.validity.state == .valid,
@@ -443,7 +453,85 @@ extension PhysiologyContext {
                     }
                 }
             }
+            if config.stableAwakeMetrics.contains(.respiratoryRate) {
+                out += respiratoryStableAwakeValues(envelopes, identity: identity, mode: mode, finality: finality,
+                                                    config: config)
+            }
             return out.sorted { ($0.seriesKey, $0.regimeKey) < ($1.seriesKey, $1.regimeKey) }
+        }
+
+        /// The explicit stable-awake respiratory adapter (spec-02 §2, docs/spec-02/CONTRACT.md §6).
+        ///
+        /// Respiratory estimates are short RSA windows (`series.resp_rate.2min`, one a minute, overlapping), and the
+        /// estimator withholds itself whenever the wrist moves, so no exercise rate exists to compare. Each envelope
+        /// keeps its own System B verdict (HR-independent motion context; an HR-reading decoder track is never
+        /// evidence). Here:
+        /// 1. an envelope qualifies when it is a window estimate (not `snapshot.*`, `windowS` below the stable-awake
+        ///    window), valid, stable-awake eligible and wholly inside one 5-minute window of the local-midnight grid
+        ///    of the day (the grid of the 5-minute HR windows);
+        /// 2. a 5-minute window takes the median of its qualifying estimates when it holds at least
+        ///    `stableAwakeRespMinEstimatesPerWindow` non-overlapping ones;
+        /// 3. the day's `resp_rate.stable_awake_5min` value is the median of the windows' values when at least
+        ///    `stableAwakeMinWindows` windows exist (support = windows), with the same time-band strata as the other
+        ///    stable-awake series. Nothing is zero-filled: no qualifying window → no value.
+        static func respiratoryStableAwakeValues(_ envelopes: [MeasurementEnvelope], identity: DayIdentity,
+                                                 mode: ProcessingMode, finality: Finality,
+                                                 config: ReferenceConfig) -> [DailyValue] {
+            guard let series = stableAwakeSeriesKey(metric: .respiratoryRate, config: config) else { return [] }
+            let width = max(1, config.stableAwakeWindowS)
+            let dayStart = identity.dayWindow.start
+            struct Window { var start: Int; var members: [MeasurementEnvelope] }
+            var grouped: [String: [Int: [MeasurementEnvelope]]] = [:]
+            for e in envelopes where e.metric == .respiratoryRate && !e.method.id.hasPrefix("snapshot.")
+                && e.method.windowS < width {
+                guard let v = e.value, v.isFinite, e.validity.state == .valid,
+                      e.verdict(.stableAwakeRest)?.state == .eligible,
+                      identity.dayWindow.contains(e.support.start), e.support.isValid else { continue }
+                let k = (e.support.start - dayStart) / width
+                let wEnd = min(dayStart + (k + 1) * width, identity.dayWindow.end)
+                guard e.support.end <= wEnd else { continue }
+                grouped[e.regimeKey, default: [:]][k, default: []].append(e)
+            }
+            var out: [DailyValue] = []
+            for regime in grouped.keys.sorted() {
+                var windows: [Window] = []
+                for k in grouped[regime]!.keys.sorted() {
+                    let members = grouped[regime]![k]!.sorted { ($0.support, $0.id) < ($1.support, $1.id) }
+                    var independent = 0, lastEnd = Int.min
+                    for m in members where m.support.start >= lastEnd { independent += 1; lastEnd = m.support.end }
+                    guard independent >= max(1, config.stableAwakeRespMinEstimatesPerWindow) else { continue }
+                    windows.append(Window(start: dayStart + k * width, members: members))
+                }
+                func value(_ ws: [Window], key: String, extra: [ReasonCode]) -> DailyValue? {
+                    guard ws.count >= max(1, config.stableAwakeMinWindows), let first = ws.first?.members.first,
+                          let med = RobustStats.median(ws.compactMap { w in
+                              RobustStats.median(w.members.compactMap(\.value))
+                          }) else { return nil }
+                    let members = ws.flatMap(\.members)
+                    let supportS = ws.reduce(0) { acc, w in
+                        acc + SignalValidityEngine.mergeIntervals(w.members.map(\.support)).reduce(0) { $0 + $1.duration }
+                    }
+                    return DailyValue(day: identity.day, seriesKey: key, regimeKey: regime, metric: .respiratoryRate,
+                                      value: med, units: first.method.units, supportCount: ws.count,
+                                      supportUnit: "window", supportS: supportS, mode: mode, finality: finality,
+                                      sourceIds: members.map(\.id).sorted(),
+                                      reasons: ([stableAwakeWindows, stableAwakeRespirationWindow] + extra).sorted())
+                }
+                if let dv = value(windows, key: series, extra: []) { out.append(dv) }
+                guard config.stratifyStableAwakeByTimeBand else { continue }
+                var bands: [String: [Window]] = [:]
+                for w in windows {
+                    let m = w.members[0]
+                    let secondsOfDay = max(0, m.localTime.secondsOfDay - (m.support.start - w.start))
+                    bands[timeBand(secondsOfDay: secondsOfDay, config: config), default: []].append(w)
+                }
+                for band in bands.keys.sorted() {
+                    if let dv = value(bands[band]!, key: series + "." + band, extra: [timeBandStratum]) {
+                        out.append(dv)
+                    }
+                }
+            }
+            return out
         }
 
         /// Median of the windows with the number of non-overlapping windows as support; nil below the minimum.
@@ -490,6 +578,8 @@ extension PhysiologyContext {
             case .hrvRmssd: return "hrv_rmssd." + suffix
             case .hrvSdnn: return "hrv_sdnn." + suffix
             case .heartRate: return "heart_rate." + suffix
+            // The explicit respiratory adapter (`respiratoryStableAwakeValues`).
+            case .respiratoryRate: return "resp_rate." + suffix
             default: return nil
             }
         }

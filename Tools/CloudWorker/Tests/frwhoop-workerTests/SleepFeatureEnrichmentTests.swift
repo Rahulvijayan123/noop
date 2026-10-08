@@ -272,6 +272,68 @@ final class SleepFeatureEnrichmentTests: XCTestCase {
         XCTAssertTrue(minutes.allSatisfy { $0.valid })
     }
 
+    // MARK: spec-02 history nights / timezone (rebound input)
+
+    func testLoadHistoryCarriesPublishedNightsAndZone() throws {
+        let dayStart = SleepFeatureEnrichment.unixSeconds("2026-09-10T00:00:00Z")!
+        let main: [String: Any] = [
+            "start_at": SleepFeatureEnrichment.isoUTC(dayStart), "end_at": SleepFeatureEnrichment.isoUTC(dayStart + 28_800),
+            "is_nap": false, "asleep_min": 432.5, "awake_min": 47.5, "efficiency": 0.901,
+            "stages": [["start": dayStart, "end": dayStart + 28_800, "stage": "light"]],
+        ]
+        // A nap with no minute fields and an out-of-range value: nil, never zero.
+        let nap: [String: Any] = [
+            "start_at": SleepFeatureEnrichment.isoUTC(dayStart + 50_000),
+            "end_at": SleepFeatureEnrichment.isoUTC(dayStart + 52_000),
+            "is_nap": true, "awake_min": 5000.0, "stages": [] as [Any],
+        ]
+        let broken: [String: Any] = ["start_at": "nope", "end_at": "nope", "stages": [] as [Any]]
+        let sleepJSON = String(data: try JSONSerialization.data(withJSONObject: [main, nap, broken]), encoding: .utf8)!
+        let db = FakeDB(snapshotRows: [["day": "2026-09-10", "rev": "5", "sleep": sleepJSON,
+                                        "tz": "America/Los_Angeles"]])
+        let history = try XCTUnwrap(try SleepFeatureEnrichment.loadHistory(
+            db: db, userId: "u", deviceId: "d", days: 31, todayDay: "2026-09-11",
+            ianaTimezone: "UTC", algorithmVersion: "frwhoop-server-1"))
+        XCTAssertEqual(history.timezoneByDay["2026-09-10"], "America/Los_Angeles")
+        let nights = try XCTUnwrap(history.nightsByDay["2026-09-10"])
+        XCTAssertEqual(nights.count, 2)
+        XCTAssertEqual(nights[0], SleepFeatureHistoryNight(start: dayStart, end: dayStart + 28_800, isNap: false,
+                                                           asleepMin: 432.5, awakeMin: 47.5, efficiency: 0.901))
+        XCTAssertEqual(nights[1].isNap, true)
+        XCTAssertNil(nights[1].asleepMin)
+        XCTAssertNil(nights[1].awakeMin, "out of the sidecar's range: nil, so the request is never refused")
+    }
+
+    func testRequestSendsHistoryNightsBoundedWithNullsNotZeros() throws {
+        let n0 = 1789000000
+        var many: [SleepFeatureHistoryNight] = []
+        for k in 0..<10 {  // 10 entries; the sidecar accepts 8 per day
+            many.append(SleepFeatureHistoryNight(start: n0 + k * 4000, end: n0 + k * 4000 + 600 + k * 10,
+                                                 isNap: k > 0, asleepMin: k == 3 ? nil : 10, awakeMin: 1,
+                                                 efficiency: nil))
+        }
+        many.append(SleepFeatureHistoryNight(start: n0 + 50_000, end: n0 + 80_000, isNap: false,
+                                             asleepMin: 400, awakeMin: 20, efficiency: 0.95))
+        var history = SleepFeatureHistory(dayRevisions: [("2026-10-04", 11)],
+                                          minutes: [("2026-10-04", n0, 1, true)])
+        history.nightsByDay["2026-10-04"] = many
+        history.timezoneByDay["2026-10-04"] = "Europe/London"
+        let request = SleepFeatureEnrichment.buildRequest(makeInput(
+            nights: [makeNight(start: n0, end: n0 + 3600)], history: history))
+        let days = try XCTUnwrap((request["history"] as? [String: Any])?["days"] as? [[String: Any]])
+        XCTAssertEqual(days[0]["timezone"] as? String, "Europe/London")
+        let sent = try XCTUnwrap(days[0]["nights"] as? [[String: Any]])
+        XCTAssertEqual(sent.count, SleepFeatureHistoryNight.maxPerDay)
+        XCTAssertTrue(sent.contains { ($0["end"] as? Int) == n0 + 80_000 }, "the main night is never dropped")
+        let starts = sent.compactMap { $0["start"] as? Int }
+        XCTAssertEqual(starts, starts.sorted())
+        XCTAssertTrue(sent.allSatisfy { $0["efficiency"] is NSNull || $0["efficiency"] is Double })
+        if let k3 = sent.first(where: { ($0["start"] as? Int) == n0 + 3 * 4000 }) {
+            XCTAssertTrue(k3["asleep_min"] is NSNull, "missing minutes travel as null, never 0")
+        }
+        XCTAssertTrue(JSONSerialization.isValidJSONObject(request))
+    }
+
     // MARK: Transport through the real loopback server (StubHTTPServer)
 
     func testEnrichRoundTripsThroughRealHTTP() throws {

@@ -186,12 +186,11 @@ final class PCCardiacContextTests: XCTestCase {
         dn.sleep.dayNightHeartRateVersion = "pc-day-night-hr-x"
         XCTAssertNotEqual(dn.fingerprint, base.fingerprint, "the day/night definition version is keyed")
 
-        // Respiratory recovery does not compute in this build: its version neither moves the key nor is claimed.
-        XCTAssertFalse(PC.Policy.respiratoryRecoveryComputes)
+        // The post-exertion respiratory return computes: its version moves the key and is claimed.
         var resp = base
         resp.exertion.respiratoryRecoveryVersion = "pc-resp-recovery-x"
-        XCTAssertEqual(resp.fingerprint, base.fingerprint)
-        XCTAssertNil(base.versions.respiratoryRecovery)
+        XCTAssertNotEqual(resp.fingerprint, base.fingerprint)
+        XCTAssertEqual(base.versions.respiratoryRecovery, base.exertion.respiratoryRecoveryVersion)
         XCTAssertEqual(base.versions.pulse, "pc-pulse-1")
         // …while the exertion config it sits in still keys everything else.
         var ex = base
