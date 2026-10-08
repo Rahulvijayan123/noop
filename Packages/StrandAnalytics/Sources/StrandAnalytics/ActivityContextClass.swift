@@ -256,7 +256,7 @@ public struct ActivityClassification: Equatable, Sendable {
     }
 }
 
-/// Refinements below `ActivityClass`. Additive: the class codes (`act-class-3`) do not change, so a reader
+/// Refinements below `ActivityClass`. Additive: the class codes (`act-class-4`) do not change, so a reader
 /// that ignores `activity_detail` reads exactly what it read before.
 public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
     case stairs
@@ -279,18 +279,35 @@ public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
 
 public enum ActivityClassifier {
 
-    /// The most confidence a sitting or standing claim may carry when only the wrist's own posture cues back it
-    /// (arm pattern, held forearm orientation, a shift's direction): no learned head that reads posture (HART's
-    /// fine sit / stand rows) and no transition expert spoke (D9-08). Posterior mass is not a calibrated
-    /// probability: on the D7 replays wrist-only sitting reached 0.88-0.90 (FORTH, PAMAP2), and in free living
-    /// (Capture-24) the wrist's sitting / standing claims are right far less often than their mass says. Until a
-    /// fitted calibration map exists, the class confidence of such a claim is capped here. A vehicle detail is
-    /// the encoder's call (it names vehicle motion) and is not capped.
+    /// The most confidence a sitting, standing or restless ("Sitting, restless" / "Standing, restless") claim may
+    /// carry unless a learned posture source AGREES with the posture claimed (D9-08). The wrist's own posture cues
+    /// (arm pattern, held forearm orientation, a shift's direction) all come from one IMU and are correlated, so
+    /// their posterior mass is not a calibrated probability: on the D7 replays wrist-only sitting / standing stayed
+    /// at or below 0.81 (hsmm-1.7) and 0.72 (hsmm-1.8), while "Sitting, restless" reached 0.88-0.90 because its
+    /// confidence summed the seated AND upright mass (Capture-24: 815 of 851 fidgeting states above 0.75 while
+    /// about 62 % of them were sitting); and in free living (Capture-24) the wrist's sitting / standing claims are
+    /// right far less often than their mass says. Until a fitted calibration map exists, the class confidence of
+    /// such a claim is capped here. A vehicle detail is the encoder's call (it names vehicle motion) and is not
+    /// capped.
     public static let wristOnlyPostureConfidenceCap = 0.75
+    /// The ceiling once a learned posture source agrees with the posture claimed
+    /// (`ActivityEvidenceSummary.learnedPosture`). Softer, never lifted: HART's fine sit / stand rows separate
+    /// sitting from standing at an AUC of only ~0.68 in free living (D7; FORTH 0.74-0.81 scripted), and HART reads
+    /// the same IMU the wrist cues do, so its agreement is not independent confirmation.
+    public static let learnedPostureConfidenceCap = 0.85
 
-    /// Whether a learned posture source backed this evidence: HART's fine distribution (its sit / stand rows) or
-    /// the transition expert (`ActivityEvidenceSummary.experts`: "hart_fine", "transition"). The folded encoder
-    /// classes say nothing about posture, and the gait expert only speaks while walking.
+    /// The ceiling on a claim of `claimed` (seated or upright) given the posture the learned posture memory
+    /// leans toward: the softer learned cap only when the two agree, the wrist-only cap otherwise (no learned
+    /// source, one that is undecided, or one that leans the OTHER way).
+    public static func postureConfidenceCap(claimed: PostureClass, learnedPosture: PostureClass?) -> Double {
+        learnedPosture == claimed ? learnedPostureConfidenceCap : wristOnlyPostureConfidenceCap
+    }
+
+    /// Whether a learned source that reads posture spoke at all: HART's fine distribution or the transition expert
+    /// (`ActivityEvidenceSummary.experts`: "hart_fine", "transition"). Provenance only since hsmm-1.9: a source
+    /// that spoke is not a source that agreed (the transition expert "speaks" whenever it does not abstain, which
+    /// in steady state means "no transition"), so this no longer moves the confidence cap; agreement does
+    /// (`postureConfidenceCap(claimed:learnedPosture:)`).
     public static func learnedPostureEvidence(experts: [String]) -> Bool {
         experts.contains("hart_fine") || experts.contains("transition")
     }
@@ -338,7 +355,7 @@ public enum ActivityClassifier {
                                 inBed: Bool = false,
                                 wear: WearContextState,
                                 evidenceQuality: Double,
-                                learnedPostureEvidence: Bool = false) -> ActivityClassification {
+                                learnedPosture: PostureClass? = nil) -> ActivityClassification {
         let quality = min(1, max(0, evidenceQuality))
         if wear == .offWrist {
             return ActivityClassification(activityClass: .offWrist, confidence: 1, familyConfidence: 1,
@@ -361,10 +378,14 @@ public enum ActivityClassifier {
         // them, not the posture head's lean (which reads a still sleeper as seated; see `ActivityDisplay`).
         let lying = (sleep == .asleep || inBed) ? stationary : stationary * recumbent
 
-        // D9-08: the sitting / standing mass the wrist alone may claim.
-        let postureCap = learnedPostureEvidence ? 1.0 : wristOnlyPostureConfidenceCap
-        let sittingMass = min(postureCap, stationary * seated) + locomotion[.vehicleMotion]
-        let standingMass = min(postureCap, stationary * upright)
+        // D9-08: the sitting / standing mass the evidence may claim (the wrist-only cap unless a learned posture
+        // source agrees with that posture, and then the softer learned cap).
+        let seatedCap = postureConfidenceCap(claimed: .seatedLikely, learnedPosture: learnedPosture)
+        let uprightCap = postureConfidenceCap(claimed: .uprightStationary, learnedPosture: learnedPosture)
+        let seatedStill = min(seatedCap, stationary * seated)
+        let uprightStill = min(uprightCap, stationary * upright)
+        let sittingMass = seatedStill + locomotion[.vehicleMotion]
+        let standingMass = uprightStill
 
         var candidates: [ActivityClass: Double] = [
             .running: locomotion[.running],
@@ -402,7 +423,12 @@ public enum ActivityClassifier {
             family = confidence
             sameFamily = [.sitting, .sittingDesk]
         case .standing: confidence = standingMass; family = confidence
-        case .fidgeting: confidence = stationary * (seated + upright); family = confidence
+        // "Sitting, restless" / "Standing, restless" name the posture the hands were restless in: the claim is
+        // that posture's mass, capped like sitting / standing. (hsmm-1.8 summed seated + upright, so a restless
+        // seated wrist carried the standing mass too and reached ~0.9 wrist-only.)
+        case .fidgeting:
+            confidence = seated >= upright ? seatedStill : uprightStill
+            family = confidence
         case .stationary: confidence = stationary * (1 - recumbent); family = confidence
         }
 
@@ -448,16 +474,34 @@ public enum ActivityClassifier {
         }
     }
 
+    /// A run keeps the union of the experts that spoke, not whether a learned source agreed with its posture
+    /// second by second, so a run's sitting / standing confidence stays at the wrist-only cap (hsmm-1.9): the
+    /// stored rows never claim more than the wrist can justify.
     public static func classify(run: ActivityContextRun) -> ActivityClassification {
         classify(posture: run.posture, locomotion: run.locomotion, armBehavior: run.armBehavior,
                  sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence,
-                 learnedPostureEvidence: learnedPostureEvidence(experts: run.experts))
+                 learnedPosture: nil)
     }
 
     public static func classify(state: ActivityContextState) -> ActivityClassification {
         classify(posture: state.posture, locomotion: state.locomotion, armBehavior: state.armBehavior,
                  sleep: state.sleep.state, inBed: state.sleep.inBed, wear: state.wear.state,
                  evidenceQuality: state.overallConfidence,
-                 learnedPostureEvidence: learnedPostureEvidence(experts: state.evidence.experts))
+                 learnedPosture: state.evidence.learnedPosture)
+    }
+
+    /// The hsmm-1.8 signature. A learned source's presence no longer lifts the cap (it is not agreement with the
+    /// posture claimed), so `learnedPostureEvidence` is ignored: this classifies as wrist-only.
+    @available(*, deprecated, message: "presence is not agreement; pass learnedPosture")
+    public static func classify(posture: HeadProbabilities<PostureClass>,
+                                locomotion: HeadProbabilities<LocomotionClass>,
+                                armBehavior: HeadProbabilities<ArmBehaviorClass>,
+                                sleep: SleepContextState,
+                                inBed: Bool = false,
+                                wear: WearContextState,
+                                evidenceQuality: Double,
+                                learnedPostureEvidence: Bool) -> ActivityClassification {
+        classify(posture: posture, locomotion: locomotion, armBehavior: armBehavior, sleep: sleep, inBed: inBed,
+                 wear: wear, evidenceQuality: evidenceQuality, learnedPosture: nil)
     }
 }

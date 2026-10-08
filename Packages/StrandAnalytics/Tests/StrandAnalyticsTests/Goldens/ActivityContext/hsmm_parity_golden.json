@@ -1,5 +1,5 @@
 {
-  "decoder" : "hsmm-1.8",
+  "decoder" : "hsmm-1.9",
   "generator" : "ActivityHsmmGoldenParityTests (StrandAnalytics, Swift) from the scenario inputs of Tools\/ActivityContext\/fixtures\/hsmm_golden.json",
   "scenarios" : [
     {
