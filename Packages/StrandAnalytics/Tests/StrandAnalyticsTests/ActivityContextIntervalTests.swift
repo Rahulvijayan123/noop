@@ -395,10 +395,10 @@ final class ActivityContextIntervalTests: XCTestCase {
         XCTAssertGreaterThan(walkHR, 95)
         XCTAssertLessThan(walkHR, 108)
         XCTAssertGreaterThan(runHR, 125)
-        // Rows shorter than the decoder's lag (one 5-s tick) are left out: runs follow the per-state class without
+        // Rows of a single 5-s tick (the decoder's lag) are left out: runs follow the per-state class without
         // the display label's hold, so the one transitional reading at the onset of the walk is its own short row,
         // and it carries the walk's first heart-rate second (the sim's heart rate jumps with the first step).
-        let seatedHR = intervals.filter { $0.activityClass.isStationaryAwake && $0.durationSeconds >= 5 }.compactMap(\.hrMean)
+        let seatedHR = intervals.filter { $0.activityClass.isStationaryAwake && $0.durationSeconds > 5 }.compactMap(\.hrMean)
         XCTAssertFalse(seatedHR.isEmpty)
         XCTAssertTrue(seatedHR.allSatisfy { $0 < 80 }, "\(seatedHR)")
         // Seconds in intervals match the document's own per-class summary to within the folded fragments.

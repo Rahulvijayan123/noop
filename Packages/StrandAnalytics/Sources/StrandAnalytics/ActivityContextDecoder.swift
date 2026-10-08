@@ -943,7 +943,10 @@ public struct ActivityContextDecoder: Sendable {
                 tracking.showNext = tracking.events[i]
             }
             tracking.activePostural = PosturalEventTrack(kind: back, ts: ts, probability: massOf(back))
-            record(back, p: massOf(back), ts: ts, onset: ts, source: posturalSource)
+            record(back, p: massOf(back), ts: ts, onset: ts, source: expertSpoke
+                   ? ActivityTransitionEvent.sourceTransitionExpert : decoderSource)
+            tracking.transitionRiseTs = ts
+            tracking.expertInExcursion = expertSpoke ? true : nil
         } else if var active = tracking.activePostural {
             let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts })
             var mass = massOf(active.kind)
@@ -965,12 +968,16 @@ public struct ActivityContextDecoder: Sendable {
                 tracking.activePostural = active
                 if let i { tracking.events[i].probability = mass }
             }
-            if let i { tracking.events[i].source = posturalSource }
+            // The expert speaking at any second of the excursion marks the event; it never un-marks it.
+            if let i, tracking.expertInExcursion == true { tracking.events[i].source = posturalSource }
             if transitionTotal < Self.posturalEventFloor / 2 {
                 if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
                     tracking.showNext = tracking.events[i]
                 }
                 tracking.activePostural = nil
+                // The excursion is over: a later rise is its own, with its own onset and source.
+                tracking.transitionRiseTs = nil
+                tracking.expertInExcursion = nil
             }
         } else if let hit = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
                   // hsmm-1.8: the floor is on the transition modes' summed mass. A burst whose direction is

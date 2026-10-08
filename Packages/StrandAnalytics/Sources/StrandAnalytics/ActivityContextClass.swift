@@ -44,7 +44,11 @@ public enum ActivityClassVersions {
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
-    public static let interval = "ctx-int-1"
+    /// 2: runs split on the per-state class rather than the display label, boundaries back-dated to the flagged
+    /// event's onset, the fold never absorbs off-wrist / unknown / another context and records what it absorbed,
+    /// split parts re-derive from their own runs, and rows carry in-bed, uncertainty, experts, transition count,
+    /// gap and settling (WP2).
+    public static let interval = "ctx-int-2"
 }
 
 /// One canonical activity state per moment. Raw values are the persisted / wire codes: never rename them.

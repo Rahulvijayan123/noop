@@ -633,9 +633,12 @@ public enum ActivityContextRuns {
     /// settled. The result, and the new tail, are exactly what one pass over all the states would give: a resumed
     /// day and a day decoded from scratch store the same runs, at any offload cadence.
     static func coalesce(_ states: [ActivityContextState], intervalS: Int, events: [ActivityTransitionEvent],
-                         resuming tail: ActivityContextRunsTail?, final: [ActivityContextRun])
+                         resuming tail: ActivityContextRunsTail?, final: [ActivityContextRun],
+                         offWrist: [DayStateSpan] = [])
         -> (runs: [ActivityContextRun], tail: ActivityContextRunsTail) {
-        var raw = tail?.raw ?? []
+        // Raw runs are kept as their exact running sums (a run's JSON is rounded), so a continuation folds the
+        // same numbers a single pass does.
+        var rawSums = tail?.raw ?? []
         var acc = tail?.open
         let maxGap = max(intervalS, 1) * 2
         var previousGait = tail?.previousGait
@@ -655,12 +658,12 @@ public enum ActivityContextRuns {
                 a.add(s, gait: added)
                 acc = a
             } else {
-                if let a = acc { raw.append(a.run(intervalS: intervalS)) }
+                if let a = acc { rawSums.append(a) }
                 acc = Accumulator(first: s, key: key, gait: added)
             }
         }
-        let closed = raw.count
-        var all = raw
+        let closed = rawSums.count
+        var all = rawSums.map { $0.run(intervalS: intervalS) }
         if let a = acc { all.append(a.run(intervalS: intervalS)) }
         let (folded, firstRaw) = foldFragmentsIndexed(all, maxFragmentS: 2 * max(intervalS, 1))
 
@@ -669,7 +672,12 @@ public enum ActivityContextRuns {
         if let end = tail?.finalEnd, !runs.isEmpty { runs[runs.count - 1].end = end }
         let seam = runs.count
         runs += folded
-        runs = aligned(runs, to: events, intervalS: intervalS, fromBoundary: max(1, seam))
+        let wearChanges = offWrist.flatMap { [$0.start, $0.end] }.sorted()
+        // The last settled run's key as the pass that settled it read it (its stored form is rounded).
+        var knownKeys: [Int: String] = [:]
+        if seam > 0, let k = tail?.finalKey { knownKeys[seam - 1] = k }
+        runs = aligned(runs, to: events, intervalS: intervalS, fromBoundary: max(1, seam), wearChanges: wearChanges,
+                       knownKeys: knownKeys)
 
         // What stays revisable: every run holding one of the last `revisableRawRuns` raw runs (a fold decision
         // looks one raw run ahead, and the last raw run is still growing), so everything before is settled.
@@ -677,8 +685,10 @@ public enum ActivityContextRuns {
         let fj = firstRaw.lastIndex { $0 <= keepFrom } ?? 0
         let rawStart = firstRaw.isEmpty ? closed : min(closed, firstRaw[fj])
         let finalEnd: Int? = fj > 0 ? folded[fj - 1].end : (seam > 0 ? (tail?.finalEnd ?? final.last?.end) : nil)
-        let next = ActivityContextRunsTail(finalRuns: seam + fj, finalEnd: finalEnd,
-                                           raw: Array(raw[rawStart..<closed]), open: acc, previousGait: previousGait)
+        let finalKey: String? = fj > 0 ? ActivityClassifier.runKey(folded[fj - 1].classification)
+            : (seam > 0 ? tail?.finalKey : nil)
+        let next = ActivityContextRunsTail(finalRuns: seam + fj, finalEnd: finalEnd, finalKey: finalKey,
+                                           raw: Array(rawSums[rawStart..<closed]), open: acc, previousGait: previousGait)
         return (runs, next)
     }
 
@@ -686,9 +696,12 @@ public enum ActivityContextRuns {
     static let revisableRawRuns = 3
 
     /// Whether `event` explains a change from a run of key `from` to one of key `to` (`ActivityClassifier.runKey`).
+    /// A change of position explains only boundaries between still or changing-position runs, and a walk or
+    /// run start / stop only boundaries into or out of moving, so each event moves the one boundary it is about.
     static func explains(_ event: ActivityTransitionEvent, from: String, to: String) -> Bool {
         let moving: Set<String> = ["walking", "running", "cycling", "active"]
         let gait: Set<String> = ["walking", "running"]
+        if event.isPostural, gait.contains(from) || gait.contains(to) { return false }
         switch event.kind {
         case .walkStart, .runStart: return moving.contains(to) && !moving.contains(from)
         case .walkStop, .runStop: return gait.contains(from) && !gait.contains(to)
@@ -704,20 +717,33 @@ public enum ActivityContextRuns {
     /// flagged the change and some seconds after the change began. When a flagged event of a compatible kind
     /// (a walk start into walking, a stand-up into standing or changing position …) was detected within a tick of
     /// the boundary, the boundary moves back to the event's onset (`ActivityTransitionEvent.onsetTs`, its
-    /// detection second when the onset is unknown), never later than it was and never past the earlier run's
-    /// first second. The onset is the decoder's own causal reading (at most `maxOnsetLeadS` before detection), so
-    /// a boundary moves by at most ~15 s, and only where the decoder said the change had begun.
+    /// detection second when the onset is unknown), never later than it was, and never so far that the earlier run
+    /// keeps less than its own first tick. The onset is the decoder's own causal reading (at most `maxOnsetLeadS`
+    /// before detection), so a boundary moves by at most ~15 s, and only where the decoder said the change began.
+    ///
+    /// Wear is a hard gate known to the second: a boundary into or out of an off-wrist run moves to the off-wrist
+    /// span's own start or end (`wearChanges`) when that second falls inside the tick before the boundary, so a
+    /// strap taken off at 10:00:03 is off from 10:00:03, not from the next 5-s tick.
     static func aligned(_ runs: [ActivityContextRun], to events: [ActivityTransitionEvent],
-                        intervalS: Int, fromBoundary first: Int = 1) -> [ActivityContextRun] {
-        guard runs.count > 1, !events.isEmpty, first < runs.count else { return runs }
+                        intervalS: Int, fromBoundary first: Int = 1,
+                        wearChanges: [Int] = [], knownKeys: [Int: String] = [:]) -> [ActivityContextRun] {
+        guard runs.count > 1, !(events.isEmpty && wearChanges.isEmpty), first < runs.count else { return runs }
         let step = max(1, intervalS)
         let ordered = events.sorted { $0.ts < $1.ts }
         var out = runs
-        let keys = runs.map { ActivityClassifier.runKey($0.classification) }
+        let keys = runs.indices.map { knownKeys[$0] ?? ActivityClassifier.runKey(runs[$0].classification) }
         var cursor = 0
         for i in max(1, first)..<out.count {
             let a = out[i - 1], b = out[i]
             guard a.end == b.start, keys[i - 1] != keys[i] else { continue }
+            let offWrist = ActivityClass.offWrist.rawValue
+            if (keys[i - 1] == offWrist) != (keys[i] == offWrist) {
+                if let c = wearChanges.last(where: { $0 > b.start - step && $0 <= b.start }), c > a.start, c < b.start {
+                    out[i - 1].end = c
+                    out[i].start = c
+                }
+                continue
+            }
             while cursor < ordered.count, ordered[cursor].ts < b.start - step { cursor += 1 }
             var target: Int?
             var j = cursor
@@ -730,7 +756,7 @@ public enum ActivityContextRuns {
                 j += 1
             }
             guard let t = target else { continue }
-            let boundary = max(a.start + 1, min(b.start, t))
+            let boundary = max(a.start + step, min(b.start, t))
             guard boundary < b.start else { continue }
             out[i - 1].end = boundary
             out[i].start = boundary
@@ -954,12 +980,15 @@ public enum ActivityContextRuns {
 public struct ActivityContextRunsTail: Codable, Equatable, Sendable {
     var finalRuns: Int
     var finalEnd: Int?
-    var raw: [ActivityContextRun]
+    /// `ActivityClassifier.runKey` of the last settled run, as the pass that settled it read it.
+    var finalKey: String?
+    var raw: [ActivityContextRuns.Accumulator]
     var open: ActivityContextRuns.Accumulator?
     var previousGait: GaitTotals?
 
     enum CodingKeys: String, CodingKey {
-        case finalRuns = "final_runs", finalEnd = "final_end", raw, open, previousGait = "previous_gait"
+        case finalRuns = "final_runs", finalEnd = "final_end", finalKey = "final_key", raw, open
+        case previousGait = "previous_gait"
     }
 }
 
@@ -995,7 +1024,9 @@ public struct ActivityContextDaySummary: Codable, Equatable, Sendable {
             let seconds = r.end - r.start
             if let l = r.displayContext { labelSeconds[l, default: 0] += seconds } else { unclear += seconds }
             classSeconds[ActivityClassifier.classify(run: r).activityClass.rawValue, default: 0] += seconds
-            confSum += r.overallConfidence * Double(seconds)
+            // At the precision a run is stored with, so a summary over runs read back from a stored document (a
+            // resumed day) equals the one over the same runs fresh from the decoder.
+            confSum += (r.overallConfidence * 100).rounded() / 100 * Double(seconds)
             total += seconds
         }
         self.init(labelSeconds: labelSeconds, unclearSeconds: unclear,
@@ -1049,7 +1080,7 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
                 config: ActivityDecoderConfig = ActivityDecoderConfig(), includeSnapshot: Bool = true) {
         let interval = max(1, config.publishIntervalS)
         let coalesced = ActivityContextRuns.coalesce(track.states, intervalS: interval, events: track.events,
-                                                      resuming: nil, final: [])
+                                                      resuming: nil, final: [], offWrist: input.offWrist)
         let runs = coalesced.runs
         self.schemaVersion = ActivityContextVersions.schema
         self.versions = track.snapshot.versions
@@ -1312,7 +1343,8 @@ public enum ActivityContextDayBuilder {
         // the seam folds and aligns exactly as one pass over the whole day would.
         let coalesced = ActivityContextRuns.coalesce(track.states, intervalS: interval, events: doc.events,
                                                       resuming: runsTail,
-                                                      final: Array(cached.runs.prefix(runsTail.finalRuns)))
+                                                      final: Array(cached.runs.prefix(runsTail.finalRuns)),
+                                                      offWrist: input.offWrist)
         doc.runs = coalesced.runs
         doc.runsTail = coalesced.tail
         doc.latest = track.states.last ?? cached.latest
