@@ -171,15 +171,12 @@ struct CompareView: View {
     private var loadTaskID: String { "\(selectionKey)|\(repo.refreshSeq)" }
 
     var body: some View {
-        ScreenScaffold(title: "Compare", subtitle: "Overlay signals, draw conclusions.",
+        ScreenScaffold(title: "Compare", titleDisplay: .navigationBar,
                        // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
-                       // alignment/spacing/header). The content is one inner eager VStack; no staggered
-                       // reveals, and the only GeometryReaders are chart-local (.chartOverlay plot rects),
-                       // so nothing depends on eager layout of the scroll column.
-                       lazy: true,
-                       // Liquid finish: the day-of-sky backdrop carries the liquid atmosphere across the
-                       // analysis tabs, exactly like Today and the batch-1 screens.
-                       topBackground: liquidScaffoldSky()) {
+                       // alignment/spacing/header). The content is one inner eager VStack; the only
+                       // GeometryReaders are chart-local (.chartOverlay plot rects), so nothing depends on
+                       // eager layout of the scroll column.
+                       lazy: true) {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                 metricSection
 
@@ -345,7 +342,7 @@ struct CompareView: View {
 
     private var metricSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Metrics", overline: "Overlay 2-4 signals")
+            SectionHeader("Metrics")
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     // Responsive: range pills + the Add menu side-by-side when there's room, else
@@ -446,22 +443,15 @@ struct CompareView: View {
     private func overlaySection(_ series: [CompareSeries]) -> some View {
         let nonEmpty = series.filter { !$0.rows.isEmpty }
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Overlay", overline: "\(range.phrase)")
-            ChartCard(
-                title: "Normalized overlay",
-                subtitle: anyWidened
-                    ? String(localized: "Min-max normalized · sparse series widened past \(range.phrase) · \(inspectHint)")
-                    : String(localized: "Each line min-max normalized within \(range.phrase) · \(inspectHint)"),
-                trailing: String(localized: "\(nonEmpty.count) series"),
-                // Anchor the overlay card to the brand-green chrome world; each line keeps its own
-                // categorical series colour so the lines stay distinguishable against the wash.
-                tint: StrandPalette.accent
-            ) {
-                // The overlay is min–max NORMALIZED 0–1, so the Effort scale never touches the line shape;
-                // only the per-series hover read-outs convert (passed through to the tooltip). (#268)
-                OverlayChart(series: nonEmpty, effortScale: effortScale, height: NoopMetrics.chartHeight)
-            } footer: {
-                legend(nonEmpty)
+            SectionHeader("Overlay", trailing: range.phrase)
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    // The overlay is min–max NORMALIZED 0–1 within the window (each line on its own
+                    // range), so the Effort scale never touches the line shape; only the per-series
+                    // read-outs convert. (#268)
+                    OverlayChart(series: nonEmpty, effortScale: effortScale, height: NoopMetrics.chartHeightPrimary)
+                    legend(nonEmpty)
+                }
             }
         }
     }
@@ -470,14 +460,6 @@ struct CompareView: View {
         VStack(spacing: 0) {
             ForEach(Array(series.enumerated()), id: \.element.id) { idx, s in
                 HStack(spacing: 10) {
-                    // A small liquid vessel posed at this series' LATEST value within its own min–max
-                    // window (the same 0–1 position the overlay's "now" end-cap sits at) — the liquid
-                    // accent tying the legend to the real series. Static, decorative (the min/max text
-                    // + colour swatch carry the meaning for VoiceOver).
-                    LiquidVessel(value: s.rows.last.map { s.normalized($0.value) },
-                                 tint: s.color, animated: false)
-                        .frame(width: 22, height: 22)
-                        .accessibilityHidden(true)
                     RoundedRectangle(cornerRadius: 2, style: .continuous)
                         .fill(s.color)
                         .frame(width: 14, height: 3)
@@ -562,8 +544,7 @@ struct CompareView: View {
     private func correlationSection(_ series: [CompareSeries]) -> some View {
         let pairs = pairResults(series)
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("How They Move Together",
-                          overline: "Pearson r · \(range.phrase)",
+            SectionHeader("How they move together",
                           trailing: pairs.isEmpty ? nil
                                     : (pairs.count == 1 ? String(localized: "1 pair")
                                                         : String(localized: "\(pairs.count) pairs")))
@@ -584,21 +565,12 @@ struct CompareView: View {
         }
     }
 
-    /// One pairwise correlation as its own NoopCard.
+    /// One pairwise correlation as its own card: r with a bar for direction and size, the plain-language
+    /// read, and the scatter of the days the two share (what actually shows the relationship).
     private func pairCard(_ p: PairResult) -> some View {
-        let tint = correlationColor(p.r)
-        // Frosted card washed by the relationship's own colour (green positive / rose negative), with a
-        // TrendChip surfacing the signed direction at a glance — the Today delta idiom, applied to r.
-        return NoopCard(tint: tint) {
-            VStack(alignment: .leading, spacing: 8) {
-                HStack(spacing: 10) {
-                    // A small liquid vessel filled to the correlation STRENGTH (|r|, a neutral 0–1
-                    // magnitude — not a health value), tinted by the relationship's own colour. Static
-                    // (posed) so a page of pair cards costs one cached frame each, matching Today's small
-                    // vessels. Decorative — the r read-out + sentence carry the meaning for VoiceOver.
-                    LiquidVessel(value: min(abs(p.r), 1), tint: tint, animated: false)
-                        .frame(width: 30, height: 30)
-                        .accessibilityHidden(true)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(spacing: NoopMetrics.space2) {
                     // Two color swatches for the pair.
                     HStack(spacing: 3) {
                         Circle().fill(p.a.color).frame(width: 8, height: 8)
@@ -607,22 +579,24 @@ struct CompareView: View {
                     Text("\(p.a.metric.title) ↔ \(p.b.metric.title)")
                         .font(StrandFont.headline)
                         .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(2)
                     Spacer()
-                    TrendChip(text: signedR(p.r), color: tint)
                     Text("r = \(signedR(p.r))")
-                        .font(StrandFont.number(18))
-                        .foregroundStyle(tint)
+                        .font(StrandFont.number(17))
+                        .foregroundStyle(StrandPalette.textPrimary)
                 }
+                InsightsDivergingBar(value: p.r, magnitude: 1,
+                                     positiveColor: StrandPalette.statusPositive,
+                                     negativeColor: StrandPalette.statusCritical)
 
                 Text(insightSentence(p))
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // The strength magnitude drawn as a liquid tube — the horizontal progress idiom Today
-                // uses for its key-metric fills, here reading |r| from none (0) to a perfect link (1).
-                LiquidTube(frac: min(abs(p.r), 1), tint: tint, height: 8, animated: false)
-                    .accessibilityHidden(true)
+                InsightsScatterChart(pairs: CorrelationEngine.alignByDay(p.a.rows, p.b.rows),
+                                     xTitle: axisTitle(p.a.metric), yTitle: axisTitle(p.b.metric),
+                                     color: p.a.color)
 
                 Text("\(p.n) overlapping days · \(strengthWord(p.r)) \(directionWord(p.r)) correlation")
                     .font(StrandFont.footnote)
@@ -631,6 +605,11 @@ struct CompareView: View {
         }
         .accessibilityElement(children: .combine)
         .accessibilityLabel("\(p.a.metric.title) versus \(p.b.metric.title), r equals \(String(format: "%.2f", p.r)), \(p.n) days")
+    }
+
+    /// "HRV (ms)" for a scatter axis: the metric and its stored unit.
+    private func axisTitle(_ m: MetricDescriptor) -> String {
+        m.unit.isEmpty ? m.title : "\(m.title) (\(m.unit))"
     }
 
     // MARK: - Insight language
@@ -669,10 +648,6 @@ struct CompareView: View {
         return r >= 0 ? String(localized: "positive") : String(localized: "negative")
     }
 
-    private func correlationColor(_ r: Double) -> Color {
-        let base = r >= 0 ? StrandPalette.statusPositive : StrandPalette.statusCritical
-        return base.opacity(0.55 + 0.45 * min(abs(r), 1.0))
-    }
 }
 
 // MARK: - Selected-metric chips (wrapping flow layout)
@@ -700,8 +675,10 @@ private struct FlowChips: View {
                         onRemove(metric)
                     } label: {
                         Image(systemName: "xmark")
-                            .font(.system(size: 9, weight: .semibold))
+                            .font(StrandFont.icon(.inline))
                             .foregroundStyle(StrandPalette.textTertiary)
+                            .frame(minWidth: 24, minHeight: 24)
+                            .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Remove \(metric.title)")
@@ -917,7 +894,7 @@ private struct OverlayChart: View {
                 x: .value("Date", p.date),
                 y: .value("Normalized", p.norm)
             )
-            .interpolationMethod(.catmullRom)
+            .interpolationMethod(.monotone)
             .lineStyle(StrokeStyle(lineWidth: 2.2, lineCap: .round, lineJoin: .round))
             .foregroundStyle(by: .value("Metric", p.title))
 
@@ -933,40 +910,23 @@ private struct OverlayChart: View {
                 .foregroundStyle(by: .value("Metric", p.title))
             }
         }
-        // Bevel "now" end-caps — a soft halo + bright core on each series' latest point, drawn on top.
-        .chartOverlay { proxy in
-            GeometryReader { geo in
-                let plot = proxy.plotRectCompat(in: geo)
-                ForEach(model.endCaps) { cap in
-                    if let px = proxy.position(forX: cap.date),
-                       let py = proxy.position(forY: cap.norm),
-                       let color = colorFor(cap.title) {
-                        ZStack {
-                            Circle().fill(color.opacity(0.30)).frame(width: 16, height: 16)
-                            Circle().fill(color.opacity(0.65)).frame(width: 10, height: 10)
-                            Circle().fill(Color.white).frame(width: 4, height: 4)
-                        }
-                        .position(x: px + plot.minX, y: py + plot.minY)
-                        .allowsHitTesting(false)
-                    }
-                }
-            }
-            .accessibilityHidden(true)
-        }
         .chartForegroundStyleScale(range: series.map(\.color))
         .chartYScale(domain: 0...1)
         .chartYAxis {
-            // Normalized axis — label endpoints as low/high rather than raw numbers.
+            // Normalized axis: each line's position within its OWN min–max over the window, in percent.
             AxisMarks(position: .leading, values: [0.0, 0.5, 1.0]) { value in
-                AxisGridLine().foregroundStyle(StrandPalette.hairline.opacity(0.4))
+                AxisGridLine().foregroundStyle(NaraChartStyle.gridColor)
                 AxisValueLabel {
                     if let d = value.as(Double.self) {
-                        Text(d == 0 ? "low" : d == 1 ? "high" : "mid")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                        Text("\(Int((d * 100).rounded()))")
+                            .font(NaraChartStyle.axisFont)
+                            .foregroundStyle(NaraChartStyle.axisColor)
                     }
                 }
             }
+        }
+        .chartYAxisLabel(position: .top, alignment: .leading) {
+            Text("% of own range").font(NaraChartStyle.unitFont).foregroundStyle(StrandPalette.textSecondary)
         }
         // Day-aligned marks, not a requested count. `.automatic(desiredCount:)` picks the stride that
         // best fits the count, and over a short window (this chart offers W) that stride goes sub-day, so
