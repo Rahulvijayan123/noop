@@ -10,8 +10,6 @@ import StrandDesign
 // More list pushed it; nothing here reads or computes data.
 
 struct BrowseView: View {
-    /// The Live session runs full screen (the guardian owns the display), as it did from Today before.
-    @State private var showsLiveSession = false
     #if DEBUG
     /// `--demo-browse-open N`: the Nth row (counting down the whole list from 0) opened at launch, so a
     /// simulator screenshot can check that every destination opens.
@@ -26,35 +24,18 @@ struct BrowseView: View {
                 .push("Explore", "square.grid.2x2") { MetricExplorerView() },
                 .push("Compare", "chart.line.uptrend.xyaxis") { CompareView() },
                 .push("Week in review", "calendar") { WeeklyDigestView() },
-                .push("Hydration", "drop") { HydrationView() },
             ]),
             ("Body", [
                 .push("Workouts", "figure.run") { WorkoutsView() },
                 .push("Lift Log", "dumbbell") { LiftLogView() },
-                .push("Live", "waveform.path.ecg") { LiveView() },
-                .action("Live session", "shield.lefthalf.filled") { showsLiveSession = true },
-                .push("Stress", "gauge.with.dots.needle.50percent") { StressView() },
-                .push("Breathe", "wind") { BreathingView() },
-                .push("Intervals", "timer") { IntervalTimerView() },
-                .push("Rhythm", "waveform.path") { RhythmHost() },
             ]),
-            ("Insights", [
-                .push("Insights", "lightbulb") { InsightsView() },
-                .push("What Moves You", "wand.and.sparkles") { InsightsHubView() },
-                .push("Intelligence", "brain.head.profile") { IntelligenceView() },
-                .push("Lab Book", "books.vertical") { LabBookView() },
-                .push("Coupled view", "rectangle.split.3x1") { CoupledView() },
-                .push("How your scores work", "info.circle") { ScoringGuideView() },
+            ("Learn", [
+                .push("How your metrics work", "info.circle") { ScoringGuideView() },
             ]),
             ("Data", [
-                .push("Data sources", "square.and.arrow.down") { DataSourcesView() },
-                .push("Your Data, Fused", "square.stack.3d.up") { FusedRecordHost() },
                 .push("Apple Health", "heart") { AppleHealthView() },
-                .push("Mi Band", "figure.walk.motion") { XiaomiBandView() },
                 .push("Backup & Sync", "externaldrive.badge.icloud") { BackupSyncView() },
                 .push("Power saving", "battery.25") { PowerSavingView() },
-                .push("Nara Limitations", "list.bullet.rectangle") { NoopLimitationsView() },
-                .push("Updates", "bell") { UpdatesInboxView() },
             ]),
         ]
     }
@@ -67,7 +48,6 @@ struct BrowseView: View {
                 }
             }
         }
-        .browseLiveSessionPresentation(isPresented: $showsLiveSession)
         #if DEBUG
         .navigationDestination(isPresented: Binding(get: { demoEntry != nil },
                                                     set: { if !$0 { demoEntry = nil } })) {
@@ -89,7 +69,7 @@ struct BrowseView: View {
     }
 }
 
-/// One row of Browse: a screen to push, or (the Live session) an action.
+/// One row of Browse: a screen to push, or an action.
 private struct BrowseEntry: Identifiable {
     enum Kind {
         case push(() -> AnyView)
@@ -148,20 +128,6 @@ private extension View {
             .toolbarBackground(.hidden, for: .navigationBar)
         #else
         self.background(StrandPalette.surfaceBase)
-        #endif
-    }
-
-    /// The Live session: a full-screen cover on iPhone (the guardian owns the display mid-workout), a sheet
-    /// on the Mac, where `fullScreenCover` does not exist. The session view ends itself through `onClose`.
-    @ViewBuilder func browseLiveSessionPresentation(isPresented: Binding<Bool>) -> some View {
-        #if os(iOS)
-        self.fullScreenCover(isPresented: isPresented) {
-            LiveSessionView(onClose: { isPresented.wrappedValue = false })
-        }
-        #else
-        self.sheet(isPresented: isPresented) {
-            LiveSessionView(onClose: { isPresented.wrappedValue = false })
-        }
         #endif
     }
 }

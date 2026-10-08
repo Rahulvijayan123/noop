@@ -97,6 +97,11 @@ struct LiquidTodayView: View {
     // SwiftUI re-mount, and the two Today surfaces agree on the selection.
     @AppStorage(TodayView.selectedDayOffsetKey) private var selectedDayOffset = 0
     @State private var showDayPicker = false
+    /// The pop-up for the card the user tapped, and the page its "Open details" button pushes after the
+    /// pop-up has gone (a push from under a presented sheet would be dropped).
+    @State private var explainer: CardExplainer?
+    @State private var pendingRoute: TabRoute?
+    @State private var showsPendingRoute = false
     /// Where the heart-rate CHART sits, so a sideways drag on it scrubs instead of changing the day.
     @State private var heartRateCardFrame: CGRect = .null
     private static let daySwipeSpace = "liquidTodayDaySwipeSpace"
@@ -332,9 +337,9 @@ struct LiquidTodayView: View {
         }
         .coordinateSpace(name: Self.daySwipeSpace)
         .onPreferenceChange(LiquidHeartRateCardFrameKey.self) { heartRateCardFrame = $0 }
-        // Swipe left/right to change DAYS (WHOOP-style). Tab-swipe is disabled on Today in RootTabView so
-        // this owns the horizontal gesture here.
-        .simultaneousGesture(daySwipeGesture)
+        // Day navigation has no control on this page for now (it moves elsewhere), so a sideways drag must
+        // not change the day silently: the header no longer says which day is shown. `daySwipeGesture`,
+        // `step(by:)` and the picker binding stay for that control.
         // One light tick per day change (swipe, chevron or calendar pick).
         .strandHaptic(.selection, trigger: selectedDayOffset)
         // G1 (findings/g1-day-ui.md T01; audit-g1-day F1b): the day-rollover + zone-context sequences
@@ -354,13 +359,32 @@ struct LiquidTodayView: View {
         .onAppear {
             let clamped = TodayView.restoredDayOffset(saved: selectedDayOffset, maxOffset: earliestDayOffset)
             if clamped != selectedDayOffset { selectedDayOffset = clamped }
+            // With no day control on the page, a day left selected by an earlier version (or the classic
+            // Today) would strand the user on a past day with nothing saying so. Always open on today.
+            #if DEBUG
+            let keepsDemoDay = DemoLaunch.intArg("--demo-day-offset") != nil
+            #else
+            let keepsDemoDay = false
+            #endif
+            if !keepsDemoDay, selectedDayOffset != 0 { selectedDayOffset = 0 }
         }
         #if DEBUG
         .task { await applyDemoDayOffset() }
         #endif
-        // How the scores work, reached from the Rest ring's context menu (and from Browse).
+        // How the metrics work, reached from the Rest ring's context menu (and from Browse).
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
+        }
+        .sheet(item: $explainer, onDismiss: {
+            if pendingRoute != nil { showsPendingRoute = true }
+        }) { card in
+            CardExplainerSheet(
+                explainer: card,
+                onOpenDetails: { route in pendingRoute = route; explainer = nil },
+                onClose: { explainer = nil })
+        }
+        .navigationDestination(isPresented: $showsPendingRoute) {
+            if let route = pendingRoute { route.screen }
         }
         .sheet(item: $customizationDestination) { destination in
             TodayCustomizationSheet(
@@ -404,76 +428,38 @@ struct LiquidTodayView: View {
 
     // MARK: - Header
 
-    /// The page header: the day's name (title1) over its date, both one button that opens the date
-    /// picker; a return-to-today action while browsing the past; the day stepper; Settings. A title
-    /// appears once, and the date is the only line under it.
+    /// The page header: a time-of-day greeting with the user's first name, and Settings. No title and no
+    /// date: the greeting is the only line. Day navigation has no control here for now.
     private var header: some View {
         HStack(alignment: .center, spacing: NoopMetrics.space1) {
-            Button { showDayPicker = true } label: {
-                VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
-                    Text(dayTitle)
-                        .font(StrandFont.title1)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .lineLimit(1)
-                        .minimumScaleFactor(0.7)
-                    Text(verbatim: dateLine)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
-                }
+            Text(verbatim: greeting)
+                .font(StrandFont.title1)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.6)
                 .frame(maxWidth: .infinity, alignment: .leading)
-                .contentShape(Rectangle())
-            }
-            .buttonStyle(.plain)
-            .accessibilityElement(children: .combine)
-            .accessibilityAddTraits(.isHeader)
-            .accessibilityHint(Text("Choose a day. Swipe sideways to change day."))
-            .popover(isPresented: $showDayPicker) {
-                DatePicker("", selection: dayPickerBinding, in: ...Repository.logicalDay(Date()),
-                           displayedComponents: [.date])
-                    .datePickerStyle(.graphical)
-                    .labelsHidden()
-                    .padding(12)
-                    .frame(minWidth: 320, minHeight: 360)
-                    .liquidPopoverAdaptation()
-            }
-            // G1 (spec §3 / findings T03): an explicit one-tap return to Today while browsing a past day.
-            if selectedDayOffset > 0 {
-                Button {
-                    selectedDayOffset = 0
-                    showDayPicker = false
-                } label: {
-                    Text("Today")
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                        .padding(.horizontal, NoopMetrics.space1)
-                        .frame(minHeight: NoopMetrics.minimumHitTarget)
-                        .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Return to today")
-            }
-            dayChevron("chevron.left", enabled: selectedDayOffset < earliestDayOffset) { step(by: 1) }
-                .accessibilityLabel(Text("Previous day"))
-            dayChevron("chevron.right", enabled: selectedDayOffset > 0) { step(by: -1) }
-                .accessibilityLabel(Text("Next day"))
+                .accessibilityAddTraits(.isHeader)
+                .accessibilityIdentifier("today.greeting")
             HeaderSettingsButton()
                 .padding(.leading, NoopMetrics.space1)
         }
     }
 
-    /// One day-stepper chevron, drawn like `PeriodStepper`'s: 44 pt target, accent when it can move,
-    /// `textTertiary` and disabled at the end of the range.
-    private func dayChevron(_ symbol: String, enabled: Bool, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Image(systemName: symbol)
-                .font(StrandFont.icon(.row).weight(.semibold))
-                .foregroundStyle(enabled ? StrandPalette.accent : StrandPalette.textTertiary.opacity(0.5))
-                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
-                .contentShape(Rectangle())
+    /// "Good morning, Rahul": the word follows the local hour, the name is the first word of the profile
+    /// name (nothing after the comma when none is set).
+    private var greeting: String {
+        Self.greeting(hour: Calendar.current.component(.hour, from: Date()), displayName: profile.displayName)
+    }
+
+    static func greeting(hour: Int, displayName: String) -> String {
+        let word: String
+        switch hour {
+        case 5..<12:  word = String(localized: "Good morning")
+        case 12..<17: word = String(localized: "Good afternoon")
+        default:      word = String(localized: "Good evening")
         }
-        .buttonStyle(.plain)
-        .disabled(!enabled)
+        let first = displayName.split(whereSeparator: \.isWhitespace).first.map(String.init) ?? ""
+        return first.isEmpty ? word : "\(word), \(first)"
     }
 
     // MARK: - Hero
@@ -483,24 +469,29 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         NoopCard {
             HStack(alignment: .top, spacing: NoopMetrics.space2) {
-                BaselineHeroCell(isLoading: isLoading)
+                BaselineHeroCell(isLoading: isLoading, onExplain: { explainer = $0 })
                 if selectedDayOffset == 0 {
-                    WatchdogHeroCell(isLoading: isLoading)
+                    WatchdogHeroCell(isLoading: isLoading, onExplain: { explainer = $0 })
                 }
+                let restValue = restScore.map { String(Int($0.rounded())) } ?? Self.noValueDash
+                let restState = HeroRings.recoveryStatus(score: restScore)
                 HeroRingCell(label: String(localized: "Rest"),
                              fraction: restScore.map { $0 / 100 },
-                             value: restScore.map { String(Int($0.rounded())) } ?? Self.noValueDash,
+                             value: restValue,
                              color: StrandPalette.restColor,
-                             state: HeroRings.recoveryStatus(score: restScore),
-                             route: .metric(HeroRingMetric.rest),
+                             state: restState,
+                             explainer: .rest(value: restValue, state: restState,
+                                              tint: StrandPalette.restColor,
+                                              route: .metric(HeroRingMetric.rest)),
+                             onExplain: { explainer = $0 },
                              isLoading: isLoading)
-                    // The scoring guide stays one long-press away until the Rest detail page links it.
+                    // The metrics guide stays one long-press away.
                     .contextMenu {
                         Button { guideSection = .rest } label: {
-                            Label("How your scores work", systemImage: "info.circle")
+                            Label("How your metrics work", systemImage: "info.circle")
                         }
                     }
-                    .accessibilityAction(named: Text("How your scores work")) { guideSection = .rest }
+                    .accessibilityAction(named: Text("How your metrics work")) { guideSection = .rest }
             }
         }
     }
@@ -651,9 +642,15 @@ struct LiquidTodayView: View {
                               state: m.state, trend: trend, reservesTrendSlot: keyMetricsDetailed,
                               isEstimate: m.isEstimate, isLoading: isLoading)
         if let detail = m.detail {
-            // A VALUE link (not a closure), so a re-tap of the Today tab pops back to the root (#135/#198).
-            NavigationLink(value: TabRoute.metricSourced(key: detail.key, source: detail.source)) { tile }
+            // A tap explains the tile; the pop-up's "Open details" pushes the page this link used to.
+            Button {
+                let reading = m.value.map { v in m.unit.map { "\(v) \($0)" } ?? v }
+                explainer = .keyMetric(m.metric, value: reading, state: m.state,
+                                       tint: m.metric.customizationTint, icon: m.metric.customizationIcon,
+                                       route: .metricSourced(key: detail.key, source: detail.source))
+            } label: { tile }
                 .buttonStyle(LiquidPressStyle())
+                .accessibilityHint(Text("Explains this card"))
                 .contextMenu {
                     Button { customizationDestination = .keyMetrics } label: {
                         Label("Edit Key Metrics", systemImage: "slider.horizontal.3")
@@ -708,7 +705,11 @@ struct LiquidTodayView: View {
                            isToday: selectedDayOffset == 0,
                            window: heartRateWindow,
                            isLoading: isLoading,
-                           frameSpace: Self.daySwipeSpace)
+                           frameSpace: Self.daySwipeSpace,
+                           onExplain: {
+                               explainer = .heartRate(value: displayDay?.restingHr.map { "\($0) bpm resting" },
+                                                      route: .heartRateDay)
+                           })
     }
 
     /// The chart's x window: the selected logical day, midnight to midnight, widened to the loaded samples
@@ -1256,11 +1257,13 @@ private struct HeroRingCell: View {
     let value: String
     let color: Color
     let state: String?
-    let route: TabRoute
+    /// The pop-up a tap opens (its "Open details" button goes to the page this cell used to push).
+    let explainer: CardExplainer
+    let onExplain: (CardExplainer) -> Void
     let isLoading: Bool
 
     var body: some View {
-        NavigationLink(value: route) {
+        Button { onExplain(explainer) } label: {
             VStack(spacing: NoopMetrics.space2) {
                 ScoreRing(fraction: fraction, value: value, color: color,
                           diameter: Self.ringDiameter, isLoading: isLoading)
@@ -1290,7 +1293,7 @@ private struct HeroRingCell: View {
         .accessibilityValue(Text(isLoading ? String(localized: "Loading")
                                  : [ScoreRing.displayValue(fraction: fraction, value: value), state]
                                     .compactMap { $0 }.joined(separator: ", ")))
-        .accessibilityHint(Text("Opens the trend and readings"))
+        .accessibilityHint(Text("Explains this card"))
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -1299,6 +1302,7 @@ private struct HeroRingCell: View {
 /// Isolated so Today only re-renders this cell when the usuals move.
 private struct BaselineHeroCell: View {
     let isLoading: Bool
+    let onExplain: (CardExplainer) -> Void
     @EnvironmentObject private var store: BaselineStore
 
     var body: some View {
@@ -1308,12 +1312,15 @@ private struct BaselineHeroCell: View {
             guard let check, counted > 0 else { return StrandPalette.textTertiary }
             return check.offCount == 0 ? StrandPalette.statusPositive : StrandPalette.statusWarning
         }()
+        let value = check.map { "\($0.inRangeCount)/\(counted)" } ?? LiquidTodayView.noValueDash
+        let state = Self.stateWord(check)
         HeroRingCell(label: String(localized: "Baseline"),
                      fraction: counted > 0 ? check.map { Double($0.inRangeCount) / Double(counted) } : nil,
-                     value: check.map { "\($0.inRangeCount)/\(counted)" } ?? LiquidTodayView.noValueDash,
+                     value: value,
                      color: tint,
-                     state: Self.stateWord(check),
-                     route: .baselineCharts,
+                     state: state,
+                     explainer: .baseline(value: value, state: state, tint: tint, route: .baselineCharts),
+                     onExplain: onExplain,
                      isLoading: isLoading)
     }
 
@@ -1334,17 +1341,22 @@ private struct BaselineHeroCell: View {
 /// Live Watchdog: the ring fills with how far the last half-hour is from the usual, full at the severe cut.
 private struct WatchdogHeroCell: View {
     let isLoading: Bool
+    let onExplain: (CardExplainer) -> Void
     @EnvironmentObject private var store: BaselineStore
 
     var body: some View {
         let state = HeroRings.watchdogState(store.watchdogResult)
         let distance = HeroRings.watchdogDistance(store.watchdogResult)
+        let value = LiquidTodayView.intValue(distance) ?? LiquidTodayView.noValueDash
+        let tint = WatchdogTone.color(state)
         HeroRingCell(label: String(localized: "Watchdog"),
                      fraction: distance.map { $0 / 100 },
-                     value: LiquidTodayView.intValue(distance) ?? LiquidTodayView.noValueDash,
-                     color: WatchdogTone.color(state),
+                     value: value,
+                     color: tint,
                      state: HeroRings.watchdogLabel(state),
-                     route: .watchdog,
+                     explainer: .watchdog(value: value, state: HeroRings.watchdogLabel(state), tint: tint,
+                                          route: .watchdog),
+                     onExplain: onExplain,
                      isLoading: isLoading)
     }
 }
@@ -1382,6 +1394,7 @@ private struct TodayHeartRateCard: View {
     let window: ClosedRange<Date>
     let isLoading: Bool
     let frameSpace: String
+    let onExplain: () -> Void
 
     @State private var selection: Date?
 
@@ -1401,11 +1414,11 @@ private struct TodayHeartRateCard: View {
     var body: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                NavigationLink(value: TabRoute.heartRateDay) {
-                    TodayCardTitleRow(title: String(localized: "Heart rate")) { readout }
+                Button(action: onExplain) {
+                    TodayCardTitleRow(title: String(localized: "Heart rate"), showsChevron: false) { readout }
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint(Text("Opens the full-day heart rate graph with an activity timeline"))
+                .accessibilityHint(Text("Explains this card"))
 
                 IntradayChart(samples: samples, bucketSeconds: 300, color: StrandPalette.metricRose,
                               references: resting.map { [ChartReference(Double($0), label: String(localized: "Resting"))] } ?? [],
@@ -1423,9 +1436,9 @@ private struct TodayHeartRateCard: View {
                         }
                     }
 
-                NavigationLink(value: TabRoute.heartRateDay) { stats }
+                Button(action: onExplain) { stats }
                     .buttonStyle(.plain)
-                    .accessibilityHint(Text("Opens the full-day heart rate graph with an activity timeline"))
+                    .accessibilityHint(Text("Explains this card"))
             }
         }
         // A new day (or the first load) starts unselected.

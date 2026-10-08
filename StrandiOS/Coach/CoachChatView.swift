@@ -167,13 +167,11 @@ struct CoachChatView: View {
                                   action: toggleSidebar)
                     .padding(.trailing, -4)
             }
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Sana")
-                    .font(StrandFont.rounded(28))
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .accessibilityAddTraits(.isHeader)
-                subtitle
-            }
+            // Just the name: no subtitle and no chat title under it (the sidebar lists the chats).
+            Text("Sana")
+                .font(StrandFont.rounded(28))
+                .foregroundStyle(StrandPalette.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
             if sidebarAvailable {
                 CoachHeaderButton(symbol: "square.and.pencil", label: "New chat", identifier: "coachNewChatButton") {
@@ -182,31 +180,12 @@ struct CoachChatView: View {
                 }
                 .disabled(!vm.canSwitchThreads)
             }
-            BrandMark(size: 40, style: .tile)
         }
         // The round button's 44 pt hit area overhangs its 36 pt face; the face lines up with the screen margin.
         .padding(.leading, sidebarAvailable ? NoopMetrics.screenPadding - 4 : NoopMetrics.screenPadding)
         .padding(.trailing, NoopMetrics.screenPadding)
         .padding(.top, 14)
         .padding(.bottom, 8)
-    }
-
-    /// The open chat's title, or "Your health assistant" until it has one.
-    private var subtitle: some View {
-        Group {
-            if let title = vm.threadTitle, !title.isEmpty {
-                Text(verbatim: title)
-            } else {
-                Text("Your health assistant")
-            }
-        }
-        .font(StrandFont.caption)
-        .foregroundStyle(StrandPalette.textTertiary)
-        .lineLimit(1)
-        .truncationMode(.tail)
-        .contentTransition(.opacity)
-        .animation(NoopMotion.gated(NoopMotion.value, reduced: reduceMotion), value: vm.threadTitle)
-        .accessibilityIdentifier("coachThreadTitle")
     }
 
     // MARK: Empty state
