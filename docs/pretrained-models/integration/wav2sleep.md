@@ -151,8 +151,8 @@ The worker already reconstructs anchored PPG in `SensorBiomarkerInputs`
                 "interval_end_utc": "<in-bed end>", "iana_timezone": "...", "profile_version": "...",
                 "config_version": "...", "corrections_version": "..."},
     "input": {"window": {"start_utc": 0, "end_utc": 0}, "input_revision": "sha256:<sorted object digests>",
-              "ppg": {"native_rate_hz": 24, "units": "adc_counts", "withheld_seconds": {},
-                      "segments": ["<Spec 01 segments>"]}}}
+              "ppg": {"native_rate_hz": 25, "units": "adc_counts", "withheld_seconds": {},
+                      "segments": ["<Spec 01 segments (run_id, config.identity/known/stable, clock.packet_timing_verified, clock.samples_per_second)>"]}}}
    ```
 
    - The client timeout is 20 s. Measured `infer` time is about 1 s, estimated 2–4 s on the Droplet.
@@ -166,8 +166,11 @@ The worker already reconstructs anchored PPG in `SensorBiomarkerInputs`
    `cache_key`) and the runtime identity block. Skip the call when a row with the same `cache_key`
    exists. A changed weight byte, gate or sample changes the key.
 
-`clock.verified` and `clock.source` are the inner names this adapter reads. If Spec 01's
-`ppg-transport.md` names them differently, change `contract._parse_segment` (one function) and the
+The clock members are the ones Spec 01 pinned (docs/model-integration/README.md, "PPG segments",
+commits ff143411e and 0fd8b94d3): `clock.packet_timing_verified` must be true, and
+`clock.samples_per_second` must equal `ppg.native_rate_hz`. The native rate is 25 Hz for anchored
+v26 segments, and 24 Hz is also accepted. Spec 01's `ppg-transport.md` is not on its branch yet, so
+if it later names these differently, change `contract._parse_segment` (one function) and the
 contract test cases.
 
 ## 5. Storage and consumer proposal: `sleep_stage_shadow_comparison`

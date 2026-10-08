@@ -22,7 +22,7 @@
  "provider_id": "wav2sleep.ppg-only.v1",
  "wired": false,
  "release_mode": "shadow",
- "input_contract": "PPG only: input.ppg.segments[] absolute ADC counts at 24 Hz with the Spec 01 members run_id, config.identity, config.known=true, config.stable=true and clock.verified=true; segments joined only within one run_id and only when contiguous; each run is one recording resampled to the pinned 1024-per-30-s grid (34.133 Hz, linear interpolation, no padding) and z-scored over the run; ECG/ABD/THX absent; PPG-derived respiration/RSA refused as ABD/THX; window <= 10 h (1200 epochs), >= 4 h scored from runs >= 2 h, >= 75% coverage; output: per-30-s epoch softmax probabilities + logits (wake/light/deep/rem) with mask, mask reason and native-sample provenance, argmax label as a separate field",
+ "input_contract": "PPG only: input.ppg.segments[] absolute ADC counts at a declared native rate of 25 Hz (anchored v26) or 24 Hz, with the Spec 01 members run_id, config.identity, config.known=true, config.stable=true and clock.packet_timing_verified=true with clock.samples_per_second equal to ppg.native_rate_hz; segments joined only within one run_id and only when contiguous; each run is one recording resampled to the pinned 1024-per-30-s grid (34.133 Hz, linear interpolation, no padding) and z-scored over the run; ECG/ABD/THX absent; PPG-derived respiration/RSA refused as ABD/THX; window <= 10 h (1200 epochs), >= 4 h scored from runs >= 2 h, >= 75% coverage; output: per-30-s epoch softmax probabilities + logits (wake/light/deep/rem) with mask, mask reason and native-sample provenance, argmax label as a separate field",
  "label_space": "wav2sleep/wake-light-deep-rem",
  "class_order": ["wake", "light", "deep", "rem"],
  "vendored_code": {
