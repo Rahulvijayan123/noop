@@ -49227,60 +49227,60 @@
         }
       }
     },
-    "Choose how NOOP looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.": {
+    "Choose how Nara looks. The whole app updates as you tap. You can change this any time in Settings → Appearance.": {
       "localizations": {
         "de": {
           "stringUnit": {
             "state": "translated",
-            "value": "Wähle, wie NOOP aussieht. Die ganze App aktualisiert sich beim Tippen. Du kannst das jederzeit unter Einstellungen → Erscheinungsbild ändern."
+            "value": "Wähle, wie Nara aussieht. Die ganze App aktualisiert sich beim Tippen. Du kannst das jederzeit unter Einstellungen → Erscheinungsbild ändern."
           }
         },
         "es": {
           "stringUnit": {
             "state": "translated",
-            "value": "Elige el aspecto de NOOP. Toda la app se actualiza al tocar. Puedes cambiarlo en cualquier momento en Ajustes → Apariencia."
+            "value": "Elige el aspecto de Nara. Toda la app se actualiza al tocar. Puedes cambiarlo en cualquier momento en Ajustes → Apariencia."
           }
         },
         "fr": {
           "stringUnit": {
             "state": "translated",
-            "value": "Choisissez l'apparence de NOOP. Toute l'application se met à jour au fur et à mesure. Vous pouvez changer cela à tout moment dans Paramètres → Apparence."
+            "value": "Choisissez l'apparence de Nara. Toute l'application se met à jour au fur et à mesure. Vous pouvez changer cela à tout moment dans Paramètres → Apparence."
           }
         },
         "it": {
           "stringUnit": {
             "state": "translated",
-            "value": "Scegli l'aspetto di NOOP. Tutta l'app si aggiorna mentre tocchi. Puoi cambiarlo in qualsiasi momento in Impostazioni → Aspetto."
+            "value": "Scegli l'aspetto di Nara. Tutta l'app si aggiorna mentre tocchi. Puoi cambiarlo in qualsiasi momento in Impostazioni → Aspetto."
           }
         },
         "pt-PT": {
           "stringUnit": {
             "state": "translated",
-            "value": "Escolha o aspeto do NOOP. Todo o aplicativo é atualizado à medida que toca. Pode alterar isto a qualquer momento em Definições → Aparência."
+            "value": "Escolha o aspeto do Nara. Todo o aplicativo é atualizado à medida que toca. Pode alterar isto a qualquer momento em Definições → Aparência."
           }
         },
         "ru": {
           "stringUnit": {
             "state": "translated",
-            "value": "Выберите внешний вид NOOP. Всё приложение обновляется при нажатии. Изменить это можно в любой момент в Настройках → Внешний вид."
+            "value": "Выберите внешний вид Nara. Всё приложение обновляется при нажатии. Изменить это можно в любой момент в Настройках → Внешний вид."
           }
         },
         "zh-Hans": {
           "stringUnit": {
             "state": "translated",
-            "value": "选择 NOOP 的外观。点按即可全局生效。之后随时可在设置 → 外观中更改。"
+            "value": "选择 Nara 的外观。点按即可全局生效。之后随时可在设置 → 外观中更改。"
           }
         },
         "zh-Hant": {
           "stringUnit": {
             "state": "translated",
-            "value": "選擇 NOOP 的外觀。點擊後整個應用程式會即時更新。你隨時可以在「設定 → 外觀」中更改。"
+            "value": "選擇 Nara 的外觀。點擊後整個應用程式會即時更新。你隨時可以在「設定 → 外觀」中更改。"
           }
         },
         "pl": {
           "stringUnit": {
             "state": "translated",
-            "value": "Wybierz wygląd NOOP. Cała aplikacja aktualizuje się po dotknięciu. Możesz to zmienić w dowolnym momencie w Ustawieniach → Wygląd."
+            "value": "Wybierz wygląd Nara. Cała aplikacja aktualizuje się po dotknięciu. Możesz to zmienić w dowolnym momencie w Ustawieniach → Wygląd."
           }
         }
       }
