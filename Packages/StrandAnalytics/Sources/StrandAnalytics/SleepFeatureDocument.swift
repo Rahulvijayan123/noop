@@ -948,12 +948,22 @@ public struct SleepMetricGate: Codable, Equatable, Sendable {
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         status = c.tolerant(SleepMetricStatus.self, forKey: .status) ?? .unknown
-        reasons = c.tolerant([String].self, forKey: .reasons) ?? []
+        // A gate written as `{status, reason}` (CONTRACT §5.4 `phase_status`) keeps its single reason.
+        let listed = c.tolerant([String].self, forKey: .reasons) ?? []
+        if listed.isEmpty, let single = (try? decoder.container(keyedBy: SingleReasonKey.self))?
+            .tolerant(String.self, forKey: .reason), !single.isEmpty {
+            reasons = [single]
+        } else {
+            reasons = listed
+        }
     }
 
     enum CodingKeys: String, CodingKey {
         case status = "status", reasons = "reasons"
     }
+
+    /// Decode-only alias for a gate that carries one `reason` string.
+    enum SingleReasonKey: String, CodingKey { case reason = "reason" }
 }
 
 /// The per-night evidence/coverage block (contract section 4). Every number is a count or a
@@ -1566,12 +1576,24 @@ public struct SleepPhaseRelations: Codable, Equatable, Sendable {
 
     public init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
-        hrMinusTemp = c.tolerant(SleepPhaseRelation.self, forKey: .hrMinusTemp)
-        sleepMidpointMinusTemp = c.tolerant(SleepPhaseRelation.self, forKey: .sleepMidpointMinusTemp)
+        // docs/spec-02/CONTRACT.md §5.4 names these `hr_minus_temp_acrophase_h` /
+        // `sleep_midpoint_minus_temp_acrophase_h`; the short keys are accepted too, so either spelling
+        // decodes instead of silently becoming nil (spec-02 readback fix).
+        let contract = try decoder.container(keyedBy: ContractKeys.self)
+        hrMinusTemp = contract.tolerant(SleepPhaseRelation.self, forKey: .hrMinusTempAcrophaseH)
+            ?? c.tolerant(SleepPhaseRelation.self, forKey: .hrMinusTemp)
+        sleepMidpointMinusTemp = contract.tolerant(SleepPhaseRelation.self, forKey: .sleepMidpointMinusTempAcrophaseH)
+            ?? c.tolerant(SleepPhaseRelation.self, forKey: .sleepMidpointMinusTemp)
     }
 
     enum CodingKeys: String, CodingKey {
         case hrMinusTemp = "hr_minus_temp", sleepMidpointMinusTemp = "sleep_midpoint_minus_temp"
+    }
+
+    /// The CONTRACT §5.4 wire names (decode-only aliases).
+    enum ContractKeys: String, CodingKey {
+        case hrMinusTempAcrophaseH = "hr_minus_temp_acrophase_h"
+        case sleepMidpointMinusTempAcrophaseH = "sleep_midpoint_minus_temp_acrophase_h"
     }
 }
 

@@ -269,7 +269,7 @@ final class SleepFeatureDocumentTests: XCTestCase {
 
     /// A realistic document, extended from the contract §2 response example, exercising every
     /// typed block the Sleep page renders.
-    private static let realisticFixture = """
+    static let realisticFixture = """
     {
       "schema_version": 1,
       "algorithm_version": "nara-sleep-features-1",
