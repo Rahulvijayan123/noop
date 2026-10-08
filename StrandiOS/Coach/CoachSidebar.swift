@@ -3,8 +3,9 @@ import SwiftUI
 
 /// The Sana chat list (`docs/COACH_MEMORY.md` §7.6): search, New chat, folders, the date-grouped chats and the
 /// way into "What Sana remembers". It observes only the thread store and the chrome state, never the view model,
-/// so a streaming reply does not redraw it. `CoachChatView` wraps it in `.equatable()` for the same reason: the
-/// memory-sheet callback is a closure, which SwiftUI can't compare on its own.
+/// so a streaming reply does not redraw it. `CoachChatView`'s drawer layer wraps it in `.equatable()` for the same
+/// reason, and so a drawer-drag frame only moves it: the memory-sheet callback is a closure, which SwiftUI can't
+/// compare on its own.
 ///
 /// On iPhone it is the drawer (`compact`), and picking a chat or New chat closes it. On iPad it is the inline
 /// column and stays where it is.
@@ -13,6 +14,9 @@ struct CoachSidebar: View, Equatable {
     @ObservedObject var chrome: CoachChromeState
     /// The iPhone drawer rather than the iPad column.
     let compact: Bool
+    /// Whether the drawer or column is showing. It stays in the tree while hidden (only moved off screen), so a
+    /// search field focused when it closes would keep the keyboard and take typing out of sight; closing clears it.
+    let isOpen: Bool
     /// Opens the memory sheet; the chat view presents it, because the sheet reads the view model.
     var onShowMemories: () -> Void = {}
 
@@ -25,7 +29,7 @@ struct CoachSidebar: View, Equatable {
     @State private var confirmation: Confirmation?
 
     static func == (a: CoachSidebar, b: CoachSidebar) -> Bool {
-        a.store === b.store && a.chrome === b.chrome && a.compact == b.compact
+        a.store === b.store && a.chrome === b.chrome && a.compact == b.compact && a.isOpen == b.isOpen
     }
 
     /// The text-entry alerts. Only one is ever up, so a single `.alert` serves them all.
@@ -108,6 +112,8 @@ struct CoachSidebar: View, Equatable {
             list
             footer
         }
+        // Every way of closing (scrim, drag, escape, a pending prompt, the iPad toggle, leaving the tab) lands here.
+        .onChange(of: isOpen) { _, open in if !open { searchFocused = false } }
         .alert(Text(prompt?.title ?? ""),
                isPresented: Binding(get: { prompt != nil }, set: { if !$0 { prompt = nil } }),
                presenting: prompt) { p in
@@ -178,14 +184,26 @@ struct CoachSidebar: View, Equatable {
 
     // MARK: List
 
+    /// What every row reads from the store, read once per body rather than once per row.
+    private struct RowContext {
+        let currentThreadId: String?
+        let canSwitchThreads: Bool
+        let showsSnippets: Bool
+        /// The "Move to folder" choices, sorted once rather than in every row's context menu.
+        let folders: [CoachFolder]
+    }
+
     private var list: some View {
-        ScrollView(showsIndicators: false) {
+        let context = RowContext(currentThreadId: store.currentThreadId, canSwitchThreads: store.canSwitchThreads,
+                                 showsSnippets: store.searchResults != nil,
+                                 folders: store.folders.sorted { $0.sortOrder < $1.sortOrder })
+        return ScrollView(showsIndicators: false) {
             LazyVStack(alignment: .leading, spacing: 2) {
                 if let error = store.errorMessage { errorRow(error) }
                 if let results = store.searchResults {
-                    searchResults(results)
+                    searchResults(results, context)
                 } else {
-                    browse
+                    browse(context)
                 }
             }
             .padding(.horizontal, 8)
@@ -195,18 +213,21 @@ struct CoachSidebar: View, Equatable {
         .scrollDismissesKeyboard(.immediately)
     }
 
+    /// Each group is a `Section`, not a stack, so the lazy stack builds only the rows on screen: a long Older group
+    /// paged in by scrolling stays cheap when the store publishes (every turn start and end, saves, titles).
     @ViewBuilder
-    private var browse: some View {
+    private func browse(_ context: RowContext) -> some View {
         let firstFolder = store.sections.first { if case .folder = $0.kind { return true } else { return false } }?.id
         ForEach(store.sections) { section in
             switch section.kind {
             case .folder(let folder):
                 if section.id == firstFolder { sectionTitle(Text("Folders")) }
-                folderSection(folder, threads: section.threads)
+                folderSection(folder, threads: section.threads, context)
             default:
-                VStack(alignment: .leading, spacing: 2) {
+                Section {
+                    ForEach(section.threads) { row($0, context) }
+                } header: {
                     sectionTitle(title(of: section))
-                    ForEach(section.threads) { row($0) }
                 }
             }
         }
@@ -234,9 +255,20 @@ struct CoachSidebar: View, Equatable {
             .accessibilityAddTraits(.isHeader)
     }
 
-    private func folderSection(_ folder: CoachFolder, threads: [CoachThread]) -> some View {
+    private func folderSection(_ folder: CoachFolder, threads: [CoachThread], _ context: RowContext) -> some View {
         let isCollapsed = collapsed.contains(folder.id)
-        return VStack(alignment: .leading, spacing: 2) {
+        return Section {
+            if !isCollapsed {
+                ForEach(threads) { row($0, context, indented: true) }
+                if threads.isEmpty {
+                    Text("No chats in this folder yet")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .padding(.leading, 46)
+                        .padding(.vertical, 6)
+                }
+            }
+        } header: {
             Button { toggle(folder) } label: {
                 HStack(spacing: 10) {
                     Image(systemName: "chevron.right")
@@ -274,22 +306,11 @@ struct CoachSidebar: View, Equatable {
             .accessibilityValue(isCollapsed ? Text("Collapsed") : Text("Expanded"))
             .accessibilityHint(isCollapsed ? Text("Shows the chats in this folder") : Text("Hides the chats in this folder"))
             .accessibilityIdentifier("coachFolderRow.\(folder.id)")
-
-            if !isCollapsed {
-                ForEach(threads) { row($0, indented: true) }
-                if threads.isEmpty {
-                    Text("No chats in this folder yet")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .padding(.leading, 46)
-                        .padding(.vertical, 6)
-                }
-            }
         }
     }
 
     @ViewBuilder
-    private func searchResults(_ results: [CoachThread]) -> some View {
+    private func searchResults(_ results: [CoachThread], _ context: RowContext) -> some View {
         HStack(spacing: 8) {
             sectionTitle(Text("Results"))
             Spacer(minLength: 0)
@@ -297,7 +318,7 @@ struct CoachSidebar: View, Equatable {
                 ProgressView().controlSize(.small).padding(.trailing, 12).padding(.top, 10)
             }
         }
-        ForEach(results) { row($0) }
+        ForEach(results) { row($0, context) }
         if results.isEmpty, !store.isSearching {
             Text("No chats match your search.")
                 .font(StrandFont.subhead)
@@ -307,9 +328,9 @@ struct CoachSidebar: View, Equatable {
         }
     }
 
-    private func row(_ thread: CoachThread, indented: Bool = false) -> some View {
-        let selected = store.currentThreadId == thread.id
-        let locked = !store.canSwitchThreads && !selected
+    private func row(_ thread: CoachThread, _ context: RowContext, indented: Bool = false) -> some View {
+        let selected = context.currentThreadId == thread.id
+        let locked = !context.canSwitchThreads && !selected
         return Button { open(thread) } label: {
             VStack(alignment: .leading, spacing: 3) {
                 Text(verbatim: thread.displayTitle)
@@ -317,7 +338,7 @@ struct CoachSidebar: View, Equatable {
                     .fontWeight(selected ? .semibold : .regular)
                     .foregroundStyle(StrandPalette.textPrimary)
                     .lineLimit(1)
-                if let snippet = thread.snippet, !snippet.isEmpty, store.searchResults != nil {
+                if let snippet = thread.snippet, !snippet.isEmpty, context.showsSnippets {
                     Text(CoachSnippet.attributed(snippet))
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textSecondary)
@@ -338,20 +359,20 @@ struct CoachSidebar: View, Equatable {
         }
         .buttonStyle(LiquidPressStyle())
         .opacity(locked ? StrandPalette.disabledOpacity : 1)
-        .contextMenu { menu(for: thread) }
+        .contextMenu { menu(for: thread, folders: context.folders) }
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityHint(locked ? Text("Available when Sana finishes answering") : Text(""))
         .accessibilityIdentifier("coachThreadRow.\(thread.id)")
     }
 
     @ViewBuilder
-    private func menu(for thread: CoachThread) -> some View {
+    private func menu(for thread: CoachThread, folders: [CoachFolder]) -> some View {
         Button {
             promptText = thread.title ?? thread.displayTitle
             prompt = .renameThread(thread)
         } label: { Label("Rename", systemImage: "pencil") }
         Menu {
-            ForEach(store.folders.sorted { $0.sortOrder < $1.sortOrder }) { folder in
+            ForEach(folders) { folder in
                 Button { Task { await store.move(id: thread.id, folderId: folder.id) } } label: {
                     if thread.folderId == folder.id {
                         Label { Text(verbatim: folder.name) } icon: { Image(systemName: "checkmark") }
@@ -532,7 +553,8 @@ struct CoachSidebar: View, Equatable {
         let text = promptText
         switch prompt {
         case .renameThread(let thread):
-            Task { await store.rename(id: thread.id, title: text) }
+            // Through the view model, so the header follows the rename and is put back if the server refuses it.
+            store.requestRename(id: thread.id, title: text)
         case .newFolder(let moving):
             Task {
                 guard let folder = await store.createFolder(name: text), let moving else { return }

@@ -334,6 +334,13 @@ struct StrandiOSApp: App {
                     guard scenePhase == .active else { return }
                     Task { await WidgetSnapshot.publish(from: model) }
                 }
+                // K9: an in-process intent (Ask Coach) queued work after this scene had already gone active and
+                // drained, as on a warm resume. Drain again now rather than at the next activation, by which time
+                // the question is usually past its ten minutes. Not active yet: the activation drain below takes it.
+                .onReceive(NotificationCenter.default.publisher(for: PendingIntents.didQueue)) { _ in
+                    guard scenePhase == .active else { return }
+                    model.drainPendingIntents(router: router)
+                }
                 // Apple Health is explicitly opt-in. Once any write type is authorized, keep one
                 // best-effort BGAppRefresh request armed; revoking all write access cancels it.
                 .onChange(of: health.auth) { _, auth in

@@ -18,6 +18,7 @@ struct CoachChatView: View {
     @EnvironmentObject private var chrome: CoachChromeState
     @Environment(\.horizontalSizeClass) private var sizeClass
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
     /// True while the list should chase new content. Only the wearer dragging the list upward turns it off:
@@ -28,8 +29,6 @@ struct CoachChatView: View {
     /// The iPad column. Local rather than in `chrome`, so an open column never pauses the tab swipe.
     @State private var inlineOpen = true
     @State private var showMemories = false
-    /// How far a leftward drag has pulled the open drawer.
-    @GestureState private var drawerDrag: CGFloat = 0
 
     private static let inlineWidth: CGFloat = 300
 
@@ -57,49 +56,23 @@ struct CoachChatView: View {
             let drawerWidth = compact ? min(320, geo.size.width * 0.84) : Self.inlineWidth
             let open = sidebarOpen
             let drawer = compact && open
+            let inline = !compact && open
             ZStack(alignment: .topLeading) {
+                // One transaction for the spacer and the column, so on iPad the chat slides with the sidebar
+                // instead of snapping to its new width (also when the threads feature arrives and opens it). Keyed
+                // on the inline column only: the iPhone drawer floats over the chat and must not animate it.
                 HStack(spacing: 0) {
                     Color.clear
-                        .frame(width: !compact && open ? Self.inlineWidth : 0)
-                        .animation(motion, value: open)
+                        .frame(width: inline ? Self.inlineWidth : 0)
                     chatColumn
                         .accessibilityHidden(drawer)
                 }
+                .animation(motion, value: inline)
 
-                Button { closeDrawer() } label: {
-                    Color.black.opacity(0.32).ignoresSafeArea()
-                }
-                .buttonStyle(.plain)
-                .opacity(drawer ? 1 : 0)
-                .allowsHitTesting(drawer)
-                .accessibilityLabel("Close chats")
-                .accessibilityHidden(!drawer)
-                .accessibilityIdentifier("coachSidebarScrim")
-                .animation(motion, value: drawer)
-
-                CoachSidebar(store: vm.threadStore, chrome: chrome, compact: compact,
-                             onShowMemories: { showMemories = true })
+                CoachDrawerLayer(store: vm.threadStore, chrome: chrome, compact: compact, open: open,
+                                 width: drawerWidth, motion: motion, onShowMemories: { showMemories = true })
                     .equatable()
-                    .frame(width: drawerWidth)
-                    .frame(maxHeight: .infinity)
-                    .background {
-                        NoopChromeSurface()
-                            .overlay(alignment: .trailing) {
-                                Rectangle().fill(StrandPalette.hairline).frame(width: 0.5)
-                            }
-                            .shadow(color: .black.opacity(drawer ? 0.22 : 0), radius: 22, x: 8, y: 0)
-                            .ignoresSafeArea()
-                    }
-                    .offset(x: open ? min(0, drawerDrag) : -(drawerWidth + 32))
-                    .allowsHitTesting(open)
-                    .accessibilityHidden(!open)
-                    .accessibilityAddTraits(drawer ? .isModal : [])
-                    .accessibilityAction(.escape) { closeDrawer() }
-                    .animation(motion, value: open)
             }
-            // The leftward close drag. A mask instead of a conditional attachment keeps one view type in both
-            // states (the same reason `RootTabView` masks its tab swipe).
-            .simultaneousGesture(closeDrag(width: drawerWidth), including: drawer ? .all : .subviews)
         }
         .background(alignment: .top) { liquidScaffoldSky().ignoresSafeArea(edges: .top) }
         .task {
@@ -107,7 +80,16 @@ struct CoachChatView: View {
             #if DEBUG
             await CoachSidebarDemo.seed(vm.threadStore)
             #endif
-            await vm.start()
+            // Unstructured, so leaving the tab mid-start (which cancels this `.task`) can't cancel the launch
+            // refresh of the chat list and memories after `start()` has marked itself done. A later appear finds it
+            // started (or still running) and returns at once.
+            await Task { await vm.start() }.value
+        }
+        // Back in the foreground (often on a new day, with the app kept in memory overnight): a repeated start()
+        // refreshes a starter set that is not from today, and retries a start that found the server unreachable.
+        .onChange(of: scenePhase) { _, phase in
+            guard phase == .active else { return }
+            Task { await vm.start() }
         }
         // A question handed over by the Today launcher, Siri or `--coach-prompt`. It goes into a new chat (after
         // any reply in progress) and is cleared only once the chat has taken it.
@@ -128,7 +110,15 @@ struct CoachChatView: View {
         .onChange(of: vm.threadId) { _, _ in following = true }
         .onChange(of: inputFocused) { _, focused in if focused { vm.noteUserInteraction() } }
         .onDisappear { chrome.drawerOpen = false }
-        .sheet(isPresented: $showMemories) { CoachMemorySheet(vm: vm) }
+        .sheet(isPresented: $showMemories) {
+            // Values in, so a streaming flush (which redraws this view, and with it the sheet's content) leaves the
+            // sheet alone unless the memories themselves changed.
+            CoachMemorySheet(memories: vm.memories, isLoading: vm.isLoadingMemories,
+                             refresh: { await vm.refreshMemories() },
+                             forget: { await vm.forget($0) },
+                             forgetAll: { await vm.forgetAllMemories() })
+                .equatable()
+        }
         #if DEBUG
         .onAppear {
             if CommandLine.arguments.contains("--coach-focus") { inputFocused = true }
@@ -153,31 +143,15 @@ struct CoachChatView: View {
         }
     }
 
-    private func closeDrag(width: CGFloat) -> some Gesture {
-        DragGesture(minimumDistance: 16)
-            .updating($drawerDrag) { value, state, _ in
-                let dx = value.translation.width
-                guard abs(dx) > abs(value.translation.height) else { return }
-                state = max(-width, min(0, dx))
-            }
-            .onEnded { value in
-                let dx = value.translation.width, dy = value.translation.height
-                guard abs(dx) > abs(dy) * 1.2 else { return }
-                if dx < -60 || value.predictedEndTranslation.width < -width / 2 { closeDrawer() }
-            }
-    }
-
     private func toggleSidebar() {
         vm.noteUserInteraction()
         if compact {
             inputFocused = false
             chrome.drawerOpen.toggle()
         } else {
-            inlineOpen.toggle()
+            withAnimation(motion) { inlineOpen.toggle() }
         }
     }
-
-    private func closeDrawer() { chrome.drawerOpen = false }
 
     // MARK: Header
 
@@ -442,6 +416,86 @@ struct CoachChatView: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Error: \(message)")
     }
+}
+
+// MARK: - Drawer
+
+/// The scrim, the sidebar and the leftward close drag. A separate view that owns the drag state, so a drag frame
+/// (60-120 a second) invalidates only this layer and never the chat column with its Markdown bubbles. Equatable,
+/// because the memory callback is a closure SwiftUI can't compare, so a streaming flush in the chat skips it too.
+private struct CoachDrawerLayer: View, Equatable {
+    let store: CoachThreadStore
+    let chrome: CoachChromeState
+    /// The iPhone drawer rather than the iPad column.
+    let compact: Bool
+    let open: Bool
+    let width: CGFloat
+    let motion: Animation?
+    let onShowMemories: () -> Void
+
+    /// How far a leftward drag has pulled the open drawer.
+    @GestureState private var drag: CGFloat = 0
+
+    private var drawer: Bool { compact && open }
+
+    static func == (a: CoachDrawerLayer, b: CoachDrawerLayer) -> Bool {
+        a.store === b.store && a.chrome === b.chrome && a.compact == b.compact && a.open == b.open
+            && a.width == b.width && a.motion == b.motion
+    }
+
+    var body: some View {
+        ZStack(alignment: .topLeading) {
+            Button(action: close) {
+                Color.black.opacity(0.32).ignoresSafeArea()
+            }
+            .buttonStyle(.plain)
+            .opacity(drawer ? 1 : 0)
+            .allowsHitTesting(drawer)
+            .accessibilityLabel("Close chats")
+            .accessibilityHidden(!drawer)
+            .accessibilityIdentifier("coachSidebarScrim")
+            .animation(motion, value: drawer)
+
+            CoachSidebar(store: store, chrome: chrome, compact: compact, isOpen: open, onShowMemories: onShowMemories)
+                .equatable()
+                .frame(width: width)
+                .frame(maxHeight: .infinity)
+                .background {
+                    NoopChromeSurface()
+                        .overlay(alignment: .trailing) {
+                            Rectangle().fill(StrandPalette.hairline).frame(width: 0.5)
+                        }
+                        .shadow(color: .black.opacity(drawer ? 0.22 : 0), radius: 22, x: 8, y: 0)
+                        .ignoresSafeArea()
+                }
+                .offset(x: open ? min(0, drag) : -(width + 32))
+                .allowsHitTesting(open)
+                .accessibilityHidden(!open)
+                .accessibilityAddTraits(drawer ? .isModal : [])
+                .accessibilityAction(.escape) { close() }
+                .animation(motion, value: open)
+        }
+        // The leftward close drag. While the drawer is open the scrim covers the chat and the sidebar the rest, so
+        // this layer sees every drag. A mask instead of a conditional attachment keeps one view type in both states
+        // (the same reason `RootTabView` masks its tab swipe).
+        .simultaneousGesture(closeDrag, including: drawer ? .all : .subviews)
+    }
+
+    private var closeDrag: some Gesture {
+        DragGesture(minimumDistance: 16)
+            .updating($drag) { value, state, _ in
+                let dx = value.translation.width
+                guard abs(dx) > abs(value.translation.height) else { return }
+                state = max(-width, min(0, dx))
+            }
+            .onEnded { value in
+                let dx = value.translation.width, dy = value.translation.height
+                guard abs(dx) > abs(dy) * 1.2 else { return }
+                if dx < -60 || value.predictedEndTranslation.width < -width / 2 { close() }
+            }
+    }
+
+    private func close() { chrome.drawerOpen = false }
 }
 
 // MARK: - Composer

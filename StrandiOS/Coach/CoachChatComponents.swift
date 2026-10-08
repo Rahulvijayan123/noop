@@ -361,16 +361,28 @@ private extension View {
 
 /// "What Sana remembers": the saved facts (up to 200, newest ranking first), each with Forget, and Forget all.
 /// Forgetting touches memory only; the chats themselves stay in the history.
-struct CoachMemorySheet: View {
-    @ObservedObject var vm: CoachChatViewModel
+///
+/// It takes the memory state as values, not the view model: observing the view model would rebuild the sheet and
+/// its 200-row list on every streaming flush of a reply. The presenter re-creates it on each of its own redraws, so
+/// it is `Equatable` on those values (the actions are closures SwiftUI can't compare) and shown with `.equatable()`.
+struct CoachMemorySheet: View, Equatable {
+    let memories: [CoachMemory]
+    let isLoading: Bool
+    let refresh: () async -> Void
+    let forget: (CoachMemory) async -> Void
+    let forgetAll: () async -> Void
     @Environment(\.dismiss) private var dismiss
     @State private var confirmForgetAll = false
+
+    static func == (a: CoachMemorySheet, b: CoachMemorySheet) -> Bool {
+        a.isLoading == b.isLoading && a.memories == b.memories
+    }
 
     var body: some View {
         NavigationStack {
             Group {
-                if vm.memories.isEmpty {
-                    if vm.isLoadingMemories {
+                if memories.isEmpty {
+                    if isLoading {
                         ProgressView()
                             .tint(StrandPalette.accent)
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -392,12 +404,12 @@ struct CoachMemorySheet: View {
             }
             .confirmationDialog("Forget everything Sana remembers about you?", isPresented: $confirmForgetAll,
                                 titleVisibility: .visible) {
-                Button("Forget all", role: .destructive) { Task { await vm.forgetAllMemories() } }
+                Button("Forget all", role: .destructive) { Task { await forgetAll() } }
                 Button("Cancel", role: .cancel) {}
             } message: {
                 Text("Sana stops using these facts in its answers. Your chats stay in your history.")
             }
-            .task { await vm.refreshMemories() }
+            .task { await refresh() }
         }
     }
 
@@ -417,20 +429,20 @@ struct CoachMemorySheet: View {
     private var list: some View {
         List {
             Section {
-                ForEach(vm.memories) { memory in
+                ForEach(memories) { memory in
                     row(memory)
                         .listRowBackground(StrandPalette.surfaceRaised)
                         .swipeActions {
-                            Button(role: .destructive) { Task { await vm.forget(memory) } } label: {
+                            Button(role: .destructive) { Task { await forget(memory) } } label: {
                                 Label("Forget", systemImage: "trash")
                             }
                         }
                         .contextMenu {
-                            Button(role: .destructive) { Task { await vm.forget(memory) } } label: {
+                            Button(role: .destructive) { Task { await forget(memory) } } label: {
                                 Label("Forget", systemImage: "trash")
                             }
                         }
-                        .accessibilityAction(named: "Forget") { Task { await vm.forget(memory) } }
+                        .accessibilityAction(named: "Forget") { Task { await forget(memory) } }
                 }
             } header: {
                 Text("Sana keeps these facts between chats and uses the ones that matter for each question. Forgetting one takes it out of Sana's memory; your chats stay in your history.")
@@ -439,8 +451,8 @@ struct CoachMemorySheet: View {
                     .textCase(nil)
                     .padding(.bottom, 4)
             } footer: {
-                if vm.memories.count >= CoachChatViewModel.memoryListLimit {
-                    Text("Showing the first \(vm.memories.count) memories.")
+                if memories.count >= CoachChatViewModel.memoryListLimit {
+                    Text("Showing the first \(memories.count) memories.")
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
@@ -448,15 +460,18 @@ struct CoachMemorySheet: View {
 
             Section {
                 Button(role: .destructive) { confirmForgetAll = true } label: {
+                    // One colour for the title and the icon: the role alone reddens only the title in a List and
+                    // leaves the icon in the tint.
                     Label("Forget all", systemImage: "trash")
                         .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.statusCritical)
                 }
                 .listRowBackground(StrandPalette.surfaceRaised)
                 .accessibilityIdentifier("coachForgetAllMemories")
             }
         }
         .scrollContentBackground(.hidden)
-        .refreshable { await vm.refreshMemories() }
+        .refreshable { await refresh() }
     }
 
     private func row(_ memory: CoachMemory) -> some View {

@@ -22,6 +22,7 @@ extension AppModel {
     /// ask coach). Call when the app becomes active. The optional `router` lets the ask-coach
     /// intent navigate to the Sana tab with the question.
     func drainPendingIntents(router: NavRouter? = nil) {
+        var askCoachDates: [Date?] = []
         for item in PendingIntents.drain() {
             switch item.action {
             case .markMoment: markMoment(at: item.date ?? Date())
@@ -29,19 +30,20 @@ extension AppModel {
             // The one-shot routine sends the confirmed pattern + RUN_ALARM sequence, acked, so a
             // busy just-foregrounded BLE link can't silently drop it.
             case .buzz:       buzzStrapOnce()
-            // K9: "Ask Coach" via Siri. The question goes to Sana as a new chat, through the same hand-off
-            // the Today launcher uses (`AICoachEngine.pendingPrompt`, which `CoachChatView` takes), and the
-            // Sana tab opens. The question is consumed from its dedicated key whatever happens next, so one
-            // that arrived while Coach was switched off, or was queued more than ten minutes ago, is
-            // dropped rather than asked out of the blue later.
-            case .askCoach:
-                guard let question = PendingIntents.consumeCoachQuestion(),
-                      CoachBriefScheduler.coachMasterEnabled,
-                      PendingIntents.isFreshCoachQuestion(queuedAt: item.date) else { break }
-                coach.pendingPrompt = question
-                router?.openCoach()
+            case .askCoach:   askCoachDates.append(item.date)
             }
         }
+        // K9: "Ask Coach" via Siri. The question goes to Sana as a new chat, through the same hand-off the Today
+        // launcher uses (`AICoachEngine.pendingPrompt`, which `CoachChatView` takes), and the Sana tab opens.
+        // There is one question slot however many entries were queued, so the entries are handled once, together:
+        // an older entry must not take the newest question and judge it by its own, older date. The question is
+        // consumed from its key whatever happens next, so one that arrived while Coach was switched off, or was
+        // asked more than ten minutes ago, is dropped rather than asked out of the blue later.
+        guard !askCoachDates.isEmpty,
+              let question = PendingIntents.takeCoachQuestion(queueDates: askCoachDates),
+              CoachBriefScheduler.coachMasterEnabled else { return }
+        coach.pendingPrompt = question
+        router?.openCoach()
     }
 
     /// Background entry point for the "Sync Strap" shortcut. When iOS launches NOOP in the background to run

@@ -12,7 +12,16 @@ enum PendingIntents {
     /// K9: the question text for a pending `.askCoach` action. Stored separately because the
     /// action queue encodes as `[String]` and a question can contain colons.
     private static let coachQuestionKey = "noop.pendingCoachQuestion"
+    /// K9: when the question in `coachQuestionKey` was asked (epoch seconds). The slot holds one question, so its
+    /// age is its own, never that of whichever queued `.askCoach` entry happens to be drained first. A plain
+    /// companion key keeps the question itself a bare string, as older builds wrote and read it.
+    private static let coachQuestionDateKey = "noop.pendingCoachQuestionAt"
     private static var defaults: UserDefaults? { UserDefaults(suiteName: WidgetSnapshot.suiteName) }
+
+    /// Posted on the main thread once an intent running in the app process has queued something the open app should
+    /// act on now. The app drains on it when its scene is already active, so a request that lands after the
+    /// activation drain is not left waiting for the next one.
+    static let didQueue = Notification.Name("noop.pendingIntents.didQueue")
 
     /// Optional `at` is the invocation time, captured now and consumed on drain. Encoded into the
     /// stored string as "rawValue:epochSeconds" so the array stays a plain [String] (no schema
@@ -27,19 +36,34 @@ enum PendingIntents {
 
     /// K9: queue an "Ask Coach" action with the associated question text. The question is stored
     /// in a dedicated key (one pending question at a time — the user rarely queues multiple Siri
-    /// questions before the app opens).
+    /// questions before the app opens), stamped with `date` so its freshness travels with it.
     static func appendAskCoach(question: String, at date: Date? = nil) {
         guard let d = defaults else { return }
         d.set(question, forKey: coachQuestionKey)
+        if let date { d.set(date.timeIntervalSince1970, forKey: coachQuestionDateKey) }
+        else { d.removeObject(forKey: coachQuestionDateKey) }
         append(.askCoach, at: date)
     }
 
-    /// K9: read and clear the pending coach question. Returns nil when no question is queued.
-    static func consumeCoachQuestion() -> String? {
+    /// K9: read and clear the pending coach question and its stamp. Returns nil when no question is queued.
+    /// `queuedAt` is nil for a question an older build stored without one.
+    static func consumeCoachQuestion() -> (text: String, queuedAt: Date?)? {
         guard let d = defaults else { return nil }
         let q = d.string(forKey: coachQuestionKey)
+        let stamp = d.object(forKey: coachQuestionDateKey) as? Double
         d.removeObject(forKey: coachQuestionKey)
-        return q
+        d.removeObject(forKey: coachQuestionDateKey)
+        return q.map { ($0, stamp.map { Date(timeIntervalSince1970: $0) }) }
+    }
+
+    /// K9: everything one drain's `.askCoach` entries resolve to: at most one question, the pending one, and only
+    /// when it is fresh. The question is consumed whatever the answer, so a stale one never comes back later.
+    /// Its own stamp decides; `queueDates` (the drained entries' stamps, the newest of which belongs to the
+    /// question in the slot) date only a question stored by a build that kept no stamp.
+    static func takeCoachQuestion(queueDates: [Date?], now: Date = Date()) -> String? {
+        guard let pending = consumeCoachQuestion() else { return nil }
+        let queuedAt = pending.queuedAt ?? queueDates.compactMap { $0 }.max()
+        return isFreshCoachQuestion(queuedAt: queuedAt, now: now) ? pending.text : nil
     }
 
     /// How long a Siri question stays worth asking. Opening the app later than this should not put an old
@@ -137,6 +161,9 @@ struct AskCoachIntent: AppIntent {
             return .result(dialog: "Sana is switched off. Turn it on in Settings to ask questions.")
         }
         PendingIntents.appendAskCoach(question: question, at: Date())
+        // This runs in the app process. When the scene went active before the append (a warm resume), the
+        // activation drain has already run and found nothing; this asks the open app to drain again now.
+        NotificationCenter.default.post(name: PendingIntents.didQueue, object: nil)
         return .result(dialog: "Opening Sana with your question: \(question)")
     }
 }
