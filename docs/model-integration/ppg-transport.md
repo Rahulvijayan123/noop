@@ -314,7 +314,26 @@ No droplet session was available to this implementer; nothing above has been run
 
 ## Tests
 
-(Filled in below with the exact commands and counts from this branch's runs.)
+Round-2 runs on this branch (macOS, Xcode 26.3 toolchain via `DEVELOPER_DIR`; logs under
+`_build-scratch/spec01/ppg-transport/`):
+
+| Suite | Command | Result |
+|---|---|---|
+| NoopPush | `cd Packages/NoopPush && xcrun swift test` | 202 tests, 0 failures |
+| Phone PPG + IMU object lane | `xcodebuild test … -only-testing:StrandTests/PpgObjectLaneTests -only-testing:StrandTests/ImuObjectLaneTests` | 35 tests (11 + 24), 0 failures |
+| Full StrandTests | `xcodebuild test … -only-testing:StrandTests` | 3,217 tests, 13 skipped, 11 assertion failures in 3 cases: `IntradayWordingAndCoachTests.testMinuteBucketsAreDescribedAsMinuteBuckets` (known pre-existing) and `ActivityCalibrationSessionTests.{testBeginWithAnEmptyProtocolEndsCleanly, testStepsChainBackToBackAndEveryActivityEndsWithDone}` (reproduce alone; activity code this branch does not touch) |
+| Worker PPG and sensor lane | `cd Tools/CloudWorker && FRWHOOP_TEST_DB_URL=<scratch Postgres> xcrun swift test --filter 'PpgTransportTests\|SensorBiomarker'` | 78 tests, 0 failures, 0 skipped (scratch cluster on 127.0.0.1:55547 from `scripts/worker_db.py`, 191 migrations, stopped afterwards); without the DB URL: 78, 9 skipped, 0 failures |
+| Receiver PPG | `cd supabase/functions && EDGE_TEST_ARTIFACTS=<short path> deno test --frozen --lock=deno.lock … tests/ppg_anchor_transport_test.ts tests/ppg_anchor_integration_test.ts tests/registry_test.ts` | 15 passed (5 steps), 0 failed |
+| Sidecar envelope consumers (read-only) | `cd Tools/InferenceWorker && uv run --frozen pytest -q tests/sensor_biomarkers` | 2 failures in `test_family_dispatch.py`; on retry one passes and `test_one_broken_family_never_discards_the_others` still fails with an optional family reporting `timeout` instead of `adapter_broken`. That test builds its own request and does not read the envelope this branch regenerated |
+| iOS compile | `xcodebuild -scheme NOOPiOS -configuration Debug -destination generic/platform=iOS CODE_SIGNING_ALLOWED=NO build` | BUILD SUCCEEDED |
+
+What the phone tests prove: flag off stages nothing and the lane offers exactly `1.4,1.3,1.2,1.1,1.0` (so a
+1.5-advertising receiver negotiates 1.3); flag on with a receiver at 1.2/1.3/1.4 gets nothing; flag on at 1.5
+sends the golden's `phone_real_frames` rows, banked in a real `WhoopStore`, through the real `PushCoordinator`
+and `ImuObjectTransport`, and the uploaded bytes equal the golden's `wire_base64`, its manifest identity and
+its end cursor; a second pass sends nothing; anchor-less and out-of-range rows are never sent; paging by
+cursor sends every anchored second within the horizon exactly once; a pruned cursor row does not restart the
+upload; an open hour waits for the offload.
 
 ## Requests to parent
 
