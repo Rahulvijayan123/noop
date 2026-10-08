@@ -57,6 +57,12 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// only after beating the defaults on held-out runs (`ActivityPersonalProfileFitter`). nil (the default)
     /// scores with the population profiles exactly as before.
     public var personalProfile: ActivityPersonalProfile? = nil
+    /// The wearer's verified sit / stand head (`ActivitySitStand.swift`). Set it ONLY while
+    /// `ActivitySitStandGate.evaluate` says `.enabled`. nil (the default) is OFF: states, snapshots and `cacheTag`
+    /// are exactly what they were before the head existed. When set, each still, awake, on-wrist, non-moving
+    /// second's still-segment log-odds feed the learned posture memory (bounded per second, with its usual cap
+    /// and decay), and sitting / standing claims it agrees with read "Likely sitting" / "Likely standing".
+    public var sitStandHead: ActivitySitStandModel? = nil
 
     public init() {}
 }
