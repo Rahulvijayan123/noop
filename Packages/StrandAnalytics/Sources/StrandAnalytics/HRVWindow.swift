@@ -71,6 +71,47 @@ public struct HRVSignalQuality: Equatable, Sendable {
     }
 }
 
+// MARK: - Regime and eligibility reasons
+
+/// The measurement regime a window was taken in. HRV asleep, lying awake in bed and awake out of bed are
+/// materially different populations (overnight RMSSD typically runs well above daytime RMSSD), so a
+/// baseline must never mix them, and a window whose regime is not known belongs to none of them (D9-04).
+public enum HRVWindowRegime: String, Equatable, Sendable, CaseIterable {
+    /// Any part of the window was explicitly asleep.
+    case asleep
+    /// Known awake, but in bed (inside a detected night's in-bed window or a sleep session).
+    case inBedAwake = "in_bed_awake"
+    /// Known awake, out of bed.
+    case awake
+    /// Sleep state not known over the window (no lookup, `sleep == .unknown` stretches, mostly uncovered).
+    case unknown
+}
+
+/// Why a window is not a baseline observation for a regime: the FIRST gate it failed, in the order
+/// `HRVWindowBuilder.ineligibility` checks them. Raw values are stable codes for logs and diagnostics.
+public enum HRVWindowIneligibility: String, Equatable, Sendable, CaseIterable {
+    case noRmssd = "no_rmssd"
+    /// No transition-event data for the span (`transitionEventsAvailable == false`).
+    case noTransitionEvents = "no_transition_events"
+    case transitionInWindow = "transition_in_window"
+    /// `phase` is `.transition`, `.recovery` or `.unknown` (including a lookback too short to rule out a
+    /// recent transition).
+    case notSteadyState = "not_steady_state"
+    /// The window's `regime` is not the one asked for (for the resting awake baseline: not `.awake`).
+    case regimeMismatch = "regime_mismatch"
+    case wearNotOnWrist = "wear_not_on_wrist"
+    case tooSoonAfterLocomotion = "too_soon_after_locomotion"
+    case tooSoonAfterExercise = "too_soon_after_exercise"
+    case artifacts
+    case untrustworthySignal = "untrustworthy_signal"
+    case offWristLabel = "off_wrist_label"
+    case wearSignalQuality = "wear_signal_quality"
+    /// No motion reading overlapped the window: stillness cannot be shown, so the window fails closed.
+    case unknownMotion = "unknown_motion"
+    case motionTooHigh = "motion_too_high"
+    case gyroTooHigh = "gyro_too_high"
+}
+
 // MARK: - Window
 
 /// One canonical-duration HRV observation.
@@ -159,12 +200,36 @@ public struct HRVWindow: Equatable, Sendable {
     /// `.onWrist` if on-wrist stretches cover at least half of it, otherwise `.unknown`; nil without a
     /// lookup.
     public var wear: WearContextState?
+    /// Whether a known-awake window was in bed (a detected night's in-bed window, or a sleep span the
+    /// caller passed). nil = not recorded, read as out of bed.
+    public var inBed: Bool?
+    /// The measurement regime, from `asleep` and `inBed`: asleep → `.asleep`; known awake → `.inBedAwake`
+    /// or `.awake`; sleep unknown → `.unknown`. Only `.awake` windows can be resting awake baseline
+    /// observations.
+    public var regime: HRVWindowRegime {
+        switch asleep {
+        case true?: return .asleep
+        case false?: return inBed == true ? .inBedAwake : .awake
+        case nil: return .unknown
+        }
+    }
+    /// Length in seconds of the most recent locomotion bout before the window (contiguous walking /
+    /// running / cycling / vigorous stretches in the lookup), nil when none is known. With
+    /// `precedingLocomotionRunning` it dose-scales the locomotion settling floor (D8-08).
+    public var precedingLocomotionBoutS: Int?
+    /// Whether that bout included running.
+    public var precedingLocomotionRunning: Bool
+    /// The first gate the window failed for the resting awake baseline, nil when it is eligible (or for a
+    /// hand-built window nobody evaluated). `eligibleForBaseline == (ineligibleReason == nil)` for windows
+    /// from `HRVWindowBuilder.build`.
+    public var ineligibleReason: HRVWindowIneligibility?
 
-    /// Whether this window should be folded into a resting physiological baseline. False whenever
+    /// Whether this window should be folded into the resting AWAKE physiological baseline. False whenever
     /// `rmssd` is nil, whenever `phase != .steadyState` (a transition, recovery or unknown-phase window
-    /// is real physiology but not resting physiology), whenever the window is asleep or its wear is not
-    /// known on-wrist, whenever it is too soon after locomotion/exercise, and whenever motion/wear data
-    /// say the wrist was not actually still. See `HRVWindowBuilder.isEligibleForBaseline`.
+    /// is real physiology but not resting physiology), whenever its regime is not known `.awake` or its
+    /// wear is not known on-wrist, whenever it is too soon after locomotion/exercise, whenever no motion
+    /// reading shows the wrist was still, and whenever motion/wear data say it was not. See
+    /// `HRVWindowBuilder.ineligibility` (and `ineligibleReason` for which gate failed).
     public var eligibleForBaseline: Bool
 
     public init(kind: HRVWindowKind, start: Int, end: Int, rmssd: Double?, sdnn: Double?, meanNN: Double?,
@@ -176,7 +241,9 @@ public struct HRVWindow: Equatable, Sendable {
                wearSignal: WearSignalState? = nil,
                secondsSincePosturalTransition: Int? = nil, secondsSinceLocomotionTransition: Int? = nil,
                transitionsInWindow: Int = 0, transitionEventsAvailable: Bool = false,
-               asleep: Bool? = nil, wear: WearContextState? = nil) {
+               asleep: Bool? = nil, wear: WearContextState? = nil, inBed: Bool? = nil,
+               precedingLocomotionBoutS: Int? = nil, precedingLocomotionRunning: Bool = false,
+               ineligibleReason: HRVWindowIneligibility? = nil) {
         self.kind = kind; self.start = start; self.end = end
         self.rmssd = rmssd; self.sdnn = sdnn; self.meanNN = meanNN; self.medianNN = medianNN
         self.rrDiffSqSumMs2 = rrDiffSqSumMs2; self.rrDiffCount = rrDiffCount; self.nnM2 = nnM2
@@ -195,6 +262,10 @@ public struct HRVWindow: Equatable, Sendable {
         self.transitionsInWindow = transitionsInWindow
         self.transitionEventsAvailable = transitionEventsAvailable
         self.asleep = asleep; self.wear = wear
+        self.inBed = inBed
+        self.precedingLocomotionBoutS = precedingLocomotionBoutS
+        self.precedingLocomotionRunning = precedingLocomotionRunning
+        self.ineligibleReason = ineligibleReason
     }
 }
 
@@ -218,14 +289,16 @@ public enum HRVWindowBuilder {
         /// on-device IMU pipeline that would populate `gyroRmsDps` is still being wired up (nil here is far
         /// more common today than a real measurement, and nil never penalizes — see `HRVWindow.gyroRmsDps`).
         public var maxGyroRmsDps = 15.0
-        /// Seconds after a transition during which a window is excluded outright.
-        public var transitionGuardS = ActivityTransitionProximity.defaultTransitionS
-        /// Seconds after a transition during which a window is included but not baseline-eligible.
-        public var recoveryGuardS = ActivityTransitionProximity.defaultRecoveryS
+        /// Kind-aware transition / recovery widths (D8-08). The HRV-baseline policy: 30 s transition after
+        /// any event; recovery 300 s after a change of position (autonomic re-equilibration, Watanabe 2007)
+        /// and after a walk stops; 1800 s after a run or a bout of 30 min or more.
+        public var recovery = ActivityTransitionProximity.RecoveryPolicy.hrvBaseline
         /// Minimum seconds between the end of walking/running/cycling and the window start. Postural
         /// settling takes 1-2 min (Bourdillon 2017); HR/HRV after even light locomotion settles more
-        /// slowly, so this is longer than `recoveryGuardS`.
+        /// slowly. A floor: a long bout or a run raises it to `recovery.longBoutRecoveryS`.
         public var minSinceLocomotionS = 300
+        /// Contiguous locomotion stretches (from the lookup) at most this far apart are one bout.
+        public var boutJoinGapS = 30
         /// Minimum seconds between the end of vigorous activity and the window start. Matches the
         /// policy's and the PC engine's 600 s post-bout exclusion; vagal recovery after hard effort is
         /// far longer (Stanley 2013), so this is a floor, not a recovery model.
@@ -266,11 +339,16 @@ public enum HRVWindowBuilder {
     ///     overlap a given window.
     ///   - activity: a lookup over the span's behavioural intervals, for `activityContext` and the
     ///     locomotion/exercise lookback. nil leaves those fields nil rather than guessing.
-    ///   - transitionEvents: flagged transitions for the span (and some lookback before it — a caller
-    ///     should pass at least `recoveryGuardS` seconds of history, or `secondsSinceTransition` reads
-    ///     `nil` for a window that is really still inside a transition's wake). nil means NO event data
-    ///     (no decoder ran): every window's phase is then `.unknown` and none is baseline-eligible. An
-    ///     empty array means the decoder ran and found no transitions.
+    ///   - transitionEvents: flagged transitions for the span (and some lookback before it). nil means NO
+    ///     event data (no decoder ran): every window's phase is then `.unknown` and none is
+    ///     baseline-eligible. An empty array means the decoder ran and found no transitions.
+    ///   - eventsCoverFrom: the earliest second `transitionEvents` speaks for. A window whose start is less
+    ///     than `config.recovery.requiredLookbackS` after it, with no event behind it, reads phase
+    ///     `.unknown` rather than steady (a transition just before the data began cannot be ruled out).
+    ///     nil: the start of the activity lookup (the decoder that produced the lookup produced the events),
+    ///     else `dayStart`.
+    ///   - sleepSpans: sleep sessions / in-bed spans overlapping the span. A known-awake window inside one
+    ///     is `.inBedAwake`, never `.awake`.
     ///   - wearSignal: the window's six-state wear-signal interpretation context
     ///     (feat/wear-signal-quality V1), if a caller has resolved one. nil leaves the eligibility rules
     ///     untouched; `.onWristLoose`, `.motionArtifact`, `.offWrist` and `.sensorDropout` make the
@@ -280,17 +358,20 @@ public enum HRVWindowBuilder {
                              activity: ActivityContextLookup? = nil,
                              transitionEvents: [ActivityTransitionEvent]? = nil,
                              wearSignal: WearSignalState? = nil,
+                             eventsCoverFrom: Int? = nil, sleepSpans: [(start: Int, end: Int)] = [],
                              config: Config = Config()) -> [HRVWindow] {
         guard dayEnd > dayStart else { return [] }
         let duration = kind.durationSeconds
         let sortedRR = rr.sortedByTsStable()
+        let coverFrom = eventsCoverFrom ?? activity?.intervals.first?.start ?? dayStart
         var windows: [HRVWindow] = []
         var t = dayStart
         while t + duration <= dayEnd {
             let we = t + duration
             if let w = buildOne(kind: kind, start: t, end: we, rr: sortedRR, imuWindows: imuWindows,
                                 gravity: gravity, activity: activity, transitionEvents: transitionEvents,
-                                wearSignal: wearSignal, config: config) {
+                                wearSignal: wearSignal, eventsCoverFrom: coverFrom, sleepSpans: sleepSpans,
+                                config: config) {
                 windows.append(w)
             }
             t = we
@@ -305,10 +386,12 @@ public enum HRVWindowBuilder {
                              activity: ActivityContextLookup? = nil,
                              transitionEvents: [ActivityTransitionEvent]? = nil,
                              epochWearSignal: [ActivityEpoch],
+                             eventsCoverFrom: Int? = nil, sleepSpans: [(start: Int, end: Int)] = [],
                              config: Config = Config()) -> [HRVWindow] {
         guard dayEnd > dayStart else { return [] }
         let duration = kind.durationSeconds
         let sortedRR = rr.sortedByTsStable()
+        let coverFrom = eventsCoverFrom ?? activity?.intervals.first?.start ?? dayStart
         var windows: [HRVWindow] = []
         var t = dayStart
         while t + duration <= dayEnd {
@@ -316,7 +399,8 @@ public enum HRVWindowBuilder {
             let resolved = resolveWearSignal(epochs: epochWearSignal, windowStart: t, windowEnd: we)
             if let w = buildOne(kind: kind, start: t, end: we, rr: sortedRR, imuWindows: imuWindows,
                                 gravity: gravity, activity: activity, transitionEvents: transitionEvents,
-                                wearSignal: resolved, config: config) {
+                                wearSignal: resolved, eventsCoverFrom: coverFrom, sleepSpans: sleepSpans,
+                                config: config) {
                 windows.append(w)
             }
             t = we
@@ -327,7 +411,8 @@ public enum HRVWindowBuilder {
     private static func buildOne(kind: HRVWindowKind, start: Int, end: Int, rr: [RRInterval],
                                  imuWindows: [ImuWindowFeatures], gravity: [GravitySample],
                                  activity: ActivityContextLookup?, transitionEvents: [ActivityTransitionEvent]?,
-                                 wearSignal: WearSignalState?, config: Config) -> HRVWindow? {
+                                 wearSignal: WearSignalState?, eventsCoverFrom: Int,
+                                 sleepSpans: [(start: Int, end: Int)], config: Config) -> HRVWindow? {
         let slice = rr.filter { $0.ts >= start && $0.ts < end }
         guard !slice.isEmpty else { return nil }
 
@@ -364,7 +449,8 @@ public enum HRVWindowBuilder {
 
         var activityContext: ActivityClass?, activityConfidence: Double?
         var sinceLocomotion: Int?, sinceExercise: Int?
-        var asleep: Bool?, wear: WearContextState?
+        var asleep: Bool?, wear: WearContextState?, inBed = false
+        var bout: (seconds: Int, running: Bool)?
         if let activity {
             let composition = activity.composition(from: start, to: end)
             if let dominant = composition.dominant {
@@ -375,7 +461,9 @@ public enum HRVWindowBuilder {
                 $0.activityClass.isGait || $0.activityClass == .cycling
             }
             sinceExercise = secondsSince(start: start, end: end, in: activity) { $0.activityClass == .vigorousActivity }
+            bout = locomotionBout(endingBefore: end, in: activity, joinGapS: config.boutJoinGapS)
             let overlapping = activity.intervals(from: start, to: end)
+            inBed = overlapping.contains { $0.inBed == true && $0.sleep != .asleep }
             if overlapping.contains(where: { $0.sleep == .asleep || $0.activityClass == .sleeping }) {
                 asleep = true
             } else {
@@ -391,6 +479,8 @@ public enum HRVWindowBuilder {
                 wear = 2 * onWristS >= end - start ? .onWrist : .unknown
             }
         }
+        if sleepSpans.contains(where: { $0.end > start && $0.start < end }) { inBed = true }
+
         let events = transitionEvents ?? []
         let lag = config.eventDetectionLagS
         let inWindow = events.filter { $0.ts >= start && $0.ts < end + lag }.count
@@ -399,11 +489,21 @@ public enum HRVWindowBuilder {
                                                    events: events.filter { ActivityTransitionProximity.isPostural($0.kind) })
         let sinceLocoEvent = secondsSinceTransition(start: start, end: end, lag: lag,
                                                     events: events.filter { !ActivityTransitionProximity.isPostural($0.kind) })
-        let phase = ActivityTransitionProximity.windowPhase(secondsSinceTransitionAtStart: sinceTransition,
-                                                            transitionsInWindow: inWindow,
+        // Every event behind the window, judged by its own kind's recovery (D8-08); a locomotion stop
+        // carries the length of the bout it ended, read from the lookup.
+        let preceding = events.filter { $0.ts < start }.map { e -> ActivityTransitionProximity.PrecedingEvent in
+            var boutS: Int?, running = false
+            if ActivityTransitionProximity.isLocomotionStop(e.kind), let activity,
+               let b = locomotionBout(endingBefore: e.ts + lag, in: activity, joinGapS: config.boutJoinGapS,
+                                      endingAfter: e.ts - 60) {
+                boutS = b.seconds; running = b.running
+            }
+            return .init(kind: e.kind, secondsBefore: start - e.ts, boutS: boutS, running: running)
+        }
+        let phase = ActivityTransitionProximity.windowPhase(preceding: preceding, transitionsInWindow: inWindow,
                                                             eventsAvailable: transitionEvents != nil,
-                                                            transitionS: config.transitionGuardS,
-                                                            recoveryS: config.recoveryGuardS)
+                                                            lookbackS: start - eventsCoverFrom,
+                                                            policy: config.recovery)
 
         var window = HRVWindow(
             kind: kind, start: start, end: end, rmssd: rmssd, sdnn: sdnn, meanNN: meanNN, medianNN: medianNN,
@@ -414,40 +514,62 @@ public enum HRVWindowBuilder {
             secondsSinceExercise: sinceExercise, phase: phase, eligibleForBaseline: false,
             wearSignal: wearSignal, secondsSincePosturalTransition: sincePostural,
             secondsSinceLocomotionTransition: sinceLocoEvent, transitionsInWindow: inWindow,
-            transitionEventsAvailable: transitionEvents != nil, asleep: asleep, wear: wear)
-        window.eligibleForBaseline = isEligibleForBaseline(window, config: config)
+            transitionEventsAvailable: transitionEvents != nil, asleep: asleep, wear: wear, inBed: inBed,
+            precedingLocomotionBoutS: bout?.seconds, precedingLocomotionRunning: bout?.running ?? false)
+        window.ineligibleReason = ineligibility(window, config: config)
+        window.eligibleForBaseline = window.ineligibleReason == nil
         return window
     }
 
-    /// The baseline-eligibility predicate, exposed standalone so a caller (or a test) can re-evaluate it
-    /// against a window built, or hand-constructed, independently of `build`. Deliberately never looks at
-    /// `activityContext`'s SEMANTIC value except as a hard off-wrist check — see the file header. The
-    /// lookup is read for REGIME, not label: asleep vs awake, known wear, and how long ago the wearer last
-    /// moved, because a resting awake baseline must not mix in sleep or an unsettled post-walk recovery.
+    /// The resting-AWAKE baseline-eligibility predicate, exposed standalone so a caller (or a test) can
+    /// re-evaluate it against a window built, or hand-constructed, independently of `build`. Deliberately
+    /// never looks at `activityContext`'s SEMANTIC value except as a hard off-wrist check — see the file
+    /// header. The lookup is read for REGIME, not label: asleep vs in bed vs awake, known wear, and how long
+    /// ago the wearer last moved, because a resting awake baseline must not mix in sleep or an unsettled
+    /// post-walk recovery.
     public static func isEligibleForBaseline(_ w: HRVWindow, config: Config = Config()) -> Bool {
-        guard w.rmssd != nil else { return false }
-        // Context gates (D3-03 / D6-03): a window with any transition inside it, with no event data to
-        // tell, explicitly asleep or of unknown sleep (`asleep == nil`: not known awake over at least
-        // half the window), of unknown wear, or too soon after locomotion/exercise is real physiology
-        // but not a resting AWAKE baseline observation. A hand-built window that does not state these
-        // fields defaults to unknown (no event data, sleep and wear nil) and is therefore ineligible.
-        guard w.transitionEventsAvailable, w.transitionsInWindow == 0 else { return false }
-        guard w.phase == .steadyState else { return false }
-        guard w.asleep == false else { return false }
-        guard w.wear == .onWrist || w.wearSignal == .onWristGood, w.wear != .offWrist else { return false }
-        if let s = w.secondsSinceLocomotion, s < config.minSinceLocomotionS { return false }
-        if let s = w.secondsSinceExercise, s < config.minSinceExerciseS { return false }
-        guard (w.artifactFraction ?? 1) <= config.maxArtifactFraction else { return false }
-        guard w.signalQuality.trustworthy else { return false }
-        guard w.activityContext != .offWrist else { return false }
+        ineligibility(w, config: config) == nil
+    }
+
+    /// The first gate `w` fails as a baseline observation for `regime` (default: the resting awake
+    /// baseline), nil when it passes them all. The same signal-quality and settling gates apply to every
+    /// regime; only the regime itself differs, so each regime keeps its own population and a window is
+    /// eligible for at most one of them.
+    public static func ineligibility(_ w: HRVWindow, regime: HRVWindowRegime = .awake,
+                                     config: Config = Config()) -> HRVWindowIneligibility? {
+        guard w.rmssd != nil else { return .noRmssd }
+        // Context gates (D3-03 / D6-03 / D9-04): a window with no event data to tell, with any transition
+        // inside it, not settled after the last one (kind-aware, D8-08), of another or an unknown regime,
+        // of unknown wear, or too soon after locomotion/exercise is real physiology but not a resting
+        // baseline observation for `regime`. A hand-built window that does not state these fields defaults
+        // to unknown (no event data, sleep and wear nil, regime unknown) and is therefore ineligible.
+        guard w.transitionEventsAvailable else { return .noTransitionEvents }
+        guard w.transitionsInWindow == 0 else { return .transitionInWindow }
+        guard w.phase == .steadyState else { return .notSteadyState }
+        guard regime != .unknown, w.regime == regime else { return .regimeMismatch }
+        guard w.wear == .onWrist || w.wearSignal == .onWristGood, w.wear != .offWrist else { return .wearNotOnWrist }
+        if let s = w.secondsSinceLocomotion {
+            let floor = max(config.minSinceLocomotionS,
+                            config.recovery.locomotionRecoveryS(boutS: w.precedingLocomotionBoutS,
+                                                                running: w.precedingLocomotionRunning))
+            if s < floor { return .tooSoonAfterLocomotion }
+        }
+        if let s = w.secondsSinceExercise, s < config.minSinceExerciseS { return .tooSoonAfterExercise }
+        guard (w.artifactFraction ?? 1) <= config.maxArtifactFraction else { return .artifacts }
+        guard w.signalQuality.trustworthy else { return .untrustworthySignal }
+        guard w.activityContext != .offWrist else { return .offWristLabel }
         // Spec §10 minimum V1 physiology gate (additive): a window carrying a wear-signal state whose
         // `opticalMeasurementQuality` is non-nil — `.onWristLoose` → `.uncertain`, `.motionArtifact` →
         // `.poor`, `.offWrist`/`.sensorDropout` → `.unavailable` — must never feed a resting baseline.
         // nil (no wear signal), `.onWristGood` and `.unknown` keep the pre-existing rules exactly.
-        guard w.wearSignal?.opticalMeasurementQuality == nil else { return false }
-        if let motion = w.motionRmsG, motion > config.maxMotionRmsG { return false }
-        if let gyro = w.gyroRmsDps, gyro > config.maxGyroRmsDps { return false }
-        return true
+        guard w.wearSignal?.opticalMeasurementQuality == nil else { return .wearSignalQuality }
+        // Fail CLOSED on motion (D9-04): no motion reading means stillness was never shown (on the phone the
+        // gravity offload lags HR/RR, so a live walk can arrive with R-R but no motion yet). The gyro stays
+        // optional: there is no always-on gyro stream, and the accelerometer reading already shows stillness.
+        guard let motion = w.motionRmsG else { return .unknownMotion }
+        if motion > config.maxMotionRmsG { return .motionTooHigh }
+        if let gyro = w.gyroRmsDps, gyro > config.maxGyroRmsDps { return .gyroTooHigh }
+        return nil
     }
 
     // MARK: Motion
@@ -500,6 +622,28 @@ public enum HRVWindowBuilder {
                                                events: [ActivityTransitionEvent]) -> Int? {
         let latest = events.filter { $0.ts < end + lag }.map(\.ts).max()
         return latest.map { max(0, start - $0) }
+    }
+
+    /// The most recent locomotion bout (walking / running / cycling / vigorous stretches no more than
+    /// `joinGapS` apart) that started before `endingBefore`, and ended after `endingAfter` when given: its
+    /// length (clipped at `endingBefore`) and whether any part of it was running. nil when none.
+    private static func locomotionBout(endingBefore: Int, in activity: ActivityContextLookup, joinGapS: Int,
+                                       endingAfter: Int? = nil) -> (seconds: Int, running: Bool)? {
+        func moving(_ iv: ActivityContextInterval) -> Bool {
+            iv.activityClass.isGait || iv.activityClass == .cycling || iv.activityClass == .vigorousActivity
+        }
+        let candidates = activity.intervals.filter { moving($0) && $0.start < endingBefore }
+        guard var i = candidates.indices.last else { return nil }
+        let boutEnd = min(candidates[i].end, endingBefore)
+        if let endingAfter, boutEnd < endingAfter { return nil }
+        var boutStart = candidates[i].start
+        var running = candidates[i].activityClass == .running
+        while i > 0, boutStart - candidates[i - 1].end <= joinGapS {
+            i -= 1
+            boutStart = min(boutStart, candidates[i].start)
+            running = running || candidates[i].activityClass == .running
+        }
+        return (boutEnd - boutStart, running)
     }
 
     /// Seconds from the end of the most recent interval matching `predicate` to the window START; 0 when

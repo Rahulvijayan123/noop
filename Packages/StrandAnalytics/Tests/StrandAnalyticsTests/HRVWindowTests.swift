@@ -41,6 +41,11 @@ final class HRVWindowTests: XCTestCase {
         ActivityContextLookup(intervals: [interval(from, to, .sitting)])
     }
 
+    /// A still wrist on the 1 Hz motion stream: since D9-04 a window needs a motion reading to be eligible.
+    private func still(_ from: Int, _ seconds: Int) -> [GravitySample] {
+        (0..<seconds).map { GravitySample(ts: from + $0, x: 0, y: 0, z: 1, dynAccel: 0.005) }
+    }
+
     // MARK: Canonical windowing
 
     func testCanonicalWindowingTilesTheSpanAndDropsATrailingPartial() {
@@ -193,7 +198,8 @@ final class HRVWindowTests: XCTestCase {
         func window(startOffset: Int) throws -> HRVWindow {
             let start = t0 + startOffset
             return try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: start, dayEnd: start + 300,
-                                                        rr: rr, activity: lookup, transitionEvents: events).first)
+                                                        rr: rr, gravity: still(t0, 10_000), activity: lookup,
+                                                        transitionEvents: events).first)
         }
 
         // Window STARTING 10 s after the transition: deep inside the transition guard.
@@ -207,10 +213,19 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertEqual(recovering.phase, .recovery)
         XCTAssertFalse(recovering.eligibleForBaseline, "recovery is real physiology, but not a baseline observation")
 
-        // Window starting 200 s after: past both guards.
-        let steady = try window(startOffset: 500 + 200)
+        // Window starting 200 s after a change of position: past the 120 s heart-rate settling, but HRV's
+        // autonomic re-equilibration takes up to 5 min (D8-08, Watanabe 2007), so still recovery for a
+        // baseline. (Before D8-08 every kind used 120 s and this read steady.)
+        let hrSettled = try window(startOffset: 500 + 200)
+        XCTAssertEqual(hrSettled.phase, .recovery)
+        XCTAssertEqual(hrSettled.ineligibleReason, .notSteadyState)
+        XCTAssertFalse(hrSettled.eligibleForBaseline)
+
+        // Window starting 320 s after: past the 300 s HRV recovery.
+        let steady = try window(startOffset: 500 + 320)
         XCTAssertEqual(steady.phase, .steadyState)
         XCTAssertEqual(steady.transitionsInWindow, 0)
+        XCTAssertNil(steady.ineligibleReason)
         XCTAssertTrue(steady.eligibleForBaseline)
     }
 
@@ -272,6 +287,7 @@ final class HRVWindowTests: XCTestCase {
     func testDecodedSpanWithNoTransitionsReadsSteadyState() throws {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300),
                                                       activity: awakeSitting(t0 - 600, t0 + 600),
                                                       transitionEvents: []).first)
         XCTAssertNil(w.secondsSinceTransition)
@@ -279,7 +295,26 @@ final class HRVWindowTests: XCTestCase {
         XCTAssertEqual(w.phase, .steadyState, "absence of a transition event is not evidence one just happened")
         XCTAssertEqual(w.asleep, false)
         XCTAssertEqual(w.wear, .onWrist)
+        XCTAssertEqual(w.regime, .awake)
         XCTAssertTrue(w.eligibleForBaseline)
+    }
+
+    func testDecodedSpanThatBeginsAtTheWindowIsUnknownNotSteady() throws {
+        // D8-08: with no event in a lookback shorter than the recovery a transition could still be in, "no
+        // event" proves nothing: the decode (and its events) began right at the window.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let lookup = awakeSitting(t0, t0 + 600)
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: lookup,
+                                                      transitionEvents: []).first)
+        XCTAssertEqual(w.phase, .unknown)
+        XCTAssertEqual(w.ineligibleReason, .notSteadyState)
+        // The caller can vouch for a longer event history than the lookup shows.
+        let vouched = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300,
+                                                           rr: rr, gravity: still(t0, 300), activity: lookup,
+                                                           transitionEvents: [], eventsCoverFrom: t0 - 300).first)
+        XCTAssertEqual(vouched.phase, .steadyState)
+        XCTAssertTrue(vouched.eligibleForBaseline)
     }
 
     func testNoEventDataIsUnknownPhaseNotSteadyState() throws {
@@ -324,7 +359,8 @@ final class HRVWindowTests: XCTestCase {
         let halfAwake = ActivityContextLookup(intervals: [interval(t0, t0 + 150, .sitting, sleep: .awake),
                                                           interval(t0 + 150, t0 + 300, .sitting, sleep: .unknown)])
         let w3 = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
-                                                       activity: halfAwake, transitionEvents: []).first)
+                                                       gravity: still(t0, 300), activity: halfAwake,
+                                                       transitionEvents: [], eventsCoverFrom: t0 - 600).first)
         XCTAssertEqual(w3.asleep, false)
         XCTAssertTrue(w3.eligibleForBaseline)
     }
@@ -373,6 +409,7 @@ final class HRVWindowTests: XCTestCase {
         let rr = beats(constantMs: 800, from: t0, seconds: 300)
         func window(_ intervals: [ActivityContextInterval]) throws -> HRVWindow {
             try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                 gravity: still(t0, 300),
                                                  activity: ActivityContextLookup(intervals: intervals),
                                                  transitionEvents: []).first)
         }
@@ -388,6 +425,110 @@ final class HRVWindowTests: XCTestCase {
                                        interval(t0 - 400, t0 + 600, .sitting)])
         XCTAssertEqual(recentEffort.secondsSinceExercise, 400)
         XCTAssertFalse(recentEffort.eligibleForBaseline)
+        // D8-08 dose scaling: a 40-min walk that ended 600 s before is past the 300 s floor but not the
+        // 1800 s recovery a long bout leaves; so is a short run.
+        let longWalk = try window([interval(t0 - 3_000, t0 - 600, .walking), interval(t0 - 600, t0 + 600, .sitting)])
+        XCTAssertEqual(longWalk.precedingLocomotionBoutS, 2_400)
+        XCTAssertEqual(longWalk.ineligibleReason, .tooSoonAfterLocomotion)
+        let shortRun = try window([interval(t0 - 900, t0 - 600, .running), interval(t0 - 600, t0 + 600, .sitting)])
+        XCTAssertTrue(shortRun.precedingLocomotionRunning)
+        XCTAssertEqual(shortRun.ineligibleReason, .tooSoonAfterLocomotion)
+        // Walk bits a few seconds apart are one bout.
+        let joined = try window([interval(t0 - 3_000, t0 - 2_000, .walking), interval(t0 - 1_990, t0 - 600, .briskWalking),
+                                 interval(t0 - 600, t0 + 600, .sitting)])
+        XCTAssertEqual(joined.precedingLocomotionBoutS, 2_400)
+        XCTAssertFalse(joined.eligibleForBaseline)
+        // The same long walk 1900 s before: settled.
+        let settled = try window([interval(t0 - 4_300, t0 - 1_900, .walking), interval(t0 - 1_900, t0 + 600, .sitting)])
+        XCTAssertTrue(settled.eligibleForBaseline)
+    }
+
+    func testAWalkStopEventIsJudgedByItsBoutNotThePosturalRule() throws {
+        // D8-08: a walk_stop 320 s before the window is past a postural change's 300 s, and past an ordinary
+        // walk's 300 s; after a 40-min walk the wake lasts 1800 s.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let stop = [ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: t0 - 320)]
+        func window(walkFrom: Int) throws -> HRVWindow {
+            let lookup = ActivityContextLookup(intervals: [interval(walkFrom, t0 - 325, .walking),
+                                                           interval(t0 - 325, t0 + 600, .sitting)])
+            var config = HRVWindowBuilder.Config()
+            config.minSinceLocomotionS = 0 // isolate the event rule from the lookup's locomotion floor
+            config.recovery.longBoutS = 1_800
+            return try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                        gravity: still(t0, 300), activity: lookup,
+                                                        transitionEvents: stop, config: config).first)
+        }
+        XCTAssertEqual(try window(walkFrom: t0 - 900).phase, .steadyState, "a 10-min walk: 300 s recovery")
+        XCTAssertEqual(try window(walkFrom: t0 - 2_725).phase, .recovery, "a 40-min walk: 1800 s recovery")
+    }
+
+    // MARK: Regime (D9-04)
+
+    func testWindowInsideSleepIsEligibleOnlyForTheAsleepRegime() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let night = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .sleeping, sleep: .asleep)])
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: night,
+                                                      transitionEvents: []).first)
+        XCTAssertEqual(w.regime, .asleep)
+        XCTAssertFalse(w.eligibleForBaseline, "never an awake-rest observation")
+        XCTAssertEqual(w.ineligibleReason, .regimeMismatch)
+        XCTAssertNil(HRVWindowBuilder.ineligibility(w, regime: .asleep), "a clean asleep-regime observation")
+        XCTAssertEqual(HRVWindowBuilder.ineligibility(w, regime: .inBedAwake), .regimeMismatch)
+    }
+
+    func testAwakeInBedIsItsOwnRegime() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        var lyingInBed = interval(t0 - 600, t0 + 600, .lyingDown, sleep: .awake)
+        lyingInBed.inBed = true
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300),
+                                                      activity: ActivityContextLookup(intervals: [lyingInBed]),
+                                                      transitionEvents: []).first)
+        XCTAssertEqual(w.asleep, false)
+        XCTAssertEqual(w.regime, .inBedAwake)
+        XCTAssertFalse(w.eligibleForBaseline)
+        XCTAssertNil(HRVWindowBuilder.ineligibility(w, regime: .inBedAwake))
+
+        // A sleep session over the window makes known-awake time in bed, whatever the lookup's inBed says.
+        let s = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: awakeSitting(t0 - 600, t0 + 600),
+                                                      transitionEvents: [],
+                                                      sleepSpans: [(start: t0 + 200, end: t0 + 9_000)]).first)
+        XCTAssertEqual(s.regime, .inBedAwake)
+        XCTAssertEqual(s.ineligibleReason, .regimeMismatch)
+    }
+
+    func testUnknownSleepIsTheUnknownRegimeAndEligibleForNone() throws {
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let lookup = ActivityContextLookup(intervals: [interval(t0 - 600, t0 + 600, .sitting, sleep: .unknown)])
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                      gravity: still(t0, 300), activity: lookup,
+                                                      transitionEvents: []).first)
+        XCTAssertEqual(w.regime, .unknown)
+        for regime in HRVWindowRegime.allCases {
+            XCTAssertEqual(HRVWindowBuilder.ineligibility(w, regime: regime), .regimeMismatch, "\(regime)")
+        }
+    }
+
+    // MARK: Motion fails closed (D9-04)
+
+    func testMissingMotionFailsClosedWithAnExplicitReason() throws {
+        // Clean R-R, awake, on-wrist, settled, but no gravity row reached the window (the phone's gravity
+        // offload lags HR/RR): stillness was never shown, so the window is not a resting observation.
+        let rr = beats(constantMs: 800, from: t0, seconds: 300)
+        let lookup = awakeSitting(t0 - 600, t0 + 600)
+        let blind = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                          activity: lookup, transitionEvents: []).first)
+        XCTAssertNil(blind.motionRmsG)
+        XCTAssertNotNil(blind.rmssd)
+        XCTAssertFalse(blind.eligibleForBaseline)
+        XCTAssertEqual(blind.ineligibleReason, .unknownMotion)
+        let seen = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0, dayEnd: t0 + 300, rr: rr,
+                                                         gravity: still(t0, 300), activity: lookup,
+                                                         transitionEvents: []).first)
+        XCTAssertTrue(seen.eligibleForBaseline)
+        XCTAssertNil(seen.ineligibleReason)
     }
 
     func testWindowPhaseRules() {
@@ -471,9 +612,31 @@ final class HRVWindowTests: XCTestCase {
             baseEligibleWindow(activityContext: .sitting, gyroRmsDps: 50)))
     }
 
-    func testEligibilityIsNotPenalizedByAbsentMotionReadings() {
-        XCTAssertTrue(HRVWindowBuilder.isEligibleForBaseline(
-            baseEligibleWindow(motionRmsG: nil, gyroRmsDps: nil)))
+    func testEligibilityFailsClosedOnAbsentMotionButNotOnAbsentGyro() {
+        // D9-04: absent motion used to pass ("never penalizes"); stillness that was never measured is not
+        // stillness. The gyro stays optional: no always-on gyro stream exists.
+        XCTAssertFalse(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(motionRmsG: nil, gyroRmsDps: nil)))
+        XCTAssertEqual(HRVWindowBuilder.ineligibility(baseEligibleWindow(motionRmsG: nil)), .unknownMotion)
+        XCTAssertTrue(HRVWindowBuilder.isEligibleForBaseline(baseEligibleWindow(motionRmsG: 0.01, gyroRmsDps: nil)))
+    }
+
+    func testHandBuiltWindowDerivesItsRegimeFromAsleepAndInBed() {
+        var w = baseEligibleWindow()
+        XCTAssertEqual(w.regime, .awake)
+        w.asleep = nil
+        XCTAssertEqual(w.regime, .unknown)
+        w.asleep = true
+        XCTAssertEqual(w.regime, .asleep)
+        w = HRVWindow(kind: .canonical5m, start: t0, end: t0 + 300, rmssd: 30, sdnn: 40, meanNN: 800, medianNN: 800,
+                      rrDiffSqSumMs2: 1_000, rrDiffCount: 100, nnM2: 2_000, validRRCount: 300, artifactFraction: 0.05,
+                      signalQuality: HRVSignalQuality(coverageVerdict: .plausible, beatAccurateFraction: 0.99,
+                                                      trustworthy: true),
+                      motionRmsG: 0.01, gyroRmsDps: nil, activityContext: .sitting, activityConfidence: 0.9,
+                      secondsSinceTransition: 300, secondsSinceLocomotion: nil, secondsSinceExercise: nil,
+                      phase: .steadyState, eligibleForBaseline: false, transitionEventsAvailable: true,
+                      asleep: false, wear: .onWrist, inBed: true)
+        XCTAssertEqual(w.regime, .inBedAwake)
+        XCTAssertEqual(HRVWindowBuilder.ineligibility(w), .regimeMismatch, "awake in bed is not awake-rest")
     }
 
     func testEligibilityFailsOnHighArtifactFractionOrUntrustworthySignal() {
