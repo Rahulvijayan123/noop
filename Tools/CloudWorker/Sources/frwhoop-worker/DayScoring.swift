@@ -332,7 +332,16 @@ struct DayScorer {
             stageAlgorithmVersion: v2StageAlgorithmVersion,
             nights: nights, hr: hr, tempCelsius: tempCelsius, beats: beats,
             breathTrack: breathTrack, history: history))
-        guard let response = SleepFeatureEnrichment.enrich(request: request, client: client) else {
+        // Busy keeps the day's published document (the snapshot replaces the whole payload).
+        let previous: () -> [String: Any]? = { [db, v2StageAlgorithmVersion] in
+            (try? db.isolatingFailures {
+                try SleepFeatureEnrichment.loadPublishedDocument(
+                    db: db, userId: claim.userId, deviceId: claim.deviceId, day: claim.day,
+                    algorithmVersion: v2StageAlgorithmVersion)
+            }) ?? nil
+        }
+        guard let response = SleepFeatureEnrichment.enrich(request: request, client: client,
+                                                           previous: previous) else {
             return nil
         }
         return response
