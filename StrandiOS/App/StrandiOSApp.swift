@@ -701,6 +701,21 @@ enum DemoScreens {
         // `--demo-kit-only <ids>` for a few sections.
         case "kitcharts": return AnyView(KitChartsGallery())
         case "kitcomponents": return AnyView(KitComponentsGallery())
+        // The device, data-source and setup screens (the "more" area), each as it looks when pushed.
+        case "datasources": return AnyView(DataSourcesView())
+        case "applehealth": return AnyView(AppleHealthView())
+        case "miband": return AnyView(XiaomiBandView())
+        case "backup": return AnyView(BackupSyncView())
+        case "powersaving": return AnyView(PowerSavingView())
+        case "limitations": return AnyView(NoopLimitationsView())
+        case "testcentre": return AnyView(TestCentreView())
+        case "rawcollector": return AnyView(RawDataCollectorView())
+        case "terms": return AnyView(TermsGateView(onAccept: {}))
+        case "onboarding": return AnyView(OnboardingWizard(onFinished: {}))
+        case "applehealthrhr": return AnyView(AppleHealthSeriesDemoScreen(key: "resting_hr"))
+        case "applehealthspo2": return AnyView(AppleHealthSeriesDemoScreen(key: "spo2"))
+        case "applehealthsleep": return AnyView(AppleHealthSeriesDemoScreen(key: "asleep_min"))
+        case "devicedetail": return AnyView(DeviceDetailDemoScreen())
         default:         return nil
         }
     }
