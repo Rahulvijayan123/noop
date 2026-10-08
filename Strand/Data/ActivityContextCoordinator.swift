@@ -157,6 +157,7 @@ final class ActivityContextCoordinator {
 
         var owners: [Int: Repository.ActivityContextOwner] = [:]
         var fingerprints: [Int: String] = [:]
+        var tails: [Int: [ActivityTransitionEvent]] = [:]
         var configTags: [Int: String] = [:]
         var candidates: [ActivityContextMaterialization.Candidate] = []
         var unanswered: Set<Int> = []
@@ -178,9 +179,14 @@ final class ActivityContextCoordinator {
             // derived — persisted, so a late backfill to an old day is seen after a relaunch too — and with what
             // this process last saw. Equal-count *value* corrections are caught by the track's content
             // fingerprint once the day is re-examined.
+            // The previous day's last events are input too: the day's first rows settle on them. Witnessed by their
+            // content ("" with none), so the day is derived again once the day before it is stored or its last
+            // minutes change, and not otherwise.
+            let tail = await previousDayTail(day, ids: ids, store: store)
+            tails[day.start] = tail
             if let fingerprint = await repo.activityContextInputFingerprint(store: store, ids: ids, day: day,
                                                                              ownerId: owner.deviceId, configTag: configTag) {
-                fingerprints[day.start] = fingerprint
+                fingerprints[day.start] = fingerprint + ActivityContextPersistence.tailFingerprint(tail)
             }
             candidates.append(.init(day: day, ledger: ledgers[owner.deviceId]?[day.start],
                                     newestHeartRateTs: owner.newestHeartRateTs, lastCheck: checks[day.start],
@@ -211,7 +217,7 @@ final class ActivityContextCoordinator {
         for day in due {
             guard let owner = owners[day.start] else { continue }
             await materialize(day, owner: owner, ledger: ledgers[owner.deviceId]?[day.start],
-                              inputFingerprint: fingerprints[day.start],
+                              inputFingerprint: fingerprints[day.start], previousEvents: tails[day.start] ?? [],
                               configTag: configTags[day.start] ?? repo.activityContextLedgerConfigTag(dayStart: day.start),
                               ids: ids, store: store)
         }
@@ -227,8 +233,21 @@ final class ActivityContextCoordinator {
         return now - last < Self.openDayRederiveFloorS
     }
 
+    /// The previous day's events in the `hrvEventLookbackS` before `day`, as stored with that day under any of `ids`.
+    /// Empty when that day is not stored yet (or the read failed): the day's first rows and windows then see no
+    /// event before the day, as before.
+    private func previousDayTail(_ day: Day, ids: [String], store: WhoopStore) async -> [ActivityTransitionEvent] {
+        var rows: [ActivityContextTransitionRow] = []
+        for id in ids {
+            rows += (try? await store.activityContextTransitions(
+                deviceId: id, from: day.start - ActivityContextPersistence.hrvEventLookbackS, to: day.start)) ?? []
+        }
+        return ActivityContextPersistence.events(rows)
+    }
+
     private func materialize(_ day: Day, owner: Repository.ActivityContextOwner, ledger: ActivityContextDayRow?,
-                             inputFingerprint: String?, configTag: String, ids: [String], store: WhoopStore) async {
+                             inputFingerprint: String?, previousEvents: [ActivityTransitionEvent],
+                             configTag: String, ids: [String], store: WhoopStore) async {
         let startedAt = Int(Date().timeIntervalSince1970)
         checks[day.start] = .init(at: startedAt, newestHeartRateTs: owner.newestHeartRateTs,
                                   inputFingerprint: inputFingerprint)
@@ -254,21 +273,37 @@ final class ActivityContextCoordinator {
         let streams = loaded.streams
         let beats = await repo.rrIntervals(from: streams.start, to: streams.end, limit: 250_000)
         let document = loaded.document, hr = streams.hr, steps = streams.stepCounter, gravity = streams.gravity
+        // The previous day's last minutes, as stored with that day, so the day's first rows and HRV windows see a
+        // change of position or the end of a walk or a workout just before midnight: its events (read when the
+        // pass planned the day, and witnessed in its input fingerprint) as settling anchors and for the windows'
+        // recovery lookback, and its intervals for the windows' time-since-locomotion / exercise gates. Empty when
+        // that day is not stored yet.
+        var previousRows: [[ActivityContextInterval]] = []
+        for id in ids {
+            let rows = (try? await store.activityContextIntervals(
+                deviceId: id, from: day.start - ActivityContextPersistence.hrvIntervalLookbackS, to: day.start)) ?? []
+            previousRows.append(rows.map(ActivityContextInterval.init(row:)))
+        }
+        let previousIntervals = ActivityContextPersistence.merged(previousRows)
         let (built, hrvWindows) = await Task.detached(priority: .utility) {
-            let intervals = ActivityContextIntervalBuilder.build(document: document, hr: hr, steps: steps, rr: beats)
+            let events = ActivityContextPersistence.hrvEvents(day: document.events, previous: previousEvents,
+                                                              dayStart: document.dayStart)
+            let intervals = ActivityContextIntervalBuilder.build(runs: document.runs, events: events,
+                                                                 hr: hr, steps: steps, rr: beats)
             // Fed by exactly the same live beat-to-beat R-R and the strap's always-on 1 Hz motion stream the
             // interval build above uses (no fabricated/placeholder data): see `HRVWindow.swift`'s header for
             // why this is a SEPARATE, canonical-duration population from `intervals`'s own per-interval RMSSD.
             // `imuWindows` is left empty: the strap does not stream raw 100 Hz IMU continuously during normal
             // wear (only during an opt-in Raw Data collector session), so `motionRmsG` falls back to the 1 Hz
             // stream and `gyroRmsDps` stays honestly nil here rather than inventing a reading.
-            let lookup = ActivityContextLookup(intervals: intervals)
+            let lookup = ActivityContextLookup(intervals: ActivityContextPersistence.hrvIntervals(
+                day: intervals, previous: previousIntervals, dayStart: document.dayStart))
             // The phone's day document carries runs, not per-epoch wear signal (that is server-only, in the
             // C10 epochs), so every window resolves wearSignal nil here. These windows only feed the
             // diagnostic line today; no score or baseline reads them yet.
             let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: document.dayStart, dayEnd: document.dayEnd,
                                                  rr: beats, gravity: gravity, activity: lookup,
-                                                 transitionEvents: document.events,
+                                                 transitionEvents: events,
                                                  epochWearSignal: [])
             return (intervals, windows)
         }.value

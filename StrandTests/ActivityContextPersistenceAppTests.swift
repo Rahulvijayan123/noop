@@ -107,6 +107,84 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
                       "the day is decoded and written again, not only re-stamped: \(logs)")
     }
 
+    // MARK: Interval context columns (INT-A)
+
+    @MainActor
+    func testAMaterializedDayStoresEveryIntervalContextFieldNotDefaults() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        let rows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        XCTAssertFalse(rows.isEmpty)
+        for row in rows {
+            XCTAssertNotNil(row.inBed, "in-bed is recorded, not left NULL")
+            XCTAssertNotNil(row.uncertainty)
+            XCTAssertNotNil(row.experts)
+            XCTAssertNotNil(row.transitionCount)
+            XCTAssertNotNil(row.absorbedClasses)
+            XCTAssertNotNil(row.absorbedSeconds)
+            XCTAssertNotNil(row.settlingSeconds)
+            if !(ActivityClass(rawValue: row.activityClass)?.isMovement ?? true) {
+                XCTAssertNotNil(row.settledFromTs, "a still row says where its settled part starts")
+            }
+        }
+        XCTAssertTrue(rows.dropFirst().allSatisfy { $0.precededByGapS != nil })
+        // What the coach reads back is the context the builder produced, field for field.
+        let stored = await repo.storedActivityContext(from: day.start, to: day.end)
+        XCTAssertEqual(stored.intervals, rows.map(ActivityContextInterval.init(row:)))
+    }
+
+    // MARK: The previous day's tail (INT-A review)
+
+    @MainActor
+    func testADayIsDerivedAgainWhenTheDayBeforeItEndsInAWalkAndItsFirstRowSettlesOnIt() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        let previous = ActivityContextMaterialization.localDays(endingAt: now, count: 5, timeZone: .current)[4]
+        XCTAssertEqual(previous.end, day.start)
+        _ = try await store.insert(desk(from: previous.end - 3_600, seconds: 3_600), deviceId: id)
+        _ = try await store.insert(desk(from: day.start, seconds: 1_800), deviceId: id)
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        let blindRows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        XCTAssertFalse(blindRows.isEmpty)
+        XCTAssertTrue(blindRows.allSatisfy { ($0.settlingSeconds ?? 0) == 0 }, "nothing before the day yet")
+        let firstLedgerRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        let firstLedger = try XCTUnwrap(firstLedgerRow)
+
+        // The previous day, as stored, ends in a walk 30 s before midnight.
+        let previousLedgerRow = try await store.activityContextDay(deviceId: id, day: previous.key)
+        let previousLedger = try XCTUnwrap(previousLedgerRow)
+        let previousRows = try await store.activityContextIntervals(deviceId: id, from: previous.start, to: previous.end)
+        var previousEvents = try await store.activityContextTransitions(deviceId: id, from: previous.start, to: previous.end)
+        previousEvents.append(ActivityContextTransitionRow(ts: day.start - 30, kind: "walk_stop", probability: 0.9,
+                                                           decoderVersion: previousLedger.decoderVersion))
+        try await store.replaceActivityContext(deviceId: id, day: previousLedger, intervals: previousRows,
+                                               transitions: previousEvents)
+
+        var logs: [String] = []
+        await coordinator(repo, logs: { logs.append($0) }).drainMaterialization(pauseNs: 0)
+        XCTAssertTrue(logs.contains { $0.hasPrefix("Activity context: saved") && $0.hasSuffix(day.key) },
+                      "the day's input changed with the day before it: \(logs)")
+        XCTAssertFalse(logs.contains { $0.hasPrefix("Activity context: saved") && $0.hasSuffix(previous.key) })
+        let secondLedgerRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        XCTAssertNotEqual(secondLedgerRow?.inputFingerprint, firstLedger.inputFingerprint)
+        let seenRows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        // Every still row in the first 90 s settles on the walk (the decode can open with a few-second fragment).
+        let opening = seenRows.filter { $0.startTs < day.start + 90 }
+        XCTAssertFalse(opening.isEmpty)
+        for row in opening where !(ActivityClass(rawValue: row.activityClass)?.isMovement ?? true) {
+            XCTAssertEqual(row.settledFromTs, min(row.endTs, day.start + 90), "settles after the walk: \(row.startTs - day.start)")
+            XCTAssertEqual(row.settlingSeconds, min(row.endTs, day.start + 90) - row.startTs)
+        }
+        XCTAssertTrue(opening.contains { $0.settledFromTs == day.start + 90 }, "the row holding +90 s settles from it")
+
+        // Nothing new: nothing is written again.
+        logs = []
+        await coordinator(repo, logs: { logs.append($0) }).drainMaterialization(pauseNs: 0)
+        XCTAssertFalse(logs.contains { $0.hasPrefix("Activity context: saved") }, "\(logs)")
+    }
+
     // MARK: Strap change (D5-08)
 
     @MainActor

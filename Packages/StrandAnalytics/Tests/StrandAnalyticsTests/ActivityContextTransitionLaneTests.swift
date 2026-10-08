@@ -686,9 +686,10 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(ActivityContextRuns.foldFragments(runs, maxFragmentS: 10, events: [elsewhere]).count, 3)
     }
 
-    func testAContextFieldTheStoreDoesNotKeepReadsBackAsNotRecorded() throws {
-        // Review fix: the store row has no columns for the ctx-int-2 fields yet, and they read back as 0 / false
-        // (fully certain, no transitions, not in bed). They now read back as nil: not recorded.
+    func testAContextFieldReadsBackAsRecordedAndARowWithoutItAsNotRecorded() throws {
+        // Review fix: the ctx-int-2 fields used to read back as 0 / false (fully certain, no transitions, not in bed)
+        // from a store row with no columns for them. The row now carries them (INT-A), so they read back exactly;
+        // a row written without them (a pre-ctx-int-2 row) still reads nil: not recorded.
         let built = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), run(120, 125, posture: upright),
                                                                 run(125, 240, posture: seated)])
         let iv = try XCTUnwrap(built.first)
@@ -697,7 +698,12 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(iv.transitionCount, 0)
         XCTAssertEqual(iv.absorbedSeconds, 5)
         XCTAssertEqual(iv.settlingSeconds, 0)
-        let back = ActivityContextInterval(row: iv.storeRow)
+        XCTAssertEqual(ActivityContextInterval(row: iv.storeRow), iv)
+        var legacy = iv.storeRow
+        legacy.inBed = nil; legacy.uncertainty = nil; legacy.experts = nil; legacy.transitionCount = nil
+        legacy.absorbedClasses = nil; legacy.absorbedSeconds = nil; legacy.precededByGapS = nil
+        legacy.settlingSeconds = nil
+        let back = ActivityContextInterval(row: legacy)
         XCTAssertNil(back.inBed)
         XCTAssertNil(back.uncertainty)
         XCTAssertNil(back.experts)

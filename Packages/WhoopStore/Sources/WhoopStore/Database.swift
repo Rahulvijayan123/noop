@@ -1213,14 +1213,17 @@ extension WhoopStore {
         //
         // `activityContextInterval` gains the run-level fields the interval builder is gaining (in-bed, overall
         // uncertainty, the experts that shaped the run, the transitions folded inside, seconds absorbed from
-        // short fragments, the data gap before it, and the settling time after a posture change). All NULL-able,
-        // and NULL reads as "not recorded" (a 0 transition count is a real "none folded in", so it is never the
-        // default). Until the builder fills them, count a run's transitions with `activityContextIntervalTransitions`.
+        // short fragments and their classes, the data gap before it, and the settling time after a posture change),
+        // the detail the class folds away (`in_vehicle` on a sitting row: a drive is not seated rest), the class
+        // of the touching row before it, and heart rate / RMSSD over the settled part only (after the settling
+        // window, so a sitting row after a walk does not report the recovery as seated rest). All NULL-able, and
+        // NULL reads as "not recorded" (a 0 transition count is a real "none folded in", so it is never the
+        // default). The stored events themselves are counted per row by `activityContextIntervalTransitions`.
         //
         // `activityContextTransition` keeps the decoder's typed events (sit-to-stand and the like) durably, so a
         // 10 s stand that the interval builder folds into a sitting stretch still leaves a joinable trace.
-        // Written with the day's intervals, in the same transaction. `onsetTs` / `source` are NULL until the
-        // decoder reports them.
+        // Written with the day's intervals, in the same transaction. `onsetTs` / `source` are NULL when the
+        // decoder did not report them.
         //
         // `spotHrvReading` keeps each manual 60 s HRV reading with its own start and end, instead of one value
         // per day that a second reading overwrote. It carries no copy of the activity context: like every other
@@ -1254,6 +1257,16 @@ extension WhoopStore {
                 t.add(column: "absorbedSeconds", .integer)
                 t.add(column: "precededByGapS", .integer)
                 t.add(column: "settlingSeconds", .integer)
+                t.add(column: "absorbedClasses", .text)          // comma-joined class codes, most seconds first
+                t.add(column: "detail", .text)                   // in_vehicle | stairs | postural_transition
+                t.add(column: "detailConfidence", .double)
+                t.add(column: "precedingClass", .text)           // class of the touching row before
+                t.add(column: "settledFromTs", .integer)         // first second after settling
+                t.add(column: "hrMeanSettled", .double)          // statistics over [settledFromTs, endTs)
+                t.add(column: "hrSamplesSettled", .integer)
+                t.add(column: "rmssdSettled", .double)
+                t.add(column: "rrDiffSqSumMs2Settled", .double)
+                t.add(column: "rrDiffCountSettled", .integer)
             }
             try db.create(table: "activityContextTransition", options: [.ifNotExists]) { t in
                 t.column("deviceId", .text).notNull()

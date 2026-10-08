@@ -51,10 +51,27 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
     public var transitionCount: Int?
     /// Seconds of shorter fragments absorbed into the interval (nil when not recorded).
     public var absorbedSeconds: Int?
+    /// Classes of those fragments, comma-separated codes, most seconds first ("" when none; nil when not recorded).
+    public var absorbedClasses: String?
     /// Seconds of no data immediately before the interval (nil when unknown).
     public var precededByGapS: Int?
     /// Seconds after a change of posture before the interval is settled (nil when not applicable).
     public var settlingSeconds: Int?
+    /// A finer reading the class folds away (`in_vehicle` on a sitting row, `stairs`, `postural_transition`) and
+    /// its head mass; nil when none held the interval.
+    public var detail: String?
+    public var detailConfidence: Double?
+    /// Class of the interval just before (touching it); nil after a gap, for a day's first row, or not recorded.
+    public var precedingClass: String?
+    /// First second after the interval's settling (`startTs` when nothing settles it); nil for movement rows.
+    public var settledFromTs: Int?
+    /// Heart rate and RMSSD (with its components) over `[settledFromTs, endTs)` only; nil when settling does not
+    /// apply, leaves under a minute, or the row is not rest (a ride in a vehicle).
+    public var hrMeanSettled: Double?
+    public var hrSamplesSettled: Int?
+    public var rmssdSettled: Double?
+    public var rrDiffSqSumMs2Settled: Double?
+    public var rrDiffCountSettled: Int?
 
     public init(startTs: Int, endTs: Int, activityClass: String, confidence: Double,
                 runnerUp: String? = nil, runnerUpConfidence: Double = 0, evidenceQuality: Double = 0,
@@ -67,7 +84,10 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
                 respRateBpm: Double? = nil, respBreaths: Int = 0,
                 inBed: Bool? = nil, uncertainty: Double? = nil, experts: String? = nil,
                 transitionCount: Int? = nil, absorbedSeconds: Int? = nil, precededByGapS: Int? = nil,
-                settlingSeconds: Int? = nil) {
+                settlingSeconds: Int? = nil, absorbedClasses: String? = nil, detail: String? = nil,
+                detailConfidence: Double? = nil, precedingClass: String? = nil, settledFromTs: Int? = nil,
+                hrMeanSettled: Double? = nil, hrSamplesSettled: Int? = nil, rmssdSettled: Double? = nil,
+                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil) {
         self.startTs = startTs
         self.endTs = endTs
         self.activityClass = activityClass
@@ -101,6 +121,16 @@ public struct ActivityContextIntervalRow: Equatable, Sendable {
         self.absorbedSeconds = absorbedSeconds
         self.precededByGapS = precededByGapS
         self.settlingSeconds = settlingSeconds
+        self.absorbedClasses = absorbedClasses
+        self.detail = detail
+        self.detailConfidence = detailConfidence
+        self.precedingClass = precedingClass
+        self.settledFromTs = settledFromTs
+        self.hrMeanSettled = hrMeanSettled
+        self.hrSamplesSettled = hrSamplesSettled
+        self.rmssdSettled = rmssdSettled
+        self.rrDiffSqSumMs2Settled = rrDiffSqSumMs2Settled
+        self.rrDiffCountSettled = rrDiffCountSettled
     }
 
     public var durationSeconds: Int { endTs - startTs }
@@ -600,7 +630,9 @@ extension WhoopStore {
         startTs, endTs, activityClass, confidence, runnerUp, runnerUpConfidence, evidenceQuality, posture, \
         locomotion, armBehavior, sleepState, wearState, intensity, stepTicks, cadenceSpm, hrSamples, hrMean, \
         hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount, respRateBpm, respBreaths, \
-        inBed, uncertainty, experts, transitionCount, absorbedSeconds, precededByGapS, settlingSeconds
+        inBed, uncertainty, experts, transitionCount, absorbedSeconds, precededByGapS, settlingSeconds, \
+        absorbedClasses, detail, detailConfidence, precedingClass, settledFromTs, hrMeanSettled, hrSamplesSettled, \
+        rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled
         """
 
     private static let dayColumns = """
@@ -615,8 +647,10 @@ extension WhoopStore {
              posture, locomotion, armBehavior, sleepState, wearState, intensity, stepTicks, cadenceSpm,
              hrSamples, hrMean, hrMin, hrMax, hrSlope, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount,
              respRateBpm, respBreaths, inBed, uncertainty, experts, transitionCount, absorbedSeconds,
-             precededByGapS, settlingSeconds)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             precededByGapS, settlingSeconds, absorbedClasses, detail, detailConfidence, precedingClass,
+             settledFromTs, hrMeanSettled, hrSamplesSettled, rmssdSettled, rrDiffSqSumMs2Settled, rrDiffCountSettled)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """
 
     private static func arguments(deviceId: String, row r: ActivityContextIntervalRow) -> StatementArguments {
@@ -624,7 +658,9 @@ extension WhoopStore {
          r.evidenceQuality, r.posture, r.locomotion, r.armBehavior, r.sleepState, r.wearState, r.intensity,
          r.stepTicks, r.cadenceSpm, r.hrSamples, r.hrMean, r.hrMin, r.hrMax, r.hrSlope, r.rmssd, r.rrBeats,
          r.rrDiffSqSumMs2, r.rrDiffCount, r.respRateBpm, r.respBreaths, r.inBed, r.uncertainty, r.experts,
-         r.transitionCount, r.absorbedSeconds, r.precededByGapS, r.settlingSeconds]
+         r.transitionCount, r.absorbedSeconds, r.precededByGapS, r.settlingSeconds, r.absorbedClasses, r.detail,
+         r.detailConfidence, r.precedingClass, r.settledFromTs, r.hrMeanSettled, r.hrSamplesSettled, r.rmssdSettled,
+         r.rrDiffSqSumMs2Settled, r.rrDiffCountSettled]
     }
 
     private static func intervalRow(from row: Row) -> ActivityContextIntervalRow {
@@ -641,7 +677,12 @@ extension WhoopStore {
             respRateBpm: row["respRateBpm"], respBreaths: row["respBreaths"],
             inBed: row["inBed"], uncertainty: row["uncertainty"], experts: row["experts"],
             transitionCount: row["transitionCount"], absorbedSeconds: row["absorbedSeconds"],
-            precededByGapS: row["precededByGapS"], settlingSeconds: row["settlingSeconds"])
+            precededByGapS: row["precededByGapS"], settlingSeconds: row["settlingSeconds"],
+            absorbedClasses: row["absorbedClasses"], detail: row["detail"], detailConfidence: row["detailConfidence"],
+            precedingClass: row["precedingClass"], settledFromTs: row["settledFromTs"],
+            hrMeanSettled: row["hrMeanSettled"], hrSamplesSettled: row["hrSamplesSettled"],
+            rmssdSettled: row["rmssdSettled"], rrDiffSqSumMs2Settled: row["rrDiffSqSumMs2Settled"],
+            rrDiffCountSettled: row["rrDiffCountSettled"])
     }
 
     private static func dayRow(from row: Row) -> ActivityContextDayRow {
