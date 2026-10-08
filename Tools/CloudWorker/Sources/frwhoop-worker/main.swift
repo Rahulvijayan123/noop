@@ -138,6 +138,14 @@ import FoundationNetworking
 
 setvbuf(stdout, nil, _IOLBF, 0)
 
+// `--print-identity` prints what this executable measures about itself (RuntimeIdentity) and exits
+// before reading any configuration or opening a connection: deploy/release-host.sh checks a fresh
+// build with it before the release can be selected.
+if CommandLine.arguments.dropFirst().contains("--print-identity") {
+    print(RuntimeIdentity.measure(environment: ProcessInfo.processInfo.environment).jsonText())
+    exit(0)
+}
+
 struct WorkerConfig {
     let dbURL: String
     let b2KeyID: String
@@ -442,6 +450,11 @@ let sensorState = LaneState(LaneSnapshot(
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()
+// Measured once: the executable's digest and the release it belongs to (heartbeat meta.identity).
+let runtimeIdentity = RuntimeIdentity.measure(environment: env)
+FileHandle.standardOutput.write(("frwhoop-worker: identity executable_sha256=\(runtimeIdentity.executableSHA256 ?? "unmeasured") "
+    + "release=\(runtimeIdentity.release?.releaseID ?? "none") "
+    + "matches_release=\(runtimeIdentity.matchesRelease.map { String($0) } ?? "unknown")\n").data(using: .utf8)!)
 
 /// A stable per-worker UUID so a worker's health row is the same row across
 /// restarts, while `process_instance_id` distinguishes this process.
@@ -1198,6 +1211,8 @@ func heartbeat(final: Bool = false) {
         if let oldest = queue.oldestSeconds { meta["oldest_eligible_seconds"] = oldest }
     }
     if let dbError { meta["db_error"] = String(dbError.prefix(600)) }
+    // What this process measured about itself at startup; `source_revision` above is only the claim.
+    meta["identity"] = runtimeIdentity.wire
 
     let metaText: String
     if let data = try? JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys]),
