@@ -19,6 +19,14 @@ import WhoopProtocol
 //   * Family/anchor conversion is reused exactly (`skinTempCelsius`, per-device
 //     WHOOP 4 anchor, 4.0 raw-band rejection); devices/anchors are never combined
 //     in one trend (one document = one device family + anchor identity).
+//   * The bins are built ONCE over the whole peri-sleep analysis span
+//     `[first observed onset − 60 min, last fragment end + 30 min)` (widened to the
+//     morning-response window when that reaches further; spec-02 §3, CONTRACT §4.2).
+//     The nightly summary reads the in-fragment subset only, so post-wake and
+//     pre-onset observations never change it; the pre-onset slope reads
+//     `[onset − 60 min, onset)` (minutes BEFORE the first fragment included) and the
+//     post-wake slope `[window end, window end + 30 min)`. Before this repair both
+//     slopes read the in-fragment subset, so the post-wake slope could never exist.
 //   * Accepted readings aggregate into UTC-minute bins by MEDIAN; a WHOOP 1 Hz
 //     minute bin needs ≥30 distinct accepted sample seconds; no empty-bin
 //     interpolation; duplicate samples cannot inflate coverage.
@@ -30,9 +38,67 @@ import WhoopProtocol
 
 extension SleepAnalyticsV1 {
 
-    static func thermalGroup(timeline: SleepAnalyticsTimeline,
-                             input: SleepAnalyticsInput,
-                             config: SleepAnalyticsConfig) -> SleepAnalyticsThermalGroup {
+    // MARK: - Qualified minute bins (built ONCE over the peri-sleep analysis span)
+
+    /// The qualified UTC-minute skin-temperature bins over the whole peri-sleep analysis span
+    /// (docs/spec-02/CONTRACT.md §4.2). Built ONCE; the nightly summary, both slopes and the
+    /// morning-response temperature curve read subsets of these same bins — nothing re-bins.
+    struct ThermalMinuteBins {
+        /// Half-open analysis span `[spanStart, spanEnd)` (unix seconds): from
+        /// min(first fragment start, first observed onset − pre-onset window, window end − morning
+        /// window) to max(window end + post-wake window, window end + morning window).
+        let spanStart: Int
+        let spanEnd: Int
+        /// Accepted minute bins (qualified AND not equilibration-excluded), ascending by minute.
+        let accepted: [(minute: Int, median: Double)]
+        /// Distinct accepted sample seconds per UTC minute, for every minute holding ≥ 1 accepted
+        /// second (thin, qualified and excluded minutes alike). Duplicates never count twice.
+        let support: [Int: Int]
+        /// Qualified minutes removed by the post-re-wear equilibration rule.
+        let excludedMinutes: Set<Int>
+        /// True when an explicit re-wear event (an off-wrist interval END) backed an exclusion
+        /// window overlapping the span.
+        let rewearVerified: Bool
+        /// Per-sample stream diagnostics over the span (closed-vocabulary keys).
+        let sampleCounts: [String: Int]
+
+        /// The accepted bin median at `minute`, or nil (thin, excluded or absent).
+        func acceptedMedian(at minute: Int) -> Double? {
+            acceptedIndex[minute]
+        }
+        private let acceptedIndex: [Int: Double]
+
+        init(spanStart: Int, spanEnd: Int, accepted: [(minute: Int, median: Double)],
+             support: [Int: Int], excludedMinutes: Set<Int>, rewearVerified: Bool,
+             sampleCounts: [String: Int]) {
+            self.spanStart = spanStart; self.spanEnd = spanEnd
+            self.accepted = accepted; self.support = support
+            self.excludedMinutes = excludedMinutes; self.rewearVerified = rewearVerified
+            self.sampleCounts = sampleCounts
+            var index: [Int: Double] = [:]
+            index.reserveCapacity(accepted.count)
+            for bin in accepted { index[bin.minute] = bin.median }
+            self.acceptedIndex = index
+        }
+    }
+
+    /// Build every qualified UTC-minute bin once over the analysis span with the funnel's worn,
+    /// plausibility, distinct-second and re-wear equilibration rules (spec-02 §3, CONTRACT §4.2).
+    static func thermalMinuteBins(timeline: SleepAnalyticsTimeline,
+                                  input: SleepAnalyticsInput,
+                                  config: SleepAnalyticsConfig) -> ThermalMinuteBins {
+        let windowEnd = timeline.fragments.last?.end ?? 0
+        var spanStart = timeline.fragments.first?.start ?? 0
+        if let onset = timeline.firstSupportedAsleepStart {
+            spanStart = min(spanStart, onset - config.preOnsetSlopeWindowSeconds)
+        }
+        spanStart = min(spanStart, windowEnd - config.morningWindowBeforeSeconds)
+        let spanEnd = windowEnd + max(config.postWakeSlopeWindowSeconds, config.morningWindowAfterSeconds)
+        // Samples are read on WHOLE UTC minutes covering the span, so a minute bin at the span
+        // edge holds exactly the samples it would hold with no span filter at all (the nightly
+        // summary is byte-identical to a whole-read binning).
+        let readStart = spanStart - ((spanStart % 60) + 60) % 60
+        let readEnd = spanEnd + (60 - ((spanEnd % 60) + 60) % 60) % 60
 
         // ── Worn gate + conversion (the funnel's own rules) ─────────────────────
         // A sample is worn when its second carries valid HR presence (exact-second
@@ -42,22 +108,21 @@ extension SleepAnalyticsV1 {
         // centidegree path converts directly; then the 28–42 °C plausibility band
         // (config) rejects implausible conversions.
         var hrSeconds = Set<Int>()
-        for s in input.hr where Double(s.bpm) >= config.hrPlausibleMinBpm
-            && Double(s.bpm) <= config.hrPlausibleMaxBpm {
+        for s in input.hr where s.ts >= readStart && s.ts < readEnd
+            && Double(s.bpm) >= config.hrPlausibleMinBpm && Double(s.bpm) <= config.hrPlausibleMaxBpm {
             hrSeconds.insert(s.ts)
         }
-
         let anchor: Double
         switch input.deviceFamily {
         case .whoop4: anchor = input.skinTempAnchorRaw ?? Whoop4SkinTemp.anchorRaw
         case .whoop5: anchor = 0   // unused by the centidegree path
         }
-        let anchorResolved = input.skinTempAnchorRaw ?? Whoop4SkinTemp.anchorRaw
+        let offWrist = input.offWristIntervals.filter { $0.end > readStart && $0.start < readEnd }
 
         var received = 0, duplicate = 0, rejected = 0
         var outOfBand = 0, offWristRejected = 0, implausible = 0
         var acceptedBySecond: [Int: Double] = [:]      // second → °C (deduped, first wins)
-        for sample in input.skinTemp {
+        for sample in input.skinTemp where sample.ts >= readStart && sample.ts < readEnd {
             received += 1
             guard acceptedBySecond[sample.ts] == nil else { duplicate += 1; continue }
             if input.deviceFamily == .whoop4,
@@ -65,7 +130,7 @@ extension SleepAnalyticsV1 {
                    && Double(sample.raw) <= Double(Whoop4SkinTemp.wornMaxRaw)) {
                 outOfBand += 1; rejected += 1; continue
             }
-            if input.offWristIntervals.contains(where: { $0.start <= sample.ts && sample.ts < $0.end }) {
+            if offWrist.contains(where: { $0.start <= sample.ts && sample.ts < $0.end }) {
                 offWristRejected += 1; rejected += 1; continue
             }
             if !hrSeconds.contains(sample.ts) {
@@ -81,55 +146,80 @@ extension SleepAnalyticsV1 {
         }
 
         // ── UTC-minute bins, medians, ≥30 distinct accepted seconds ────────────
-        // Duplicate samples in one minute collapse into the second map first, so
-        // coverage counts DISTINCT seconds and cannot be inflated by repeats.
-        var binSeconds: [Int: Set<Int>] = [:]
+        // `acceptedBySecond` is keyed by second, so each value is one DISTINCT second:
+        // duplicates collapsed above and cannot inflate a bin's support.
         var binValues: [Int: [Double]] = [:]
         for (ts, c) in acceptedBySecond {
-            let minute = ts - ts % 60
-            binSeconds[minute, default: []].insert(ts)
-            binValues[minute, default: []].append(c)
+            binValues[ts - ((ts % 60) + 60) % 60, default: []].append(c)
         }
-        // In-fragment minute medians: only minutes INSIDE a fragment are the night.
-        var minuteMedians: [(minute: Int, median: Double)] = []
-        minuteMedians.reserveCapacity(binValues.count)
+        var support: [Int: Int] = [:]
+        support.reserveCapacity(binValues.count)
+        var qualified: [(minute: Int, median: Double)] = []
+        qualified.reserveCapacity(binValues.count)
         for (minute, values) in binValues {
-            guard timeline.fragments.contains(where: { $0.start <= minute && minute < $0.end }) else { continue }
-            guard let seconds = binSeconds[minute], seconds.count >= config.tempMinuteMinDistinctSampleSeconds else {
+            support[minute] = values.count
+            guard values.count >= config.tempMinuteMinDistinctSampleSeconds else {
                 continue      // a thin bin is missing, never interpolated
             }
-            minuteMedians.append((minute, median(values)))
+            qualified.append((minute, median(values)))
         }
-        minuteMedians.sort { $0.minute < $1.minute }
+        qualified.sort { $0.minute < $1.minute }
 
         // ── Equilibration exclusions after an explicit re-wear event ────────────
-        // A re-wear event = the END of an off-wrist interval. The configurable
-        // window after it is excluded from the slope/summary minutes. If NO
-        // off-wrist interval end exists in the analysis span, no exclusion is
-        // claimed and `rewearEventVerified` stays false — warmup was not verified,
+        // A re-wear event = the END of an off-wrist interval. The configurable window after
+        // it is excluded from every subset (summary, slopes, morning curve). An event just
+        // before the span still excludes the part of its window that overlaps the span. If no
+        // event backs an exclusion, `rewearVerified` stays false — warmup was not verified,
         // never invented (spec section 6).
-        let analysisStart = min(timeline.fragments.first?.start ?? 0,
-                                (timeline.firstSupportedAsleepStart ?? Int.max) - config.preOnsetSlopeWindowSeconds)
-        let analysisEnd = (timeline.fragments.last?.end ?? 0) + config.postWakeSlopeWindowSeconds
-        var rewearExcludedMinutes = 0
+        let qualifiedMinutes = Set(qualified.map(\.minute))
+        var excluded = Set<Int>()
         var rewearVerified = false
-        var excludedMinutes = Set<Int>()
         for interval in input.offWristIntervals {
-            let rewearAt = interval.end
-            guard rewearAt > analysisStart, rewearAt < analysisEnd else { continue }
+            let from = interval.end
+            let to = from + config.thermalRewearExclusionSeconds
+            guard to > spanStart, from < spanEnd else { continue }
             rewearVerified = true
-            let from = rewearAt
-            let to = rewearAt + config.thermalRewearExclusionSeconds
-            var m = from - from % 60
+            var m = from - ((from % 60) + 60) % 60
             while m < to {
-                if minuteMedians.contains(where: { $0.minute == m }) {
-                    excludedMinutes.insert(m)
-                }
+                if qualifiedMinutes.contains(m) { excluded.insert(m) }
                 m += 60
             }
         }
-        rewearExcludedMinutes = excludedMinutes.count
-        let summaryMinutes = minuteMedians.filter { !excludedMinutes.contains($0.minute) }
+        let accepted = qualified.filter { !excluded.contains($0.minute) }
+
+        return ThermalMinuteBins(
+            spanStart: spanStart, spanEnd: spanEnd, accepted: accepted, support: support,
+            excludedMinutes: excluded, rewearVerified: rewearVerified,
+            sampleCounts: [
+                "temp_received": received,
+                "temp_valid": acceptedBySecond.count,
+                "temp_duplicate": duplicate,
+                "temp_rejected": rejected,
+                "temp_whoop4_raw_band_rejected": outOfBand,
+                "temp_off_wrist_rejected": offWristRejected,
+                "temp_not_worn_evidenced": rejected - outOfBand - offWristRejected - implausible,
+                "temp_implausible_rejected": implausible,
+                "temp_span_accepted_minutes": accepted.count,
+            ])
+    }
+
+    // MARK: - Thermal group
+
+    static func thermalGroup(timeline: SleepAnalyticsTimeline,
+                             input: SleepAnalyticsInput,
+                             config: SleepAnalyticsConfig,
+                             bins: ThermalMinuteBins? = nil) -> SleepAnalyticsThermalGroup {
+        let bins = bins ?? thermalMinuteBins(timeline: timeline, input: input, config: config)
+        let anchorResolved = input.skinTempAnchorRaw ?? Whoop4SkinTemp.anchorRaw
+        let rewearExcludedMinutes = bins.excludedMinutes.count
+        let rewearVerified = bins.rewearVerified
+        // Every slope reads the span's accepted bins; the nightly summary reads ONLY the
+        // in-fragment subset (a minute whose start lies inside a fragment), so post-wake and
+        // pre-onset observations can never move the night's values.
+        let spanMinutes = bins.accepted
+        let summaryMinutes = spanMinutes.filter { bin in
+            timeline.fragments.contains(where: { $0.start <= bin.minute && bin.minute < $0.end })
+        }
 
         // ── Nightly summary (spec table: ≥30 valid minutes + ≥80% eligible) ────
         let fragmentSpan = timeline.fragmentSpanSeconds
@@ -165,7 +255,7 @@ extension SleepAnalyticsV1 {
             let wStart = onset - config.preOnsetSlopeWindowSeconds
             let wEnd = onset
             preOnset = slope(windowStart: wStart, windowEnd: wEnd,
-                            minutes: summaryMinutes, onsetObserved: timeline.onsetPrefixObserved,
+                            minutes: spanMinutes, onsetObserved: timeline.onsetPrefixObserved,
                             requiredValid: config.preOnsetSlopeMinValidMinutes,
                             eligibleMinutes: config.preOnsetSlopeWindowSeconds / 60,
                             maxMissingRun: config.slopeMaxMissingRunSeconds, config: config)
@@ -181,7 +271,7 @@ extension SleepAnalyticsV1 {
         if windowEnd > 0 {
             postWake = slope(windowStart: windowEnd,
                              windowEnd: windowEnd + config.postWakeSlopeWindowSeconds,
-                             minutes: summaryMinutes, onsetObserved: true,
+                             minutes: spanMinutes, onsetObserved: true,
                              requiredValid: config.postWakeSlopeMinValidMinutes,
                              eligibleMinutes: config.postWakeSlopeWindowSeconds / 60,
                              maxMissingRun: config.slopeMaxMissingRunSeconds, config: config)
@@ -189,15 +279,9 @@ extension SleepAnalyticsV1 {
             postWake = nil
         }
 
-        let mergedStreamCounts = timeline.streamCounts.merging([
-                "temp_received": received,
-                "temp_valid": acceptedBySecond.count,
-                "temp_duplicate": duplicate,
-                "temp_rejected": rejected,
-                "temp_whoop4_raw_band_rejected": outOfBand,
-                "temp_off_wrist_rejected": offWristRejected,
-                "temp_not_worn_evidenced": rejected - outOfBand - offWristRejected - implausible,
-                "temp_implausible_rejected": implausible,
+        let mergedStreamCounts = timeline.streamCounts
+            .merging(bins.sampleCounts) { _, new in new }
+            .merging([
                 "temp_valid_minutes": validCount,
                 "temp_eligible_minutes": eligibleMinutes,
                 "temp_rewear_excluded_minutes": rewearExcludedMinutes,
@@ -283,17 +367,23 @@ extension SleepAnalyticsV1 {
             longestMissingRunSeconds: longestMissing)
     }
 
-    /// Ordinary least-squares slope of y against x (unix seconds), per hour.
+    /// Ordinary least-squares slope of y against x (unix seconds), per SECOND (callers scale to
+    /// per hour). CENTRED form Σ(x−x̄)(y−ȳ) / Σ(x−x̄)²: the raw-sum form `n·Σx² − (Σx)²` cancels
+    /// catastrophically at unix-second magnitudes (~1.8e9 s), which biased a 30-minute slope by
+    /// ~0.2 % (spec-02 thermal repair). Mathematically identical; numerically exact on a line.
     private static func olsSlope(_ points: [(x: Double, y: Double)]) -> Double? {
         guard points.count >= 2 else { return nil }
         let n = Double(points.count)
-        let sx = points.reduce(0.0) { $0 + $1.x }
-        let sy = points.reduce(0.0) { $0 + $1.y }
-        let sxx = points.reduce(0.0) { $0 + $1.x * $1.x }
-        let sxy = points.reduce(0.0) { $0 + $1.x * $1.y }
-        let denominator = n * sxx - sx * sx
-        guard denominator.magnitude > 1e-12 else { return nil }   // zero_denominator: constant time
-        return (n * sxy - sx * sy) / denominator
+        let mx = points.reduce(0.0) { $0 + $1.x } / n
+        let my = points.reduce(0.0) { $0 + $1.y } / n
+        var sxx = 0.0, sxy = 0.0
+        for p in points {
+            let dx = p.x - mx
+            sxx += dx * dx
+            sxy += dx * (p.y - my)
+        }
+        guard sxx > 1e-12 else { return nil }   // zero_denominator: constant time
+        return sxy / sxx
     }
 
     private static func olsSlope(_ minutes: [(minute: Int, median: Double)]) -> Double? {

@@ -314,7 +314,8 @@ final class SleepAnalyticsAttachTests: XCTestCase {
             claim: makeClaim(), hr: fullHR(start: t0, end: t0 + 360), rr: [], gravity: [],
             skinTemp: [], skinFamily: .whoop5, edits: [], offWristIntervals: []))
         XCTAssertEqual(payload["schema_version"] as? Int, 1)
-        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-1")
+        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-2")
+        XCTAssertEqual(payload["config_version"] as? String, "v2")
         XCTAssertEqual(payload["scope"] as? String, "main_night")
         XCTAssertEqual(payload["timezone"] as? String, "America/Los_Angeles")
         XCTAssertEqual(payload["start"] as? Int, t0)
@@ -401,7 +402,7 @@ final class SleepAnalyticsAttachTests: XCTestCase {
         // The document's own algorithm_version lives NESTED inside sleep_analytics_v1
         // (snake_case wire keys, the shared contract's CodingKeys); the payload never
         // carries a stray `recovery` key.
-        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-1")
+        XCTAssertEqual(payload["algorithm_version"] as? String, "nara-sleep-analytics-2")
         XCTAssertEqual(payload["schema_version"] as? Int, 1)
         XCTAssertNil(payload["recovery"])
 

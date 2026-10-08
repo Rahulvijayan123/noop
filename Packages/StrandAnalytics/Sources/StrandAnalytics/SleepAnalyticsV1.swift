@@ -1071,7 +1071,7 @@ public struct SleepAnalyticsFragmentInfo: Codable, Equatable, Sendable {
 }
 
 /// The additive `daily.sleep_analytics_v1` document. schema_version 1,
-/// algorithm_version "nara-sleep-analytics-1", scope "main_night". The outer hosted
+/// algorithm_version "nara-sleep-analytics-2" (was "-1" before spec-02), scope "main_night". The outer hosted
 /// `inputRevision`/`resultRevision` own freshness; the fingerprint detects stale documents
 /// when effective bounds change. No inner pre-publication result revision exists.
 public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
@@ -1166,9 +1166,9 @@ public struct SleepAnalyticsDocument: Codable, Equatable, Sendable {
 /// Versioned engineering gates/defaults (spec: conservative PRODUCT rules, not physiological
 /// validity thresholds; version them and test their boundaries).
 public struct SleepAnalyticsConfig: Equatable, Sendable {
-    /// Recorded on the document (`config_version`). Stays `v1` with `algorithmVersion` until the spec-02 change
-    /// lands; then `v2`.
-    public var version: String = "v1"
+    /// Recorded on the document (`config_version`). `v2` since spec-02 §3 (thermal bins built once over the
+    /// peri-sleep span, so the post-wake slope is computable; CONTRACT §4).
+    public var version: String = "v2"
     // ── Support mask (spec 4.4) ─────────────────────────────────────────
     /// Native epoch length the support mask grids at (s).
     public var nativeEpochSeconds: Int = 30
@@ -1237,8 +1237,11 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
 
     public init() {}
 
-    /// The canonical v1 defaults.
-    public static let v1 = SleepAnalyticsConfig()
+    /// The canonical defaults (config `v2`).
+    public static let v2 = SleepAnalyticsConfig()
+    /// Source-compatible alias for the canonical defaults. Since spec-02 it carries `version == "v2"`; there
+    /// is no way to compute the retired v1 thermal behaviour. Prefer `.v2`.
+    public static let v1 = v2
 
     /// Deterministic fingerprint of the config's gate values (recorded on the document via
     /// `configVersion` plus this digest in the group metadata).
@@ -1258,8 +1261,8 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
         parts += [tempPlausibilityMinC, tempPlausibilityMaxC].map { String(format: "%.1f", $0) }
         parts += [prvDiagnosticsEnabled ? "1" : "0"]
         parts += [prvWindowSeconds, prvMinValidPairs].map(String.init)
-        // The spec-02 gates (pNN50 threshold, morning-response windows) join the fingerprint with config v2,
-        // when the groups that read them compute. Until then identical inputs keep identical fingerprints.
+        // The spec-02 gates (pNN50 threshold, morning-response windows) join the fingerprint when the
+        // groups that read them compute.
         return parts.joined(separator: "|")
     }
 }
@@ -1272,10 +1275,9 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
 /// dependencies. Canonical scoring is untouched.
 public enum SleepAnalyticsV1 {
     public static let schemaVersion = 1
-    /// Stays `-1` until a spec-02 change alters a meaning: pNN50, stage-associated movement and the morning
-    /// response are optional and absent until their groups compute, so the contents are unchanged. The bump to
-    /// `-2` lands with the thermal change that makes the post-wake slope computable on the full analysis span.
-    public static let algorithmVersion = "nara-sleep-analytics-1"
+    /// `-2` since spec-02 §3: the thermal minute bins are built once over the peri-sleep span, so the
+    /// post-wake slope (and the full pre-onset window) became computable — a change of meaning (CONTRACT §4).
+    public static let algorithmVersion = "nara-sleep-analytics-2"
     public static let scope = "main_night"
 
     /// ISO-8601 UTC, second resolution (the document's `*_at` wire format).

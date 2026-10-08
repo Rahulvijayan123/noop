@@ -88,8 +88,14 @@ extension DayScorer {
             fragments: fragments,
             timezoneId: claim.timezoneId,
             // Streams passed AS LOADED (spec worker step 2): no per-metric requery, no history
-            // expansion. The extractor clips internally to the fragments plus the explicit
-            // peri-sleep thermal windows.
+            // expansion, and NO clipping to the night. `scoreAndBuildPayloads` reads
+            // [local midnight − 30 h, local midnight + 54 h), a superset of the extractor's whole
+            // requested window — [first observed onset − 60 min, last fragment end + 30 min) for
+            // the thermal bins and slopes, and [end − 30 min, end + 30 min) for the morning
+            // response (spec-02 §3 "Supply its full requested window"; CONTRACT §4.2–4.3). The
+            // post-wake temperature AND the HR seconds that worn-gate it must reach the extractor,
+            // so this adapter must never trim the streams to the fragments. The extractor clips
+            // internally to that span.
             hr: hr,
             gravity: gravity,
             skinTemp: skinTemp,
@@ -154,7 +160,7 @@ extension DayScorer {
         // Documented signature: SleepAnalyticsV1.compute(input:config:) -> SleepAnalyticsDocument
         // (non-throwing; the top-level compute() entry point lands with the group computers on
         // the integration branch. If the merged signature ever becomes `throws`, add `try` here.)
-        let document = SleepAnalyticsV1.compute(input: input, config: .v1)
+        let document = SleepAnalyticsV1.compute(input: input, config: .v2)
 
         // Encode through Codable, then rehydrate to a JSON dictionary. JSONEncoder refuses
         // non-finite Doubles outright; the recursive check below is the belt-and-suspenders
@@ -174,7 +180,7 @@ extension DayScorer {
             // log reads them by the SAME names so no group ever logs ":?"
             // (review P3-1).
             let statuses = [
-                "continuity", "stage_dynamics", "movement", "thermal", "prv_diagnostics",
+                "continuity", "stage_dynamics", "movement", "thermal", "prv_diagnostics", "morning_response",
             ].map { key -> String in
                 guard let group = json[key] as? [String: Any],
                       let quality = group["quality"] as? [String: Any],

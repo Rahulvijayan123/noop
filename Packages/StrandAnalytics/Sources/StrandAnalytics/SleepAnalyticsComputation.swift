@@ -22,8 +22,11 @@ extension SleepAnalyticsV1 {
     /// error and never a fabricated value (spec worker step 5: a failure withholds its own
     /// document, never the canonical score).
     public static func compute(input: SleepAnalyticsInput,
-                               config: SleepAnalyticsConfig = .v1) -> SleepAnalyticsDocument {
+                               config: SleepAnalyticsConfig = .v2) -> SleepAnalyticsDocument {
         let timeline = normalize(input: input, config: config)
+        // Thermal minute bins are built ONCE over the peri-sleep span and shared by the thermal
+        // group and the morning-response temperature curve (spec-02 §3: no double aggregation).
+        let thermalBins = thermalMinuteBins(timeline: timeline, input: input, config: config)
         let fingerprint = documentFingerprint(input: input, timeline: timeline, config: config)
 
         func fragmentInfo(for span: SleepAnalyticsTimeline.FragmentSpan) -> SleepAnalyticsFragmentInfo? {
@@ -54,7 +57,8 @@ extension SleepAnalyticsV1 {
             continuity: SleepAnalyticsV1.continuityGroup(timeline: timeline, input: input, config: config),
             stageDynamics: SleepAnalyticsV1.stageDynamicsGroup(timeline: timeline, input: input, config: config),
             movement: SleepAnalyticsV1.movementGroup(timeline: timeline, input: input, config: config),
-            thermal: SleepAnalyticsV1.thermalGroup(timeline: timeline, input: input, config: config),
+            thermal: SleepAnalyticsV1.thermalGroup(timeline: timeline, input: input, config: config,
+                                                   bins: thermalBins),
             prvDiagnostics: SleepAnalyticsV1.prvGroup(timeline: timeline, input: input, config: config),
             morningResponse: SleepAnalyticsV1.morningResponseGroup(timeline: timeline, input: input,
                                                                    config: config))
