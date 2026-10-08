@@ -826,6 +826,26 @@ final class CloudPushTests: XCTestCase {
         XCTAssertEqual(try XCTUnwrap(none.hostedResult).hrvSeries, [], "no series published is empty, not invented")
     }
 
+    func testHostedResultAttachesTheWorkersSlotContextToEachPoint() throws {
+        let points: [Any] = [[1_790_869_800, 64.0, 800] as [Any], [1_790_870_700, 41.0, 700] as [Any],
+                             [1_790_871_600, 58.0, 650] as [Any]]
+        let context: [Any] = [
+            ["slot_s": 1_790_869_800, "weak": false, "reasons": [] as [Any], "moving_share": 0.0,
+             "unknown_share": 0.1, "clean_coverage": 0.9] as [String: Any],
+            ["slot_s": 1_790_870_700, "weak": true, "reasons": ["movement", "something_new"], "moving_share": 0.8,
+             "unknown_share": 0.0, "clean_coverage": 0.8] as [String: Any],
+            ["slot_s": 1_790_871_600, "reasons": ["movement"]] as [String: Any],   // malformed: no `weak`
+        ]
+        let daily: [String: Any] = ["hrv_series": ["slot_s": 900, "points": points, "context": context] as [String: Any]]
+        let snapshot = ServerScoreRepository.snapshot(day: "2026-09-30", deviceId: "my-whoop",
+                                                      envelope: hostedEnvelope(daily: daily), fetchedAtMs: 0)
+        let series = try XCTUnwrap(snapshot.hostedResult).hrvSeries
+        XCTAssertEqual(series.map(\.context?.weak), [false, true, nil])
+        XCTAssertEqual(series[1].context?.reasons, [.movement], "an unknown reason code is skipped, the flag kept")
+        XCTAssertEqual(series[1].context?.movingShare ?? 0, 0.8, accuracy: 0.0001)
+        XCTAssertEqual(series.map(\.rmssd), [64.0, 41.0, 58.0], "a flagged reading is kept, never dropped")
+    }
+
     func testMaterializedHostedDayReplacesADriftedNightInsteadOfDoublingIt() async throws {
         let store = try await WhoopStore.inMemory()
         let computedId = HostedResultMaterializer.computedId(for: "my-whoop")
