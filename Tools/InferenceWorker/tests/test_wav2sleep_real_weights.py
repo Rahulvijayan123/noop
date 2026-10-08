@@ -127,6 +127,11 @@ def test_forward_parity_with_the_official_code(provider, name):
               f"max|dlogit|={lg:.3g} max|dprob|={pr:.3g} argmax {ag}/{n} "
               f"(official -inf route max|dlogit| {meta['runs'][k]['inf_route_max_abs_logit_diff']:.3g})")
     if name.startswith("parity_8h"):
+        # The pinned prepare() caches into one shared folder that load_dataset globs whole, so a
+        # reference whose predict_on_folder saw more than this night is not this night's output
+        # (the v2 references had that bug at 24 Hz: WAV2SLEEP.md §9).
+        assert meta["runs"][0].get("pof") == {"isolated_prepare_cache": True, "8h_dataset_files": 1,
+                                              "10h_dataset_files": 1}, "regenerate with official_reference_v3"
         pof = reference["pof_preds"]
         agree = int(np.sum(outcome["logits"].argmax(1) == pof))
         assert agree == pof.size == 960
@@ -134,7 +139,7 @@ def test_forward_parity_with_the_official_code(provider, name):
         same = int(np.sum(padded[:960] == pof))
         print(f"[wav2sleep parity] predict_on_folder(signals=['PPG'], max_length_hours=8) argmax "
               f"{agree}/{pof.size}; pinned default max_length_hours=10 (2 h raw-zero padding) agrees "
-              f"with the unpadded run on {same}/960 epochs (deviation D1)")
+              f"with the unpadded run on {same}/960 epochs (deviation D1, an observation)")
 
 
 def test_real_weight_staging_is_deterministic_and_thread_count_is_rounding_only(root):

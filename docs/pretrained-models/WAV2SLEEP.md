@@ -1,7 +1,7 @@
 # wav2sleep, PPG-only: shadow sleep-stage adapter (Spec 03, candidate 2)
 
-**Status:** the adapter is implemented, shadow-only and off by default. It matches the official code
-bit for bit on synthetic fixtures. **Activation is deferred.** No anchored overnight PPG reaches the
+**Status:** the adapter is implemented, shadow-only, off by default and unregistered. It matches the official
+code bit for bit on synthetic fixtures at 24 and 25 Hz (all 11 real-weight tests pass, 2026-10-08). **Activation is deferred.** No anchored overnight PPG reaches the
 server yet, and there is no sleep-stage evaluation set with a PPG waveform. Nothing here is evidence
 that the model stages WHOOP sleep correctly.
 
@@ -243,14 +243,59 @@ Details and evidence are in `wav2sleep_vendored/PROVENANCE.md` §3.
 
 | # | Deviation |
 | --- | --- |
-| D1 | No zero-padding to 10 h. The pinned grid ends at the run's last whole epoch. On the 8-h synthetic night, the official default padding agrees with the unpadded official run on only 398/960 epochs at both 24 and 25 Hz (the first reference run gave 395, when both fixtures wrote their official outputs to shared folders), because raw zeros next to a ~3.8e5-count DC dominate the z-score. |
+| D1 | No zero-padding to 10 h. The pinned grid ends at the run's last whole epoch. On the 8-h synthetic night, the official default padding agrees with the unpadded official run on only 395/960 epochs at 24 Hz and 398/960 at 25 Hz, because raw zeros next to a ~3.8e5-count DC dominate the z-score. (The v2 references reported 398 at both rates; the 24 Hz figure there was the 25 Hz night, see §9.) Why no padding rather than padding after normalisation: §8.1. |
 | D2 | Each contiguous run is its own recording. The official `dropna()` + interpolation would bridge gaps. |
 | D3 | `yaml.safe_load` + an allowlisted builder instead of `yaml.CLoader` + `hydra.instantiate`. The checkpoint gets an explicit key/shape check before the strict load. |
 | D4 | `np.interp` instead of the pandas interpolate path. Bitwise equal (tested). |
 | D5 | Logits and `softmax(logits)` are returned as well. The official API returns only argmax. |
 | D6 | The z-score and forward run under a fixed thread cap (default 1). torch's float32 reductions round differently across thread counts, by one float32 ulp of the mean. |
-| D7 | Absolute ADC counts are used as given, which is the official CSV/parquet path. The EDF [-1, 1] scaling would change probabilities by at most 1.2e-4. |
+| D7 | Absolute ADC counts are used as given, which is the official CSV/parquet path. The EDF [-1, 1] scaling would change probabilities by at most 1.2e-4 at 24 Hz and 1.7e-4 at 25 Hz, and no argmax. |
 | D8 | ECG/ABD/THX are absent rather than `-inf`. Both routes are official, and they differ by at most 3.6e-6 in the logits. |
+
+### 8.1 D1: which padding is the faithful contract
+
+The official code offers two behaviours for a night shorter than 10 h:
+
+- **Official default** (`max_length_hours=10`): pad raw values with zeros to 10 h, then z-score the padded
+  vector. In training the PSG pleth came from EDF files scaled to [-1, 1] by the header range, so a zero there
+  sits inside the signal's range. WHOOP gives absolute ADC counts with a ~3.8e5 DC level, and a raw zero is far
+  outside it. Reproducing this is not faithful to what the model saw.
+- **`max_length_hours` set to the run's length**: no padding; the z-score covers only real samples. This is a
+  public parameter of the pinned API.
+
+Two Nara options were compared on the synthetic fixtures (`_build-scratch/spec03-physio/d1_padding.py`,
+`pof-isolation/d1_padding.json`):
+
+- **A**: no padding (the adapter today, the second official behaviour).
+- **B**: z-score the real samples, then zero-pad the *normalised* tensor to 1200 epochs.
+
+The yardstick is consistency, not accuracy: truncate the 1199-epoch 10-h fixture to N epochs, and count how
+often each option's argmax on epochs [0, N) equals the model's own argmax for the same epochs when it sees the
+complete night (which needs no padding). "O" is the official default reproduced in the adapter's environment.
+
+| Rate | Truncated to | A (no padding) | B (normalise, then pad) | O (raw-zero pad) |
+| --- | --- | --- | --- | --- |
+| 24 Hz | 4 h (480) | 326 | 305 | 256 |
+| 24 Hz | 6 h (720) | 653 | 533 | 366 |
+| 24 Hz | 8 h (960) | 651 | 607 | 333 |
+| 24 Hz | 9 h (1080) | 844 | 781 | 368 |
+| 25 Hz | 4 h (480) | 343 | 294 | 264 |
+| 25 Hz | 6 h (720) | 695 | 510 | 413 |
+| 25 Hz | 8 h (960) | 695 | 648 | 405 |
+| 25 Hz | 9 h (1080) | 902 | 807 | 367 |
+
+On the 8-h and gapped fixtures themselves, B agrees with A on 739/960 and 770/960 epochs (24 / 25 Hz) on the
+8-h night, and on 154–284 of the gapped runs' epochs.
+
+**Decision: keep A.** It is an official behaviour, it never feeds the model values the pinned code would not
+produce from the same samples, and it is the most consistent option at every length and both rates. B
+invents a padding convention that neither the code nor the training data defines.
+
+**Caveat that matters for any activation.** Even A agrees with the complete-night output on only ~68–72 % of
+epochs at 8 h. The non-causal z-score and the sequence mixer make every epoch's output depend on how much of
+the night the model sees. A night split by a gap is staged as two shorter recordings and will differ from the
+same night seen whole. This is synthetic-signal evidence only; it is one more reason the evaluation-set gate
+must be met before any comparison is trusted.
 
 ## 9. Parity with the official code
 
@@ -276,21 +321,29 @@ Setup:
 Further results:
 
 - Official `predict_on_folder(signals=['PPG'], max_length_hours=8)` run end to end matches the
-  adapter's argmax on 960/960 epochs.
+  adapter's argmax on 960/960 epochs at 24 Hz and at 25 Hz, each night with its own `prepare()` cache.
+- **The earlier 24 Hz failure (899/960) was a harness bug, now fixed.** The pinned `prepare()` returns one
+  shared cache folder and `load_dataset` stages every night in it, in unsorted `glob` order. The v2
+  references ran the 25 Hz night first, so the 24 Hz call staged both nights and its first prediction was
+  the 25 Hz night (899/960 is exactly the cross-rate agreement of the two direct routes). Run alone, each
+  rate agrees 960/960. Evidence: `_build-scratch/spec03-physio/pof-isolation/report.json`;
+  `wav2sleep_vendored/PROVENANCE.md` §6. References are now `reference-v3`
+  (`official_reference_v3.py`), and the test refuses a reference whose `predict_on_folder` dataset held
+  more than one night. No expected value was changed.
 - The official `-inf` route stays within 3.6e-6 of the absent route in the logits.
 - Threads 1 vs 2 with real weights: 0 difference on this fixture.
 
 **Diagnostics** (not gates):
 
-- Flipping the PPG sign changes 353/960 argmax epochs (max probability change 0.97). The checkpoint
-  is polarity-sensitive, and the polarity of WHOOP's raw optical channel relative to PSG oximeter
+- Flipping the PPG sign changes 353/960 argmax epochs at 24 Hz and 316/960 at 25 Hz (max probability
+  change 0.97 / 0.99). The checkpoint is polarity-sensitive, and the polarity of WHOOP's raw optical channel relative to PSG oximeter
   pleth is unverified.
-- The EDF-style [-1, 1] scaling changes probabilities by at most 1.2e-4.
+- The EDF-style [-1, 1] scaling changes probabilities by at most 1.2e-4 (24 Hz) / 1.7e-4 (25 Hz), no argmax.
 
 To reproduce, see the scripts in `_build-scratch/spec03-physio/` (not committed):
 
 1. `make_fixtures.py`: fixtures to npz.
-2. `official_reference.py`: run in the official-lock venv.
+2. `official_reference_v3.py`: run in the official-lock venv, output `reference-v3/`.
 3. `test_wav2sleep_real_weights.py`, run with `FRWHOOP_WAV2SLEEP_MODEL_ROOT` and
    `FRWHOOP_WAV2SLEEP_OFFICIAL_REFERENCE` set, and `-s` to print the numbers.
 
@@ -363,3 +416,33 @@ The remaining activation gates, in order:
    manifest fragments.
 
 Until then the adapter stays registered-off (or unregistered), shadow-only and non-publishable.
+
+## 12. Keep or remove the dormant adapter (recommendation; the owner decides)
+
+The adapter was written before its candidate's gates were met, which Spec 03 did not ask for. Assessment on
+2026-10-08:
+
+**Is the dormant code safe?**
+
+- **Unreachable in production.** Nothing registers it: `server.py`, `providers/__init__.py` and
+  `registry_adapter.py` do not mention wav2sleep (checked with `git grep`). Even with
+  `FRWHOOP_WAV2SLEEP_SHADOW_ENABLED=1` set, no route calls it. Registration is a separate edit to Spec 01's
+  files (`integration/wav2sleep.md`).
+- **No new dependencies.** It uses the sidecar's existing torch, numpy and PyYAML; `pyproject.toml` and
+  `uv.lock` are unchanged.
+- **Fails closed.** A disabled lane parses nothing and reports `not_ready`. An enabled lane refuses
+  unverified artifacts, legacy un-anchored deltas, unverified clocks, unknown optical configuration and
+  derived respiration (§4).
+- **What the code does not do.** `ACTIVATION_GATES` is reported in every response as `promotion_blocked_by`,
+  but nothing checks it. The gates are enforced by the lane staying unregistered, not by code.
+- **Size.** About 400 KB of source (adapter plus vendored MIT model code), and about 2 minutes of extra test
+  time with artifacts (none without).
+
+**Is it useful?** Yes, if the owner expects to meet the gates. The bit-exact parity harness, the artifact
+pins and the corrected manifest fragment took most of the effort and would have to be redone. The D1 and
+`predict_on_folder` findings (§8.1, §9) are also recorded here.
+
+**Recommendation:** keep it dormant and unregistered on this branch. Do not merge it to `main` until the
+owner has decided on the capture policy and an evaluation set (gates 2 and 4). If either is ruled out, delete
+`frwhoop_sleep/wav2sleep/`, `frwhoop_sleep/wav2sleep_vendored/` and `tests/test_wav2sleep_*` together, and
+keep this document as the record.

@@ -103,6 +103,7 @@ class ActiNetRuntime:
     threads: int = 1
     grid: str = DEFAULT_GRID
     load_seconds: float = 0.0
+    loaded_files: Dict[str, str] = field(default_factory=dict)   # role -> sha256 measured by verify-before-load
     _digests: Dict[str, str] = field(default_factory=dict, repr=False)
 
     @property
@@ -123,6 +124,24 @@ class ActiNetRuntime:
             self._digests["pre"] = sha256_json(self.preprocessing)
         return self._digests["pre"]
 
+    def loaded(self) -> Optional[Dict[str, str]]:
+        """Spec 01's ``activity-loaded-1`` map (``activity_context/loaded.py``): only what this process holds, as
+        strings. None where that module is absent (this package before Spec 01 merges); ping then omits it and the
+        worker gives this child no cache identity, which is the safe default."""
+        try:
+            from ..loaded import base_loaded
+        except ImportError:
+            return None
+        out = base_loaded(self.threads if self.available else None)
+        if not self.available:
+            return out
+        for role, digest in sorted(self.loaded_files.items()):
+            out[f"{role}_sha256"] = digest
+        out.update({"artifact_digest": self.artifact_digest, "preprocessing_digest": self.preprocessing_digest,
+                    "model_version": MODEL_VERSION, "release_mode": RELEASE_MODE, "grid": self.grid,
+                    "max_batch": str(self.max_batch)})
+        return out
+
 
 def build_runtime(artifact_dir: Optional[str] = None, *, threads: Optional[int] = 1,
                   max_batch: int = DEFAULT_MAX_BATCH, max_epochs: int = MAX_EPOCHS_PER_REQUEST,
@@ -135,7 +154,8 @@ def build_runtime(artifact_dir: Optional[str] = None, *, threads: Optional[int] 
         if classifier is None:
             from .model import build_classifier
             from .weights import read_artifact
-            state, classes_, hmm_block, _ = read_artifact(artifact_dir, pins)
+            state, classes_, hmm_block, measured = read_artifact(artifact_dir, pins)
+            kw["loaded_files"] = dict(measured)
             hmm = params_from_doc(hmm_block, classes_)
             classifier = build_classifier(state, len(classes_), threads=threads, max_batch=max_batch)
             classes = classes_
@@ -307,7 +327,7 @@ def wire_response(rt: ActiNetRuntime, res: EpochResults, digest: str, t0: float)
             reasons[ep.reason] = reasons.get(ep.reason, 0) + 1
     pre = rt.preprocessing_digest
     art = rt.artifact_digest
-    return {
+    resp = {
         "ok": True, "schema": WIRE_SCHEMA, "model_id": MODEL_ID, "model_version": MODEL_VERSION,
         "release_mode": RELEASE_MODE, "consumer": CONSUMER,
         "upstream": {"package": "actinet", "version": UPSTREAM_VERSION, "commit": UPSTREAM_COMMIT,
@@ -323,6 +343,15 @@ def wire_response(rt: ActiNetRuntime, res: EpochResults, digest: str, t0: float)
         "counts": {"epochs": n, "valid": int(res.index.shape[0]), "invalid": reasons},
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }
+    loaded = rt.loaded()
+    if loaded is not None:                     # the worker checks an answer came from the identity it keyed
+        resp["loaded_digest"] = _loaded_digest(loaded)
+    return resp
+
+
+def _loaded_digest(loaded: Dict[str, str]) -> str:
+    from ..loaded import loaded_digest
+    return loaded_digest(loaded)
 
 
 def handle_infer(rt: ActiNetRuntime, req: Dict[str, Any]) -> Dict[str, Any]:
@@ -345,7 +374,7 @@ def handle_infer(rt: ActiNetRuntime, req: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def handle_ping(rt: ActiNetRuntime) -> Dict[str, Any]:
-    return {
+    resp = {
         "ok": True, "model_available": rt.available, "model_status": rt.status,
         "model_error": f"{rt.error.kind}: {rt.error.message}" if rt.error is not None else None,
         "schema": WIRE_SCHEMA, "model_id": MODEL_ID, "model_version": MODEL_VERSION, "release_mode": RELEASE_MODE,
@@ -358,6 +387,11 @@ def handle_ping(rt: ActiNetRuntime) -> Dict[str, Any]:
                    "max_runs": MAX_RUNS, "max_output_bytes": rt.max_output_bytes},
         "package_version": __version__, "load_seconds": round(rt.load_seconds, 3),
     }
+    loaded = rt.loaded()
+    if loaded is not None:
+        resp["loaded"] = loaded
+        resp["loaded_digest"] = _loaded_digest(loaded)
+    return resp
 
 
 def handle_request(rt: ActiNetRuntime, req: Dict[str, Any]) -> Dict[str, Any]:

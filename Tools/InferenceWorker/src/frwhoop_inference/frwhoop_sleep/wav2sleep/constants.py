@@ -178,8 +178,8 @@ OUTPUT_TYPES = {
 }
 
 #: The samples reach the model with the sign they arrived with. The released checkpoint is
-#: polarity-sensitive (on the synthetic 8-h night a sign flip changed 353/960 argmax epochs, max
-#: probability change 0.97) and WHOOP's raw optical polarity relative to the PSG oximeter pleth
+#: polarity-sensitive (on the synthetic 8-h night a sign flip changed 353/960 argmax epochs at 24 Hz
+#: and 316/960 at 25 Hz, max probability change 0.97 / 0.99) and WHOOP's raw optical polarity relative to the PSG oximeter pleth
 #: it was trained on is unverified - so nothing is inverted, rectified or auto-corrected here;
 #: settling the polarity is an activation gate.
 POLARITY = "as_received"

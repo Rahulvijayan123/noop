@@ -22,7 +22,7 @@
         "No Nara bundle supplies the Walmsley label space or a label output; the deployed actukb bundle has Nara posture/locomotion/arm/transition heads plus a log-only, not test-gated movement_intensity regression.",
         "Complete 30-s windows of 100 Hz accelerometer in g exist (about 2,400 non-overlapping windows, 2026-10-05 to 10-08).",
         "Part-time capture (60 s per 180 s) makes the upstream HMM, sleep correction and daily imputation inapplicable; window-level labels only.",
-        "Upstream parity is not yet shown (motion agent).",
+        "Upstream parity shown on a synthetic six-run request (tests/actinet_classifier/test_actinet_classifier_real.py; 2026-10-08).",
         "Licence scope for a service on beta testers' data is an owner decision (Oxford Academic Use Licence)."
       ],
       "gates": [
@@ -86,7 +86,7 @@
             "ssl-wearables v1.0.0 LICENSE.md: Academic Use Licence (git blob 64ed9bef8cde6795d8fcc89bc4d38fdb025ba6a6); README v1.0.0 licence section: academic research only, commercial use via Oxford University Innovation (sha256 1323fc0640e30e239bd718de5526f893424fe801e2964fa18d8be5b09bd60c8c)",
             "no CC BY text in any actinet/actipy sdist; actinet README and readthedocs point only to LICENSE.md",
             "repo says CC BY-NC 4.0: Tools/ActivityContext/NOTICE.md:347, Tools/ActivityContext/activity_context/inertia/registry.py:37 (needs correction)",
-            "same question as ElderNet (Tools/ActivityContext/ELDERNET.md:12-20); production already runs ssl-wearables weights (actukb) and ElderNet (candidate) on one beta tester's account"
+            "same question as ElderNet (Tools/ActivityContext/ELDERNET.md:12-20); production already runs ssl-wearables weights (actukb) and ElderNet (candidate) with no per-account gate: at 05:44Z rows existed for the owner and one beta tester in both lanes (corrected 2026-10-08)"
           ]
         }
       ],
@@ -410,7 +410,7 @@
   "incidental_findings": [
     "PGOPTIONS='-c default_transaction_read_only=on' is ignored by the Supabase session pooler (show default_transaction_read_only returned off); set it in-session.",
     "Tools/ActivityContext/NOTICE.md:342-348 and activity_context/inertia/registry.py:37 state CC BY-NC 4.0 for ActiNet/ssl-wearables; upstream says Oxford Academic Use Licence.",
-    "ElderNet and the ssl-wearables actukb lane run in candidate mode on one beta tester's account, although ELDERNET.md:17-19 says to wait for the owner's licence-scope decision.",
+    "ElderNet and the ssl-wearables actukb lane run in candidate mode with no per-account gate (rows for the owner and one beta tester at 05:44Z), although ELDERNET.md:17-19 says to wait for the owner's licence-scope decision (corrected 2026-10-08).",
     "docs/BACKEND.md:777-779 says candidate decodes run only for inertia1; the code and migration 20261007100000 also accept actinet.",
     "Tools/InferenceWorker/models/manifest.json wav2sleep revision 278e3046 is a GitHub code commit, not an HF revision; artifact URLs use resolve/main.",
     "The worker journal shows a 40001 serialization failure in scoring_legacy_claim_one about every 15 s (outside this spec)."

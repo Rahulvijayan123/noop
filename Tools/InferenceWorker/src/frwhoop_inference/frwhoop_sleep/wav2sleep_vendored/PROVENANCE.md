@@ -67,13 +67,13 @@ numba, pyarrow, pyedflib or huggingface_hub).
 
 | # | Official behaviour | Adapter | Why / evidence |
 | --- | --- | --- | --- |
-| D1 | `prepare()`/`process_waveform_dataframe` default `max_length_hours=10` zero-fills (raw zeros) every recording shorter than 10 h, then z-scores the padded signal | The pinned function's grid is ended at the run's last whole epoch (`max_length_hours = n*30/3600`); nothing is padded | WHOOP samples are absolute ADC counts (~3.8e5 DC). Padding them with 0 makes the global z-score measure the padding step: on the synthetic 8-h night the official default agrees with the unpadded official run on only 395/960 argmax epochs, and a 2-h run's normalized waveform collapses to a flat ~+2 sigma plateau. For a recording exactly n epochs long the two paths are identical. |
+| D1 | `prepare()`/`process_waveform_dataframe` default `max_length_hours=10` zero-fills (raw zeros) every recording shorter than 10 h, then z-scores the padded signal | The pinned function's grid is ended at the run's last whole epoch (`max_length_hours = n*30/3600`); nothing is padded | WHOOP samples are absolute ADC counts (~3.8e5 DC). Padding them with 0 makes the global z-score measure the padding step: on the synthetic 8-h night the official default agrees with the unpadded official run on only 395/960 argmax epochs at 24 Hz and 398/960 at 25 Hz (each night run alone; §6 explains why an earlier 398-at-both figure was wrong), and a 2-h run's normalized waveform collapses to a flat ~+2 sigma plateau. For a recording exactly n epochs long the two paths are identical. |
 | D2 | `dropna()` then linear interpolation across any gap inside a recording | Each contiguous run is its own recording; segments are joined only within one `run_id` and only when contiguous; gap and run-edge epochs are masked | Spec 01: never concatenate disjoint runs. Tested: the pinned code bridges a 20-min gap with >30,000 interpolated samples; the adapter never places a model sample inside a gap. |
 | D3 | `yaml.load(CLoader)` + `hydra.utils.instantiate(config)`; `load_state_dict(torch.load(path, weights_only=True))` | Size and sha256 verified before any byte is parsed; `yaml.safe_load` + an allowlist of the four `_target_` classes; hydra directives refused; nested `signal_map` passed as a plain dict instead of an OmegaConf `DictConfig`; `torch.load(weights_only=True, map_location='cpu')`, exact key/shape/dtype comparison, then `load_state_dict(strict=True)` | Untrusted bytes are never given a full YAML loader or a call-anything instantiator. Same modules, same strict state_dict load. |
 | D4 | pandas outer-join `interpolate(method='index', limit_area='inside')` | `np.interp` on the same points | pandas' `index` method is `np.interp` over the valid points; tested bitwise-equal against the vendored function. |
 | D5 | `predict()` returns only `argmax` | Also returns the raw logits and `softmax(logits)` in float64; label = argmax of the logits | The checkpoint was trained with `CrossEntropyLoss` (scripts/config/training/main.yaml), so softmax is the matching probability; uncalibrated on WHOOP. |
 | D6 | z-score and forward run at torch's ambient intra-op thread count | Both run under the adapter's cap (default 1, max 4) and the previous count is restored | torch float32 mean/std reductions are split across threads: at the default 12 threads the mean of one 10-h run rounded one float32 ulp differently from the single-threaded official run (max z difference 1.2e-5). Under a fixed cap the output is bit-reproducible; at cap 1 it is bit-identical to the official code run single-threaded. |
-| D7 | EDF input: arbitrary-unit PPG scaled to [-1, 1] by the EDF header's physical range before resampling (CSV/parquet input: values used as given) | Absolute ADC counts used as given (the CSV/parquet path); polarity unchanged | The z-score makes positive affine scaling irrelevant: applying the EDF-style scaling with the signed 20-bit range changes probabilities by at most 1.2e-4 (float32 rounding) and no argmax on the 8-h fixture. |
+| D7 | EDF input: arbitrary-unit PPG scaled to [-1, 1] by the EDF header's physical range before resampling (CSV/parquet input: values used as given) | Absolute ADC counts used as given (the CSV/parquet path); polarity unchanged | The z-score makes positive affine scaling irrelevant: applying the EDF-style scaling with the signed 20-bit range changes probabilities by at most 1.2e-4 at 24 Hz and 1.7e-4 at 25 Hz (float32 rounding) and no argmax on the 8-h fixture. |
 | D8 | `predict_on_folder(signals=None)` passes ECG/ABD/THX as `-inf` (masked) | The modalities are absent from the input dict (the official `signals=['PPG']` route) | Both are official. Measured on the official code: max logit difference between the two routes 3.6e-6, every argmax equal. |
 
 Two further adapter rules are additions, not deviations: a run whose native standard deviation is
@@ -100,12 +100,13 @@ recording: `process_waveform_dataframe` -> parquet -> `ParquetDataset(...)[0]` -
 | 10 h single run | 1199 | bit-identical | bit-identical | 0 | 0 | 1199/1199 |
 
 Also: official `predict_on_folder(signals=['PPG'], max_length_hours=8)` end to end agrees with the
-adapter's argmax on 960/960 epochs; the official `-inf` masked route differs from the absent route
+adapter's argmax on 960/960 epochs at both 24 and 25 Hz, when each night is run with its own
+`prepare()` cache (references `reference-v3`, generated by `official_reference_v3.py`); the official `-inf` masked route differs from the absent route
 by at most 3.6e-6 in logits. These are synthetic PPG-shaped fixtures: parity shows the adapter
 computes what the official code computes, not that the model stages WHOOP sleep correctly.
 
-Diagnostic (not a gate): flipping the sign of the PPG changes the argmax on 353 of 960 epochs
-(max probability change 0.97). The released checkpoint is therefore polarity-sensitive, and whether
+Diagnostic (not a gate): flipping the sign of the PPG changes the argmax on 353 of 960 epochs at
+24 Hz and 316 of 960 at 25 Hz (max probability change 0.97 / 0.99). The released checkpoint is therefore polarity-sensitive, and whether
 WHOOP's raw optical channel has the polarity of the PSG oximeter pleth signals it was trained on is
 unverified. The official training config enables random polarity flipping (`flip_polarity: True`),
 but the measured sensitivity shows the released model is not invariant. Nothing is inverted here;
@@ -117,3 +118,29 @@ MIT for both the code (repository `LICENSE`, copied here, sha256
 `4d7f2e5bbae4970024ccbad782883bfd4d3c8241ff3d2e3a07051fb7082f1fa8`) and the released weights (Hugging
 Face model card `license: mit`). The training data (NSRR SHHS, MESA, CFS, CHAT, CCSHS, MrOS, WSC)
 are under NSRR data-use agreements and are not part of this adapter.
+
+## 6. The `predict_on_folder` 24 Hz divergence (resolved 2026-10-08)
+
+The v2 references showed official `predict_on_folder` agreeing with the official direct route on only
+899/960 epochs at 24 Hz, while 25 Hz agreed on 960/960. The cause was the reference harness, not the
+adapter and not the model:
+
+- The pinned `prepare()` writes each preprocessed night to `<tempdir>/wav2sleep/PPG_<h>h/<input path>.parquet`
+  and returns the whole `PPG_<h>h` folder; `load_dataset` then globs every parquet in that folder,
+  unsorted (`api.py` `_get_parquet_files`).
+- The v2 reference ran `parity_8h_25hz` before `parity_8h_24hz`. The 24 Hz call therefore loaded two
+  nights, and its `preds[0]` was the cached 25 Hz night. 899/960 is exactly the argmax agreement between
+  the 24 Hz and 25 Hz direct routes.
+- Isolation run (`_build-scratch/spec03-physio/pof_isolation.py`, `pof-isolation/report.json`): in the
+  shared sequence the 24 Hz call's dataset held 2 files and its `preds[0]` equalled the v2 `pof_preds`
+  on 960/960; run alone, each rate's `predict_on_folder` equals its direct route on 960/960.
+- The same contamination applied to the v2 `pof_preds_default10` at 24 Hz, so the "398/960 at both
+  rates" D1 figure was wrong at 24 Hz. Run alone: 395/960 at 24 Hz, 398/960 at 25 Hz.
+
+`official_reference_v3.py` points `tempfile` at a fresh directory for every `predict_on_folder` call and
+records that each dataset held exactly one file; `test_forward_parity_with_the_official_code` refuses a
+reference without that record. The assertion itself (adapter argmax equals `predict_on_folder` on all
+960 epochs) is unchanged.
+
+Anyone calling the official API on more than one night should note the same behaviour: nights cached
+under one `<tempdir>` are all staged together, in filesystem order.

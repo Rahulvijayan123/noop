@@ -12,7 +12,7 @@ account; "beta tester" is any other account. No account ids appear here.
 
 | # | Candidate | Decision | Why |
 |---|---|---|---|
-| 1 | **ActiNet native classifier** (upstream default `walmsley`: sleep / sedentary / light / MVPA) | **Admitted for adapter work, shadow only. Activation deferred.** | No Nara bundle has this label space or output type. Complete 30-s, 100 Hz windows in g exist. Parity is not yet shown (motion agent). Owner licence decision is open. |
+| 1 | **ActiNet native classifier** (upstream default `walmsley`: sleep / sedentary / light / MVPA) | **Admitted for adapter work, shadow only. Activation deferred.** | No Nara bundle has this label space or output type. Complete 30-s, 100 Hz windows in g exist. Upstream parity shown on a synthetic request (updated 2026-10-08, below). Owner licence decision is open. |
 | 2 | **wav2sleep**, PPG only | **Deferred entirely.** The checkpoint identity is verified. Do not register or enable a provider. | Every production PPG second lacks its anchor. The Spec 01 transport is not built. No overnight waveform exists. No PPG+PSG evaluation set exists. |
 | 3 | **ActiTect / RBDisco** | **Deferred entirely.** The assets are acquired and verified. | No complete raw-accelerometer night exists. Upstream resampling would interpolate the part-time gaps. |
 | 4 | **Pulsewatch** | **Deferred entirely.** | The checkpoint needs a Google sign-in. The 0.5–20 Hz band cannot be reproduced from 24 Hz data. PPG and ACC were never captured together. |
@@ -31,7 +31,7 @@ project folder, outside git) or `host:` (the Droplet).
 | ActiNet | No already-working equivalent trained Nara head bundle | **pass** (no equivalent exists) | Deployed bundle `shadow-ncsa-primary-actukb` (bundle_sha256 `aba9a811…`) has posture/locomotion/arm/transition heads in Nara's label space plus `movement_intensity`. That head is a 1-output sigmoid regression of `clip(ln MET/ln 12,0,1)` (INERTIA1.md:204-211). It is not in `test_gate.json`, and the decoder only logs it (ActivityContextMotionHeadsFusion.swift:23; INERTIA1.md:390-391). No bundle has the Walmsley label space. The `c24` encoder is the Willetts backbone (actinet.py:41-49). |
 | ActiNet | Suitable raw accelerometer windows (window level) | **pass** | Raw IMU arrives as NPB1 `rawImuSession`: 600 i16 per second, 100 Hz, axis-major (Npb1ImuDecoder.swift:10-16). The scale is 1/4096 g (preprocess.py:47). Runs split at gaps > 1 s and are never filled (preprocess.py:18-24; ActivityLane.swift:13-21). Production holds about 2,400 complete non-overlapping 30-s windows (2026-10-05 to 10-08, from the owner and two beta testers; one tester contributed 19). |
 | ActiNet | Contiguous runs for the documented temporal processing (HMM, sleep correction, daily summaries) | **fail** | Part-time capture is on by default: 60 s in every 180 s (ActivityImuCapture.swift:31-37). The median run is 52–56 s and the median gap 127 s. The longest overnight run is 554 s. Upstream Viterbi runs across gaps, then `restore_labels_after_gaps` puts back the raw label on the first epoch after each gap. With 1–2 epochs per run, the HMM either does nothing or smooths across 2-minute gaps, so it cannot be applied faithfully. Do not use daily imputation. |
-| ActiNet | Frozen classifier plus original preprocessing reproduces upstream output | **unknown** | The motion agent owns this check. The artifact is `ssl-ukb-c24-rw-30s-20260128.joblib.lzma`: 40,902,237 B, sha256 `07dfd748…`, md5 `a829041b…`. That md5 matches actinet 0.7.2 `__classifiers__["walmsley"]`. |
+| ActiNet | Frozen classifier plus original preprocessing reproduces upstream output | **pass** on a synthetic six-run request, with documented deviations (updated 2026-10-08) | `tests/actinet_classifier/test_actinet_classifier_real.py`: against actinet 0.7.2's own outputs, probabilities within 1e-4, logits within 2e-3 (observed ~3e-5), raw and HMM labels exact, on both grids. Deviations D1–D3 (no calibration, no non-wear, partial epochs invalid) in [ACTINET_CLASSIFIER.md](ACTINET_CLASSIFIER.md) §8. Not shown on real WHOOP windows (no upstream output exists for them). The artifact is `ssl-ukb-c24-rw-30s-20260128.joblib.lzma`: 40,902,237 B, sha256 `07dfd748…`, md5 `a829041b…`. That md5 matches actinet 0.7.2 `__classifiers__["walmsley"]`. |
 | ActiNet | Licence fits the intended use (owner decision) | **unknown** | Upstream is the Oxford **Academic Use Licence**, not CC BY-NC 4.0. Evidence: actinet `LICENSE.md` (sha256 `9a4f1846…`, identical in sdists 0.5.2–0.7.2) clause 1.1(b), and ssl-wearables v1.0.0 `LICENSE.md` (blob `64ed9bef…`). NOTICE.md:347 and registry.py:37 say CC BY-NC 4.0. |
 | wav2sleep | Spec 01 PPG transport fixed | **fail** | The production wire carries no `baseCode`, so every v26 second is withheld `missing_ppg_anchor` (SensorBiomarkerInputs.swift:18-22, 438-443; docs/sensor-biomarkers/validation.md:147-150). The Spec 01 branch has contract text only (`ff143411e`). Its `spec01/ppg-transport-20261007` worktree has no changes. |
 | wav2sleep | Contiguous overnight waveform with verified clock and quality | **fail** | 429 `ppgWaveformSample` objects from 5 users, 2026-08-13 to 2026-09-22. Nothing has arrived since. They hold at most 2.05 h of record-seconds per day, scattered across objects that span up to 41 h. All are anchorless. v26 appears only in strap-chosen stretches of the night (PpgHr.swift:3-9). `sensor_biomarker_days` has no PPG family on any day. |
@@ -157,11 +157,25 @@ service". Neither the actinet README, the readthedocs pages, the ssl-wearables R
 separate weight terms. No "CC BY" text appears in any actinet or actipy sdist.
 
 This is the same question as ElderNet's licence-scope note (ELDERNET.md:12-20): does an internal service on
-beta testers' data qualify? It already applies today. The live `actukb` lane runs the ssl-wearables weights on
-one beta tester's account (2 rows). ElderNet (`FRWHOOP_ELDERNET_ENABLED=1`, `MODE=candidate`) runs on one beta
-tester's account (3 rows of `activity_gait_windows_days`). ELDERNET.md:17-19 says the lane should not be
-switched on for other people's data until that decision is made. NOTICE.md:342-348 and registry.py:37 should
-say Academic Use Licence, not CC BY-NC 4.0.
+beta testers' data qualify? It already applies today.
+
+- **Audience (corrected 2026-10-08).** An earlier version of this paragraph said the live `actukb` lane ran on
+  "one beta tester's account". That contradicted the table above, which shows `actukb` candidate rows for the
+  owner **and** one beta tester (2 rows each), plus one owner shadow row.
+- **There is no per-account gate.** The worker has no allowlist setting for either lane; the only settings are
+  `FRWHOOP_INERTIA_*` and `FRWHOOP_ELDERNET_*` (enabled, mode, bundle, checkpoint, threads, timeout, budget).
+  Neither `ActivityMotionHeads.swift` nor `ActivityGaitQuality.swift` filters by account. While enabled, both
+  lanes run for **every account whose raw IMU reaches the worker**. Raw IMU arrived from the owner and two beta
+  testers between 10-05 and 10-08 (coverage table below).
+- **ElderNet** (`FRWHOOP_ELDERNET_ENABLED=1`, `MODE=candidate`) had 5 rows of `activity_gait_windows_days` at
+  05:44 UTC: 2 for the owner and 3 for one beta tester (eligibility.json).
+- **Not re-counted.** A fresh read-only aggregate query on 2026-10-08 (afternoon) was refused by the session's
+  permission policy, so these counts are as of 05:44 UTC.
+
+ELDERNET.md:17-19 says the lane should not be switched on for other people's data until the licence decision is
+made; with no per-account gate it already processes any tester's raw IMU. NOTICE.md:342-348, registry.py:37 and
+the vendored `ssl_wearables_resnet.py` header should say Academic Use Licence, not CC BY-NC 4.0. Proposed text
+and the use-by-use reading are in [integration/licence-corrections.md](integration/licence-corrections.md).
 
 ## 2. wav2sleep (PPG only)
 
