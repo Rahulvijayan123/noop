@@ -138,11 +138,11 @@ public enum ActivityContextPersistence {
     }
 
     /// How far before a day's start the canonical HRV windows need the previous day's events, so the day's first
-    /// windows still see a change of position or the end of a walk just before midnight (`HRVWindowBuilder`'s
-    /// recovery guard, plus its detection lag).
+    /// windows still see a change of position or the end of a walk just before midnight: the longest recovery the
+    /// HRV-baseline policy needs before a window (`requiredLookbackS`), plus the decoder's detection lag.
     public static var hrvEventLookbackS: Int {
         let c = HRVWindowBuilder.Config()
-        return max(120, c.recoveryGuardS + c.eventDetectionLagS)
+        return max(120, c.recovery.requiredLookbackS + c.eventDetectionLagS)
     }
 
     /// The events the day's HRV windows and intervals are built with: the day's own, plus those of `previous` (the

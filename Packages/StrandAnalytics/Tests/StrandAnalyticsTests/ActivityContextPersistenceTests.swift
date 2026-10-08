@@ -102,7 +102,9 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertEqual(first?.secondsSinceTransition, 30)
         XCTAssertNotEqual(first?.phase, .steadyState, "30 s after the walk ended is still recovery")
         XCTAssertNil(blind?.secondsSinceTransition, "without the tail the window cannot see what came just before it")
-        XCTAssertEqual(blind?.phase, .steadyState)
+        // Without the tail the lookback is too short to call the window steady: the phase is unknown, never steady
+        // rest (HRV-baseline policy, required lookback; D9-04 fail-closed).
+        XCTAssertEqual(blind?.phase, .unknown)
     }
 
     func testTheDaysFirstHRVWindowsSeeAWalkOrWorkoutThatEndedBeforeMidnight() throws {
@@ -121,7 +123,8 @@ final class ActivityContextPersistenceTests: XCTestCase {
         }
         XCTAssertGreaterThanOrEqual(ActivityContextPersistence.hrvIntervalLookbackS, HRVWindowBuilder.Config().minSinceExerciseS)
         let blind = try firstWindow(day)
-        XCTAssertTrue(blind.eligibleForBaseline, "nothing before the day: the window reads as steady rest")
+        XCTAssertFalse(blind.eligibleForBaseline, "nothing before the day: too little history to judge the window steady rest")
+        XCTAssertEqual(blind.phase, .unknown)
 
         // A run that ended 240 s before midnight: inside the 300 s locomotion gate.
         let run = [iv(-900, -240, .running)]

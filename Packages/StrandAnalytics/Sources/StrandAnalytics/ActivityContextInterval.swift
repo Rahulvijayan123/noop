@@ -157,6 +157,10 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     public var rmssdSettled: Double?
     public var rrDiffSqSumMs2Settled: Double?
     public var rrDiffCountSettled: Int?
+    /// Where the label came from when it was not the decoder: `ActivityContextProvenance.userCorrection` when
+    /// the wearer's own correction overrode these seconds (applied at read time by `ActivityContextCorrections`,
+    /// never written to the store). nil for decoder output.
+    public var provenance: String?
 
     public var durationSeconds: Int { end - start }
     /// Whether the row is a ride in a vehicle (`detail == .inVehicle`).
@@ -177,7 +181,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 settlingSeconds: Int? = nil, detail: ActivityDetail? = nil, detailConfidence: Double? = nil,
                 precedingClass: ActivityClass? = nil, settledFrom: Int? = nil,
                 hrMeanSettled: Double? = nil, hrSamplesSettled: Int? = nil, rmssdSettled: Double? = nil,
-                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil) {
+                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil, provenance: String? = nil) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -200,6 +204,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.hrMeanSettled = hrMeanSettled; self.hrSamplesSettled = hrSamplesSettled
         self.rmssdSettled = rmssdSettled
         self.rrDiffSqSumMs2Settled = rrDiffSqSumMs2Settled; self.rrDiffCountSettled = rrDiffCountSettled
+        self.provenance = provenance
     }
 
     public init(from decoder: Decoder) throws {
@@ -249,6 +254,7 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         rmssdSettled = try c.decodeIfPresent(Double.self, forKey: .rmssdSettled)
         rrDiffSqSumMs2Settled = try c.decodeIfPresent(Double.self, forKey: .rrDiffSqSumMs2Settled)
         rrDiffCountSettled = try c.decodeIfPresent(Int.self, forKey: .rrDiffCountSettled)
+        provenance = try c.decodeIfPresent(String.self, forKey: .provenance)
     }
 
     /// Whether `ts` falls inside the interval.

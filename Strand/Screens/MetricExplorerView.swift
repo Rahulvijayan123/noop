@@ -755,9 +755,11 @@ struct MetricDetailView: View {
     // MARK: Activity context (optional, feature-off default)
     //
     // Hosted `daily.activity_context` for the LATEST day of this metric's series, loaded only for the
-    // metrics with explicit support intervals (HRV / respiratory rate / SpO2). All three stay nil until
-    // a server payload carries the key, so builds with no activity data render exactly as before.
-    private static let activityMetrics: Set<String> = ["hrv", "resp_rate", "spo2"]
+    // metrics with explicit support intervals: the nightly heroes (HRV / resting HR / respiratory rate /
+    // SpO2 / skin temperature), each joined to the night it was measured over
+    // (`ActivityContextSelection.nightlyMetrics`). All three stay nil until a server payload carries the
+    // key, so builds with no activity data render exactly as before.
+    static let activityMetrics: Set<String> = ["hrv", "rhr", "resp_rate", "spo2", "skin_temp"]
     @State private var activityContext: ActivityContextDocument?
     @State private var activityInterval: [Int]?
     @State private var activityDayWindow: [Int]?
@@ -997,7 +999,7 @@ struct MetricDetailView: View {
                     // scores) or a big SF-Rounded headline, floated over the domain's starfield,
                     // with the range pill. Then the frosted chart / stat tiles / correlations.
                     heroHeader(effectiveRange: effRange, windowed: win, windowFellBack: fellBack)
-                    // Activity context line (HRV / resp / SpO2 only, and only when the hosted snapshot
+                    // Activity context line (the nightly heroes in `activityMetrics`, and only when the hosted snapshot
                     // carried a `daily.activity_context`): one line under the metric value + the day
                     // ribbon, tapping through to the detail sheet. Feature-off builds render nothing.
                     if let context = activityContext,

@@ -33,8 +33,14 @@ enum CoachActivityContext {
         }
     }
 
+    /// - Parameter days: each saved day's standing (`Repository.storedActivityContextWithStatus`). When given,
+    ///   a stretch is `provisional` when it overlaps a day the ledger has not finalised, and `from an older model` when it overlaps a day that is being re-derived
+    ///   (`.refreshing`); days of another rule set (`.stale`) serve no intervals and are named in one line.
+    ///   nil (no ledger read) falls back to the heuristic: today's stretches ending within `provisionalTailS`
+    ///   of the saved horizon.
     static func describe(intervals: [ActivityContextInterval], from: Int, to: Int,
                          activity: ActivityClass? = nil, storedThrough: Int? = nil,
+                         days: [Repository.StoredActivityContextDay]? = nil,
                          timeZone: TimeZone = .current, now: Date = Date(), maxStretches: Int = 16,
                          provisionalTailS: Int = 300) -> String {
         let span = "\(stamp(from, timeZone)) to \(stamp(to, timeZone)) (\(timeZone.identifier))"
@@ -56,6 +62,21 @@ enum CoachActivityContext {
             coverage += " Saved through \(clock(through, timeZone))" + (ago > 90 ? " (\(duration(ago)) ago)." : ".")
         }
         lines.append(coverage)
+        if let days {
+            // One entry per device id: after a strap swap an old id can hold a stale ledger for a day the current
+            // id serves with a current one. Only a day nothing serves is unknown.
+            let served = Set(days.filter { $0.status != .stale }.map(\.dayStart))
+            let stale = days.filter { $0.status == .stale && !served.contains($0.dayStart)
+                && $0.dayEnd > from && $0.dayStart < to }.map(\.day)
+            if !stale.isEmpty {
+                lines.append("Saved context for \(Set(stale).sorted().joined(separator: ", ")) came from an older classifier with different labels and is not shown until it is processed again; treat that time as unknown, not as off-wrist.")
+            }
+        }
+        let correctedS = intervals.filter { $0.provenance == ActivityContextProvenance.userCorrection }
+            .reduce(0) { $0 + max(0, min($1.end, to) - max($1.start, from)) }
+        if correctedS > 0 {
+            lines.append("\(duration(correctedS)) of this window is labelled from the user's own corrections of the classifier (marked 'corrected by the user'), which take precedence over the classifier.")
+        }
 
         if let activity, scoped.isEmpty {
             let others = all.classes.prefix(4).map { "\($0.activityClass.displayName) \(duration($0.seconds))" }
@@ -79,6 +100,7 @@ enum CoachActivityContext {
         lines.append(heading)
         let horizon = storedThrough ?? intervals.map(\.end).max() ?? to
         let tailIsToday = sameLocalDay(horizon, Int(now.timeIntervalSince1970), timeZone)
+        let standing = days.map { DayStanding($0) }
         for stretch in shown {
             let detail = ActivityContextAggregator.summarize(stretch.intervals, from: stretch.start, to: stretch.end)
                 .classes.first
@@ -86,15 +108,43 @@ enum CoachActivityContext {
             if let hr = detail?.hrMean { line += ", heart rate \(Int(hr.rounded())) bpm" }
             if let detail, let hrv = hrvPhrase(detail) { line += ", \(hrv)" }
             line += ", confidence \(String(format: "%.2f", stretch.meanConfidence))"
-            // Today's newest stretch is still being decided: the next sync can extend or relabel it.
-            if tailIsToday, stretch.end >= horizon - provisionalTailS { line += ", provisional" }
+            if stretch.intervals.contains(where: { $0.provenance == ActivityContextProvenance.userCorrection }) {
+                line += ", corrected by the user"
+            }
+            if let standing {
+                // The ledger's own word on each day (WP3): not final yet, or derived by an older configuration.
+                if standing.isProvisional(stretch) { line += ", provisional" }
+                if standing.isFromOlderModel(stretch) { line += ", from an older model" }
+            } else if tailIsToday, stretch.end >= horizon - provisionalTailS {
+                // No ledger read: today's newest stretch is still being decided.
+                line += ", provisional"
+            }
             lines.append(line)
         }
         lines.append(notes)
         return lines.joined(separator: "\n")
     }
 
-    private static let notes = "Notes: sitting and standing cannot be told apart from a wrist, so 'Still (sitting or standing)' means the strap could not say and 'Sitting' / 'Standing' are best guesses. A stretch marked provisional is today's newest one and can still be extended or relabelled by the next sync; a low confidence means the label is a weak guess. Cycling is only reported when the strap or a logged workout names it. HRV and respiratory rate are read only while the wrist is still, so a missing value means none could be read, not zero."
+    private static let notes = "Notes: sitting and standing cannot be told apart from a wrist, so 'Still (sitting or standing)' means the strap could not say and 'Sitting' / 'Standing' are best guesses. A stretch marked provisional comes from a day that is not final yet (today, or a night whose sleep had not settled) and can still be extended or relabelled when it is processed again; 'from an older model' means it was derived by an earlier classifier configuration and is queued to be processed again; a low confidence means the label is a weak guess. Cycling is only reported when the strap or a logged workout names it. HRV and respiratory rate are read only while the wrist is still, so a missing value means none could be read, not zero."
+
+    /// Per-day ledger standing, looked up by a stretch's span.
+    private struct DayStanding {
+        let days: [Repository.StoredActivityContextDay]
+        init(_ days: [Repository.StoredActivityContextDay]) { self.days = days.filter { $0.status != .stale } }
+
+        private func overlapping(_ s: Stretch) -> [Repository.StoredActivityContextDay] {
+            days.filter { $0.dayStart < s.end && $0.dayEnd > s.start }
+        }
+
+        /// Overlaps a day the ledger has not finalised.
+        func isProvisional(_ s: Stretch) -> Bool {
+            overlapping(s).contains(where: \.isProvisional)
+        }
+
+        func isFromOlderModel(_ s: Stretch) -> Bool {
+            overlapping(s).contains { $0.status == .refreshing }
+        }
+    }
 
     private static func describe(_ a: ActivityClassAggregate, of covered: Int) -> String {
         var parts = ["\(a.activityClass.displayName), \(duration(a.seconds)) (\(percent(covered > 0 ? Double(a.seconds) / Double(covered) : 0)))"]

@@ -206,7 +206,7 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         XCTAssertNil(leftover, "the old owner's ledger went with the hand-off")
         let leftoverRows = try await store.activityContextIntervals(deviceId: Repository.whoopSource, from: day.start, to: day.end)
         XCTAssertTrue(leftoverRows.isEmpty)
-        let stored = await repo.storedActivityContext(from: day.start, to: day.end)
+        let stored = await repo.storedActivityContext(from: day.start, to: day.end, feedback: [])
         XCTAssertTrue(stored.intervals.contains { $0.start <= day.start + 9 * 3_600 + 60 && day.start + 9 * 3_600 + 60 < $0.end },
                       "the canonical history's stretch is described by the new owner's decode")
     }
@@ -308,14 +308,14 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
             deviceId: id, day: ledger(recent, decoder: ActivityContextVersions.decoder, finality: "provisional"),
             intervals: [ActivityContextIntervalRow(startTs: recent.start + 600, endTs: recent.start + 1_200, activityClass: "walking", confidence: 0.8)])
 
-        let stored = await repo.storedActivityContextWithStatus(from: old.start, to: recent.end)
+        let stored = await repo.storedActivityContextWithStatus(from: old.start, to: recent.end, feedback: [])
         XCTAssertEqual(stored.intervals.map(\.activityClass), [.walking], "the old decoder's labels are not served")
         XCTAssertEqual(stored.days.map(\.status), [.stale, .current])
         XCTAssertEqual(stored.days.map(\.isProvisional), [false, true])
         XCTAssertEqual(stored.days.last?.decoderVersion, ActivityContextVersions.decoder)
         XCTAssertTrue(stored.hasProvisionalContext)
         XCTAssertEqual(stored.through, recent.start + 1_200)
-        let plain = await repo.storedActivityContext(from: old.start, to: recent.end)
+        let plain = await repo.storedActivityContext(from: old.start, to: recent.end, feedback: [])
         XCTAssertEqual(plain.intervals, stored.intervals)
     }
 

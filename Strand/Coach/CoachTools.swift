@@ -326,9 +326,11 @@ struct CoachToolExecutor {
         let now = Date()
         let to = Int(now.timeIntervalSince1970)
         let from = to - Self.int(args["hours"], default: 6, max: 168) * 3_600
-        let stored = await repo.storedActivityContext(from: from, to: to)
+        // With each day's ledger standing, so 'provisional' / 'from an older model' come from the ledger, and
+        // with the user's stretch corrections applied (D9-07).
+        let stored = await repo.storedActivityContextWithStatus(from: from, to: to)
         return CoachActivityContext.describe(intervals: stored.intervals, from: from, to: to, activity: activity,
-                                             storedThrough: stored.through, now: now)
+                                             storedThrough: stored.through, days: stored.days, now: now)
     }
 
     // MARK: Memory

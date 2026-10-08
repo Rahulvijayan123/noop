@@ -99,6 +99,12 @@ extension Repository {
         var hasProvisionalContext: Bool {
             days.contains { $0.status != .stale && ($0.isProvisional || $0.status == .refreshing) }
         }
+
+        /// Seconds of `intervals` whose label is the wearer's own correction rather than the decoder's.
+        var userCorrectedSeconds: Int {
+            intervals.filter { $0.provenance == ActivityContextProvenance.userCorrection }
+                .reduce(0) { $0 + $1.durationSeconds }
+        }
     }
 
     /// The saved activity context overlapping `[from, to)`, oldest first, and how far the saved days reach.
@@ -107,14 +113,24 @@ extension Repository {
     /// where two cover the same seconds (`ActivityContextPersistence.merged`), so a strap swap or a re-paired
     /// strap does not split a day's story. `through` is the latest decode horizon of the days in the window
     /// (nil when none has been saved). Days derived by another rule set are not served (see
-    /// `storedActivityContextWithStatus`, which also says which days are provisional).
-    func storedActivityContext(from: Int, to: Int, timeZone: TimeZone = .current)
+    /// `storedActivityContextWithStatus`, which also says which days are provisional). The wearer's stretch
+    /// corrections are applied on top (D9-07), as in `storedActivityContextWithStatus`.
+    func storedActivityContext(from: Int, to: Int, timeZone: TimeZone = .current,
+                               feedback: [StretchFeedback]? = nil)
         async -> (intervals: [ActivityContextInterval], through: Int?) {
-        let stored = await storedActivityContextWithStatus(from: from, to: to, timeZone: timeZone)
+        let stored = await storedActivityContextWithStatus(from: from, to: to, timeZone: timeZone, feedback: feedback)
         return (stored.intervals, stored.through)
     }
 
-    func storedActivityContextWithStatus(from: Int, to: Int, timeZone: TimeZone = .current) async -> StoredActivityContext {
+    /// The saved context with each day's standing, as every phone consumer should see it: the decoder's rows
+    /// with the wearer's corrections laid over them (`ActivityContextCorrections`: a "not wearing" answer makes
+    /// its seconds off-wrist with no physiology, a class answer relabels them, both stamped
+    /// `provenance == "user_correction"`, confidence 1). The overlay is applied here, at read time, and never
+    /// written back: the stored rows stay what the model said. `feedback` defaults to the phone's saved verdicts
+    /// (`StretchFeedbackStore.shared`, the last `keepSyncedDays` of answers); pass `[]` for the decoder's own
+    /// reading.
+    func storedActivityContextWithStatus(from: Int, to: Int, timeZone: TimeZone = .current,
+                                         feedback: [StretchFeedback]? = nil) async -> StoredActivityContext {
         let empty = StoredActivityContext(intervals: [], through: nil, days: [])
         guard to > from, let store = await storeHandle() else { return empty }
         let ids = rawPhysiologyReadIds(store: store)
@@ -141,7 +157,11 @@ extension Repository {
             let served = rows.filter { row in !staleDays.contains { $0.dayStart <= row.startTs && row.startTs < $0.dayEnd } }
             if !served.isEmpty { lists.append(served.map(ActivityContextInterval.init(row:))) }
         }
-        let merged = ActivityContextPersistence.merged(lists)
+        // Every verdict, not only the corrections: a newer "that was right" withdraws an older correction. The
+        // phone keeps synced verdicts for `StretchFeedbackStore.keepSyncedDays` (by answer time), so the overlay
+        // covers that horizon; older history reads the decoder's own label.
+        let corrections = feedback ?? StretchFeedbackStore.shared.verdicts(overlapping: from, to: to)
+        let merged = ActivityContextCorrections.applying(corrections, to: ActivityContextPersistence.merged(lists))
         days.sort { ($0.dayStart, $0.deviceId) < ($1.dayStart, $1.deviceId) }
         guard !merged.isEmpty else { return StoredActivityContext(intervals: [], through: nil, days: days) }
         let through = days.filter { $0.status != .stale }.compactMap(\.dataThrough).max()
