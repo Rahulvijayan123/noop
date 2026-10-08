@@ -1,0 +1,478 @@
+// Sana's chat history: threads, folders and the message store (docs/COACH_MEMORY.md §4).
+//
+// Messages are written only through coach_messages_save_v1, which resolves an old build's thread-less rows,
+// rejects saves for deleted or foreign threads, creates missing threads and merges meta. Everything else here
+// is owner-filtered PostgREST: every query carries `user_id=eq.<owner>`, and the owner always comes from the
+// installation credential. Pages use opaque cursors over (created_at, id) or (last_message_at, id), encoded
+// from the raw database values so microsecond timestamps never skip or repeat a row.
+import { isUuid } from './keys.ts';
+import {
+  clampInt, collapse, type CoachDeps, enc, fail, isObject, iso, quoted, readJson, SMALL_BODY_BYTES, tsKey, uuidOf,
+} from './coach_llm.ts';
+
+const MAX_TEXT_CHARS = 60_000;
+const MAX_SAVE_ROWS = 40;
+
+export const THREAD_COLUMNS =
+  'id,title,title_source,folder_id,pinned,origin,created_at,updated_at,last_message_at,message_count,preview,summary_topics,'
+  + 'summary_messages,curated_through,summarized_at';
+const FOLDER_COLUMNS = 'id,name,sort_order,created_at,updated_at';
+const MESSAGE_COLUMNS = 'id,client_id,thread_id,role,content,meta,created_at';
+
+/** A thread whose newest message is at least this old is quiet: maintenance folds whatever is left of it. */
+export const QUIET_MS = 10 * 60_000;
+
+/**
+ * The summary rule of a maintenance pass (docs/COACH_MEMORY.md §5 Maintain step 3): 4 new messages, 2 when there
+ * is no summary yet, or any once the chat has gone quiet.
+ */
+export const summaryDue = (pending: number, hasSummary: boolean, quiet: boolean) =>
+  pending >= 4 || (!hasSummary && pending >= 2) || (quiet && pending >= 1);
+
+/** What `needsMaintenance` is judged against: the clock and the owner's forget-all floor. */
+export interface ThreadView { now: number; floor: string | null }
+
+/**
+ * Whether POST threads/:id/maintain would do work now, judged from the thread row: memory curation is due when
+ * something arrived after both `curated_through` and the forget-all floor, the summary by `summaryDue`. Blocked
+ * turns are counted until a pass steps the cursors over them, which the next pass always does.
+ */
+export function needsMaintenance(r: any, view: ThreadView): boolean {
+  const last = tsKey(r.last_message_at);
+  if (!Number.isFinite(last)) return false;
+  const mineAfter = Math.max(tsKey(r.curated_through) || -Infinity, tsKey(view.floor) || -Infinity);
+  if (last > mineAfter) return true;
+  const pending = Math.max(0, Number(r.message_count ?? 0) - Number(r.summary_messages ?? 0));
+  const quiet = view.now * 1000 - last >= QUIET_MS * 1000;
+  return summaryDue(pending, r.summarized_at != null, quiet);
+}
+
+/** The `Thread` shape; `snippet` only on search results. */
+export function publicThread(r: any, view: ThreadView, snippet?: string | null) {
+  const count = Number(r.message_count ?? 0);
+  return {
+    id: r.id, title: r.title ?? null, titleSource: r.title_source ?? 'none', folderId: r.folder_id ?? null,
+    pinned: r.pinned === true, origin: r.origin ?? 'app', createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+    lastMessageAt: iso(r.last_message_at), messageCount: count, preview: r.preview ?? null,
+    topics: Array.isArray(r.summary_topics) ? r.summary_topics : [],
+    pendingMessages: Math.max(0, count - Number(r.summary_messages ?? 0)),
+    needsMaintenance: needsMaintenance(r, view),
+    ...(snippet !== undefined ? { snippet } : {}),
+  };
+}
+
+/** The view for `publicThread`. The floor is read best effort: without it, curation is judged by the cursor alone. */
+export async function threadView(d: CoachDeps, userId: string): Promise<ThreadView> {
+  const rows = await d.rest.select('coach_user_state', `user_id=eq.${userId}&select=memory_floor_at`).catch(() => []);
+  return { now: d.now(), floor: typeof rows?.[0]?.memory_floor_at === 'string' ? rows[0].memory_floor_at : null };
+}
+
+export const publicFolder = (r: any) => ({
+  id: r.id, name: r.name, sortOrder: Number(r.sort_order ?? 0), createdAt: iso(r.created_at), updatedAt: iso(r.updated_at),
+});
+
+// ------------------------------------------------------------------------------------------------
+// Cursors
+// ------------------------------------------------------------------------------------------------
+
+/** Opaque page cursor: base64url of `[timestamp|null, id]`. */
+export function encodeCursor(at: string | null, id: string): string {
+  return btoa(JSON.stringify([at, id])).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+}
+
+export function decodeCursor(raw: unknown, allowNullTime = false): { at: string | null; id: string } {
+  if (typeof raw !== 'string' || raw.length > 200) throw fail('invalid_cursor', 400);
+  try {
+    const padded = raw.replace(/-/g, '+').replace(/_/g, '/');
+    const [at, id] = JSON.parse(atob(padded + '='.repeat((4 - (padded.length % 4)) % 4)));
+    const timeOk = at === null ? allowNullTime : typeof at === 'string' && at.length <= 40 && Number.isFinite(Date.parse(at));
+    if (timeOk && isUuid(id)) return { at, id };
+  } catch { /* fall through */ }
+  throw fail('invalid_cursor', 400);
+}
+
+/** Rows strictly after the cursor in `created_at desc, id desc` order. */
+export function olderThan(c: { at: string | null; id: string }, column = 'created_at'): string {
+  return `&or=(${column}.lt.${enc(quoted(c.at!))},and(${column}.eq.${enc(quoted(c.at!))},id.lt.${c.id}))`;
+}
+
+/** Rows after the cursor in `last_message_at desc nulls last, id desc` order. */
+function threadsAfter(c: { at: string | null; id: string }): string {
+  if (c.at === null) return `&last_message_at=is.null&id=lt.${c.id}`;
+  const at = enc(quoted(c.at));
+  return `&or=(last_message_at.lt.${at},and(last_message_at.eq.${at},id.lt.${c.id}),last_message_at.is.null)`;
+}
+
+// ------------------------------------------------------------------------------------------------
+// Messages
+// ------------------------------------------------------------------------------------------------
+
+const publicMessage = (r: any) => ({
+  id: r.id, clientId: r.client_id, role: r.role, content: r.content, meta: r.meta ?? {}, createdAt: r.created_at,
+});
+
+function messageRow(m: any, now: number) {
+  if (!isObject(m) || !isUuid(m.clientId) || !['user', 'assistant'].includes(m.role)
+      || typeof m.content !== 'string' || m.content.length > MAX_TEXT_CHARS) throw fail('invalid_message', 400);
+  if (m.threadId != null && !isUuid(m.threadId)) throw fail('invalid_message', 400);
+  const meta = isObject(m.meta) ? m.meta : {};
+  const metaText = JSON.stringify(meta);
+  if (metaText.length > 20_000) throw fail('invalid_message', 400);
+  const title = collapse(stripNul(m.threadTitle)).slice(0, 120);
+  return {
+    client_id: m.clientId.toLowerCase(), thread_id: m.threadId ? String(m.threadId).toLowerCase() : null,
+    role: m.role, content: stripNul(m.content), meta: metaText.includes('\\u0000') ? stripNulDeep(meta) : meta,
+    created_at: createdAt(m.createdAt, now), thread_title: title || null,
+  };
+}
+
+// The row is written as one batch with the rest, so anything PostgreSQL would refuse is fixed here rather than
+// failing the whole save (which the phone's outbox would retry forever): NUL characters, which text and jsonb
+// cannot hold, and timestamps it cannot parse. A time is re-rendered as ISO; one outside 2000..2200 is now.
+const stripNul = (v: unknown) => (typeof v === 'string' ? v.replace(/\u0000/g, '') : v);
+
+function stripNulDeep(v: unknown): unknown {
+  if (typeof v === 'string') return stripNul(v);
+  if (Array.isArray(v)) return v.map(stripNulDeep);
+  if (isObject(v)) return Object.fromEntries(Object.entries(v).map(([k, x]) => [stripNul(k), stripNulDeep(x)]));
+  return v;
+}
+
+function createdAt(v: unknown, now: number): string {
+  const t = typeof v === 'string' && v.length <= 64 ? Date.parse(v) : NaN;
+  return Number.isFinite(t) && t >= Date.UTC(2000, 0, 1) && t < Date.UTC(2200, 0, 1) ? new Date(t).toISOString() : new Date(now).toISOString();
+}
+
+export async function messagesRoute(req: Request, userId: string, d: CoachDeps): Promise<Response> {
+  const owner = `user_id=eq.${userId}`;
+  const params = new URL(req.url).searchParams;
+  if (req.method === 'GET') {
+    const threadId = params.get('threadId');
+    if (threadId !== null) return await threadPage(d, userId, threadId, params);
+    // The original single-conversation read: the latest N across every thread, oldest first, same shape.
+    const limit = clampInt(params.get('limit') ?? '60', 1, 200, 60);
+    const rows = await d.rest.select('coach_messages',
+      `${owner}&client_id=not.is.null&order=created_at.desc,id.desc&limit=${limit}&select=id,client_id,role,content,meta,created_at`);
+    return Response.json({ messages: rows.map(publicMessage).reverse() });
+  }
+  if (req.method === 'POST') {
+    const body = await readJson(req);
+    if (!Array.isArray(body?.messages) || !body.messages.length || body.messages.length > MAX_SAVE_ROWS) {
+      throw fail('invalid_message', 400);
+    }
+    const now = d.now();
+    const rows = body.messages.map((m: any) => messageRow(m, now));
+    const result = await d.rest.rpc('coach_messages_save_v1', { p_user: userId, p_rows: rows });
+    const rejected = Array.isArray(result?.rejected) ? result.rejected : [];
+    return Response.json({
+      saved: Number(result?.saved ?? 0),
+      rejected: rejected.map((r: any) => ({ clientId: r?.client_id ?? null, reason: String(r?.reason ?? 'rejected') })),
+    });
+  }
+  if (req.method === 'DELETE') {
+    const threadId = params.get('threadId');
+    if (threadId !== null) {
+      const id = uuidOf(threadId);
+      if (!id) throw fail('invalid_id', 400);
+      await deleteThread(d, userId, id);
+    } else {
+      await deleteEverything(d, userId);
+    }
+    return Response.json({ deleted: true });
+  }
+  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}
+
+async function threadPage(d: CoachDeps, userId: string, rawId: string, params: URLSearchParams): Promise<Response> {
+  const threadId = uuidOf(rawId);
+  if (!threadId) throw fail('invalid_id', 400);
+  const limit = clampInt(params.get('limit') ?? '60', 1, 200, 60);
+  const cursor = params.get('cursor') ? decodeCursor(params.get('cursor')) : null;
+  const rows = await d.rest.select('coach_messages',
+    `user_id=eq.${userId}&thread_id=eq.${threadId}${cursor ? olderThan(cursor) : ''}`
+    + `&order=created_at.desc,id.desc&limit=${limit + 1}&select=${MESSAGE_COLUMNS}`);
+  const page = rows.slice(0, limit);
+  const oldest = page[page.length - 1];
+  const hasMore = rows.length > limit;
+  return Response.json({
+    // A new shape, so its timestamps are ISO strings; the legacy read above keeps the database rendering.
+    messages: page.reverse().map((r: any) => ({ ...publicMessage(r), threadId: r.thread_id ?? threadId, createdAt: iso(r.created_at) })),
+    hasMore, nextCursor: hasMore && oldest ? encodeCursor(oldest.created_at, oldest.id) : null,
+  });
+}
+
+/**
+ * coach_thread_delete_v1 tombstones and deletes under the owner's thread lock, which coach_messages_save_v1 takes
+ * too, so an outbox save still in flight can never bring the thread back. Messages go with their thread.
+ */
+async function deleteThread(d: CoachDeps, userId: string, threadId: string): Promise<void> {
+  await d.rest.rpc('coach_thread_delete_v1', { p_user: userId, p_thread: threadId });
+}
+
+/** Every thread and every thread-less message, in the same locked call; then the caches that name them. */
+async function deleteEverything(d: CoachDeps, userId: string): Promise<void> {
+  await d.rest.rpc('coach_thread_delete_v1', { p_user: userId, p_thread: null });
+  // Starters can point at deleted chats and searches name them; both go with the history.
+  await d.rest.patch('coach_user_state', {
+    suggestions: [], suggestions_fingerprint: null, suggestions_at: null, recent_searches: [], updated_at: new Date(d.now()).toISOString(),
+  }, `user_id=eq.${userId}`);
+}
+
+// ------------------------------------------------------------------------------------------------
+// Threads
+// ------------------------------------------------------------------------------------------------
+
+export async function loadThread(d: CoachDeps, userId: string, threadId: string, columns = THREAD_COLUMNS): Promise<any | null> {
+  const [row] = await d.rest.select('coach_threads', `user_id=eq.${userId}&id=eq.${threadId}&select=${columns}`);
+  return row ?? null;
+}
+
+function titleInput(v: unknown): string {
+  const title = collapse(v);
+  if (typeof v !== 'string' || title.length < 1 || title.length > 120) throw fail('invalid_thread', 400);
+  return title;
+}
+
+async function ownedFolder(d: CoachDeps, userId: string, folderId: string): Promise<void> {
+  const rows = await d.rest.select('coach_folders', `user_id=eq.${userId}&id=eq.${folderId}&select=id`);
+  if (!rows.length) throw fail('folder_not_found', 404);
+}
+
+export async function threadsRoute(req: Request, userId: string, sub: string[], d: CoachDeps): Promise<Response> {
+  if (sub.length === 0) {
+    if (req.method === 'GET') {
+      const params = new URL(req.url).searchParams;
+      const q = collapse(params.get('q')).slice(0, 200);
+      return q ? await searchThreads(d, userId, q, params) : await listThreads(d, userId, params);
+    }
+    if (req.method === 'POST') return await createThread(req, userId, d);
+    return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+  }
+  if (sub.length !== 1) return Response.json({ error: 'not_found' }, { status: 404 });
+  const id = uuidOf(sub[0]);
+  if (!id) throw fail('invalid_id', 400);
+  if (req.method === 'GET') {
+    const [row, view] = await Promise.all([loadThread(d, userId, id), threadView(d, userId)]);
+    if (!row) throw fail('thread_not_found', 404);
+    return Response.json({ thread: publicThread(row, view) });
+  }
+  if (req.method === 'PATCH') {
+    const body = await readJson(req, SMALL_BODY_BYTES);
+    if (!isObject(body)) throw fail('invalid_thread', 400);
+    const patch: Record<string, unknown> = {};
+    if ('title' in body) {
+      patch.title = titleInput(body.title);
+      patch.title_source = 'user';
+    }
+    if ('folderId' in body) {
+      if (body.folderId === null) patch.folder_id = null;
+      else {
+        const folderId = uuidOf(body.folderId);
+        if (!folderId) throw fail('invalid_thread', 400);
+        await ownedFolder(d, userId, folderId);
+        patch.folder_id = folderId;
+      }
+    }
+    if ('pinned' in body) {
+      if (typeof body.pinned !== 'boolean') throw fail('invalid_thread', 400);
+      patch.pinned = body.pinned;
+    }
+    if (!Object.keys(patch).length) throw fail('invalid_thread', 400);
+    patch.updated_at = new Date(d.now()).toISOString();
+    const [row] = await d.rest.patch('coach_threads', patch, `user_id=eq.${userId}&id=eq.${id}&select=${THREAD_COLUMNS}`) ?? [];
+    if (!row) throw fail('thread_not_found', 404);
+    return Response.json({ thread: publicThread(row, await threadView(d, userId)) });
+  }
+  if (req.method === 'DELETE') {
+    await deleteThread(d, userId, id);
+    return Response.json({ deleted: true });
+  }
+  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}
+
+/** Filed chats the unfiltered first page of GET threads carries beyond its date page (finding 9). */
+const FILED_ON_FIRST_PAGE = 200;
+
+async function listThreads(d: CoachDeps, userId: string, params: URLSearchParams): Promise<Response> {
+  const limit = clampInt(params.get('limit') ?? '50', 1, 100, 50);
+  const folder = params.get('folderId');
+  let inFolder = '';
+  if (folder === 'none') inFolder = '&folder_id=is.null';
+  else if (folder !== null && folder !== '') {
+    const folderId = uuidOf(folder);
+    if (!folderId) throw fail('invalid_id', 400);
+    inFolder = `&folder_id=eq.${folderId}`;
+  }
+  const cursor = params.get('cursor') ? decodeCursor(params.get('cursor'), true) : null;
+  const base = `user_id=eq.${userId}${inFolder}`;
+  const order = 'order=last_message_at.desc.nullslast,id.desc';
+  // Pinned threads lead the first page; the cursor walks the unpinned ones only. The unfiltered first page also
+  // carries the chats filed in a folder (up to FILED_ON_FIRST_PAGE) that are not on it already: the sidebar
+  // builds each folder and its count from the loaded list, and a chat moved into a folder keeps its date, so
+  // an older one would otherwise be missing from its folder until the date list was scrolled that far. Later
+  // pages may list one of them again; the phone keeps one row per id.
+  const [pinned, rows, filed, folders, view] = await Promise.all([
+    cursor ? Promise.resolve([]) : d.rest.select('coach_threads', `${base}&pinned=is.true&${order}&limit=100&select=${THREAD_COLUMNS}`),
+    d.rest.select('coach_threads', `${base}&pinned=is.false${cursor ? threadsAfter(cursor) : ''}&${order}&limit=${limit + 1}&select=${THREAD_COLUMNS}`),
+    cursor || inFolder ? Promise.resolve([]) : d.rest.select('coach_threads',
+      `${base}&pinned=is.false&folder_id=not.is.null&${order}&limit=${FILED_ON_FIRST_PAGE}&select=${THREAD_COLUMNS}`),
+    d.rest.select('coach_folders', `user_id=eq.${userId}&order=sort_order.asc,created_at.asc,id.asc&limit=500&select=${FOLDER_COLUMNS}`),
+    threadView(d, userId),
+  ]);
+  const page = rows.slice(0, limit);
+  const last = page[page.length - 1];
+  const hasMore = rows.length > limit;
+  const onPage = new Set(page.map((r: any) => String(r.id)));
+  return Response.json({
+    threads: [...pinned, ...page, ...filed.filter((r: any) => !onPage.has(String(r.id)))].map((r: any) => publicThread(r, view)),
+    folders: folders.map(publicFolder),
+    hasMore, nextCursor: hasMore && last ? encodeCursor(last.last_message_at ?? null, last.id) : null,
+  });
+}
+
+async function searchThreads(d: CoachDeps, userId: string, q: string, params: URLSearchParams): Promise<Response> {
+  const limit = clampInt(params.get('limit') ?? '20', 1, 30, 20);
+  const record = params.get('record') === '1' && q.length >= 3;
+  // Light: the sidebar shows threads and their snippets only, never the hit list, counts or months.
+  const [result, view] = await Promise.all([
+    d.rest.rpc('coach_search_v1', { p_user: userId, p_query: q, p_limit: 1, p_thread_limit: limit, p_light: true }),
+    threadView(d, userId),
+    record ? recordSearch(d, userId, q) : Promise.resolve(),
+  ]);
+  // A query with no searchable words would browse by date; the sidebar wants matches only.
+  const hits: any[] = Array.isArray(result?.terms) && result.terms.length && Array.isArray(result?.threads) ? result.threads : [];
+  const ids = hits.map((h) => uuidOf(h?.thread_id)).filter((id): id is string => !!id);
+  const rows = ids.length
+    ? await d.rest.select('coach_threads', `user_id=eq.${userId}&id=in.(${ids.join(',')})&select=${THREAD_COLUMNS}`)
+    : [];
+  const byId = new Map(rows.map((r: any) => [String(r.id).toLowerCase(), r]));
+  const threads = hits
+    .map((h) => {
+      const row = byId.get(String(h?.thread_id ?? '').toLowerCase());
+      return row ? publicThread(row, view, typeof h.snippet === 'string' ? h.snippet : null) : null;
+    })
+    .filter(Boolean);
+  return Response.json({ threads, query: q });
+}
+
+/** Newest first, case-insensitively unique, at most 10. Best effort: a lost race only drops one entry. */
+async function recordSearch(d: CoachDeps, userId: string, q: string): Promise<void> {
+  try {
+    const [state] = await d.rest.select('coach_user_state', `user_id=eq.${userId}&select=recent_searches`);
+    const prior: string[] = Array.isArray(state?.recent_searches) ? state.recent_searches.filter((s: unknown) => typeof s === 'string') : [];
+    const entry = q.slice(0, 100);
+    const next = [entry, ...prior.filter((s) => s.toLowerCase() !== entry.toLowerCase())].slice(0, 10);
+    await d.rest.upsert('coach_user_state', { user_id: userId, recent_searches: next, updated_at: new Date(d.now()).toISOString() },
+      { onConflict: 'user_id', prefer: 'resolution=merge-duplicates,return=minimal' });
+  } catch { /* recent searches only flavour the starters */ }
+}
+
+async function createThread(req: Request, userId: string, d: CoachDeps): Promise<Response> {
+  const body = await readJson(req, SMALL_BODY_BYTES);
+  if (!isObject(body)) throw fail('invalid_thread', 400);
+  const id = uuidOf(body.id);
+  if (!id) throw fail('invalid_thread', 400);
+  const title = body.title == null ? null : titleInput(body.title);
+  let folderId: string | null = null;
+  if (body.folderId != null) {
+    folderId = uuidOf(body.folderId);
+    if (!folderId) throw fail('invalid_thread', 400);
+  }
+  const [[existing], tombstones, view] = await Promise.all([
+    d.rest.select('coach_threads', `id=eq.${id}&select=user_id,${THREAD_COLUMNS}`),
+    d.rest.select('coach_thread_tombstones', `user_id=eq.${userId}&thread_id=eq.${id}&select=thread_id`),
+    threadView(d, userId),
+  ]);
+  if (tombstones.length) throw fail('thread_deleted', 410);
+  if (existing) {
+    if (existing.user_id !== userId) throw fail('thread_conflict', 409);
+    return Response.json({ thread: publicThread(existing, view) });
+  }
+  if (folderId) await ownedFolder(d, userId, folderId);
+  const stamp = new Date(d.now()).toISOString();
+  try {
+    // A client-supplied title is provisional, like the one a first message carries: the model may rename it.
+    const [row] = await d.rest.request('coach_threads', {
+      method: 'POST', query: `select=${THREAD_COLUMNS}`,
+      body: { id, user_id: userId, title, title_source: title ? 'fallback' : 'none', folder_id: folderId, origin: 'app', created_at: stamp, updated_at: stamp },
+    });
+    return Response.json({ thread: publicThread(row, view) });
+  } catch (err: any) {
+    if (err?.status !== 409) throw err;
+    // Lost a race with a message save or another device: the winner decides.
+    const [row] = await d.rest.select('coach_threads', `id=eq.${id}&select=user_id,${THREAD_COLUMNS}`);
+    if (!row || row.user_id !== userId) throw fail('thread_conflict', 409);
+    return Response.json({ thread: publicThread(row, view) });
+  }
+}
+
+// ------------------------------------------------------------------------------------------------
+// Folders
+// ------------------------------------------------------------------------------------------------
+
+function folderName(v: unknown): string {
+  const name = collapse(v);
+  if (typeof v !== 'string' || name.length < 1 || name.length > 60) throw fail('invalid_folder', 400);
+  return name;
+}
+
+export async function foldersRoute(req: Request, userId: string, sub: string[], d: CoachDeps): Promise<Response> {
+  const owner = `user_id=eq.${userId}`;
+  if (sub.length === 0) {
+    if (req.method === 'GET') {
+      const rows = await d.rest.select('coach_folders', `${owner}&order=sort_order.asc,created_at.asc,id.asc&limit=500&select=${FOLDER_COLUMNS}`);
+      return Response.json({ folders: rows.map(publicFolder) });
+    }
+    if (req.method === 'POST') {
+      const body = await readJson(req, SMALL_BODY_BYTES);
+      if (!isObject(body)) throw fail('invalid_folder', 400);
+      const id = uuidOf(body.id);
+      if (!id) throw fail('invalid_folder', 400);
+      const name = folderName(body.name);
+      const sortOrder = clampInt(body.sortOrder, -1_000_000, 1_000_000, 0);
+      const [existing] = await d.rest.select('coach_folders', `id=eq.${id}&select=user_id,${FOLDER_COLUMNS}`);
+      if (existing) {
+        if (existing.user_id !== userId) throw fail('folder_conflict', 409);
+        return Response.json({ folder: publicFolder(existing) });
+      }
+      const stamp = new Date(d.now()).toISOString();
+      try {
+        const [row] = await d.rest.request('coach_folders', {
+          method: 'POST', query: `select=${FOLDER_COLUMNS}`,
+          body: { id, user_id: userId, name, sort_order: sortOrder, created_at: stamp, updated_at: stamp },
+        });
+        return Response.json({ folder: publicFolder(row) });
+      } catch (err: any) {
+        if (err?.status !== 409) throw err;
+        const [row] = await d.rest.select('coach_folders', `id=eq.${id}&select=user_id,${FOLDER_COLUMNS}`);
+        if (!row || row.user_id !== userId) throw fail('folder_conflict', 409);
+        return Response.json({ folder: publicFolder(row) });
+      }
+    }
+    return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+  }
+  if (sub.length !== 1) return Response.json({ error: 'not_found' }, { status: 404 });
+  const id = uuidOf(sub[0]);
+  if (!id) throw fail('invalid_id', 400);
+  if (req.method === 'PATCH') {
+    const body = await readJson(req, SMALL_BODY_BYTES);
+    if (!isObject(body)) throw fail('invalid_folder', 400);
+    const patch: Record<string, unknown> = {};
+    if ('name' in body) patch.name = folderName(body.name);
+    if ('sortOrder' in body) {
+      if (typeof body.sortOrder !== 'number' || !Number.isFinite(body.sortOrder)) throw fail('invalid_folder', 400);
+      patch.sort_order = clampInt(body.sortOrder, -1_000_000, 1_000_000, 0);
+    }
+    if (!Object.keys(patch).length) throw fail('invalid_folder', 400);
+    patch.updated_at = new Date(d.now()).toISOString();
+    const [row] = await d.rest.patch('coach_folders', patch, `${owner}&id=eq.${id}&select=${FOLDER_COLUMNS}`) ?? [];
+    if (!row) throw fail('folder_not_found', 404);
+    return Response.json({ folder: publicFolder(row) });
+  }
+  if (req.method === 'DELETE') {
+    // Its threads stay and fall back to no folder (on delete set null).
+    await d.rest.delete('coach_folders', `${owner}&id=eq.${id}`);
+    return Response.json({ deleted: true });
+  }
+  return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}

@@ -189,6 +189,18 @@ const SERVICE_ONLY_FUNCTIONS = [
   "metric_insight_renew_v1",
   "metric_insight_fail_v1",
   "metric_insight_publish_v1",
+  // Coach threads and memory (20261007160000_coach_threads_memory.sql): the coach function's RPCs.
+  "coach_take_utility_quota",
+  "coach_add_utility_tokens",
+  "coach_messages_save_v1",
+  "coach_thread_delete_v1",
+  "coach_search_v1",
+  "coach_memories_ranked_v1",
+  "coach_context_manifest_v1",
+  "coach_thread_claim_v1",
+  "coach_thread_publish_v1",
+  "coach_memory_apply_v1",
+  "coach_consolidation_claim_v1",
 ];
 
 Deno.test({

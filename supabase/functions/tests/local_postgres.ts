@@ -11,8 +11,8 @@ const decoder = new TextDecoder();
 
 export async function startLocalPostgres({ scalarProjections = false, auxiliaryIdentity = false,
   appendCompatibility = false, installationLifecycle = false, objectRepresentations = false,
-  authProvisioning = false, statementTimeoutMs = 0, fullChain = false }:
-  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; statementTimeoutMs?: number; fullChain?: boolean } = {}) {
+  authProvisioning = false, coachMemory = false, statementTimeoutMs = 0, fullChain = false }:
+  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; coachMemory?: boolean; statementTimeoutMs?: number; fullChain?: boolean } = {}) {
   if (!Number.isInteger(statementTimeoutMs) || statementTimeoutMs < 0 || statementTimeoutMs > 600000) {
     throw new Error("invalid_fixture_statement_timeout");
   }
@@ -117,9 +117,23 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
         if (name === '20260918010000_production_scoring_durability.sql') migrations.push('20260921060000_production_intake_durability.sql');
       }
     }
-    for (const migration of migrations) {
+    const apply = (migration: string) => {
       const file = new URL(`../../migrations/${migration}`, import.meta.url);
-      await run(`${bin}/psql`, ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', base, '-U', 'edge_test', '-d', 'postgres', '-f', decodeURIComponent(file.pathname)]);
+      return run(`${bin}/psql`, ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', base, '-U', 'edge_test', '-d', 'postgres', '-f', decodeURIComponent(file.pathname)]);
+    };
+    for (const migration of migrations) await apply(migration);
+    if (coachMemory) {
+      // Coach threads and memory (docs/COACH_MEMORY.md). Applied under Supabase's default privileges, which
+      // hand every new table, sequence and function to anon/authenticated, so the migrations' own revokes are
+      // what keeps clients out here too.
+      await sql(`alter default privileges in schema public grant all on tables to anon, authenticated;
+        alter default privileges in schema public grant all on sequences to anon, authenticated;
+        alter default privileges in schema public grant execute on functions to anon, authenticated;`);
+      await apply('20260930235900_coach_harness.sql');
+      // Production has this index from 20260824185725_post_persistence_indexes.sql (not applied here); the coach
+      // retention prune and coach_search_v1's light pool read the owner's messages newest/oldest first through it.
+      await sql(`create index if not exists coach_messages_user_idx on public.coach_messages (user_id, created_at desc);`);
+      await apply('20261007160000_coach_threads_memory.sql');
     }
     await sql(`insert into auth.users(id) values ('${USER_A}'),('${USER_B}');`);
     const jwtSecret = 'disposable-edge-test-only-' + crypto.randomUUID();

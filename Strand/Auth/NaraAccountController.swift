@@ -96,6 +96,11 @@ public final class NaraAccountController: ObservableObject {
     public var onReady: (@MainActor (CloudPushIdentity) async -> Void)?
     /// Called after the account's runtime was stopped (cancel account-bound work).
     public var onAccountEnded: (@MainActor () async -> Void)?
+    /// Deletes a signed-out account's Sana caches and unsent turns from this phone (`docs/COACH_MEMORY.md` §7.1).
+    /// Runs on sign-out only, never on an account switch. Replaceable in tests.
+    public var removeLocalChats: @MainActor (String) async -> Void = { owner in
+        await CoachChatViewModel.removeAccountData(ownerId: owner)
+    }
 
     private var phaseSubscription: AnyCancellable?
     private var lastPhase: NaraAuthService.Phase = .restoring
@@ -267,7 +272,8 @@ public final class NaraAccountController: ObservableObject {
             scheduleRetry(after: 15)
             return
         }
-        if let owner = store.currentOwnerId() {
+        let owner = store.currentOwnerId()
+        if let owner {
             // Clear the pointer and the credential first: nothing may restart this account's upload path
             // while the runtime is still winding down.
             store.removeCredential(forOwner: owner)
@@ -275,6 +281,8 @@ public final class NaraAccountController: ObservableObject {
             RawDataSessionStore.clearPersistedCaptureIntent()
         }
         await teardownRuntime()
+        // The account is signed out on this phone: its chats leave the device with it.
+        if let owner { await removeLocalChats(owner) }
         ownsLocalHistory = true
         consecutiveFailures = 0
         consecutiveRejections = 0
@@ -510,11 +518,14 @@ public final class NaraAccountController: ObservableObject {
     public func signOut() async {
         signOutInFlight = true
         await settle()
+        let owner = runtime.runningScope?.ownerId ?? store.currentOwnerId()
         if let owner = runtime.runningScope?.ownerId { store.removeCredential(forOwner: owner) }
         store.signOutCurrentOwner()
         // A signed-out install must not re-arm raw-IMU capture on the next connect.
         RawDataSessionStore.clearPersistedCaptureIntent()
         await teardownRuntime()
+        // Sana's caches and unsent turns for the account (threads, messages, memories in manifests, the outbox).
+        if let owner { await removeLocalChats(owner) }
         await auth.signOut()
         signOutInFlight = false
         requestReconcile()
