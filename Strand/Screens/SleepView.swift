@@ -316,7 +316,11 @@ struct SleepView: View {
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
                 Group {
-                    if hasTimeline {
+                    if !repo.loaded {
+                        // The chart is a Canvas, so the scaffold's redaction cannot grey it. Until the first
+                        // load lands, show the placeholder rather than stage colours read off half the data.
+                        ChartPlaceholder(height: Self.compactChartHeight)
+                    } else if hasTimeline {
                         NightTimelineChart(
                             timeline: NightTimeline(onset: night.onsetDate,
                                                     end: Date(timeIntervalSince1970: TimeInterval(night.session.endTs)),
