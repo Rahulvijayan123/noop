@@ -49,21 +49,11 @@ final class QuietMotionCoverageTests: XCTestCase {
         // shipping call site of it is censused separately by `testBreatheCallSitesConsultTheGate`.
         "Packages/StrandDesign/Sources/StrandDesign/Motion.swift":
             "declares the breathe primitive; call sites are censused separately",
-        // TEMPORARY, owned by the Sana (Coach) session: the chart build-up reveal and the two loader dot
-        // fields predate the gate and were left ungated on that branch. They only run while a Sana answer
-        // or chart is loading. Remove these two entries once they read `motion.poseStill(reduceMotion)`
-        // (and the reveal draws its resting frame without a paused TimelineView).
-        "StrandiOS/Coach/ImageFXMosaic.swift":
-            "Sana chart build-up reveal; gate pending in the Sana session (temporary)",
-        "StrandiOS/Coach/CoachVizViews.swift":
-            "Sana loader dot fields; gate pending in the Sana session (temporary)",
     ]
 
     /// Files allowed to keep a PAUSED animation timeline for now, each with the reason.
-    private static let pausedTimelineExemptions: [String: String] = [
-        "StrandiOS/Coach/ImageFXMosaic.swift":
-            "Sana chart build-up reveal pauses its clock when idle; owned by the Sana session (temporary)",
-    ]
+    /// (The Sana chart reveal that paused its clock was removed with its Metal mosaic; nothing is exempt now.)
+    private static let pausedTimelineExemptions: [String: String] = [:]
 
     private func repoRoot() throws -> URL {
         // .../Packages/StrandDesign/Tests/StrandDesignTests/QuietMotionCoverageTests.swift -> repo root

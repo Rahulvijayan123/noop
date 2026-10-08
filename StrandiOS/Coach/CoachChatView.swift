@@ -11,6 +11,7 @@ struct CoachChatView: View {
     @EnvironmentObject private var repo: Repository
     @EnvironmentObject private var coachEngine: AICoachEngine
     @EnvironmentObject private var profile: ProfileStore
+    @EnvironmentObject private var router: NavRouter
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
     /// True while the list should chase new content. Only the wearer dragging the list upward turns it off:
@@ -18,19 +19,34 @@ struct CoachChatView: View {
     /// "I scrolled away" from "the reply just got taller".
     @State private var following = true
     @State private var throttle = CoachScrollThrottle()
+    @State private var confirmingClear = false
+
+    /// The reachability check said Sana cannot answer. Sending is off while it does (a send would only fail
+    /// into the error banner); the draft field stays editable so nothing typed is lost.
+    private var offlineReason: String? {
+        if case .offline(let reason) = vm.connection { return reason }
+        return nil
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             if vm.messages.isEmpty { welcome } else { messageList }
-            if let error = vm.errorMessage { errorBanner(error) }
+            if let error = vm.errorMessage {
+                errorBanner(error)
+            } else if let reason = offlineReason {
+                offlineNotice(reason)
+            }
             CoachComposer(vm: vm, isGenerating: vm.isGenerating, pendingImage: vm.pendingImage,
-                          wasScrubbed: vm.wasScrubbed, focused: $inputFocused)
+                          wasScrubbed: vm.wasScrubbed, isOffline: offlineReason != nil, focused: $inputFocused)
         }
-        .background(alignment: .top) { liquidScaffoldSky().ignoresSafeArea(edges: .top) }
+        .background(StrandPalette.surfaceBase.ignoresSafeArea())
         .task {
             vm.attach(repo: repo, engine: coachEngine, profile: profile)
             await vm.start()
+            #if DEBUG
+            if CoachChatViewModel.demoTranscriptRequested { vm.loadDemoTranscript() }
+            #endif
         }
         // A question handed over by the Today launcher; cleared before sending so a rebuild can't send it twice.
         .task(id: coachEngine.pendingPrompt) {
@@ -39,6 +55,12 @@ struct CoachChatView: View {
             vm.attach(repo: repo, engine: coachEngine, profile: profile)
             vm.send(prompt)
         }
+        .confirmationDialog("Clear this conversation?", isPresented: $confirmingClear, titleVisibility: .visible) {
+            Button("Clear conversation", role: .destructive) { Task { await vm.clearConversation() } }
+            Button("Cancel", role: .cancel) { }
+        } message: {
+            Text("Sana keeps what it has remembered about you.")
+        }
         #if DEBUG
         .onAppear { if CommandLine.arguments.contains("--coach-focus") { inputFocused = true } }
         #endif
@@ -46,78 +68,77 @@ struct CoachChatView: View {
 
     // MARK: Header
 
+    /// The tab-root header, drawn the same way `ScreenScaffold` draws it (title1 at the page margin, the
+    /// settings button trailing). Sana cannot use the scaffold itself: its composer is pinned below a
+    /// scrolling list.
     private var header: some View {
-        HStack(alignment: .center, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text("Sana").font(StrandFont.rounded(28)).foregroundStyle(StrandPalette.textPrimary)
-                Text("Your health assistant").font(StrandFont.caption).foregroundStyle(StrandPalette.textTertiary)
-            }
+        HStack(alignment: .center, spacing: NoopMetrics.space2) {
+            Text("Sana")
+                .font(StrandFont.title1)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
-            BrandMark(size: 40, style: .tile)
+            if !vm.messages.isEmpty {
+                CoachHeaderButton(systemImage: "square.and.pencil", label: "New chat") { confirmingClear = true }
+            }
+            HeaderSettingsButton()
         }
-        .padding(.horizontal, NoopMetrics.screenPadding)
-        .padding(.top, 14)
-        .padding(.bottom, 8)
+        .frame(minHeight: NoopMetrics.minimumHitTarget)
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.top, NoopMetrics.space4)
+        .padding(.bottom, NoopMetrics.space2)
+        // A conversation scrolls under the pinned header; a hairline gives it a clean edge (an overlay, so
+        // the header is the same height with or without it).
+        .overlay(alignment: .bottom) {
+            if !vm.messages.isEmpty {
+                Rectangle().fill(StrandPalette.hairline).frame(height: NoopMetrics.hairlineWidth)
+            }
+        }
     }
 
     // MARK: Empty state
 
     private var welcome: some View {
-        GeometryReader { geo in
-            ScrollView(showsIndicators: false) {
-                VStack(spacing: 46) {
-                    VStack(spacing: 8) {
-                        Text("Hi, I'm Sana")
-                            .font(StrandFont.rounded(24))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Ask me anything about your health.")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    .multilineTextAlignment(.center)
-
-                    if case .offline(let reason) = vm.connection { offlineCard(reason) }
-
-                    CoachSuggestionStack(prompts: suggestions) { vm.send($0) }
-                }
-                .padding(.horizontal, NoopMetrics.screenPadding)
-                .padding(.top, 12)
-                .padding(.bottom, 84)
-                .frame(maxWidth: .infinity, minHeight: geo.size.height)
+        ScrollView(showsIndicators: false) {
+            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+                CoachPromptList(prompts: suggestions, isEnabled: offlineReason == nil) { vm.send($0) }
+                disclaimer
             }
-            .scrollBounceBehavior(.basedOnSize)
-            .scrollDismissesKeyboard(.immediately)
+            .padding(.horizontal, NoopMetrics.screenHPadding)
+            .padding(.top, NoopMetrics.space3)
+            .padding(.bottom, NoopMetrics.space4)
+            .frame(maxWidth: 700, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
+        .scrollBounceBehavior(.basedOnSize)
+        .scrollDismissesKeyboard(.interactively)
     }
 
     private var suggestions: [String] {
         Array(CoachPrompts.suggestions.prefix(4))
     }
 
-    private func offlineCard(_ reason: String) -> some View {
-        VStack(spacing: 10) {
-            Image(systemName: "wifi.slash").font(.system(size: 24)).foregroundStyle(StrandPalette.textTertiary)
-            Text("Sana unavailable").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-            Text(reason)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .multilineTextAlignment(.center)
-                .fixedSize(horizontal: false, vertical: true)
-            Button {
-                Task { await vm.start() }
-            } label: {
-                Label("Try again", systemImage: "arrow.clockwise")
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.accent)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(StrandPalette.accent.opacity(0.12), in: Capsule())
-            }
-            .buttonStyle(.plain)
+    private var disclaimer: some View {
+        Text("General wellness info, not medical advice.")
+            .font(StrandFont.footnote)
+            .foregroundStyle(StrandPalette.textTertiary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, NoopMetrics.space1)
+    }
+
+    /// Why Sana cannot answer, with the one action that can fix it: Settings when cloud mode is off (trying
+    /// again cannot help), otherwise a fresh reachability check.
+    private func offlineNotice(_ reason: String) -> some View {
+        let notConfigured = reason == CoachAPIError.notConfigured.errorDescription
+        let action: InlineNotice.Action
+        if notConfigured {
+            action = InlineNotice.Action("Open Settings", perform: { router.openSettings() })
+        } else {
+            action = InlineNotice.Action("Try again", perform: { Task { await vm.start() } })
         }
-        .padding(18)
-        .frame(maxWidth: .infinity)
-        .frostedCardSurface(cornerRadius: 16)
+        return InlineNotice(reason, title: String(localized: "Sana unavailable"), tone: .neutral, action: action)
+            .padding(.horizontal, NoopMetrics.screenHPadding)
+            .padding(.bottom, NoopMetrics.space2)
     }
 
     // MARK: Messages
@@ -125,23 +146,26 @@ struct CoachChatView: View {
     private var messageList: some View {
         ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: 14) {
+                LazyVStack(alignment: .leading, spacing: NoopMetrics.space5) {
                     ForEach(vm.messages) { message in
                         CoachBubble(message: message,
                                     phase: message.isStreaming ? vm.phase : .idle,
-                                    phaseLabel: message.isStreaming ? vm.phase.label : "",
                                     onRetry: message.didStall ? { vm.retryStalled() } : nil,
                                     followUps: message.id == vm.messages.last?.id && !vm.isGenerating
                                         ? CoachFollowUps.forAnswer(message.content) : [],
+                                    followUpsEnabled: offlineReason == nil,
                                     onFollowUp: { vm.send($0) })
                             .id(message.id)
                     }
+                    disclaimer
                     Color.clear.frame(height: 1).id("bottom")
                         .onAppear { following = true }
                 }
-                .padding(.horizontal, 12)
-                .padding(.top, 8)
-                .padding(.bottom, 6)
+                .padding(.horizontal, NoopMetrics.screenHPadding)
+                .padding(.top, NoopMetrics.space3)
+                .padding(.bottom, NoopMetrics.space2)
+                .frame(maxWidth: 700, alignment: .leading)
+                .frame(maxWidth: .infinity)
             }
             .scrollDismissesKeyboard(.interactively)
             .defaultScrollAnchor(.bottom)
@@ -184,25 +208,54 @@ struct CoachChatView: View {
     }
 
     private func errorBanner(_ message: String) -> some View {
-        HStack(alignment: .top, spacing: 10) {
-            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(StrandPalette.statusCritical).accessibilityHidden(true)
+        HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space3) {
+            Image(systemName: "exclamationmark.triangle")
+                .font(StrandFont.icon(.row))
+                .foregroundStyle(StrandPalette.statusCritical)
+                .accessibilityHidden(true)
             Text(message)
                 .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.statusCritical)
+                .foregroundStyle(StrandPalette.textPrimary)
                 .fixedSize(horizontal: false, vertical: true)
-            Spacer(minLength: 0)
+                .frame(maxWidth: .infinity, alignment: .leading)
             Button { vm.errorMessage = nil } label: {
-                Image(systemName: "xmark").font(.system(size: 11, weight: .bold)).foregroundStyle(StrandPalette.textTertiary)
+                Image(systemName: "xmark")
+                    .font(StrandFont.icon(.inline))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(width: NoopMetrics.minimumHitTarget, height: 20)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Dismiss")
         }
-        .padding(12)
-        .frostedCardSurface(cornerRadius: 14)
-        .padding(.horizontal, 12)
-        .padding(.bottom, 6)
+        .padding(.leading, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space3)
+        .background(NoopPanelSurface())
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.bottom, NoopMetrics.space2)
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Error: \(message)")
+    }
+}
+
+/// A round header control, the same size and fill as the settings button beside it.
+private struct CoachHeaderButton: View {
+    let systemImage: String
+    let label: LocalizedStringKey
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Image(systemName: systemImage)
+                .font(StrandFont.icon(.inline).weight(.medium))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: 36, height: 36)
+                .background(Circle().fill(StrandPalette.surfaceInset))
+                .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel(Text(label))
     }
 }
 
@@ -216,6 +269,7 @@ private struct CoachComposer: View {
     let isGenerating: Bool
     let pendingImage: Data?
     let wasScrubbed: Bool
+    let isOffline: Bool
     var focused: FocusState<Bool>.Binding
 
     @State private var text = ""
@@ -224,37 +278,40 @@ private struct CoachComposer: View {
     @State private var showCamera = false
     @State private var showFiles = false
 
-    private var canSend: Bool { !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingImage != nil }
+    private static let radius: CGFloat = 22
+
+    private var canSend: Bool {
+        !isOffline && (!text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || pendingImage != nil)
+    }
 
     var body: some View {
-        VStack(spacing: 6) {
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             if wasScrubbed {
                 Label("Personal details were anonymized before sending", systemImage: "lock.shield")
-                    .font(StrandFont.caption)
+                    .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .frame(maxWidth: .infinity, alignment: .leading)
-                    .padding(.horizontal, 6)
+                    .padding(.horizontal, NoopMetrics.space1)
             }
-            VStack(spacing: 8) {
+            VStack(spacing: NoopMetrics.space2) {
                 if let data = pendingImage, let image = CoachImage.thumbnail(for: data, maxDimension: 56) {
                     attachment(image)
                 }
-                HStack(alignment: .bottom, spacing: 4) {
+                HStack(alignment: .bottom, spacing: NoopMetrics.space1) {
                     photoMenu
                     field
                     sendOrStop
                 }
             }
-            .padding(6)
-            .background(NoopPanelSurface(cornerRadius: 26))
-            .overlay(RoundedRectangle(cornerRadius: 26, style: .continuous)
+            .padding(NoopMetrics.space1)
+            .background(NoopPanelSurface(cornerRadius: Self.radius))
+            .overlay(RoundedRectangle(cornerRadius: Self.radius, style: .continuous)
                 .strokeBorder(focused.wrappedValue ? StrandPalette.focusRing : StrandPalette.hairline, lineWidth: 1))
-            Text("General wellness info, not medical advice.")
-                .font(.system(size: 10, design: .rounded))
-                .foregroundStyle(StrandPalette.textTertiary)
         }
-        .padding(.horizontal, 10)
-        .padding(.bottom, 4)
+        .padding(.horizontal, NoopMetrics.screenHPadding)
+        .padding(.bottom, NoopMetrics.space2)
+        .frame(maxWidth: 700)
+        .frame(maxWidth: .infinity)
         .onChange(of: photoItem) { _, item in
             guard let item else { return }
             Task {
@@ -275,22 +332,26 @@ private struct CoachComposer: View {
     }
 
     private func attachment(_ image: UIImage) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: NoopMetrics.space3) {
             Image(uiImage: image)
                 .resizable()
                 .scaledToFill()
                 .frame(width: 52, height: 52)
-                .clipShape(RoundedRectangle(cornerRadius: 10, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 10, style: .continuous).strokeBorder(StrandPalette.accent.opacity(0.5), lineWidth: 1))
-            Text("Photo ready to send").font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
-            Spacer()
+                .clipShape(RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous))
+                .accessibilityLabel("Photo to send")
+            Spacer(minLength: 0)
             Button { vm.pendingImage = nil } label: {
-                Image(systemName: "xmark.circle.fill").font(.system(size: 20)).foregroundStyle(StrandPalette.textTertiary)
+                Image(systemName: "xmark.circle.fill")
+                    .font(StrandFont.icon(.row))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
+                    .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Remove photo")
         }
-        .padding(.horizontal, 6)
+        .padding(.leading, NoopMetrics.space1)
+        .padding(.top, NoopMetrics.space1)
     }
 
     private var photoMenu: some View {
@@ -302,7 +363,7 @@ private struct CoachComposer: View {
             Button { showFiles = true } label: { Label("Choose from Files", systemImage: "folder") }
         } label: {
             Image(systemName: pendingImage != nil ? "photo.fill" : "photo")
-                .font(.system(size: 18))
+                .font(StrandFont.icon(.row))
                 .foregroundStyle(pendingImage != nil ? StrandPalette.accent : StrandPalette.textSecondary)
                 .frame(width: 38, height: 38)
         }
@@ -335,21 +396,14 @@ private struct CoachComposer: View {
     private var sendOrStop: some View {
         if isGenerating {
             Button { vm.stop() } label: {
-                Image(systemName: "stop.fill")
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(StrandPalette.statusCritical, in: Circle())
+                roundGlyph("stop.fill")
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Stop generating")
         } else {
             Button(action: commit) {
-                Image(systemName: "arrow.up")
-                    .font(.system(size: 15, weight: .semibold))
-                    .foregroundStyle(.white)
-                    .frame(width: 38, height: 38)
-                    .background(NoopVisualStyle.mintDeep.opacity(canSend ? 1 : 0.55), in: Circle())
+                roundGlyph("arrow.up")
+                    .opacity(canSend ? 1 : NoopButtonMetrics.disabledOpacity)
             }
             .buttonStyle(.plain)
             .disabled(!canSend)
@@ -358,8 +412,18 @@ private struct CoachComposer: View {
         }
     }
 
+    /// The send and stop controls: the one accent action in the composer, its glyph in the on-accent ink.
+    private func roundGlyph(_ systemImage: String) -> some View {
+        Image(systemName: systemImage)
+            .font(StrandFont.icon(.inline).weight(.semibold))
+            .foregroundStyle(StrandPalette.goldDeepText)
+            .frame(width: 38, height: 38)
+            .background(StrandPalette.accent, in: Circle())
+    }
+
     /// Clears the draft only when the view model accepted it, so text survives a send that was refused.
     private func commit() {
+        guard canSend else { return }
         if vm.send(text) { text = "" }
     }
 }

@@ -5,17 +5,10 @@ import Foundation
 
 // MARK: - Xiaomi Smart Band (Mi Band) — per-source page
 //
-// Mirrors AppleHealthView: ONE range control (SegmentedPillControl), a LazyVGrid of
-// uniform StatTiles, then ChartCard sections. Everything reads from the "xiaomi-band"
-// source — the data imported from the Mi Fitness app in Data Sources. ALL history is
-// loaded once and the range control windows it client-side, RELATIVE TO THE LATEST data
-// point (not "now"); a sparse series auto-widens to the smallest range that holds data.
-
-/// Carries the measured chart-column width up to the view so decimation can target pixels.
-private struct ChartWidthKey: PreferenceKey {
-    static var defaultValue: CGFloat = 0
-    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
-}
+// Everything here reads from the "xiaomi-band" source, the data imported from the Mi Fitness app in Data
+// sources: the last night's sleep stages, then one row per series with its latest reading. A row opens that
+// metric's own page (the shared metric page for catalogued keys, the per-source page for distance), which
+// draws the chart that suits it; this page draws no trend charts of its own.
 
 struct XiaomiBandView: View {
     @EnvironmentObject var repo: Repository
@@ -32,20 +25,8 @@ struct XiaomiBandView: View {
 
     @State private var loaded = false
     @State private var series: [String: [(day: String, value: Double)]] = [:]
-    @State private var range: RangeWindow = .quarter
-    @State private var windowCache: [String: ResolvedSeries] = [:]
-
-    /// Measured chart-column width (points). Chart point counts are capped to the chart's pixel
-    /// width — there's nothing to see in more line vertices than horizontal pixels.
-    @State private var chartWidthPts: CGFloat = 320
-    @Environment(\.displayScale) private var displayScale
     /// Imported Mi sleep sessions (carry the per-epoch hypnogram in `stagesJSON`).
     @State private var sleeps: [CachedSleepSession] = []
-
-    private struct ResolvedSeries {
-        var effective: RangeWindow
-        var rows: [(day: String, value: Double)]
-    }
 
     /// The metricSeries keys written by `XiaomiImporter`.
     private static let seriesKeys = [
@@ -55,142 +36,35 @@ struct XiaomiBandView: View {
         "stress", "vitality",
     ]
 
-    private static let dayParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = TimeZone(identifier: "UTC")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-    private static let spanFormatter: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "d MMM yyyy"; return f
-    }()
-    private static let asOfFormatter: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "d MMM"; return f
-    }()
-    private static let groupedIntFmt: NumberFormatter = {
-        let f = NumberFormatter(); f.numberStyle = .decimal; f.maximumFractionDigits = 0; return f
-    }()
-
-    private func date(_ day: String) -> Date? { Self.dayParser.date(from: day) }
-
-    // MARK: - Range control (W / M / 3M / 6M / 1Y / ALL)
-
-    enum RangeWindow: String, CaseIterable, Identifiable {
-        case week, month, quarter, half, year, all
-        var id: String { rawValue }
-        var label: String {
-            switch self {
-            case .week: return String(localized: "W"); case .month: return String(localized: "M"); case .quarter: return String(localized: "3M")
-            case .half: return String(localized: "6M"); case .year: return String(localized: "1Y"); case .all: return String(localized: "ALL")
-            }
-        }
-        var days: Int? {
-            switch self {
-            case .week: return 7; case .month: return 30; case .quarter: return 90
-            case .half: return 180; case .year: return 365; case .all: return nil
-            }
-        }
-        var caption: String {
-            switch self {
-            case .week: return String(localized: "7 DAYS"); case .month: return String(localized: "30 DAYS"); case .quarter: return String(localized: "90 DAYS")
-            case .half: return String(localized: "180 DAYS"); case .year: return String(localized: "365 DAYS"); case .all: return String(localized: "All time")
-            }
-        }
-        var name: String {
-            switch self {
-            case .week: return String(localized: "week"); case .month: return String(localized: "month"); case .quarter: return String(localized: "3 months")
-            case .half: return String(localized: "6 months"); case .year: return String(localized: "year"); case .all: return String(localized: "all history")
-            }
-        }
-        var widening: [RangeWindow] {
-            let order: [RangeWindow] = [.week, .month, .quarter, .half, .year, .all]
-            guard let i = order.firstIndex(of: self) else { return [.all] }
-            return Array(order[i...])
-        }
-    }
-
     var body: some View {
-        ScreenScaffold(title: "Mi Band", subtitle: spanSubtitle.map { "\($0)" },
-                       onRefresh: { await repo.refresh() }, lazy: loaded && hasAnyData) {
-            if loaded && !hasAnyData {
-                ComingSoon(what: "Nothing imported yet. In Data Sources, choose your Mi Fitness export (a .zip of the Mi Fitness app folder from the Files app) to bring in your steps, heart rate, sleep stages, SpO₂ and stress.")
-            } else if !loaded {
-                loadingState
-            } else {
-                // Flat children (no wrapping VStack) so the scaffold's LazyVStack can defer each
-                // off-screen chart card instead of building all ~15 at once.
-                rangeControl
-                    .background(GeometryReader { g in
-                        Color.clear.preference(key: ChartWidthKey.self, value: g.size.width)
-                    })
-                tileGrid
-                ForEach(pageItems) { item in
-                    switch item {
-                    case .header(let title, let overline):
-                        SectionHeader(title, overline: "\(overline)", trailing: range.caption)
-                    case .chart(let title, let key, let gradient, let fallback, let fmt):
-                        chartCard(title: title, key: key, gradient: gradient, fallback: fallback, fmt: fmt)
-                    case .hypnogram:
-                        sleepDetailSection   // lazily-built, positioned just before the Sleep charts
+        MorePaneNavigation {
+            ScreenScaffold(title: "Mi Band", dateLine: spanLine, titleDisplay: .navigationBar,
+                           onRefresh: { await repo.refresh() }) {
+                if loaded && !hasAnyData {
+                    VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                        ComingSoon(what: "Nothing imported yet")
+                        NavigationLink {
+                            DataSourcesView()
+                        } label: {
+                            Label("Open Data sources", systemImage: "tray.and.arrow.down")
+                        }
+                        .buttonStyle(NoopButtonStyle(.secondary))
                     }
+                } else {
+                    if loaded {
+                        sleepDetailSection
+                    } else {
+                        // Last night's card at its final size while the import loads, so the rows below
+                        // do not move down when it lands.
+                        lastNightPlaceholder
+                    }
+                    latestSections
+                        .loadingRedaction(!loaded)
+                        .background { if !loaded { LoadingAccessibilityElement() } }
                 }
             }
         }
         .task(id: repo.refreshSeq) { await load() }
-        .onChangeCompat(of: range) { _ in rebuildWindowCache() }
-        .onPreferenceChange(ChartWidthKey.self) { w in if w > 1 { chartWidthPts = w } }
-    }
-
-    /// The page's chart cards as a flat, lazily-rendered list (headers interleaved). Modelled as
-    /// data so the scaffold's `LazyVStack` + `ForEach` only build the cards actually on screen.
-    private enum PageItem: Identifiable {
-        case header(LocalizedStringKey, String)
-        case chart(LocalizedStringKey, String, Gradient, ClosedRange<Double>, (Double) -> String)
-        case hypnogram
-        var id: String {
-            switch self {
-            case .header(_, let overline): return "h-\(overline)"
-            case .chart(_, let key, _, _, _): return "c-\(key)"
-            case .hypnogram: return "hypnogram"
-            }
-        }
-    }
-
-    private var pageItems: [PageItem] {
-        [
-            .header("Heart & Vitals", "Cardiac"),
-            .chart("Resting heart rate", "rhr", roseGradient, 40...90, { "\(Int($0.rounded())) bpm" }),
-            .chart("Average heart rate", "avg_hr", roseGradient, 50...110, { "\(Int($0.rounded())) bpm" }),
-            .chart("Peak heart rate", "max_hr", roseGradient, 80...170, { "\(Int($0.rounded())) bpm" }),
-            .chart("Blood oxygen", "spo2", cyanGradient, 90...100, { String(format: "%.0f%%", $0) }),
-            .hypnogram,
-            .header("Sleep", "Rest"),
-            .chart("Time asleep", "sleep_total_min", purpleGradient, 240...600, { durationString($0) }),
-            .chart("Deep sleep", "sleep_deep_min", purpleGradient, 0...180, { durationString($0) }),
-            .chart("REM sleep", "sleep_rem_min", purpleGradient, 0...180, { durationString($0) }),
-            .chart("Sleep score", "sleep_score", accentGradient, 0...100, { "\(Int($0.rounded()))" }),
-            .header("Activity & Energy", "Movement"),
-            .chart("Steps", "steps", cyanGradient, 0...12000, { intString($0) }),
-            .chart("Distance", "distance_m", cyanGradient, 0...10000, {
-                UnitFormatter.distanceFromMeters($0, system: distanceUnitSystem)
-            }),
-            .chart("Active energy", "energy_kcal", amberGradient, 0...1000, { "\(intString($0)) kcal" }),
-            .chart("Intensity minutes", "intensity_min", amberGradient, 0...120, { "\(Int($0.rounded())) min" }),
-            .header("Wellbeing", "Body energy"),
-            .chart("Stress", "stress", amberGradient, 0...100, { "\(Int($0.rounded()))" }),
-            .chart("Vitality", "vitality", accentGradient, 0...100, { "\(Int($0.rounded()))" }),
-        ]
-    }
-
-    private func rebuildWindowCache() {
-        var cache: [String: ResolvedSeries] = [:]
-        cache.reserveCapacity(Self.seriesKeys.count)
-        for key in Self.seriesKeys {
-            let eff = computeEffectiveRange(key)
-            cache[key] = ResolvedSeries(effective: eff, rows: slice(key, eff))
-        }
-        windowCache = cache
     }
 
     private var hasAnyData: Bool { series.values.contains { !$0.isEmpty } }
@@ -210,92 +84,96 @@ struct XiaomiBandView: View {
         await MainActor.run {
             series = fetched
             sleeps = loadedSleeps
-            rebuildWindowCache()
             loaded = true
         }
     }
 
-    // MARK: - Range control + header
-
-    private var rangeControl: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack(spacing: 8) {
-                SegmentedPillControl(RangeWindow.allCases, selection: $range) { $0.label }
-                Spacer()
-                Text(range.caption).strandOverline()
-            }
-            Text(rangeSummaryCaption)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-    }
-
-    private var rangeSummaryCaption: String {
-        let anyWidened = Self.seriesKeys.contains { !raw($0).isEmpty && effectiveRange($0) != range }
-        let base = range.name
-        return anyWidened ? String(localized: "\(base) · some sparse series widened") : base
-    }
-
-    private var spanSubtitle: String? {
-        // The widest span across all loaded series — for the header.
+    /// The widest span across all loaded series, data only.
+    private var spanLine: String? {
         let allDays = series.values.flatMap { $0 }.map(\.day)
         guard let first = allDays.min(), let last = allDays.max(),
-              let lo = date(first), let hi = date(last) else {
-            return String(localized: "Steps, heart rate, sleep, SpO₂ and stress, imported from Mi Fitness, read locally on \(Platform.deviceNounPhrase).")
-        }
-        let loS = Self.spanFormatter.string(from: lo)
-        let hiS = Self.spanFormatter.string(from: hi)
-        return loS == hiS ? loS : "\(loS) → \(hiS)"
+              let lo = ChartDay.date(forKey: first), let hi = ChartDay.date(forKey: last) else { return nil }
+        let a = lo.formatted(.dateTime.day().month(.abbreviated).year())
+        let b = hi.formatted(.dateTime.day().month(.abbreviated).year())
+        return a == b ? a : "\(a) – \(b)"
     }
 
-    private var loadingState: some View {
-        NoopCard(tint: StrandPalette.metricAmber) {
-            HStack(spacing: 10) {
-                ConnectionDot(tone: .accent, pulsing: true)
-                Text("Reading your Mi Band history…")
-                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-            }
-        }
-    }
+    // MARK: - Last night (hypnogram)
 
-    // MARK: - Last sleep (hypnogram)
-
-    /// The most recent imported night that carries a per-epoch hypnogram, drawn with the same
-    /// `Hypnogram` component the WHOOP Sleep screen uses. Empty when no Mi sleep has stages.
+    /// The most recent imported night that carries a per-epoch hypnogram, drawn with the same `Hypnogram` the
+    /// Sleep screen uses, with the time in each stage under it. Absent when no Mi sleep has stages.
     @ViewBuilder
     private var sleepDetailSection: some View {
         if let night = sleeps.last(where: { ($0.stagesJSON?.count ?? 0) > 2 }),
            let decoded = decodeStages(night.stagesJSON, sessionStart: night.startTs),
            decoded.intervals.count >= 2 {
             let s = decoded.stages
+            let start = Date(timeIntervalSince1970: TimeInterval(night.startTs))
+            let wake = Date(timeIntervalSince1970: TimeInterval(night.endTs))
             VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Last sleep", overline: "Hypnogram",
-                              trailing: Self.nightFormatter.string(from: Date(timeIntervalSince1970: TimeInterval(night.startTs))))
-                ChartCard(
-                    title: "Stage breakdown",
-                    subtitle: night.efficiency.map { eff in
-                        String(localized: "\(durationString(Double(night.endTs - night.startTs) / 60)) in bed · \(Int(eff.rounded()))% efficiency")
-                    } ?? String(localized: "\(durationString(Double(night.endTs - night.startTs) / 60)) in bed"),
-                    trailing: durationString(s.asleepMin),
-                    height: NoopMetrics.chartHeight,
-                    tint: StrandPalette.restColor,
-                    chart: {
+                SectionHeader("Last night", trailing: ReadoutContent.dateLine(wake, period: .night))
+                NoopCard {
+                    VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                        HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                            Text(MoreFormat.duration(minutes: s.asleepMin))
+                                .font(StrandFont.number(28))
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("asleep")
+                                .font(StrandFont.subhead)
+                                .foregroundStyle(StrandPalette.textSecondary)
+                            Spacer(minLength: 0)
+                            if let eff = night.efficiency {
+                                Text("\(Int(eff.rounded())) % efficiency")
+                                    .font(StrandFont.footnote)
+                                    .foregroundStyle(StrandPalette.textTertiary)
+                            }
+                        }
                         Hypnogram(intervals: decoded.intervals,
-                                  height: NoopMetrics.chartHeight,
+                                  height: NoopMetrics.chartHeightSecondary,
                                   showsStageAxis: true,
-                                  nightStart: Date(timeIntervalSince1970: TimeInterval(night.startTs)),
+                                  nightStart: start,
                                   showsTimeAxis: true)
-                    },
-                    footer: {
-                        ChartFooter([
-                            ("REM", durationString(s.rem)),
-                            ("Deep", durationString(s.deep)),
-                            ("Light", durationString(s.light)),
-                            ("Awake", durationString(s.awake)),
-                        ])
-                    })
+                        LazyVGrid(columns: [GridItem(.flexible(), spacing: NoopMetrics.space3),
+                                            GridItem(.flexible(), spacing: NoopMetrics.space3)],
+                                  alignment: .leading, spacing: NoopMetrics.space2) {
+                            stageLegend("Deep", s.deep, StrandPalette.sleepDeep)
+                            stageLegend("REM", s.rem, StrandPalette.sleepREM)
+                            stageLegend("Light", s.light, StrandPalette.sleepLight)
+                            stageLegend("Awake", s.awake, StrandPalette.sleepAwake)
+                        }
+                    }
+                }
             }
         }
+    }
+
+    private var lastNightPlaceholder: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Last night", trailing: "Mon 00 – Tue 00 Sep")
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    Text(verbatim: "0 h 00 m").font(StrandFont.number(28))
+                    ChartPlaceholder(height: NoopMetrics.chartHeightSecondary)
+                    Text(verbatim: "Deep 0 h 00 m · REM 0 h 00 m").font(StrandFont.footnote)
+                    Text(verbatim: "Light 0 h 00 m · Awake 00 m").font(StrandFont.footnote)
+                }
+            }
+        }
+        .loadingPlaceholder(true)
+    }
+
+    private func stageLegend(_ name: LocalizedStringKey, _ minutes: Double, _ color: Color) -> some View {
+        HStack(spacing: NoopMetrics.space2) {
+            Circle().fill(color).frame(width: 8, height: 8).accessibilityHidden(true)
+            Text(name)
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+            Spacer(minLength: NoopMetrics.space1)
+            Text(MoreFormat.duration(minutes: minutes))
+                .font(StrandFont.captionNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+        }
+        .accessibilityElement(children: .combine)
     }
 
     private struct MiStages { var awake = 0.0; var light = 0.0; var deep = 0.0; var rem = 0.0
@@ -329,245 +207,94 @@ struct XiaomiBandView: View {
         return stages.asleepMin > 0 ? (stages, intervals) : nil
     }
 
-    private static let nightFormatter: DateFormatter = {
-        let f = DateFormatter(); f.locale = Locale(identifier: "en_US_POSIX"); f.dateFormat = "d MMM"; return f
-    }()
+    // MARK: - Latest values
 
-    // MARK: - Tiles
-
-    private var tileGrid: some View {
-        LazyVGrid(
-            columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
-            alignment: .leading,
-            spacing: NoopMetrics.gap
-        ) {
-            statTile(key: "steps", label: "Steps", accent: StrandPalette.metricCyan, fmt: { intString($0) })
-            statTile(key: "rhr", label: "Resting HR", accent: StrandPalette.metricRose, unit: "bpm",
-                     fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "sleep_total_min", label: "Sleep avg", accent: StrandPalette.metricPurple,
-                     aggregate: .mean, fmt: { durationString($0) })
-            statTile(key: "sleep_score", label: "Sleep score", accent: StrandPalette.accent,
-                     fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "spo2", label: "Blood oxygen", accent: StrandPalette.metricCyan, unit: "%",
-                     fmt: { String(format: "%.0f", $0) })
-            statTile(key: "stress", label: "Stress avg", accent: StrandPalette.metricAmber,
-                     aggregate: .mean, fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "avg_hr", label: "Avg HR", accent: StrandPalette.metricRose, unit: "bpm",
-                     aggregate: .mean, fmt: { "\(Int($0.rounded()))" })
-            statTile(key: "vitality", label: "Vitality", accent: StrandPalette.accent,
-                     fmt: { "\(Int($0.rounded()))" })
-        }
-    }
-
-    private enum Aggregate { case latest, mean }
-
-    private func statTile(key: String, label: LocalizedStringKey,
-                          accent: Color, unit: String = "",
-                          aggregate: Aggregate = .latest,
-                          fmt: @escaping (Double) -> String) -> some View {
-        let rows = resolvedWindow(key)
-        let values = rows.map(\.value)
-        let value: String
-        let caption: String?
-        if values.isEmpty {
-            value = "—"; caption = nil
-        } else {
-            switch aggregate {
-            case .latest:
-                let v = values.last ?? 0
-                value = unit.isEmpty ? fmt(v) : "\(fmt(v)) \(unit)"
-                caption = rows.last.flatMap { date($0.day) }.map { String(localized: "as of \(Self.asOfFormatter.string(from: $0))") }
-            case .mean:
-                let m = mean(values) ?? 0
-                value = unit.isEmpty ? fmt(m) : "\(fmt(m)) \(unit)"
-                caption = String(localized: "avg · \(values.count)d")
+    private var latestSections: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+            NoopListSection("Heart") {
+                seriesRow("rhr", icon: "heart", color: StrandPalette.metricRose, title: "Resting heart rate",
+                          value: { "\(Int($0.rounded())) bpm" })
+                divider
+                seriesRow("avg_hr", icon: "heart.text.square", color: StrandPalette.metricRose, title: "Average heart rate",
+                          value: { "\(Int($0.rounded())) bpm" })
+                divider
+                seriesRow("max_hr", icon: "bolt.heart", color: StrandPalette.metricRose, title: "Peak heart rate",
+                          value: { "\(Int($0.rounded())) bpm" })
+                divider
+                seriesRow("spo2", icon: "drop", color: StrandPalette.metricCyan, title: "Blood oxygen",
+                          value: { "\(Int($0.rounded())) %" })
+            }
+            NoopListSection("Sleep") {
+                seriesRow("sleep_total_min", icon: "moon.zzz", color: StrandPalette.restColor, title: "Time asleep",
+                          value: { MoreFormat.duration(minutes: $0) })
+                divider
+                seriesRow("sleep_deep_min", icon: "moon.fill", color: StrandPalette.sleepDeep, title: "Deep sleep",
+                          value: { MoreFormat.duration(minutes: $0) })
+                divider
+                seriesRow("sleep_rem_min", icon: "moon.haze", color: StrandPalette.sleepREM, title: "REM sleep",
+                          value: { MoreFormat.duration(minutes: $0) })
+                divider
+                seriesRow("sleep_score", icon: "moon.stars", color: StrandPalette.restColor, title: "Sleep score",
+                          value: { "\(Int($0.rounded()))" })
+            }
+            NoopListSection("Activity") {
+                seriesRow("steps", icon: "figure.walk", color: StrandPalette.metricCyan, title: "Steps",
+                          value: { "\(MoreFormat.integer($0)) steps" })
+                divider
+                seriesRow("distance_m", icon: "map", color: StrandPalette.metricCyan, title: "Distance",
+                          value: { UnitFormatter.distanceFromMeters($0, system: distanceUnitSystem) })
+                divider
+                seriesRow("energy_kcal", icon: "flame", color: StrandPalette.metricAmber, title: "Active energy",
+                          value: { "\(MoreFormat.integer($0)) kcal" })
+                divider
+                seriesRow("intensity_min", icon: "figure.run", color: StrandPalette.effortColor, title: "Intensity minutes",
+                          value: { "\(Int($0.rounded())) min" })
+            }
+            NoopListSection("Wellbeing") {
+                seriesRow("stress", icon: "gauge.with.dots.needle.50percent", color: StrandPalette.stressColor,
+                          title: "Stress", value: { "\(Int($0.rounded())) / 100" })
+                divider
+                seriesRow("vitality", icon: "sparkles", color: StrandPalette.chargeColor, title: "Vitality",
+                          value: { "\(Int($0.rounded()))" })
             }
         }
-        return StatTile(
-            label: label, value: value, caption: caption,
-            accent: values.isEmpty ? StrandPalette.textTertiary : accent,
-            sparkline: values.count > 1 ? sparkValues(values) : nil,
-            sparkColor: accent)
+        .buttonStyle(.plain)
     }
 
-    // MARK: - Chart card
+    private var divider: some View { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
 
     @ViewBuilder
-    private func chartCard(title: LocalizedStringKey, key: String, gradient: Gradient,
-                           fallback: ClosedRange<Double>,
-                           fmt: @escaping (Double) -> String) -> some View {
-        let rows = resolvedWindow(key)
-        // Cap to the chart's pixel width — no value in more line vertices than horizontal pixels.
-        let pixelTarget = max(64, Int(chartWidthPts * displayScale))
-        let pts = decimate(trendPoints(rows), max: pixelTarget)
-        let vals = rows.map(\.value)
-        let trailing = mean(vals).map { fmt($0) }
-        let footerItems: [(LocalizedStringKey, String)] = {
-            guard let avg = mean(vals), let lo = vals.min(), let hi = vals.max() else {
-                return [("Avg", "—"), ("Min", "—"), ("Max", "—"), ("Points", "0")]
+    private func seriesRow(_ key: String, icon: String, color: Color, title: LocalizedStringKey,
+                           value: @escaping (Double) -> String) -> some View {
+        let rows = series[key] ?? []
+        if let latest = rows.last {
+            NavigationLink {
+                destination(key)
+            } label: {
+                NoopListRow(icon: icon, iconColor: color, title: title, subtitle: MoreFormat.day(latest.day),
+                            value: value(latest.value))
             }
-            return [("Avg", fmt(avg)), ("Min", fmt(lo)), ("Max", fmt(hi)), ("Points", "\(vals.count)")]
-        }()
-        ChartCard(
-            title: title,
-            subtitle: rangeNote(forKey: key),
-            trailing: trailing,
-            chart: {
-                if pts.count >= 2 {
-                    TrendChart(points: pts, gradient: gradient,
-                               valueRange: valueRange(pts, fallback: fallback),
-                               showsArea: true, height: NoopMetrics.chartHeight, valueFormat: fmt)
-                } else if let only = vals.last {
-                    singlePoint(only, fmt: fmt, accent: StrandPalette.sample(stops: gradient.stops, at: 0.85))
-                } else {
-                    emptyChart
-                }
-            },
-            footer: { ChartFooter(footerItems) })
-    }
-
-    private func singlePoint(_ value: Double, fmt: (Double) -> String, accent: Color) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Latest reading").strandOverline()
-            Text(fmt(value)).font(StrandFont.number(34)).foregroundStyle(accent)
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
-    }
-
-    private var emptyChart: some View {
-        Text("No readings recorded.")
-            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textTertiary)
-            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
-    }
-
-    // MARK: - Gradients
-
-    private var accentGradient: Gradient {
-        Gradient(colors: [StrandPalette.accentMuted, StrandPalette.accent, StrandPalette.accentHover])
-    }
-    private var roseGradient: Gradient {
-        Gradient(colors: [StrandPalette.statusWarning, StrandPalette.statusCritical])
-    }
-    private var cyanGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricCyan.opacity(0.55), StrandPalette.metricCyan])
-    }
-    private var amberGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricAmber.opacity(0.55), StrandPalette.metricAmber])
-    }
-    private var purpleGradient: Gradient {
-        Gradient(colors: [StrandPalette.metricPurple.opacity(0.55), StrandPalette.metricPurple])
-    }
-
-    // MARK: - Series helpers (sparse-data fallback to ALL)
-
-    private func raw(_ key: String) -> [(day: String, value: Double)] { series[key] ?? [] }
-
-    private func latestDate(_ key: String) -> Date? {
-        guard let d = raw(key).last?.day else { return nil }
-        return date(d)
-    }
-
-    private func slice(_ key: String, _ r: RangeWindow) -> [(day: String, value: Double)] {
-        let all = raw(key)
-        guard let n = r.days else { return all }
-        guard let last = latestDate(key) else { return [] }
-        let cutoff = last.addingTimeInterval(-Double(n - 1) * 86_400)
-        return all.filter { row in
-            guard let d = date(row.day) else { return false }
-            return d >= cutoff
+        } else {
+            NoopListRow(icon: icon, iconColor: color, title: title, subtitle: loaded ? nil : "Mon 00 Sep",
+                        value: loaded ? "—" : "000", showsChevron: false)
         }
     }
 
-    private func effectiveRange(_ key: String) -> RangeWindow {
-        windowCache[key]?.effective ?? computeEffectiveRange(key)
-    }
-
-    private func computeEffectiveRange(_ key: String) -> RangeWindow {
-        guard !raw(key).isEmpty else { return range }
-        for r in range.widening where !slice(key, r).isEmpty { return r }
-        return .all
-    }
-
-    private func resolvedWindow(_ key: String) -> [(day: String, value: Double)] {
-        if let cached = windowCache[key]?.rows { return cached }
-        return slice(key, computeEffectiveRange(key))
-    }
-
-    private func rangeNote(forKey key: String) -> String {
-        let rows = resolvedWindow(key)
-        let eff = effectiveRange(key)
-        let n = rows.count
-        if eff != range {
-            return n == 1
-                ? String(localized: "1 reading · sparse, widened to \(eff.name)")
-                : String(localized: "\(n) readings · sparse, widened to \(eff.name)")
+    @ViewBuilder
+    private func destination(_ key: String) -> some View {
+        if let metric = MetricCatalog.metric(key: key, source: Self.source) {
+            MetricDetailView(metric: metric)
+        } else if key == "distance_m" {
+            // Distance has no catalog entry: the per-source page, as daily bars in the reader's distance unit.
+            let imperial = distanceUnitSystem == .imperial
+            let perUnit = imperial ? 1609.344 : 1000.0
+            SourceSeriesDetailView(
+                presentation: SourceSeriesPresentation(
+                    title: String(localized: "Distance"), unit: imperial ? "mi" : "km", color: StrandPalette.metricCyan,
+                    chart: .totals(minSpan: 2, decimals: 1), format: { MoreFormat.oneDecimal($0) },
+                    about: [String(localized: "The distance your Mi Band counted each day, as the Mi Fitness app exported it.")]),
+                rows: (series[key] ?? []).map { ($0.day, $0.value / perUnit) },
+                sourceName: "Mi Band")
         }
-        return n == 1
-            ? String(localized: "1 reading · \(range.name)")
-            : String(localized: "\(n) readings · \(range.name)")
-    }
-
-    /// Cap a dense daily series to ~`max` points for charting. A year/all-time window holds
-    /// hundreds of daily points per card; rendering every one across a dozen cards is what makes
-    /// "1Y"/"ALL" feel slow. Min/max bucketing keeps the visual envelope (peaks + troughs) while
-    /// cutting the point count, and always keeps the first/last sample. Stats (avg/min/max in the
-    /// footer) are computed from the FULL series, so decimation is purely a render optimization.
-    private func decimate(_ pts: [TrendPoint], max: Int) -> [TrendPoint] {
-        guard pts.count > max, max >= 4 else { return pts }
-        let bucketCount = max / 2                         // each bucket emits up to 2 points (min,max)
-        let size = Double(pts.count) / Double(bucketCount)
-        var out: [TrendPoint] = []
-        out.reserveCapacity(max + 2)
-        out.append(pts.first!)
-        for b in 0..<bucketCount {
-            let lo = Int(Double(b) * size)
-            let hi = min(pts.count, Int(Double(b + 1) * size))
-            guard lo < hi else { continue }
-            let slice = pts[lo..<hi]
-            guard let mn = slice.min(by: { $0.value < $1.value }),
-                  let mx = slice.max(by: { $0.value < $1.value }) else { continue }
-            // Emit in time order so the line doesn't zig-zag backwards.
-            if mn.date <= mx.date { out.append(mn); if mx.date != mn.date { out.append(mx) } }
-            else { out.append(mx); out.append(mn) }
-        }
-        out.append(pts.last!)
-        return out
-    }
-
-    private func trendPoints(_ rows: [(day: String, value: Double)]) -> [TrendPoint] {
-        rows.compactMap { row in
-            guard let dt = date(row.day) else { return nil }
-            return TrendPoint(date: dt, value: row.value)
-        }
-    }
-
-    private func sparkValues(_ values: [Double]) -> [Double] {
-        guard values.count > 1 else { return [values.first ?? 0, values.first ?? 0] }
-        return Array(values.suffix(40))
-    }
-
-    private func mean(_ values: [Double]) -> Double? {
-        guard !values.isEmpty else { return nil }
-        return values.reduce(0, +) / Double(values.count)
-    }
-
-    private func valueRange(_ pts: [TrendPoint], fallback: ClosedRange<Double>, pad: Double = 0.12) -> ClosedRange<Double> {
-        let v = pts.map(\.value)
-        guard let lo = v.min(), let hi = v.max() else { return fallback }
-        if hi <= lo { return (lo - 1)...(hi + 1) }
-        let span = hi - lo
-        return (lo - span * pad)...(hi + span * pad)
-    }
-
-    private func intString(_ v: Double) -> String {
-        let n = Int(v.rounded())
-        if abs(n) >= 1000 { return Self.groupedIntFmt.string(from: NSNumber(value: n)) ?? "\(n)" }
-        return "\(n)"
-    }
-
-    private func durationString(_ minutes: Double) -> String {
-        let total = Int(minutes.rounded())
-        let h = total / 60, m = total % 60
-        return h > 0 ? String(localized: "\(h)h \(m)m") : String(localized: "\(m)m")
     }
 }

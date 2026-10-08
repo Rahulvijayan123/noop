@@ -356,7 +356,7 @@ final class CoachChatViewModel: ObservableObject {
                 guard let idx = self.messages.indices.last, self.messages[idx].role == .assistant else { return }
                 self.messages[idx].didStall = true
                 self.errorMessage = self.messages[idx].content.isEmpty
-                    ? "This is taking longer than usual — Coach may be busy. Tap Retry to try again."
+                    ? "This is taking longer than usual — Sana may be busy. Tap Retry to try again."
                     : "The response stalled partway through. Tap Retry to try again."
                 self.streamTask?.cancel()
                 return
@@ -378,10 +378,10 @@ final class CoachChatViewModel: ObservableObject {
         var answer: String?
         if body.isEmpty {
             if messages[idx].didStall {
-                messages[idx].content = "Coach didn't finish answering."
+                messages[idx].content = "Sana didn't finish answering."
             } else {
                 messages.removeLast()
-                if errorMessage == nil, !Task.isCancelled { errorMessage = "Coach returned an empty reply. Please try again." }
+                if errorMessage == nil, !Task.isCancelled { errorMessage = "Sana returned an empty reply. Please try again." }
                 return
             }
         } else {
@@ -506,3 +506,60 @@ final class CoachChatViewModel: ObservableObject {
         return CoachAPIError.unavailable.errorDescription ?? ""
     }
 }
+
+#if DEBUG
+// MARK: - Screenshot transcript (DEBUG only)
+
+extension CoachChatViewModel {
+    /// `--demo-coach-transcript`: a short canned conversation (two questions, answers with a daily line chart
+    /// and a weekday bar chart, follow-ups) so the chat can be screenshotted in a simulator with no cloud
+    /// project. Presentation only: nothing is sent or stored, and Release builds do not contain it.
+    static var demoTranscriptRequested: Bool { CommandLine.arguments.contains("--demo-coach-transcript") }
+
+    func loadDemoTranscript() {
+        let cal = Calendar.current
+        let today = cal.startOfDay(for: Date())
+        let fmt = DateFormatter()
+        fmt.locale = Locale(identifier: "en_US_POSIX")
+        fmt.dateFormat = "yyyy-MM-dd"
+        let hrv = [52, 55, 49, 58, 61, 57, 54, 63, 60, 59, 66, 62, 64, 68]
+        let line = hrv.enumerated().compactMap { i, v -> String? in
+            guard i != 9, let d = cal.date(byAdding: .day, value: i - hrv.count + 1, to: today) else { return nil }
+            return "{\"x\":\"\(fmt.string(from: d))\",\"y\":\(v)}"
+        }.joined(separator: ",")
+        let lineJSON = """
+        {"type":"line","title":"HRV, last 14 nights","subtitle":"Nightly RMSSD","yLabel":"HRV (ms)","reference":58,
+         "source":"From your strap's nightly readings","points":[\(line)]}
+        """
+        let barJSON = """
+        {"type":"bar","title":"Average steps by weekday","yLabel":"Steps","source":"Last 8 weeks",
+         "points":[{"x":"Mon","y":8120},{"x":"Tue","y":9340},{"x":"Wed","y":7650},{"x":"Thu","y":10210},
+                   {"x":"Fri","y":8890},{"x":"Sat","y":12400},{"x":"Sun","y":6980}]}
+        """
+        let decoder = JSONDecoder()
+        var first = CoachChatMessage(role: .assistant, content: """
+        Your HRV has been **rising steadily** over the last two weeks, from the low 50s to **68 ms** last night, \
+        your highest in a month.
+
+        - Your resting heart rate dropped by 3 bpm over the same stretch.
+        - The one dip, on Tuesday, followed your late run.
+
+        Keep the earlier bedtimes going; they line up with the best nights.
+        """)
+        first.toolNames = ["Daily metrics", "Personal baseline"]
+        first.viz = try? decoder.decode(CoachViz.self, from: Data(lineJSON.utf8))
+        first.vizPhase = first.viz == nil ? .none : .ready
+        var second = CoachChatMessage(role: .assistant, content: """
+        Saturdays are your most active day by a clear margin, around **12,400 steps**. Sundays are the quietest.
+        """)
+        second.toolNames = ["Daily metrics"]
+        second.viz = try? decoder.decode(CoachViz.self, from: Data(barJSON.utf8))
+        second.vizPhase = second.viz == nil ? .none : .ready
+        messages = CommandLine.arguments.contains("--demo-coach-short")
+            ? [CoachChatMessage(role: .user, content: "Is my HRV normal for me?"), first]
+            : [CoachChatMessage(role: .user, content: "Is my HRV normal for me?"), first,
+               CoachChatMessage(role: .user, content: "Which days am I most active?"), second]
+        connection = .online
+    }
+}
+#endif

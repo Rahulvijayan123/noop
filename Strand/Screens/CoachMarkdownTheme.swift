@@ -11,10 +11,10 @@ import StrandDesign
 /// not shout inside a 560pt bubble), and tables get hairline borders.
 extension Theme {
     static let strand = Theme()
-        // Base body text — mirrors StrandFont.body (15 / regular).
+        // Base body text — mirrors StrandFont.body (16 / regular). Headings are sized relative to it.
         .text {
             ForegroundColor(StrandPalette.textPrimary)
-            FontSize(15)
+            FontSize(16)
         }
         .strong {
             FontWeight(.semibold)
@@ -25,20 +25,20 @@ extension Theme {
         .code {
             FontFamilyVariant(.monospaced)
             FontSize(.em(0.88))
-            ForegroundColor(StrandPalette.accentHover)
+            ForegroundColor(StrandPalette.textPrimary)
             BackgroundColor(StrandPalette.surfaceInset)
         }
         .link {
             ForegroundColor(StrandPalette.accent)
         }
-        // Headings: h1/h2 land at headline (17 / semibold), h3 just above body,
-        // h4–h6 as overline-ish small caps labels.
+        // Headings: h1–h3 at the headline role (body size, semibold), h4–h6 at the label size, so a
+        // heading inside a reply never shouts.
         .heading1 { configuration in
             configuration.label
                 .markdownMargin(top: 14, bottom: 6)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(17)
+                    FontSize(.em(1))
                     ForegroundColor(StrandPalette.textPrimary)
                 }
         }
@@ -47,7 +47,7 @@ extension Theme {
                 .markdownMargin(top: 14, bottom: 6)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(17)
+                    FontSize(.em(1))
                     ForegroundColor(StrandPalette.textPrimary)
                 }
         }
@@ -56,7 +56,7 @@ extension Theme {
                 .markdownMargin(top: 12, bottom: 4)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(16)
+                    FontSize(.em(1))
                     ForegroundColor(StrandPalette.textPrimary)
                 }
         }
@@ -65,7 +65,7 @@ extension Theme {
                 .markdownMargin(top: 10, bottom: 4)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(15)
+                    FontSize(.em(0.875))
                     ForegroundColor(StrandPalette.textPrimary)
                 }
         }
@@ -74,7 +74,7 @@ extension Theme {
                 .markdownMargin(top: 10, bottom: 4)
                 .markdownTextStyle {
                     FontWeight(.semibold)
-                    FontSize(13)
+                    FontSize(.em(0.875))
                     ForegroundColor(StrandPalette.textSecondary)
                 }
         }
