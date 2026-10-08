@@ -425,3 +425,33 @@ Run the read-only [runtime identity checklist](OPERATIONS.md#runtime-identity-ch
 A release built on another architecture (for example the arm64 Linux build used to check a
 release before shipping) has a different binary digest from the x86_64 droplet's build of the same
 commit; only the droplet's own `BUILD.json` and process digest identify what it runs.
+
+## Rolling out the Spec 01 model-integration changes
+
+Every new behaviour is off or unchanged by default. When an operator chooses to roll it out (not done
+by the Spec 01 branch), the order matters; details are in `docs/model-integration/`.
+
+1. **Migrations**, in timestamp order: `20261008100000_activity_release_authority.sql` (expert rows
+   carry `release_mode`/`authority`; joint candidate table), `20261008110000_physiology_candidate_pending.sql`
+   (persisted candidate queue), `20261008120000_ppg_transport_anchor.sql` (protocol 1.5 objects). They are
+   additive and re-runnable. Follow [docs/BACKEND.md](../docs/BACKEND.md); never `supabase db push` from
+   a workstation.
+2. **The `scores` edge function** after migration 20261008100000: its gait/activity routes select the new
+   columns.
+3. **Sidecar and worker** from one release (`release-host.sh`), then the identity checks above. The worker
+   and the candidate migration can go in either order (without the migration the worker keeps the
+   in-memory candidate pass). The worker must be the new one before step 4: an older worker refuses NPB1
+   format 3 objects (`unsupportedVersion`).
+4. **Receiver advertisement** of protocol 1.5: `NOOP_PUSH_ADVERTISE_PPG_ANCHOR=1` in the push function's
+   environment. Accepting 1.5 does not depend on it.
+5. **Phone flag** `noop.cloud.ppgAnchorUpload` (off by default) only after step 4. It adds roughly 80 bytes
+   of upload per optical second. Turning it on is an owner decision.
+
+Resource notes. The sidecar's limits in `frwhoop-inference.service` fit one warm infer worker
+(measured about 373 MB for the parent plus both workers); raise `MemoryHigh` before setting
+`FRWHOOP_INFERENCE_MAX_ACTIVE=2`. The activity children run in the worker's unit. With every activity stage
+on, they add about 1.1 GiB (HART about 454 MB, ElderNet 302 MB, Inertia about 235 MB, an ActiNet encoder
+about 361 MB). Their math threads are capped at one each by default (`FRWHOOP_ACTIVITY_THREADS`,
+`FRWHOOP_ELDERNET_THREADS`, `FRWHOOP_INERTIA_THREADS`). `frwhoop-worker.service` sets no memory or task
+limit. Measure the worker's own RSS on the droplet before adding one (suggested: `MemoryHigh` at worker
+RSS plus 1.2 GiB, and a `TasksMax`), so a guessed ceiling never kills the scoring lane.
