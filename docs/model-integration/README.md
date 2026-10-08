@@ -55,8 +55,31 @@ and an older sidecar keep working, and always sent by this branch's worker:
   channel are actually identified by the transport, not inferred. Further descriptive `config` members
   (burst index, source/drive/range/offset) may accompany them. Without `config.identity` the sidecar
   keeps its legacy identity (sorted `config` members).
-- `clock` (object): native clock provenance (what the sample times are derived from, the per-second grid
-  and endpoint ownership, and whether timing was checked against recorded packet timing).
+- `clock` (object): native clock provenance. The sidecar interprets two members:
+  `packet_timing_verified` (bool: the per-second grid was checked against recorded packet timing, not
+  inferred from a sample count) and `samples_per_second` (int; must equal `ppg.native_rate_hz`, else the PPG
+  families are withheld `blocked_input`). Other members (`source`, `grid`, `endpoint`) are provenance,
+  carried through and not interpreted. `rhythm_shadow` requires `packet_timing_verified: true` and is
+  otherwise withheld `unverified_sample_clock`; descriptive families record the flag. A segment without
+  `clock` is legacy (rhythm keeps its old `config.stable` gate).
+
+Rules both sides hold to:
+
+- `config.identity` names the optical configuration only (gain, drive, channel, LED), never a per-burst or
+  per-record counter; burst and record identity go in `run_id` or in descriptive `config` members. When the
+  transport does not identify the configuration, `config.identity` is `"unknown"` and `config.known` is
+  false; the sidecar then never pools amplitude across runs (amplitude is reported per run and marked
+  `configuration_unidentified`), while gain-independent timing features (upstroke, width50) are pooled with
+  exposure weights.
+- Segments sharing a `run_id` are time-contiguous (each starts where the previous one ended) and share one
+  `config.identity`. A violation is split, never joined, and counted as `ppg_run_id_discontinuity`.
+- `config.stable: true` is still sent, because an older sidecar's rhythm gate reads it.
+- The worker's request builder writes a golden envelope with these members to
+  `Tools/CloudWorker/Tests/frwhoop-workerTests/Resources/sensor_biomarkers/sensor_biomarkers_request_envelope.json`;
+  the sidecar tests consume that file.
+- The lane merges per-request family stages into the day document without dropping later requests'
+  per-configuration blocks, per-run exposure blocks or rhythm score vectors; per-identity blocks are pooled
+  (counts summed, distribution bins pooled), per-run blocks are concatenated.
 
 The sidecar computes pulse detection, shape, quality and rhythm preprocessing within one run at a time,
 aggregates with the real exposure of each run, and reports amplitude-bearing results per configuration
