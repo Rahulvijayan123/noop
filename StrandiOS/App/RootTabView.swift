@@ -65,6 +65,27 @@ struct RootTabView: View {
     /// V8 liquid redesign is the default Today. The classic Today stays behind this key (default ON) for
     /// installs that switched before the Settings toggle was removed.
     @AppStorage("noop.liquidTodayEnabled") private var liquidTodayEnabled = true
+    /// Liquid Glass (Settings → Display). While it is on, the bottom navigation is `NoopGlassTabBar` drawn at
+    /// the chosen intensity and the platform bar is hidden; at 0 the platform bar comes back unchanged.
+    @Environment(\.liquidGlass) private var liquidGlass
+    /// The glass bar steps aside for the keyboard, as the platform bar does by sitting beneath it. It lives in
+    /// the bottom safe-area inset, which the keyboard would otherwise carry up with it.
+    @State private var keyboardVisible = false
+
+    private var showsGlassTabBar: Bool { liquidGlass.isEnabled && !keyboardVisible }
+
+    private var glassTabItems: [NoopGlassTabItem] {
+        var items = [
+            NoopGlassTabItem(tag: 0, title: "Today", systemImage: "square.grid.2x2", identifier: "tab.today"),
+            NoopGlassTabItem(tag: 1, title: "Monitor", systemImage: "waveform.path.ecg", identifier: "tab.monitor"),
+            NoopGlassTabItem(tag: 2, title: "Events", systemImage: "calendar", identifier: "tab.events"),
+            NoopGlassTabItem(tag: 3, title: "Sleep", systemImage: "bed.double", identifier: "tab.sleep"),
+        ]
+        if coachEnabled {
+            items.append(NoopGlassTabItem(tag: 4, title: "Sana", systemImage: "sparkles", identifier: "tab.sana"))
+        }
+        return items
+    }
 
     /// The Today tab root, honouring the liquid/classic preference.
     @ViewBuilder private var todayTabRoot: some View {
@@ -119,9 +140,9 @@ struct RootTabView: View {
     }
 
     var body: some View {
-        // The platform tab bar is intentionally left fully native. iOS 26 supplies Liquid Glass and
-        // its dynamic interaction with scrolling content automatically; older supported releases use
-        // the corresponding system material and safe-area behaviour from the same TabView.
+        // The TabView still owns the tab roots, their lazy loading and their state. With Liquid Glass on, each
+        // tab hides the platform bar (see `tab(_:)`) and `NoopGlassTabBar` below drives the same selection;
+        // at 0 the platform bar is back, with its own iOS 26 glass and older releases' system material.
         TabView(selection: nativeTabSelection) {
             tab(todayTabRoot, "Today", "square.grid.2x2", path: $tabPaths[0], scrollSignal: scrollTop[0]).tag(0)
             tab(BaselineMonitorView(), "Monitor", "waveform.path.ecg", path: $tabPaths[1], scrollSignal: scrollTop[1]).tag(1)
@@ -282,17 +303,34 @@ struct RootTabView: View {
         // The running gym session, reachable from ANY tab. It sits above the tab bar rather than
         // inside the Lift Log screen, because a workout outlives whichever screen you wandered to —
         // and because swiping the sheet away must minimise the session, not end it.
+        //
+        // The glass tab bar shares this inset, beneath the session bar. Being an inset rather than an
+        // overlay is what keeps every tab's bottom content (the Sana composer, the last card) above it
+        // while scrolling content still passes under the glass.
         .safeAreaInset(edge: .bottom, spacing: 0) {
-            if liftSession.isActive {
-                LiftSessionBar()
-                    .padding(.horizontal, 14)
-                    // Clear the floating tab bar with the same constant every screen uses, or the
-                    // session bar sits on top of the tab labels.
-                    .padding(.bottom, NoopMetrics.tabBarClearance)
-                    .transition(.move(edge: .bottom).combined(with: .opacity))
+            VStack(spacing: NoopMetrics.space2) {
+                if liftSession.isActive {
+                    LiftSessionBar()
+                        .padding(.horizontal, 14)
+                        // Clear the platform's floating tab bar with the same constant every screen uses, or
+                        // the session bar sits on top of the tab labels. The glass bar is laid out below it.
+                        .padding(.bottom, showsGlassTabBar ? 0 : NoopMetrics.tabBarClearance)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
+                if showsGlassTabBar {
+                    NoopGlassTabBar(items: glassTabItems, selection: $selectedTab, onReselect: reselectTab)
+                        .transition(.move(edge: .bottom).combined(with: .opacity))
+                }
             }
         }
         .animation(.easeInOut(duration: 0.25), value: liftSession.isActive)
+        .animation(.easeInOut(duration: 0.2), value: showsGlassTabBar)
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillShowNotification)) { _ in
+            keyboardVisible = true
+        }
+        .onReceive(NotificationCenter.default.publisher(for: UIResponder.keyboardWillHideNotification)) { _ in
+            keyboardVisible = false
+        }
         // A session left running by a previous launch is back before this view exists
         // (`LiftSessionController.resumeSaved`, from `StrandiOSApp.init`), as the BAR — not as a sheet
         // thrown in the user's face; they open it when they want it.
@@ -495,6 +533,9 @@ struct RootTabView: View {
                 .toolbar(.hidden, for: .navigationBar)
                 .tabRouteDestinations()
         }
+        // On the stack, not its root, so pushed screens keep the platform bar hidden too. A value, not a
+        // conditional modifier, so flipping the setting never rebuilds the tab roots.
+        .toolbar(liquidGlass.isEnabled ? .hidden : .automatic, for: .tabBar)
         // Drive this tab's root scroll-to-top on an at-root re-tap (#198 follow-up); read by ScreenScaffold
         // / LiquidTodayView inside. Only THIS tab's token changes on its reselect, so the others don't scroll.
         .environment(\.scrollToTopSignal, scrollSignal)

@@ -1,0 +1,553 @@
+//
+//  LiquidLensConfiguration.swift
+//  AemiSDR
+//
+
+import Foundation
+import simd
+
+/// Hashable specialization key selecting which compiled fragment-shader
+/// variant the renderer should use. The renderer caches one
+/// `MTLRenderPipelineState` per distinct key (per device), built lazily on
+/// first use. All fields correspond to Metal function constants defined in
+/// `LiquidLens.metal`.
+public struct LiquidLensPipelineKey: Hashable, Sendable {
+    public let chromaticEnabled: Bool  // function_constant(0)
+    public let falloffType: Int32  // function_constant(1)
+    public let enableFresnel: Bool  // function_constant(2)
+    public let enableSpectral: Bool  // function_constant(3)
+    public let enableAspheric: Bool  // function_constant(4)
+    public let highFidelityRefraction: Bool  // function_constant(5)
+    /// Selects refraction through the symmetric second surface.
+    public let enableThickLens: Bool  // function_constant(6)
+
+    public init(
+        chromaticEnabled: Bool,
+        falloffType: Int32,
+        enableFresnel: Bool = false,
+        enableSpectral: Bool = false,
+        enableAspheric: Bool = false,
+        highFidelityRefraction: Bool = false,
+        enableThickLens: Bool = false
+    ) {
+        self.chromaticEnabled = chromaticEnabled
+        self.falloffType = falloffType
+        self.enableFresnel = enableFresnel
+        self.enableSpectral = enableSpectral
+        self.enableAspheric = enableAspheric
+        self.highFidelityRefraction = highFidelityRefraction
+        self.enableThickLens = enableThickLens
+    }
+}
+
+/// How corner radius is specified for the liquid lens shape.
+public enum LiquidLensCornerRadius: Sendable, Equatable, Hashable {
+    /// A fraction of the longer half-size dimension (0 = square, 1 = fully rounded).
+    ///
+    /// At 1.0, the corner radius equals `max(halfSize.x, halfSize.y)`,
+    /// which the shader clamps to `min(halfSize.x, halfSize.y)` producing a capsule or circle.
+    case proportional(Float)
+
+    /// An explicit value in points.
+    case points(Float)
+
+    /// Resolves to a corner radius in points for the given half-size.
+    internal func resolve(halfSize: SIMD2<Float>) -> Float {
+        switch self {
+        case .proportional(let fraction):
+            return fraction * max(halfSize.x, halfSize.y)
+        case .points(let pts):
+            return pts
+        }
+    }
+}
+
+/// Uniform buffer matching the Metal `LiquidLensUniforms` struct layout.
+///
+/// Layout (112-byte stride, 16-byte aligned because of the trailing
+/// `SIMD3<Float>` triplets). Grouped by access pattern:
+///
+///   - Geometry first (`center`, `textureSize`, `halfSize`) — read once per
+///     fragment to derive pixel-space coordinates.
+///   - Scalar shape parameters next (`strength`..`asphericK4`) — read by
+///     branch gates and the displacement scaling step.
+///   - Two `SIMD3<Float>` channel triplets (`airOver`, `deviation`) — read
+///     together as vectors in the chromatic path.
+///
+/// The RGB triplets use `SIMD3<Float>` rather than three independent scalars
+/// so the GPU can emit a single 16-byte vector load per triplet. The struct
+/// alignment is 16 bytes because of the SIMD types; the trailing scalar
+/// `spectralAirOver*` fields fit inside the 16-byte tail. Verify the layout
+/// with `MemoryLayout<LiquidLensUniforms>.stride == 112`.
+///
+/// `falloffType` does not appear here — the chosen polynomial is resolved
+/// at pipeline build time via the `kFalloffType` function constant, so the
+/// shader has no use for a runtime field. `materialType` is likewise absent
+/// because all per-material values reach the GPU through the two channel
+/// triplets. The per-channel refractive indices (`n_λ`) are CPU-only state
+/// used to derive `airOver` and `deviation`; carrying them through the
+/// uniform buffer would add 16 bytes (one vector slot) of upload bandwidth
+/// per frame for data the shader never reads.
+public struct LiquidLensUniforms: Sendable, Equatable {
+    // Geometry.
+    public var center: SIMD2<Float>
+    public var textureSize: SIMD2<Float>
+    public var halfSize: SIMD2<Float>
+
+    // Scalar shape / intensity parameters.
+    public var strength: Float
+    public var lensCurvature: Float
+    public var cornerRadius: Float
+    public var falloffLength: Float
+    public var falloffIntensity: Float
+    public var chromaticAmount: Float
+    public var overlayMode: Int32
+    public var diagonalBand: Float
+
+    /// Second-order aspheric coefficient. Applied as
+    /// `surfaceTilt = c·r·(1 + k2·(c·r)² + k4·(c·r)⁴)`. Consumed only when
+    /// the pipeline is specialized with `kEnableAspheric = true`. Zero
+    /// produces a pure spherical cap.
+    public var asphericK2: Float
+    /// Fourth-order aspheric coefficient. See `asphericK2`.
+    public var asphericK4: Float
+
+    /// Per-channel `η = n_air / n_λ`. Feeds MSL `refract(I, N, η)` for the
+    /// 3D refraction path, and also used to compute `airOver.g` in the
+    /// Fresnel block.
+    public var airOver: SIMD3<Float>
+
+    /// Scalar Snell deviation (radians) at the rim, precomputed CPU-side as
+    /// `asin(airOver · sinθ_rim) − θ_rim` where `θ_rim = asin(lensCurvature)`.
+    /// The shader's fast chromatic path multiplies this by `outwardDir ·
+    /// displacementScale` per channel, which is roughly a third of the ALU
+    /// of the 3D `refract()` path.
+    public var deviation: SIMD3<Float>
+
+    /// `n_air / n_λ` ratio at 440 nm (deep blue). Sampled only when the
+    /// pipeline is specialized with `kEnableSpectral = true`.
+    public var spectralAirOver0: Float
+    /// `n_air / n_λ` ratio at 580 nm (yellow). Sampled only when the
+    /// pipeline is specialized with `kEnableSpectral = true`.
+    public var spectralAirOver1: Float
+
+    /// Conic constant `k` for the aspheric surface profile.
+    /// Consumed by `surfaceTilt` only when the pipeline is specialized with
+    /// `kEnableAspheric = true` AND `k ≠ 0`. Standard optics values:
+    /// `k = 0` sphere, `k = -1` paraboloid,
+    /// `k < -1` hyperboloid, `k > 0` oblate ellipsoid. Defaults to `0` so
+    /// legacy aspheric configs with K2/K4 only are bit-identical to
+    /// pre-conic builds.
+    ///
+    /// Fits in the trailing 8-byte padding after `spectralAirOver1`; the
+    /// struct stride stays at 112 bytes (next 16-byte boundary after
+    /// offset 108 is 112).
+    public var asphericK: Float
+}
+
+/// Configuration for the liquid lens distortion effect.
+///
+/// All spatial values (center, halfSize, cornerRadius) are in points and will be
+/// converted to pixel coordinates by `toUniforms(textureSize:)`.
+public struct LiquidLensConfiguration: Sendable, Equatable, Hashable {
+    /// Center of the lens effect in points.
+    public var center: SIMD2<Float>
+
+    /// Half-size of the lens region in points (width/2, height/2).
+    public var halfSize: SIMD2<Float>
+
+    /// Overall effect strength multiplier. Negative values invert the lens.
+    public var strength: Float
+
+    /// Lens surface curvature (0 = flat, 1 = hemisphere).
+    public var lensCurvature: Float
+
+    /// Corner rounding for the lens shape.
+    public var cornerRadius: LiquidLensCornerRadius
+
+    /// Falloff transition curve.
+    public var falloff: LiquidLensFalloff
+
+    /// Width of the edge fade region as a fraction of min(halfSize).
+    /// At 0, the effect has sharp edges; at 1, the fade extends to the center.
+    public var falloffLength: Float
+
+    /// Falloff strength multiplier (0 = no falloff, 1 = full).
+    public var falloffIntensity: Float
+
+    /// Chromatic aberration amplifier.
+    ///
+    /// `0` disables chromatic separation. `30` (the default) is the calibrated
+    /// baseline producing visible color fringing at strength 1.0. Higher values
+    /// exaggerate the effect; lower values reduce it. Clamped to `[0, 30]` internally.
+    ///
+    /// This is an artistic amplifier rather than a physical [0, 1] interpolation:
+    /// the shader uses `mix(green, channel, amount)` where `amount > 1` extrapolates
+    /// beyond the physically-correct displacement.
+    public var chromaticAmount: Float
+
+    /// Optical material determining dispersion characteristics.
+    public var material: LiquidLensMaterial
+
+    /// When `true`, pixels outside the lens area are transparent instead of showing
+    /// the undistorted source. Use this when the lens is an overlay on live content.
+    public var overlayMode: Bool
+
+    /// Width (in points) of the soft transition band that smooths the
+    /// inner-rectangle medial-axis discontinuity in the SDF gradient. Inside
+    /// the band the displacement direction blends smoothly across the
+    /// `q.x = q.y` diagonal; outside the band it equals the true axial SDF
+    /// normal. Smaller values = sharper diagonal transition; larger values =
+    /// wider smoothing zone. Default `6` points is invisible at retina
+    /// densities while removing the rate-of-change kink that earlier
+    /// `normalize((dy, dx))` form had at the diagonal.
+    public var diagonalBand: Float
+
+    /// Second-order aspheric coefficient. `0` (default) gives a pure spherical
+    /// cap surface. Non-zero values reshape the surface profile by reducing or
+    /// amplifying spherical aberration. Only takes effect when `enableAspheric`
+    /// is true.
+    public var asphericK2: Float
+
+    /// Fourth-order aspheric coefficient. See `asphericK2`.
+    public var asphericK4: Float
+
+    /// Conic constant `k` for the aspheric surface profile. Active only when
+    /// `enableAspheric` is true AND `k ≠ 0`; otherwise the surface uses the
+    /// paraxial spherical form (legacy behavior). Standard optics values:
+    /// `0` paraxial sphere (no conic correction), `-1` paraboloid,
+    /// `< -1` hyperboloid, `> 0` oblate ellipsoid. Stacks multiplicatively
+    /// with the K2/K4 polynomial correction.
+    public var asphericK: Float
+
+    /// Enables Fresnel transmission attenuation in the shader. Real lens
+    /// surfaces lose 4–30% of light to reflection (more at grazing angles).
+    /// Off by default to preserve the bright artistic look. Triggers a
+    /// specialized pipeline variant.
+    public var enableFresnel: Bool
+
+    /// Enables 5-wavelength spectral integration for chromatic mode. Replaces
+    /// the discrete 3-band RGB sampling with samples at 440/486/546/580/656 nm
+    /// reconstructed into RGB. Costs ~2× chromatic-path sample bandwidth.
+    /// Eliminates banded fringes at extreme `chromaticAmount` values.
+    public var enableSpectral: Bool
+
+    /// Enables the aspheric surface-tilt model in the shader. When `false`,
+    /// the lens uses pure spherical-cap geometry regardless of the values of
+    /// `asphericK2` / `asphericK4`.
+    public var enableAspheric: Bool
+
+    /// Enables per-fragment MSL `refract()` 3D refraction with proper
+    /// image-plane projection. Strictly higher fidelity than the default
+    /// scalar-deviation path at large incidence angles, but **~3× the
+    /// per-fragment ALU in chromatic mode**. Off by default — toggle on for
+    /// physical accuracy when performance budget allows.
+    public var enableHighFidelityRefraction: Bool
+
+    /// Enables an opt-in second refraction at a symmetric biconvex back
+    /// surface (thin-lens approximation — lateral propagation between
+    /// surfaces is ignored). The second surface bends each wavelength again;
+    /// adjust `chromaticAmount` for the desired separation. Implies the
+    /// 3D refract path (the scalar deviation fast path cannot model two
+    /// surfaces meaningfully). Off by default.
+    public var enableThickLens: Bool
+
+    public init(
+        center: SIMD2<Float> = .zero,
+        halfSize: SIMD2<Float> = SIMD2(150, 150),
+        strength: Float = 1.0,
+        lensCurvature: Float = 1.0,
+        cornerRadius: LiquidLensCornerRadius = .points(0),
+        falloff: LiquidLensFalloff = .exponential,
+        falloffLength: Float = 1.0,
+        falloffIntensity: Float = 1,
+        chromaticAmount: Float = 30.0,
+        material: LiquidLensMaterial = .water,
+        overlayMode: Bool = false,
+        diagonalBand: Float = 6.0,
+        asphericK2: Float = 0.0,
+        asphericK4: Float = 0.0,
+        asphericK: Float = 0.0,
+        enableFresnel: Bool = false,
+        enableSpectral: Bool = false,
+        enableAspheric: Bool = false,
+        enableHighFidelityRefraction: Bool = false,
+        enableThickLens: Bool = false
+    ) {
+        self.center = center
+        self.halfSize = halfSize
+        self.strength = strength
+        self.lensCurvature = lensCurvature
+        self.cornerRadius = cornerRadius
+        self.falloff = falloff
+        self.falloffLength = falloffLength
+        self.falloffIntensity = falloffIntensity
+        self.chromaticAmount = chromaticAmount
+        self.material = material
+        self.overlayMode = overlayMode
+        self.diagonalBand = diagonalBand
+        self.asphericK2 = asphericK2
+        self.asphericK4 = asphericK4
+        self.asphericK = asphericK
+        self.enableFresnel = enableFresnel
+        self.enableSpectral = enableSpectral
+        self.enableAspheric = enableAspheric
+        self.enableHighFidelityRefraction = enableHighFidelityRefraction
+        self.enableThickLens = enableThickLens
+    }
+
+    /// Applies the chosen quality preset's flag combination to this
+    /// configuration. Returns `self` after mutation so the call can be
+    /// chained at the use site.
+    ///
+    /// The preset overrides only the feature flags it owns
+    /// (`enableHighFidelityRefraction`, `enableFresnel`, `enableSpectral`,
+    /// `enableAspheric`). All other fields (strength, curvature,
+    /// chromaticAmount, material, falloff, etc.) are left intact. Callers
+    /// can override any flag after applying a preset.
+    @discardableResult
+    public mutating func apply(_ quality: LiquidLensQuality) -> Self {
+        enableHighFidelityRefraction = quality.usesHighFidelityRefraction
+        enableFresnel = quality.usesFresnel
+        enableSpectral = quality.usesSpectral
+        enableAspheric = quality.usesAspheric
+        return self
+    }
+
+    /// Returns the function-constant key identifying which compiled fragment
+    /// shader variant the renderer should use for this configuration.
+    public func pipelineKey() -> LiquidLensPipelineKey {
+        // Spectral integration implies chromatic sampling (5 wavelengths into RGB).
+        let chromatic = enableSpectral || chromaticAmount > 0.0001
+        return LiquidLensPipelineKey(
+            chromaticEnabled: chromatic,
+            falloffType: Int32(falloff.rawValue),
+            enableFresnel: enableFresnel,
+            enableSpectral: enableSpectral,
+            enableAspheric: enableAspheric,
+            highFidelityRefraction: enableHighFidelityRefraction,
+            enableThickLens: enableThickLens
+        )
+    }
+
+    /// Converts the configuration to a Metal-compatible uniform buffer.
+    ///
+    /// - Parameters:
+    ///   - textureSize: The texture dimensions in pixels.
+    ///   - scale: Display scale factor (points → pixels). Pass `contentsScale` from `CAMetalLayer`.
+    /// - Returns: A `LiquidLensUniforms` ready to be passed to the GPU.
+    public func toUniforms(textureSize: SIMD2<Float>, scale: Float = 1.0) -> LiquidLensUniforms {
+        assert(
+            MemoryLayout<LiquidLensUniforms>.stride == 112,
+            "LiquidLensUniforms layout mismatch — Metal expects 112-byte stride, got \(MemoryLayout<LiquidLensUniforms>.stride)"
+        )
+
+        // Per-material refractive indices depend only on the material's
+        // Sellmeier coefficients and the fixed visible-band wavelengths, so
+        // the entire (n_λ + n_air/n_λ) bundle can be precomputed once per
+        // material and reused across renders. The cache holds five entries
+        // (one per `LiquidLensMaterial` case) and is built lazily on first
+        // access. Each cache hit drops 5 `sqrt`s + 4 `/`s from the per-frame
+        // path; the render hot loop only does the curvature-dependent Snell
+        // work below.
+        let indices = Self.precomputedIndices(for: material)
+        let clampedCurvature = min(max(lensCurvature, 0), 1)
+        let nAir = Self.airRefractiveIndex
+
+        // Scalar rim deviations for the fast chromatic path:
+        // θ_rim = asin(lensCurvature); dev_λ = asin((n_air / n_λ)·sinθ_rim) − θ_rim.
+        let surfaceAngle = asin(clampedCurvature)
+        let devRed = Self.snellDeviation(
+            incidentAngle: surfaceAngle, n1: nAir, n2: indices.refractiveIndex.x)
+        let devGreen = Self.snellDeviation(
+            incidentAngle: surfaceAngle, n1: nAir, n2: indices.refractiveIndex.y)
+        let devBlue = Self.snellDeviation(
+            incidentAngle: surfaceAngle, n1: nAir, n2: indices.refractiveIndex.z)
+
+        return LiquidLensUniforms(
+            center: center * scale,
+            textureSize: textureSize,
+            halfSize: halfSize * scale,
+            strength: strength,
+            lensCurvature: clampedCurvature,
+            cornerRadius: cornerRadius.resolve(halfSize: halfSize) * scale,
+            falloffLength: falloffLength,
+            falloffIntensity: falloffIntensity,
+            chromaticAmount: chromaticAmount,
+            overlayMode: overlayMode ? 1 : 0,
+            diagonalBand: max(diagonalBand, 0) * scale,
+            asphericK2: asphericK2,
+            asphericK4: asphericK4,
+            airOver: indices.airOver,
+            deviation: SIMD3(devRed, devGreen, devBlue),
+            spectralAirOver0: indices.spectralAirOver0,
+            spectralAirOver1: indices.spectralAirOver1,
+            asphericK: asphericK
+        )
+    }
+}
+
+// MARK: - Layout Verification
+
+extension LiquidLensUniforms {
+    /// Compile-time sanity check — Metal shader expects exactly 112 bytes.
+    /// The stride is set by `SIMD3<Float>` alignment (16 bytes), not by the
+    /// sum of field sizes; keep this constant in sync if the Metal struct
+    /// reorders or adds members.
+    @usableFromInline
+    static let _stride: Int = {
+        let s = MemoryLayout<LiquidLensUniforms>.stride
+        assert(s == 112, "LiquidLensUniforms stride changed to \(s) — update Metal struct to match")
+        return s
+    }()
+}
+
+// MARK: - Sellmeier Coefficients
+
+extension LiquidLensConfiguration {
+    /// Four-term Sellmeier dispersion coefficients. The C values are squared
+    /// resonance wavelengths (λᵢ²) in µm². A term with B = C = 0 contributes
+    /// nothing, so three-term fits use B4 = C4 = 0.
+    ///
+    /// Sources verified against Schott Zemax catalog 2017-01-20 (BK7, SF11),
+    /// Daimon & Masumura 2007 Appl. Opt. 46:3811 (water 20 °C, 4-term),
+    /// Sultanova et al. 2009 Acta Phys. Polonica A 116:585 (PMMA, 3-term),
+    /// and Peter 1923 / refractiveindex.info (diamond, 2-term).
+    fileprivate struct SellmeierCoefficients {
+        let b1: Float
+        let b2: Float
+        let b3: Float
+        let b4: Float
+        let c1: Float
+        let c2: Float
+        let c3: Float
+        let c4: Float
+    }
+
+    fileprivate static let redWavelength: Float = 0.6563  // Fraunhofer C (656.3 nm)
+    fileprivate static let greenWavelength: Float = 0.5461  // Fraunhofer e (546.1 nm)
+    fileprivate static let blueWavelength: Float = 0.4861  // Fraunhofer F (486.1 nm)
+    /// Extra deep-blue wavelength used in 5-wavelength spectral integration.
+    fileprivate static let spectral0Wavelength: Float = 0.440  // 440 nm
+    /// Extra yellow wavelength used in 5-wavelength spectral integration.
+    fileprivate static let spectral1Wavelength: Float = 0.580  // 580 nm
+
+    /// Refractive index of air at standard conditions.
+    fileprivate static let airRefractiveIndex: Float = 1.000293
+
+    /// CPU equivalent of single-surface Snell deviation (kept for tests only —
+    /// runtime refraction is now per-fragment via MSL `refract()` 3D form).
+    fileprivate static func snellDeviation(incidentAngle: Float, n1: Float, n2: Float) -> Float {
+        let sinIncident = sin(incidentAngle)
+        let sinRefracted = (n1 / n2) * sinIncident
+        guard abs(sinRefracted) < 1.0 else { return 0 }
+        let refractedAngle = asin(sinRefracted)
+        return refractedAngle - incidentAngle
+    }
+
+    fileprivate static func sellmeierCoefficients(for material: LiquidLensMaterial) -> SellmeierCoefficients {
+        switch material {
+        case .crownGlass:
+            // Schott N-BK7. Three-term fit, ~5e-6 max error 365 nm – 2.3 µm.
+            return SellmeierCoefficients(
+                b1: 1.03961212, b2: 0.231792344, b3: 1.01046945, b4: 0,
+                c1: 0.00600069867, c2: 0.0200179144, c3: 103.560653, c4: 0
+            )
+        case .flintGlass:
+            // Schott N-SF11. Three-term fit.
+            return SellmeierCoefficients(
+                b1: 1.73759695, b2: 0.313747346, b3: 1.89878101, b4: 0,
+                c1: 0.013188707, c2: 0.0623068142, c3: 155.23629, c4: 0
+            )
+        case .water:
+            // Daimon & Masumura 2007 — four-term fit. Including the IR-resonance
+            // term (b4/c4) brings water's accuracy in the visible from ~10⁻³ to
+            // the same ~10⁻⁶ band as the optical glasses.
+            return SellmeierCoefficients(
+                b1: 0.5684027565, b2: 0.1726177391, b3: 0.02086189578, b4: 0.1130748688,
+                c1: 0.005101829712, c2: 0.01821153936, c3: 0.02620722293, c4: 10.69792721
+            )
+        case .acrylic:
+            // Sultanova et al. 2009 (PMMA). Three-term fit; more accurate than
+            // the single-term landing page on refractiveindex.info.
+            return SellmeierCoefficients(
+                b1: 0.99654, b2: 0.18964, b3: 0.00411, b4: 0,
+                c1: 0.00787, c2: 0.02191, c3: 3.85727, c4: 0
+            )
+        case .diamond:
+            // Peter 1923 / refractiveindex.info — two-term fit. The published
+            // formula is n²-1 = 0.3306·λ²/(λ² - 0.1750²) + 4.3356·λ²/(λ² - 0.1060²),
+            // so the C denominators are already-squared resonance wavelengths
+            // (0.1750² = 0.030625, 0.1060² = 0.011236). The pre-fix coefficients
+            // stored the un-squared resonance wavelengths and produced n ≈ 2.84
+            // at 546 nm instead of the real ~2.42.
+            return SellmeierCoefficients(
+                b1: 0.3306, b2: 4.3356, b3: 0, b4: 0,
+                c1: 0.030625, c2: 0.011236, c3: 0, c4: 0
+            )
+        }
+    }
+
+    fileprivate static func sellmeierIndex(wavelength: Float, coefficients: SellmeierCoefficients) -> Float {
+        let l2 = wavelength * wavelength
+        // Each term is B·λ²/(λ²-C). When B=C=0 the term collapses to 0
+        // (numerator = 0; denominator = λ² ≠ 0 for visible wavelengths),
+        // so degenerate trailing terms are safe.
+        let t1 = (coefficients.b1 * l2) / (l2 - coefficients.c1)
+        let t2 = (coefficients.b2 * l2) / (l2 - coefficients.c2)
+        let t3 = coefficients.b3 == 0 ? 0 : (coefficients.b3 * l2) / (l2 - coefficients.c3)
+        let t4 = coefficients.b4 == 0 ? 0 : (coefficients.b4 * l2) / (l2 - coefficients.c4)
+        let n2 = 1.0 + t1 + t2 + t3 + t4
+        return sqrt(max(Float(1.0), n2))
+    }
+
+    /// Bundle of material-derived refractive quantities. `airOver` and the
+    /// spectral ratios feed the GPU uniform buffer; `refractiveIndex`
+    /// (the per-channel n_λ values) is kept CPU-side so callers and tests
+    /// can verify the Sellmeier output without having to recompute it.
+    ///
+    /// None of these depend on lens geometry or curvature, so the bundle is
+    /// cached per material at module-load time.
+    internal struct PrecomputedMaterialIndices: Sendable {
+        let refractiveIndex: SIMD3<Float>
+        let airOver: SIMD3<Float>
+        let spectralAirOver0: Float
+        let spectralAirOver1: Float
+    }
+
+    /// Lazily-built per-material lookup table for the refractive quantities
+    /// that appear in `LiquidLensUniforms`. The five `LiquidLensMaterial`
+    /// cases each produce a fixed (refractiveIndex, airOver, spectralAirOver*)
+    /// bundle from their Sellmeier coefficients and the standard Fraunhofer
+    /// wavelengths, so the heavy `sqrt`/`/` math runs at most once per
+    /// material across the process lifetime.
+    private static let precomputedIndicesTable: [LiquidLensMaterial: PrecomputedMaterialIndices] = {
+        var table: [LiquidLensMaterial: PrecomputedMaterialIndices] = [:]
+        table.reserveCapacity(LiquidLensMaterial.allCases.count)
+        let nAir = airRefractiveIndex
+        for material in LiquidLensMaterial.allCases {
+            let coefficients = sellmeierCoefficients(for: material)
+            let nRed = sellmeierIndex(wavelength: redWavelength, coefficients: coefficients)
+            let nGreen = sellmeierIndex(wavelength: greenWavelength, coefficients: coefficients)
+            let nBlue = sellmeierIndex(wavelength: blueWavelength, coefficients: coefficients)
+            let nSpec0 = sellmeierIndex(wavelength: spectral0Wavelength, coefficients: coefficients)
+            let nSpec1 = sellmeierIndex(wavelength: spectral1Wavelength, coefficients: coefficients)
+            table[material] = PrecomputedMaterialIndices(
+                refractiveIndex: SIMD3(nRed, nGreen, nBlue),
+                airOver: SIMD3(nAir / nRed, nAir / nGreen, nAir / nBlue),
+                spectralAirOver0: nAir / nSpec0,
+                spectralAirOver1: nAir / nSpec1
+            )
+        }
+        return table
+    }()
+
+    internal static func precomputedIndices(for material: LiquidLensMaterial) -> PrecomputedMaterialIndices {
+        // `allCases` enumerates every enum case at table-build time, so the
+        // dictionary always has an entry. The force-unwrap fails only if a
+        // new case is added to `LiquidLensMaterial` without rebuilding the
+        // table — easy to catch in tests and locally during development.
+        // swift-format-ignore: NeverForceUnwrap
+        precomputedIndicesTable[material]!
+    }
+}

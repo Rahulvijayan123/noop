@@ -10,9 +10,15 @@ let package = Package(
     defaultLocalization: "en",
     platforms: [.macOS(.v13), .iOS(.v16), .watchOS(.v10)],
     products: [.library(name: "StrandDesign", targets: ["StrandDesign"])],
-    dependencies: [],
+    // The Liquid Glass renderer (vendored, see Packages/AemiSDR/VENDORED.md). iOS only: the watch has no
+    // backdrop blur to drive, and the macOS app keeps its solid surfaces.
+    dependencies: [.package(path: "../AemiSDR")],
     targets: [
-        .target(name: "StrandDesign", resources: [.process("Resources")]),
+        .target(
+            name: "StrandDesign",
+            dependencies: [.product(name: "AemiSDR", package: "AemiSDR", condition: .when(platforms: [.iOS]))],
+            resources: [.process("Resources")]
+        ),
         .testTarget(name: "StrandDesignTests", dependencies: ["StrandDesign"]),
     ]
 )

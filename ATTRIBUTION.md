@@ -193,6 +193,9 @@ remains available as a fallback.
 - **GRDB.swift** (`groue/GRDB.swift`) — SQLite persistence (via Swift Package Manager).
 - **MarkdownUI** (`gonzalezreal/swift-markdown-ui`) — renders the AI Coach's Markdown
   replies (via Swift Package Manager).
+- **AemiSDR** (`Aemi-Studio/AemiSDR`, MIT or MPL-2.0, Aemi Studio) — the backdrop blur and Metal lens behind the
+  iOS Liquid Glass look (Settings → Display → Liquid Glass). Vendored in `Packages/AemiSDR`; its `VENDORED.md`
+  lists the changes from upstream.
 
 NOOP contains no WHOOP proprietary code, binaries, firmware, logos, or assets, and
 performs no DRM circumvention. It operates only with the user's own device and data.

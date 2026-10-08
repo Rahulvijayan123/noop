@@ -16,7 +16,12 @@ ZIPFoundation — https://github.com/weichsel/ZIPFoundation
   License: MIT
   Used for: reading WHOOP / Apple Health export archives during import.
 
-The MIT license is permissive: these components may be used, modified, and
+AemiSDR — https://github.com/Aemi-Studio/AemiSDR
+  License: MIT or MPL-2.0, at your option (Packages/AemiSDR/LICENSE-MIT, Packages/AemiSDR/LICENSE)
+  Used for: the iOS Liquid Glass backdrop blur and lens. Vendored in Packages/AemiSDR; see VENDORED.md
+  there for the changes from upstream.
+
+The MIT license (an option for every component above) is permissive: these components may be used, modified, and
 redistributed (including commercially) on their own terms. When they are used as
 part of NOOP's combined work, the combined work as a whole is governed by NOOP's
 PolyForm Noncommercial license.

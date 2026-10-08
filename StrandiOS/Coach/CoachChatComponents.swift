@@ -345,8 +345,16 @@ struct CoachHeaderButton: View {
 }
 
 private extension View {
-    @ViewBuilder
     func coachHeaderGlass() -> some View {
+        LiquidGlassSwitch {
+            self.noopGlassControl(in: Circle())
+        } original: {
+            self.originalCoachHeaderGlass()
+        }
+    }
+
+    @ViewBuilder
+    func originalCoachHeaderGlass() -> some View {
         if #available(iOS 26.0, *) {
             self.glassEffect(.regular.interactive(), in: Circle())
         } else {

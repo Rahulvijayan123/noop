@@ -1,0 +1,309 @@
+//
+//  LiquidLensUIView.swift
+//  AemiSDR
+//
+
+#if os(iOS)
+    import Metal
+    import OSLog
+    import QuartzCore
+    import UIKit
+
+    /// A `UIView` backed by `CAMetalLayer` that renders the physics-based liquid lens effect.
+    ///
+    /// This view converts a source `CGImage` into a Metal texture, applies the liquid lens
+    /// fragment shader with configurable parameters, and presents the result directly
+    /// via `CAMetalLayer`. Because the layer uses `isOpaque = false` with a clear background,
+    /// SwiftUI `.clipShape()` and other masking composites work naturally.
+    ///
+    /// ## Usage
+    /// ```swift
+    /// let view = LiquidLensUIView(configuration: .init(halfSize: SIMD2(200, 200), strength: 1.5))
+    /// view.setSourceImage(someImage)
+    /// ```
+    open class LiquidLensUIView: UIView {
+        // MARK: - Properties
+
+        private let logger = Logger(
+            subsystem: "studio.aemi.AemiSDR",
+            category: "LiquidLensUIView"
+        )
+
+        private var renderer: LiquidLensRenderer?
+        private var sourceTexture: MTLTexture?
+        private var configuration: LiquidLensConfiguration
+
+        /// Closure to fire from each `MTLCommandBuffer` completion handler so the
+        /// `ZeroCopyTextureBridge` slot backing the current source texture can be
+        /// reclaimed. Set by `setSourceTexture(_:onConsumed:)` and re-used by any
+        /// follow-up render driven by `layoutSubviews` until a new texture arrives.
+        private var sourceTextureOnConsumed: (@Sendable () -> Void)?
+
+        /// Optional shape path provider for masking the Metal layer to match the parent view's clip shape.
+        var clipShapePath: ShapePathProvider? {
+            didSet { updateClipMask() }
+        }
+
+        /// Fired once when the view first becomes ready for capture (has a window
+        /// and a non-zero size). Used by `_LiquidLensOverlay` to trigger the
+        /// initial capture exactly when the SwiftUI hierarchy has laid out,
+        /// replacing a hard-coded `asyncAfter(0.1)` timing hack.
+        var onReadyForFirstCapture: (() -> Void)?
+        private var didFireReady = false
+
+        /// Fires when the view's superview chain or trait collection has
+        /// changed, signalling that the `BackdropCaptureCoordinator`'s cached
+        /// content sibling / background color may be stale. Bound by
+        /// `_LiquidLensOverlay` to the coordinator's
+        /// `invalidateContentLookupCaches()`.
+        var onContentHierarchyChanged: (() -> Void)?
+
+        override open class var layerClass: AnyClass { CAMetalLayer.self }
+
+        // Safe by construction: `layerClass` above returns `CAMetalLayer.self`,
+        // so `layer` is guaranteed to be a `CAMetalLayer`. A subclass that
+        // overrides `layerClass` would invalidate this — `open` permits
+        // subclassing, so a future maintainer adding a subclass must override
+        // both or accept the trap. The cost of `as?` per render is non-zero.
+        // swift-format-ignore: NeverForceUnwrap
+        private var metalLayer: CAMetalLayer { layer as! CAMetalLayer }
+
+        // MARK: - Initialization
+
+        public init(configuration: LiquidLensConfiguration = .init()) {
+            self.configuration = configuration
+            super.init(frame: .zero)
+
+            renderer = LiquidLensRenderer()
+
+            guard let device = renderer?.device else {
+                logger.error("Metal renderer unavailable; LiquidLensUIView will not render.")
+                return
+            }
+
+            metalLayer.device = device
+            // Pixel format selection — see also `LiquidLensRenderer.pipelinePixelFormat`.
+            // On real iOS devices (A14+/M-series): 10-bit extended-range sRGB +
+            //   Display P3 colorspace preserves wide-gamut backdrop content.
+            // On the iOS simulator: `bgra10_xr_srgb` reports "not blendable" at
+            //   pipeline-state validation time. Fall back to `bgra8Unorm_srgb`
+            //   (8-bit sRGB, blendable everywhere) and skip the P3 tag.
+            #if targetEnvironment(simulator)
+                metalLayer.pixelFormat = .bgra8Unorm_srgb
+            #else
+                metalLayer.pixelFormat = .bgra10_xr_srgb
+                metalLayer.colorspace = CGColorSpace(name: CGColorSpace.displayP3)
+            #endif
+            metalLayer.isOpaque = false
+            metalLayer.framebufferOnly = true
+
+            isUserInteractionEnabled = false
+        }
+
+        @available(*, unavailable)
+        public required init?(coder _: NSCoder) {
+            fatalError("init(coder:) has not been implemented")
+        }
+
+        // MARK: - Public API
+
+        /// Sets the source image to be distorted by the lens effect.
+        public func setSourceImage(_ image: CGImage) {
+            guard let renderer else { return }
+            sourceTexture = renderer.makeTexture(from: image)
+            renderIfNeeded()
+        }
+
+        /// Sets the source image from a `UIImage`.
+        public func setSourceImage(_ image: UIImage) {
+            guard let cgImage = image.cgImage else {
+                logger.warning("UIImage has no CGImage backing; ignoring.")
+                return
+            }
+            setSourceImage(cgImage)
+        }
+
+        /// Sets a pre-existing Metal texture as the source, bypassing `makeTexture` conversion.
+        ///
+        /// Use this with ``ZeroCopyTextureBridge`` to avoid per-frame texture allocations.
+        ///
+        /// - Parameters:
+        ///   - texture: The Metal texture to render with.
+        ///   - onConsumed: Optional closure invoked from the command-buffer
+        ///     completion handler of every render driven by this texture. Used by
+        ///     `ZeroCopyTextureBridge` to reclaim its slot once the GPU is done.
+        public func setSourceTexture(_ texture: MTLTexture, onConsumed: (@Sendable () -> Void)? = nil) {
+            // If a previous capture's consumer is still pending (the prior texture
+            // was never GPU-rendered), fire it now to release that slot. Without
+            // this, two captures in quick succession lose the first consumer and
+            // the bridge slot is leaked.
+            if let stale = sourceTextureOnConsumed {
+                stale()
+            }
+            sourceTexture = texture
+            sourceTextureOnConsumed = onConsumed
+            renderIfNeeded()
+        }
+
+        /// Captures the given view's rendered content and uses it as the source texture.
+        public func captureContent(of view: UIView) {
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            let format = UIGraphicsImageRendererFormat()
+            format.scale = displayScale
+            format.opaque = false
+            let renderer = UIGraphicsImageRenderer(bounds: view.bounds, format: format)
+            let image = renderer.image { _ in
+                view.drawHierarchy(in: view.bounds, afterScreenUpdates: false)
+            }
+            setSourceImage(image)
+        }
+
+        /// Updates the lens configuration, re-rendering only if the configuration changed.
+        public func updateConfiguration(_ newConfiguration: LiquidLensConfiguration) {
+            guard configuration != newConfiguration else { return }
+            configuration = newConfiguration
+            renderIfNeeded()
+        }
+
+        // MARK: - UIView Lifecycle
+
+        /// Last drawable size + contents scale pushed to the `CAMetalLayer`.
+        /// `layoutSubviews` and `didMoveToWindow` both fire on the same first
+        /// attach, so the metric write + render is gated on a real change to
+        /// avoid two identical render passes back-to-back.
+        private var lastDrawableSize: CGSize = .zero
+        private var lastContentsScale: CGFloat = 0
+
+        @discardableResult
+        private func syncDrawableMetrics() -> Bool {
+            let scale = displayScale
+            let size = CGSize(
+                width: bounds.width * scale,
+                height: bounds.height * scale
+            )
+            guard size != lastDrawableSize || scale != lastContentsScale else { return false }
+            metalLayer.contentsScale = scale
+            metalLayer.drawableSize = size
+            lastDrawableSize = size
+            lastContentsScale = scale
+            return true
+        }
+
+        override open func layoutSubviews() {
+            super.layoutSubviews()
+            syncDrawableMetrics()
+            updateClipMask()
+            // Always attempt a render: `renderIfNeeded` is a no-op when no
+            // source texture is set yet (early `drainPendingConsumer` exit).
+            // Gating this on `metricsChanged` skipped the retry that lets a
+            // late-arriving source texture redraw on the next layout pass —
+            // visible as "starts blank, fixes on interaction" the first time
+            // the view becomes visible after the lens was added.
+            renderIfNeeded()
+            fireReadyIfPossible()
+        }
+
+        override open func didMoveToWindow() {
+            super.didMoveToWindow()
+            guard window != nil else { return }
+            onContentHierarchyChanged?()
+            syncDrawableMetrics()
+            renderIfNeeded()
+            fireReadyIfPossible()
+        }
+
+        override open func didMoveToSuperview() {
+            super.didMoveToSuperview()
+            onContentHierarchyChanged?()
+        }
+
+        override open func traitCollectionDidChange(_ previousTraitCollection: UITraitCollection?) {
+            super.traitCollectionDidChange(previousTraitCollection)
+            // Background color resolution depends on traitCollection (dark/light).
+            // The coordinator caches the resolved CGColor; invalidate on change.
+            if traitCollection.hasDifferentColorAppearance(comparedTo: previousTraitCollection) {
+                onContentHierarchyChanged?()
+            }
+        }
+
+        private func fireReadyIfPossible() {
+            guard !didFireReady,
+                window != nil,
+                bounds.width > 0,
+                bounds.height > 0
+            else { return }
+            didFireReady = true
+            onReadyForFirstCapture?()
+        }
+
+        // MARK: - Clip Masking
+
+        private func updateClipMask() {
+            guard bounds.width > 0, bounds.height > 0 else { return }
+            if let clipShapePath {
+                let maskLayer = (layer.mask as? CAShapeLayer) ?? CAShapeLayer()
+                maskLayer.frame = bounds
+                maskLayer.path = clipShapePath(bounds)
+                if layer.mask == nil {
+                    layer.mask = maskLayer
+                }
+            } else {
+                layer.mask = nil
+            }
+        }
+
+        // MARK: - Rendering
+
+        private func renderIfNeeded() {
+            // On every early-return path, fire and clear `sourceTextureOnConsumed`
+            // — the texture was never handed to the GPU, so the bridge slot
+            // wouldn't otherwise be reclaimed (it would stay in-flight forever).
+            // Without this, three thermally-throttled drops permanently exhaust
+            // the bridge's 3-slot ring.
+            guard let renderer, let sourceTexture else {
+                drainPendingConsumer()
+                return
+            }
+            guard metalLayer.drawableSize.width > 0, metalLayer.drawableSize.height > 0 else {
+                drainPendingConsumer()
+                return
+            }
+            guard let drawable = metalLayer.nextDrawable() else {
+                drainPendingConsumer()
+                return
+            }
+
+            let textureSize = SIMD2<Float>(
+                Float(metalLayer.drawableSize.width),
+                Float(metalLayer.drawableSize.height)
+            )
+            let uniforms = configuration.toUniforms(
+                textureSize: textureSize,
+                scale: Float(metalLayer.contentsScale)
+            )
+
+            // The bridge's per-frame consumer must fire exactly once. The first
+            // successful render of a freshly captured texture wires it into a
+            // command-buffer completion handler; subsequent `renderIfNeeded`
+            // calls (driven by `layoutSubviews`, `didMoveToWindow`, etc.) reuse
+            // the same `sourceTexture` but pass `nil` so they don't queue a
+            // second `markCompleted` against the same slot.
+            let consumed = sourceTextureOnConsumed
+            sourceTextureOnConsumed = nil
+
+            renderer.render(
+                sourceTexture: sourceTexture,
+                uniforms: uniforms,
+                pipelineKey: configuration.pipelineKey(),
+                drawable: drawable,
+                onCompleted: consumed
+            )
+        }
+
+        private func drainPendingConsumer() {
+            guard let pending = sourceTextureOnConsumed else { return }
+            sourceTextureOnConsumed = nil
+            pending()
+        }
+    }
+#endif

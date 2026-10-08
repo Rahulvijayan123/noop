@@ -92,6 +92,7 @@ struct NoopButtonAppearance {
 /// optional hairline edge. No shadow, no blur halo, no additive bloom — restraint only.
 private struct NoopButtonBackground: View {
     let appearance: NoopButtonAppearance
+    @Environment(\.liquidGlass) private var glass
 
     var body: some View {
         let shape = RoundedRectangle(cornerRadius: NoopButtonMetrics.cornerRadius, style: .continuous)
@@ -100,7 +101,15 @@ private struct NoopButtonBackground: View {
                 NoopPanelSurface(cornerRadius: NoopButtonMetrics.cornerRadius)
             }
             if let fill = appearance.fill {
-                shape.fill(fill)
+                if glass.isEnabled {
+                    // Tinted glass: the fill stays dense enough for the white label at full strength.
+                    LiquidGlassBackdrop(level: glass)
+                        .clipShape(shape)
+                    shape.fill(fill).opacity(glass.tintedBodyOpacity)
+                    LiquidGlassHighlights(shape: shape, level: glass)
+                } else {
+                    shape.fill(fill)
+                }
             }
             if let border = appearance.border {
                 shape.strokeBorder(border, lineWidth: 1)

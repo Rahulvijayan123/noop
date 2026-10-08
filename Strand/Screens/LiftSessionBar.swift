@@ -88,7 +88,7 @@ struct LiftSessionBar: View {
                 .padding(.leading, 12)
                 .padding(.trailing, 8)
                 .padding(.vertical, 10)
-                .background(.ultraThinMaterial, in: Capsule())
+                .modifier(LiftSessionBarSurface())
                 .overlay(Capsule().stroke(tint(engine).opacity(0.35), lineWidth: 1))
                 .contentShape(Capsule())
             }
@@ -109,5 +109,16 @@ struct LiftSessionBar: View {
     /// Screen writes the same clock — "0:45", "0:00", "1:05:00" — through NOOP's one running-clock format.
     private func bigClock(_ engine: LiftSessionEngine) -> LiftRunningClock {
         LiftRunningClock { now in engine.restRemaining(now: now) ?? now - engine.stageStartedAt }
+    }
+}
+
+/// The bar's capsule: Liquid Glass while the setting is on, the system material while it is off.
+private struct LiftSessionBarSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        LiquidGlassSwitch {
+            content.noopGlassControl(in: Capsule())
+        } original: {
+            content.background(.ultraThinMaterial, in: Capsule())
+        }
     }
 }

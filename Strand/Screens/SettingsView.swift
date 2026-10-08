@@ -36,6 +36,9 @@ struct SettingsView: View {
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     /// Light or dark for the whole app; the app roots apply it. Onboarding asks first.
     @AppStorage(AppearanceMode.storageKey) private var appearanceRaw = AppearanceMode.system.rawValue
+    #if os(iOS)
+    @AppStorage(LiquidGlassPrefs.intensityKey) private var liquidGlassPercent = LiquidGlassPrefs.defaultPercent
+    #endif
     /// The Sana master switch, under the same `noop.` key Android writes. Off removes the tab and the
     /// assistant entry points (`RootTabView`, `RootView`).
     @AppStorage("noop.coachEnabled") private var sanaEnabled = true
@@ -168,6 +171,12 @@ struct SettingsView: View {
             navRow("Appearance", AppearanceMode.resolve(appearanceRaw).label, id: "appearance") {
                 appearanceEditor
             }
+            #if os(iOS)
+            SettingsDivider()
+            navRow("Liquid Glass", LiquidGlassSettingsView.valueLabel(liquidGlassPercent), id: "liquidGlass") {
+                LiquidGlassSettingsView()
+            }
+            #endif
         }
     }
 

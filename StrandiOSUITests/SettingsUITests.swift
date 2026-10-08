@@ -31,6 +31,7 @@ final class SettingsUITests: XCTestCase {
             ("settings.height", app.steppers["Height"]),
             ("settings.weight", app.steppers["Weight in pounds"]),
             ("settings.appearance", app.buttons["Dark"]),
+            ("settings.liquidGlass", app.sliders["liquidGlass.intensity"]),
             ("settings.strap", app.staticTexts["None of these actions delete your recorded data."]),
             ("settings.placement", app.buttons["Bicep"]),
             ("settings.alerts", app.switches["automations.wristAlerts"]),
@@ -83,6 +84,12 @@ final class SettingsUITests: XCTestCase {
         goBack()
         XCTAssertTrue(waitForLabel(element("settings.appearance"), containing: "Dark"))
 
+        // Liquid Glass off: the row says so, and the platform tab bar comes back in place of the glass one.
+        tapRow("settings.liquidGlass")
+        app.buttons["Off"].tap()
+        goBack()
+        XCTAssertTrue(waitForLabel(element("settings.liquidGlass"), containing: "Off"))
+
         // Wear placement: the row must show the new value as soon as you come back (it used to stay stale).
         tapRow("settings.placement")
         app.buttons["Bicep"].tap()
@@ -122,14 +129,17 @@ final class SettingsUITests: XCTestCase {
         scrollTo(sana)
         setSwitch(sana, on: false)
         closeSettings()
-        XCTAssertFalse(app.tabBars.buttons["Sana"].exists, "Sana is off")
+        XCTAssertTrue(app.tabBars.buttons["Today"].exists, "glass off shows the platform tab bar")
+        XCTAssertFalse(sanaTab.exists, "Sana is off")
 
         // Relaunch.
         app.terminate()
         app.launch()
-        XCTAssertFalse(app.tabBars.buttons["Sana"].waitForExistence(timeout: 3), "Sana stays off")
+        XCTAssertTrue(app.tabBars.buttons["Today"].waitForExistence(timeout: 20), "glass stays off")
+        XCTAssertFalse(sanaTab.waitForExistence(timeout: 3), "Sana stays off")
         openSettings()
         XCTAssertTrue(element("settings.appearance").label.contains("Dark"))
+        XCTAssertTrue(element("settings.liquidGlass").label.contains("Off"))
         XCTAssertTrue(waitForLabel(element("settings.placement"), containing: "Bicep"))
         XCTAssertTrue(element("settings.name").label.contains("UI Test"))
         XCTAssertTrue(element("settings.shortcuts").label.contains("Mark a moment"))
@@ -144,6 +154,8 @@ final class SettingsUITests: XCTestCase {
 
         // Put everything back so the next run starts from the defaults.
         tapRow("settings.appearance"); app.buttons["System"].tap(); goBack()
+        tapRow("settings.liquidGlass"); app.buttons["Balanced"].tap(); goBack()
+        XCTAssertTrue(waitForLabel(element("settings.liquidGlass"), containing: "70%"))
         tapRow("settings.placement"); app.buttons["Wrist"].tap(); goBack()
         tapRow("settings.name"); app.textFields["settings.name.field"].tap()
         app.textFields["settings.name.field"].clearAndType(""); goBack()
@@ -160,7 +172,8 @@ final class SettingsUITests: XCTestCase {
         scrollTo(sanaAgain)
         setSwitch(sanaAgain, on: true)
         closeSettings()
-        XCTAssertTrue(app.tabBars.buttons["Sana"].waitForExistence(timeout: 5))
+        XCTAssertTrue(app.buttons["tab.sana"].waitForExistence(timeout: 5), "Sana is back, on the glass tab bar")
+        XCTAssertFalse(app.tabBars.buttons["Today"].exists, "glass on hides the platform tab bar")
     }
 
     // MARK: - Account-backed settings (local Supabase stack)
@@ -329,6 +342,11 @@ final class SettingsUITests: XCTestCase {
         XCTAssertTrue(gear.waitForExistence(timeout: 20), "the Today gear")
         gear.tap()
         XCTAssertTrue(element("settings.account").waitForExistence(timeout: 10), "Settings opened")
+    }
+
+    /// The Sana tab on whichever bar is showing: the glass bar (Liquid Glass on) or the platform one (off).
+    private var sanaTab: XCUIElement {
+        app.buttons.matching(NSPredicate(format: "identifier == %@ OR label == %@", "tab.sana", "Sana")).firstMatch
     }
 
     private func closeSettings() {

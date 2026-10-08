@@ -47,6 +47,8 @@ struct StrandiOSApp: App {
     /// Chrome accent colour (mint / WHOOP blue / custom). Chrome only — never the data colour worlds.
     @AppStorage(AccentColor.storageKey) private var accentRaw = AccentColor.mint.rawValue
     @AppStorage(AccentColor.customHexKey) private var accentCustomHex = AccentColor.defaultCustomHex
+    /// Liquid Glass intensity (Settings → Display → Liquid Glass). Every surface reads it from the environment.
+    @AppStorage(LiquidGlassPrefs.intensityKey) private var liquidGlassPercent = LiquidGlassPrefs.defaultPercent
     /// Effort's display scale is also embedded in the shared widget snapshot. Observe it here so a
     /// Settings change gets one accurate full rebuild instead of waiting for an unrelated repo refresh.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
@@ -271,6 +273,7 @@ struct StrandiOSApp: App {
                 .environment(\.locale, AppLanguage.activeLocale)
                 .chartStyle(chartStyleRaw)
                 .noopAccent(accentRaw, customHex: accentCustomHex)
+                .liquidGlass(percent: liquidGlassPercent)
                 // Dynamic Type now scales the prose/label roles (StrandFont). Cap the upper end so the
                 // fixed-geometry tiles/gauges stay legible at the largest accessibility sizes rather than
                 // clipping; the common Larger-Text range still scales fully.
@@ -714,6 +717,7 @@ enum DemoScreens {
         case "activitycalibration": return AnyView(ActivityCalibrationView())
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
+        case "liquidglass": return AnyView(NavigationStack { LiquidGlassSettingsView() })
         case "coach":    return AnyView(CoachDemoHost())
         case "chargebreakdown": return AnyView(ChargeBreakdownDemoHost())
         case "devices":  return AnyView(DevicesView())

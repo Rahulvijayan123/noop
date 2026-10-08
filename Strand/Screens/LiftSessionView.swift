@@ -569,7 +569,7 @@ struct LiftSessionView: View {
         .padding(.horizontal, NoopMetrics.screenPadding)
         .padding(.top, 10)
         .padding(.bottom, 14)
-        .background(.ultraThinMaterial)
+        .modifier(LiftActionStripSurface())
         .overlay(alignment: .top) {
             Rectangle().fill(StrandPalette.textTertiary.opacity(0.15)).frame(height: 0.5)
         }
@@ -913,4 +913,16 @@ struct LiftSessionView: View {
     /// The sport every logged session is filed under — the same token the Hevy/Liftosaur importer
     /// uses, so a typed session and an imported one land in one bucket with one icon.
     static let sport = "Strength Training"
+}
+
+/// The pinned action strip: a Liquid Glass chrome band while the setting is on, the system material while
+/// it is off.
+private struct LiftActionStripSurface: ViewModifier {
+    func body(content: Content) -> some View {
+        LiquidGlassSwitch {
+            content.background(NoopChromeSurface())
+        } original: {
+            content.background(.ultraThinMaterial)
+        }
+    }
 }
