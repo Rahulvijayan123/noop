@@ -601,6 +601,69 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
         XCTAssertGreaterThan(leakedIntoTheTrack, 0, "the scenario must exercise a pre-midnight event")
     }
 
+    /// The day filter itself, fed directly (the lookback test above only exercises it when the decoder happens to
+    /// re-emit a pre-midnight event). Events are kept by their detection second `ts` in `[dayStart, dayEnd)`:
+    /// one detected before midnight or at/after the next midnight is dropped; one detected inside the day is kept
+    /// unchanged, including its `onsetTs` when that was back-dated into the previous day (the onset is a causal
+    /// back-date of at most `maxOnsetLeadS`, and publish_activity_context_day validates `ts` only). Runs are
+    /// clipped to `dayEnd` and the summary follows the clipped runs.
+    func testTheDayFilterDropsOutOfDayEventsAndKeepsInDayOnesWhateverTheirOnset() throws {
+        var sim = DaySim(start: dayStart)
+        sim.still(300)
+        sim.walk(120)
+        sim.still(300)
+        let day = input(sim, from: dayStart, to: dayEnd)
+        let track = ActivityContextTrackBuilder.build(day)
+        var raw = ActivityContextDayDocument(track: track, input: day, generatedAt: dayEnd, includeSnapshot: false)
+        XCTAssertFalse(raw.runs.isEmpty)
+        // A run left open past midnight (as the run-stamping can leave the last one).
+        raw.runs[raw.runs.count - 1].end = dayEnd + 60
+
+        let lead = ActivityTransitionEvent.maxOnsetLeadS
+        func event(_ kind: ActivityTransitionKind, _ ts: Int, onset: Int? = nil, source: String? = "hsmm")
+            -> ActivityTransitionEvent {
+            ActivityTransitionEvent(kind: kind, probability: 0.8, ts: ts, onsetTs: onset, source: source)
+        }
+        let previousDay = event(.walkStop, dayStart - 3_600, onset: dayStart - 3_605)
+        let justBeforeMidnight = event(.sitToStandLike, dayStart - 1, onset: dayStart - 1 - lead)
+        let atMidnight = event(.walkStart, dayStart, onset: dayStart - lead)
+        let onsetInThePreviousDay = event(.standToSitLike, dayStart + 3, onset: dayStart + 3 - lead,
+                                          source: "transition_expert")
+        let midDay = event(.walkStart, dayStart + 300, onset: dayStart + 296)
+        let legacy = event(.walkStop, dayStart + 420, onset: nil, source: nil)
+        let lastSecond = event(.lyingDownLike, dayEnd - 1, onset: dayEnd - 4)
+        let atNextMidnight = event(.gettingUpLike, dayEnd, onset: dayEnd - 2)
+        let nextDay = event(.runStart, dayEnd + 90, onset: dayEnd + 85)
+        raw.events = [previousDay, justBeforeMidnight, atMidnight, onsetInThePreviousDay, midDay, legacy,
+                      lastSecond, atNextMidnight, nextDay]
+
+        let clipped = ActivityContextDays.clippedToDay(raw)
+        XCTAssertEqual(clipped.events, [atMidnight, onsetInThePreviousDay, midDay, legacy, lastSecond],
+                       "out-of-day detections dropped, in-day ones kept unchanged and in order")
+        XCTAssertEqual(clipped.events.first(where: { $0.ts == dayStart + 3 })?.onsetTs, dayStart + 3 - lead,
+                       "an onset back-dated before midnight is kept as it is")
+        XCTAssertEqual(clipped.runs.last?.end, dayEnd)
+        XCTAssertTrue(clipped.runs.allSatisfy { $0.end <= dayEnd && $0.end > $0.start })
+        XCTAssertEqual(clipped.summary, ActivityContextDaySummary(runs: clipped.runs))
+        XCTAssertEqual(clipped.dayStart, raw.dayStart)
+        XCTAssertEqual(clipped.observedSeconds, raw.observedSeconds)
+
+        // The kept events survive the payload encoding with their onset and source.
+        let data = try JSONEncoder().encode(clipped)
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let encoded = try XCTUnwrap(object["events"] as? [[String: Any]])
+        XCTAssertEqual(encoded.compactMap { $0["ts"] as? Int },
+                       [dayStart, dayStart + 3, dayStart + 300, dayStart + 420, dayEnd - 1])
+        XCTAssertEqual(encoded[1]["onset_ts"] as? Int, dayStart + 3 - lead)
+        XCTAssertEqual(encoded[1]["source"] as? String, "transition_expert")
+        XCTAssertNil(encoded[3]["onset_ts"])
+
+        // dayDocument is exactly this filter applied to the raw decode.
+        XCTAssertEqual(ActivityContextDays.dayDocument(input: day, generatedAt: dayEnd),
+                       ActivityContextDays.clippedToDay(ActivityContextDayDocument(
+                           track: track, input: day, generatedAt: dayEnd, includeSnapshot: false)))
+    }
+
     func testStreamsLoadedWithTheLookbackSplitAtTheDayStart() {
         var sim = DaySim(start: dayStart - 10)
         sim.still(20)

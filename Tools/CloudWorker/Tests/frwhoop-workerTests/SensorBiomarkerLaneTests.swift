@@ -786,7 +786,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertTrue(lane.stats.published >= 1)
         XCTAssertTrue(lane.stats.sidecarRequests >= 1)
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 
     /// The PPG path end-to-end at lane level with the PRODUCTION anchor-less wire
@@ -865,7 +865,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(row["pulse_status"], "withheld")
         XCTAssertTrue(row["withheld_reasons"]?.contains("missing_ppg_anchor") ?? false)
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 
     /// Late input revision: a second object bumps the revision, a re-claim recomputes, and the day
@@ -901,7 +901,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         let job2 = try jobRow(f)
         XCTAssertEqual(job2["completed_revision"], "2")
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 
     /// Lease expiry: an expired lease is reclaimed, the day is computed once, and the expiry is
@@ -931,7 +931,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
             [f.user, f.device]).first?["lease_expiry_count"] ?? ""
         XCTAssertEqual(expiry, "1", "the expiry must be counted on the re-claim")
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 
     /// Publish fence: a stale worker (claimed revision behind the queue's) publishes NULL and the
@@ -973,7 +973,7 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(jobAfter["lease_token"] ?? "x", "", "the stale worker's lease must be released")
         XCTAssertEqual(jobAfter["consecutive_failures"], "0", "a fenced release is never a failure")
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 
     /// Sidecar-missing independence: a refused/not-ready sidecar settles the job with bounded
@@ -998,6 +998,6 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(job["lease_token"] ?? "x", "", "the lease is released for the backoff window")
         XCTAssertGreaterThan(lane.stats.sidecarFailures, 0)
         db.rollbackTransaction()
-        try? db.exec("delete from auth.users where id = '\(f.user)'")
+        try db.deleteFixtureOwners([f.user])
     }
 }

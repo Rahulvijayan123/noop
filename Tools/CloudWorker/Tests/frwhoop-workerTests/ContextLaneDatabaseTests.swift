@@ -50,17 +50,11 @@ final class ContextLaneDatabaseTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        for user in owners {
-            // `sessions` rows first: their delete trigger (`bump_user_revision`) upserts `user_sync_state` for the
-            // user, which fails inside the account cascade and would leave the owner (and its queued work) behind.
-            try? db?.exec("delete from public.sessions where user_id = '\(user)'")
-            do {
-                try db?.exec("delete from auth.users where id = '\(user)'")
-            } catch {
-                XCTFail("fixture owner \(user) was not removed: \(error)")
-            }
-        }
+        // The account cascade runs with the owners' sessions still there (20261008100400 made that work); a
+        // failure throws instead of leaving an owner whose queued work a later suite would claim.
+        let users = owners
         owners = []
+        try db?.deleteFixtureOwners(users)
     }
 
     private func makeOwner(timezone: String = "UTC", family: String = "WHOOP 5.0 / MG") throws -> Owner {
@@ -377,6 +371,51 @@ final class ContextLaneDatabaseTests: XCTestCase {
         let j = try job(o)
         XCTAssertEqual(j["done"], j["rev"])
         XCTAssertEqual(j["outcome"], "unchanged")
+    }
+
+    /// A policy version bump (the INT-C review's `EligibilityConfig` pc-eligibility-3 → 4 and join pc-join-2 → 3)
+    /// changes the policy fingerprint, so the same inputs re-run under the new policy store a NEW revision that
+    /// supersedes the old one, instead of `unchanged`, and the stored provenance (`versions`, `policy_fingerprint`)
+    /// names the new versions. The SQL side has no copy of the version strings (only the format checks), so any
+    /// value passes. Uses explicit next versions so it holds whatever the default policy carries.
+    func testAPolicyVersionBumpStoresANewRevisionStampedWithTheNewVersions() throws {
+        let o = try makeOwner()
+        try seed(o, morningSim(dayStart))
+        try score(o)
+        try invalidate(o)
+        var lane = contextLane()
+        lane.drain(budget: 8)
+        let first = try contextDays(o)
+        XCTAssertEqual(first.count, 1, "\(first) \(lane.stats.lastError ?? "")")
+        XCTAssertEqual(first.first?["policy_fingerprint"], PC.Policy.default.fingerprint)
+
+        var bumped = PC.Policy.default
+        bumped.eligibility.version = "pc-eligibility-next-test"
+        bumped.join.version = "pc-join-next-test"
+        XCTAssertNotEqual(bumped.fingerprint, PC.Policy.default.fingerprint, "the versions are part of the fingerprint")
+        var next = contextLane()
+        next.policy = bumped
+        try invalidate(o, reason: "policy")
+        next.drain(budget: 8)
+        XCTAssertEqual(next.stats.unchanged, 0, next.stats.lastError ?? "")
+        XCTAssertGreaterThanOrEqual(next.stats.published, 1, next.stats.lastError ?? "")
+
+        let rows = try contextDays(o)
+        let current = rows.filter { $0["current"] == "true" }
+        XCTAssertEqual(current.count, 1, "\(rows)")
+        XCTAssertEqual(current.first?["policy_fingerprint"], bumped.fingerprint)
+        XCTAssertNotEqual(current.first?["rev"], first.first?["rev"])
+        XCTAssertEqual(rows.first { $0["rev"] == first.first?["rev"] }?["current"], "false",
+                       "the old policy's revision is superseded, not left current beside the new one")
+        let stamped = try db.query("""
+            select versions::text as versions, (document #>> '{header,policy_fingerprint}') as doc_policy
+            from public.physiology_context_days
+            where user_id = $1::uuid and device_id = $2::uuid and day = $3::date and superseded_by is null
+              and mode = 'retrospective'
+            """, [o.user, o.device, day]).first ?? [:]
+        XCTAssertTrue(stamped["versions"]?.contains("pc-eligibility-next-test") ?? false, "\(stamped)")
+        XCTAssertTrue(stamped["versions"]?.contains("pc-join-next-test") ?? false, "\(stamped)")
+        XCTAssertEqual(stamped["doc_policy"], bumped.fingerprint)
     }
 
     func testAWorkerThatDiesMidJobIsReplacedByOneThatPublishesOnce() throws {

@@ -61,12 +61,11 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
         addTeardownBlock {
             db.rollbackTransaction()
-            // `sessions` rows first (the workouts a test logs): their delete trigger (`bump_user_revision`) upserts
-            // `user_sync_state` for the user, which fails inside the account cascade, and the silently failed
-            // delete left the owner and its queued work behind for every later suite (the context lane claimed
-            // it: ContextLaneDatabaseTests' causal replay saw two publishes).
-            try? db.exec("delete from public.sessions where user_id = '\(user)'")
-            try? db.exec("delete from auth.users where id = '\(user)'")
+            // The account cascade must succeed with the owner's workouts (`sessions`) still there: that is the
+            // regression for 20261008100400 (`bump_user_revision` used to upsert `user_sync_state` inside the
+            // cascade and abort it). A failed delete is reported, never swallowed: a silently left owner and its
+            // queued work were claimed by later suites (ContextLaneDatabaseTests' causal replay saw two publishes).
+            try db.deleteFixtureOwners([user])
         }
         let today = Int(Date().timeIntervalSince1970) / 86_400 * 86_400
         return Fixture(db: db, user: user, device: device, dayStart: today - 86_400)
@@ -508,5 +507,25 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         XCTAssertNoThrow(try f.db.callFunctionForJSON(ActivityLane.reconcileSQL, [ActivityLane.reconcileLookback]))
         XCTAssertThrowsError(try f.db.callFunctionForJSON(ActivityLane.reconcileSQL, ["'7 days'::interval"]),
                              "the quoted form is not an interval literal")
+    }
+}
+/// Fixture-owner cleanup for the database suites.
+extension PostgresClient {
+    struct FixtureOwnerLeftBehind: Swift.Error, CustomStringConvertible {
+        var users: [String]
+        var description: String { "fixture owners still present after delete: \(users)" }
+    }
+
+    /// Deletes the test owners from `auth.users`, which cascades to everything they own, and checks they are gone.
+    /// Throws on a failed cascade (it was swallowed by `try?` before, which hid a broken account deletion), so a
+    /// teardown reports it instead of leaving an owner whose queued work a later suite claims.
+    func deleteFixtureOwners(_ users: [String]) throws {
+        guard !users.isEmpty else { return }
+        let ids = users.map { $0.lowercased() }
+        precondition(ids.allSatisfy { UUID(uuidString: $0) != nil }, "fixture owners are UUIDs")
+        let list = ids.map { "'\($0)'" }.joined(separator: ",")
+        try exec("delete from auth.users where id in (\(list))")
+        let left = try query("select id::text as id from auth.users where id in (\(list))", [])
+        if !left.isEmpty { throw FixtureOwnerLeftBehind(users: left.compactMap { $0["id"] }) }
     }
 }

@@ -20,8 +20,9 @@ final class ContextLaneActivityDocumentDatabaseTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        for user in owners { try? db?.exec("delete from auth.users where id = '\(user)'") }
+        let users = owners
         owners = []
+        try db?.deleteFixtureOwners(users)
     }
 
     private func owner() throws -> (user: String, device: String) {
