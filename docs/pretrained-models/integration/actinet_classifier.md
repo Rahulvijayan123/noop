@@ -176,7 +176,7 @@ No API, no app rendering, no canonical metric. Promotion is not on the table (§
 
 ## 8. Checked locally against Spec 01 (2026-10-08)
 
-On a throwaway local merge of `feat/spec01-model-integration-20261007` @ `783ac84da` into this branch (a separate
+On a throwaway local merge of `feat/spec01-model-integration-20261007` @ `654f93afc` into this branch at `a94bf8701` (a separate
 worktree, never pushed; the Spec 01 worktree untouched), the ActivityContext suite was run with the converted
 artifact. The ActiNet tests pass there, including `test_loaded_identity_follows_spec01_when_present` (the map is
 all strings and `loaded_digest` equals Spec 01's `loaded_digest()` in ping and infer). The full path

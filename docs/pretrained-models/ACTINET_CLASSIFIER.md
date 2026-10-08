@@ -355,10 +355,10 @@ What Spec 01 must add (worker stage, new shadow table, authority channel `activi
 heartbeat line, tests) is in [integration/actinet_classifier.md](integration/actinet_classifier.md). Spec 03 changes
 none of Spec 01's files.
 
-Checked on a local merge of Spec 01 `783ac84da` into this branch (worktree `_build-scratch/spec03-spec01-merge`,
-branch `check/spec03-on-spec01-20261008`, not pushed):
+Checked on a local merge of Spec 01 `654f93afc` into this branch at `a94bf8701` (worktree
+`_build-scratch/spec03-spec01-merge`, branch `check/spec03-on-spec01-20261008`, merge `9f1000dc6`, not pushed):
 
-- the ActiNet tests and Spec 01's `test_loaded.py` pass: 55 passed, 1 skipped (the skip needs a HART checkpoint);
+- the ActiNet tests and Spec 01's `test_loaded.py` pass: 57 passed, 1 skipped (the skip needs a HART checkpoint);
 - with the real artifact, `ping` and `infer` carry an all-string `loaded` map whose digest equals Spec 01's
   `loaded_digest()`, with `weights_sha256 1a20251b…`, `hmm_sha256 79cc17a6…` and `artifact_digest 5d4d749a…`, and
   every block is `shadow` (`eval/merged_identity_check.json`).

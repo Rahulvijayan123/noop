@@ -76,8 +76,8 @@ Contract: [ACTINET_CLASSIFIER.md](ACTINET_CLASSIFIER.md). Highlights:
 
 - **Identity.** `ping` and `infer` report Spec 01's `activity-loaded-1` identity when `activity_context/loaded.py`
   exists (guarded import).
-- **Local merge check.** On a local merge with Spec 01 `783ac84da` (clean; no shared file touched by both),
-  55 tests pass, and with the real artifact the `loaded_digest` equals Spec 01's `loaded_digest()`
+- **Local merge check.** On a local merge with Spec 01 `654f93afc` (clean; no shared file touched by both),
+  57 tests pass, and with the real artifact the `loaded_digest` equals Spec 01's `loaded_digest()`
   (`eval/merged_identity_check.json`).
 - **What Spec 01 must add:** [integration/actinet_classifier.md](integration/actinet_classifier.md).
 - **Full-path verification so far:** input → preprocessing → inference → shadow response. Persistence and
@@ -149,13 +149,11 @@ capture policy and an evaluation set; otherwise delete it. **Not activated.**
 
 | Suite | Result |
 |---|---|
-| ActiNet classifier, with the converted artifact | see HANDOFF.md §1 (final run) |
-| ActiNet classifier, without the artifact | 47 passed, 3 skipped |
-| wav2sleep real weights (`reference-v3`) | 11 passed |
-| wav2sleep provider + isolation + identity | 19 passed |
-| `Tools/InferenceWorker`, full, no artifacts | 613 passed, 54 skipped, **1 failed**: `test_features_integration.py::test_full_night_fixture_reproduces_the_committed_response_within_budget`, a wall-clock budget (1.10 s vs 0.75 s at load ~900); the module is untouched by this branch. Final rerun in HANDOFF.md §1. |
-| `Tools/ActivityContext`, full | see HANDOFF.md §1 |
-| Local merge with Spec 01 `783ac84da` | ActiNet + `test_loaded.py` 55 passed, 1 skipped (needs a HART checkpoint); wav2sleep provider/isolation/shape/vendored + `test_manifest.py` 69 passed, 1 skipped; golden envelope 7 passed |
+| ActiNet classifier, with the converted artifact | 52 passed |
+| wav2sleep real weights (`reference-v3`) + artifact tests | 28 passed (11 real-weight) |
+| `Tools/InferenceWorker`, full, no artifacts | 619 passed, 54 skipped, 1 failed. The failure is `test_features_integration.py::test_full_night_fixture_reproduces_the_committed_response_within_budget`, a 0.75 s wall-clock budget that fails only under load; rerun alone it passed 3 of 3. The module is untouched by this branch. |
+| `Tools/ActivityContext`, full | 686 passed, 44 skipped, 3 failed: `tests/inertia/test_inertia_golden.py`. The same 3 fail on a `dab2124f3` export, so they predate this branch. |
+| Local merge with Spec 01 `654f93afc` | ActiNet + `test_loaded.py` 57 passed, 1 skipped (needs a HART checkpoint); wav2sleep suites + `test_manifest.py` + `test_identity.py` 99 passed; manifest fragment 24/24 |
 
 ## 5. Decisions for the owner
 

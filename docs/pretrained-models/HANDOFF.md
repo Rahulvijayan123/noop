@@ -9,10 +9,10 @@ Rewritten 2026-10-08 (evening) after the work the previous handoff listed was fi
   or deployed. `git log -1` gives the tip.
 - **Worktree:** `/Volumes/Untitled/Nara Whoop App V2/nara-spec03-pretrained-models`.
 - **Spec 01 (read only):** `/Volumes/Untitled/Nara Whoop App V2/nara-spec01-model-integration`, branch
-  `feat/spec01-model-integration-20261007`, checked at `783ac84da`. It is still moving.
+  `feat/spec01-model-integration-20261007`. The fragments were written against `783ac84da`; the final merge check used `654f93afc`. It is still moving.
 - **Merge-check worktree (throwaway):** `_build-scratch/spec03-spec01-merge`, branch
-  `check/spec03-on-spec01-20261008`. It is Spec 03 at `619304f5a` merged with Spec 01 at `783ac84da`, plus one
-  uncommitted copied test file. It is local verification only. Delete it with
+  `check/spec03-on-spec01-20261008`. It is Spec 03 at `a94bf8701` merged with Spec 01 at `654f93afc`
+  (merge commit `9f1000dc6`). It is local verification only. Delete it with
   `git worktree remove --force` and `git branch -D` when it is no longer needed. Never push it.
 
 ## 1. What was done
@@ -33,14 +33,15 @@ Rewritten 2026-10-08 (evening) after the work the previous handoff listed was fi
 
 | Suite | Result |
 |---|---|
-| ActiNet classifier, with the converted artifact | FINAL_ACTINET |
-| `Tools/ActivityContext`, full | FINAL_AC |
-| `Tools/InferenceWorker`, full, no artifacts | FINAL_IW |
-| wav2sleep real weights, `reference-v3` | 11 passed |
+| ActiNet classifier, with the converted artifact | 52 passed |
+| `Tools/ActivityContext`, full, with the artifact | 686 passed, 44 skipped, 3 failed (the pre-existing inertia goldens, below) |
+| `Tools/InferenceWorker`, full, no artifacts | 619 passed, 54 skipped, 1 failed: `test_full_night_fixture_reproduces_the_committed_response_within_budget`, a 0.75 s wall-clock budget, failed under load. Rerun alone it passed 3 of 3 (0.44–0.46 s). The module is untouched by this branch. |
+| wav2sleep real weights (`reference-v3`) + artifact tests | 28 passed |
+| Local merge with Spec 01 `654f93afc` (`check/spec03-on-spec01-20261008` @ `9f1000dc6`) | ActiNet + `test_loaded.py` 57 passed, 1 skipped (needs a HART checkpoint); wav2sleep provider/isolation/shape/vendored/artifacts + `test_manifest.py` + `test_identity.py` 99 passed (the golden-envelope test runs there); manifest fragment 24/24 in memory; `eval/merged_identity_check.json` regenerated on this tree |
 
 The three `tests/inertia/test_inertia_golden.py` failures predate this branch: they also fail on `nara/main`
 exported to a scratch folder. They show small numerical differences from committed golden outputs in this venv.
-Not investigated; not caused here.
+Re-confirmed on 2026-10-08: the same 3 fail on a `dab2124f3` export of `Tools/ActivityContext`, run in the same venv. Not investigated; not caused here.
 
 ## 2. Rules (unchanged)
 
@@ -95,8 +96,6 @@ confirmed:
 3. **Droplet measurement** of the ActiNet child (with approval): RSS and CPU per duty-cycled day.
 4. **wav2sleep:** nothing until the gates move. If the owner rules out overnight PPG capture or an evaluation
    set, delete the adapter (WAV2SLEEP.md §12).
-5. **Rerun** `test_full_night_fixture_reproduces_the_committed_response_within_budget` on an idle machine. It
-   is a wall-clock budget that failed only under load.
 
 ## 5. Reference
 
