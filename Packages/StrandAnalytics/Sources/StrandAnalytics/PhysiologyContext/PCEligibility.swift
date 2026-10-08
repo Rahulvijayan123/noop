@@ -15,13 +15,31 @@ import Foundation
 // reasons are kept, the deciding ones first (fails, then unknowns; the positive reason when eligible); recorded
 // limits that did not decide follow and are repeated in `notes`. Quiet motion is never evidence of being
 // awake, worn or rested: those come only from `SleepWearContext` (System C), and unknown stays unknown (V02).
-// Wrist posture is never used: arm orientation is a likelihood, not a confirmed standing or orthostatic event.
+// Wrist posture is never an eligibility gate: arm orientation is a likelihood, not a confirmed standing or
+// orthostatic event. It stratifies the stable-awake references instead (`PostureContext`, recumbent / upright
+// likely, never sitting vs standing). A decoder POSTURAL TRANSITION event is a gate: stable awake rest needs the
+// support and the settling time before it (`posturalSettlingS`, 1-2 min of cardiovascular settling after a change
+// of posture) free of one. The decoder reads heart rate, so that gate is declared target-dependent for
+// optical-pulse metrics, as is the per-epoch wear-signal quality (fused from optical signal quality).
 
 extension PhysiologyContext {
 
+    /// One row of the dose-scaled post-bout exclusion: a bout of `kind` (nil = any kind) lasting at least
+    /// `minDurationS` excludes stable awake rest for `exclusionS` after it ends.
+    public struct PostBoutDose: Codable, Equatable, Sendable {
+        public var kind: String?
+        public var minDurationS: Int
+        public var exclusionS: Int
+        public init(kind: String? = nil, minDurationS: Int, exclusionS: Int) {
+            self.kind = kind; self.minDurationS = minDurationS; self.exclusionS = exclusionS
+        }
+    }
+
     public struct EligibilityConfig: Codable, Equatable, Sendable {
-        public var version = "pc-eligibility-2"
+        public var version = "pc-eligibility-3"
         public var motion = MotionEvidenceConfig()
+        /// Heart-rate free posture strata (reference stratification only; never a gate).
+        public var posture = PostureConfig()
         /// Stable awake rest: stationary share of the WHOLE support (ActivityContextJoin.restingStationaryFloor).
         public var stationaryFloorShare = 0.90
         /// Stable awake rest: qualified (labelled) coverage of the whole support (restingCoverageFloor).
@@ -31,8 +49,25 @@ extension PhysiologyContext {
         /// Stable awake rest: locomotion that ended less than this before the support excludes it
         /// (ActivityPolicyConfig.postActivityWindowS).
         public var postActivityWindowS = 600
-        /// Stable awake rest: a supported bout that ended less than this before the support excludes it (0 disables).
+        /// Stable awake rest: a supported bout that ended less than this before the support excludes it (0 disables
+        /// every post-bout exclusion). The floor of the dose-scaled exclusion below.
         public var postBoutExclusionS = 600
+        /// Dose-scaled post-bout exclusion (D8-06): the longest matching row applies, never below
+        /// `postBoutExclusionS`. Bouts carry no intensity (they are heart-rate free), so the kind stands in for it.
+        /// Literature (Seiler 2007, supine HRV): back to baseline 5-10 min after up to 120 min below the first
+        /// ventilatory threshold, ~30 min after threshold work, 90 min or more after hard work in trained
+        /// athletes. Walking and stepping of any length are light: the 600 s floor (that source, which says
+        /// duration below the threshold does not lengthen recovery). Running stands in for threshold-or-harder
+        /// work: 30 min, and 60 / 90 min when long (the duration steps are conservative choices; the source
+        /// grades intensity, not duration). A logged workout of unknown intensity gets 30 min (60 min when it
+        /// lasted an hour or more): a conservative choice, not derived from that source.
+        public var postBoutDoses: [PostBoutDose] = [
+            PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 0, exclusionS: 1800),
+            PostBoutDose(kind: ExertionBouts.kindWorkout, minDurationS: 3600, exclusionS: 3600),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 0, exclusionS: 1800),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 1200, exclusionS: 3600),
+            PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 3600, exclusionS: 5400),
+        ]
         /// Stable awake rest: optional exclusion when the trailing 24 h locomotion exceeds this (nil = record only).
         public var maxLocomotion24hS: Int? = nil
         /// Activity response: a support starting within this many seconds after a bout ended follows that bout.
@@ -41,6 +76,21 @@ extension PhysiologyContext {
         public var activityResponseMinLocomotionShare = 0.50
         /// Activity response: labelled coverage below which "no activity" cannot be asserted.
         public var activityResponseMinCoverageShare = 0.50
+        /// Stable awake rest: a decoder postural transition event in `[support.start - posturalSettlingS,
+        /// support.end)` excludes the support (cardiovascular settling after a posture change takes 1-2 min,
+        /// Watanabe 2007; Bourdillon 2017).
+        public var posturalSettlingS = 120
+        /// A postural event at or above this probability fails the support; a weaker one makes it unknown.
+        public var posturalTransitionFailProbability = 0.5
+        /// Below this share of the settling window covered by decoder documents, "no event" is recorded as only
+        /// partly observed (a note, never a gate: older days have no decoder document).
+        public var transitionCoverageFloorShare = 0.9
+        /// Stable awake rest: a mean source confidence of the activity composition below this makes the
+        /// stillness undetermined (sources without a confidence are thresholded, never gated here).
+        public var minActivityConfidence = 0.5
+        /// Stable awake rest: a share of the support above this with poor wear-signal quality (loose strap,
+        /// motion artifact, sensor dropout, off wrist) makes the support unknown. 0 = any poor second.
+        public var wearSignalPoorMaxShare = 0.0
         public init() {}
     }
 
@@ -203,7 +253,7 @@ extension PhysiologyContext {
 
     public enum Eligibility {
 
-        public static let version = "pc-eligibility-2"
+        public static let version = "pc-eligibility-3"
         public static let topExclusionReasons = 10
 
         // MARK: Reason codes — positive
@@ -236,6 +286,14 @@ extension PhysiologyContext {
         public static let recentLocomotionUnobserved: ReasonCode = "recent_locomotion_unobserved"
         public static let recentExertionBout: ReasonCode = "recent_exertion_bout"
         public static let exertionHistoryExceedsLimit: ReasonCode = "exertion_history_exceeds_limit"
+        /// A decoder postural transition at or above the fail probability in the support or its settling window.
+        public static let recentPosturalTransition: ReasonCode = "recent_postural_transition"
+        /// A weaker decoder postural transition there: whether the posture changed is undetermined.
+        public static let possiblePosturalTransition: ReasonCode = "possible_postural_transition"
+        /// No event, but decoder documents cover less than the floor of the settling window (note).
+        public static let transitionEventsPartlyObserved: ReasonCode = "transition_events_partly_observed"
+        public static let lowActivityConfidence: ReasonCode = "low_activity_confidence"
+        public static let wearSignalPoor: ReasonCode = "wear_signal_poor"
         // MARK: Reason codes — sleep measurement / activity response
         public static let notAsleep: ReasonCode = "not_asleep"
         public static let sleepEvidenceUnknown: ReasonCode = "sleep_evidence_unknown"
@@ -250,10 +308,15 @@ extension PhysiologyContext {
         public static let gateHrPlausibleBand: ReasonCode = SignalValidityEngine.gateHrPlausibleBand
         public static let gateRrKernelRange: ReasonCode = SignalValidityEngine.gateRrKernelRange
         public static let gateEctopicRejection: ReasonCode = SignalValidityEngine.gateEctopicRejection
+        /// Postural transition events come from the v2 decoder, which reads heart rate.
+        public static let gateDecoderTransitionEvents: ReasonCode = "decoder_transition_events"
+        /// The per-epoch wear-signal quality is fused from optical signal quality (the target's sensor).
+        public static let gateWearSignalOpticalQuality: ReasonCode = "wear_signal_optical_quality"
 
         public static let targetDependentGateCodes: [ReasonCode] = [
             signalInvalid, gateHrPlausibleBand, gateRrKernelRange, gateEctopicRejection,
-            gateSleepDetectorHrConfirmation, gateWearFromHeartRatePresence,
+            gateSleepDetectorHrConfirmation, gateWearFromHeartRatePresence, gateDecoderTransitionEvents,
+            gateWearSignalOpticalQuality,
         ]
 
         public static let reasonCodes: [ReasonCode] = [
@@ -264,7 +327,9 @@ extension PhysiologyContext {
             insufficientStationary, insufficientPrecedingStillness, precedingStillnessUnobserved, recentLocomotion,
             recentLocomotionUnobserved, recentExertionBout, exertionHistoryExceedsLimit, notAsleep,
             sleepEvidenceUnknown, noSupportedExertion, gateSleepDetectorHrConfirmation, gateWearFromHeartRatePresence,
-            gateHrPlausibleBand, gateRrKernelRange, gateEctopicRejection,
+            gateHrPlausibleBand, gateRrKernelRange, gateEctopicRejection, recentPosturalTransition,
+            possiblePosturalTransition, transitionEventsPartlyObserved, lowActivityConfidence, wearSignalPoor,
+            gateDecoderTransitionEvents, gateWearSignalOpticalQuality,
         ]
 
         /// Metrics measured by the optical pulse sensor (HR, beat intervals and what is derived from them).
@@ -275,6 +340,8 @@ extension PhysiologyContext {
         public static let sleepDetectorUsesHeartRate = "sleep_detector_uses_heart_rate"
         public static let wearFromHeartRateSignal = "wear_from_heart_rate_signal"
         public static let activityLabelsReadHeartRate = "activity_labels_read_heart_rate"
+        public static let transitionEventsReadHeartRate = "transition_events_read_heart_rate"
+        public static let wearSignalReadsOpticalQuality = "wear_signal_reads_optical_quality"
 
         /// The comparisons that apply to a metric/method. Series and context-derived windows (`series.*`,
         /// `context.*`) can be stable-awake, sleep or activity-response measurements; a nightly snapshot value
@@ -357,11 +424,18 @@ extension PhysiologyContext {
         }
 
         /// Evaluate one comparison for one measurement.
+        ///
+        /// - Parameters:
+        ///   - settlingTransitions: decoder transition events over `[support.start - posturalSettlingS,
+        ///     support.end)` (`TransitionEvents.summary`); nil when no decoder document covers that window, which
+        ///     gates nothing.
+        ///   - wearSignal: the per-epoch wear-signal quality over the support; nil when no epoch carried one.
         public static func evaluate(_ kind: ComparisonKind, metric: MetricKind, support: Interval,
                                     validity: SignalValidity, activity: ActivityComposition,
                                     preceding: PrecedingHistory, sleepWear: SleepWearContext,
                                     exertion: [ExertionWindowSummary], recentBouts: [BoutRef],
-                                    config: EligibilityConfig) -> EligibilityVerdict {
+                                    config: EligibilityConfig, settlingTransitions: TransitionEventSummary? = nil,
+                                    wearSignal: WearSignalSummary? = nil) -> EligibilityVerdict {
             var b = Builder()
             guard support.isValid else {
                 b.unknown(invalidInterval)
@@ -388,6 +462,8 @@ extension PhysiologyContext {
             case .stableAwakeRest:
                 stableAwake(&b, activity: activity, usable: activityUsable, preceding: preceding,
                             sleepWear: sleepWear, exertion: exertion, recentBouts: recentBouts, config: config)
+                posturalSettling(&b, metric: metric, support: support, events: settlingTransitions, config: config)
+                wearSignalQuality(&b, metric: metric, support: support, wearSignal: wearSignal, config: config)
             case .sleepMeasurement:
                 sleepMeasurement(&b, activity: activity, usable: activityUsable, sleepWear: sleepWear)
             case .activityResponse:
@@ -478,6 +554,11 @@ extension PhysiologyContext {
                 if 1 - s.movement < config.stationaryFloorShare { b.fail(movementInSupport) }
                 else if s.qualified < config.qualifiedCoverageFloorShare { b.unknown(insufficientActivityCoverage) }
                 else if s.stationary < config.stationaryFloorShare { b.unknown(insufficientStationary) }
+                // A stationary label the classifier itself is unsure of does not establish stillness.
+                if let c = activity.meanConfidence {
+                    b.diag("activity_mean_confidence", c)
+                    if c < config.minActivityConfidence { b.unknown(lowActivityConfidence) }
+                }
 
                 b.diag("preceding_still_run_s", Double(preceding.stillRunS))
                 if preceding.stillRunS < config.minPrecedingStillS {
@@ -500,15 +581,56 @@ extension PhysiologyContext {
                                                                                 : activityEvidenceUnavailable)
             }
             exertionEvidence(&b, exertion: exertion, recentBouts: recentBouts)
-            if config.postBoutExclusionS > 0,
-               let last = recentBouts.min(by: { $0.secondsBeforeMeasurement < $1.secondsBeforeMeasurement }),
-               last.secondsBeforeMeasurement < config.postBoutExclusionS {
-                b.fail(recentExertionBout)
+            if config.postBoutExclusionS > 0 {
+                // Every recent bout is checked: a long run two hours ago can still exclude after a short walk.
+                let excluding = recentBouts.filter { $0.secondsBeforeMeasurement < postBoutExclusionS($0, config) }
+                if let deciding = excluding.max(by: { postBoutExclusionS($0, config) < postBoutExclusionS($1, config) }) {
+                    b.diag("post_bout_exclusion_s", Double(postBoutExclusionS(deciding, config)))
+                    b.fail(recentExertionBout)
+                }
             }
             if let limit = config.maxLocomotion24hS, let w = exertion.first(where: { $0.windowH == 24 }),
                w.locomotionS > limit {
                 b.fail(exertionHistoryExceedsLimit)
             }
+        }
+
+        /// Stable awake rest: no decoder postural transition in the support or the settling time before it. Only
+        /// "a change happened" is used (the decoder's direction is unreliable).
+        private static func posturalSettling(_ b: inout Builder, metric: MetricKind, support: Interval,
+                                             events: TransitionEventSummary?, config: EligibilityConfig) {
+            guard let e = events else { return }
+            b.depends(transitionEventsReadHeartRate)
+            if opticalPulseMetrics.contains(metric) { b.gate(gateDecoderTransitionEvents) }
+            b.diag("postural_transitions_settling", Double(e.postural))
+            if e.postural > 0 {
+                if (e.maxPosturalProbability ?? 0) >= config.posturalTransitionFailProbability {
+                    b.fail(recentPosturalTransition)
+                } else {
+                    b.unknown(possiblePosturalTransition)
+                }
+            } else if Double(e.coveredS) < config.transitionCoverageFloorShare * Double(max(1, e.interval.duration)) {
+                b.note(transitionEventsPartlyObserved)
+            }
+        }
+
+        /// Stable awake rest: the HART lane's per-epoch wear-signal quality. A loose strap, motion artifact, sensor
+        /// dropout or off-wrist epoch inside the support makes the optical contact undetermined.
+        private static func wearSignalQuality(_ b: inout Builder, metric: MetricKind, support: Interval,
+                                              wearSignal: WearSignalSummary?, config: EligibilityConfig) {
+            guard let w = wearSignal else { return }
+            b.depends(wearSignalReadsOpticalQuality)
+            if opticalPulseMetrics.contains(metric) { b.gate(gateWearSignalOpticalQuality) }
+            let share = Double(w.poorS) / Double(max(1, support.duration))
+            b.diag("wear_signal_poor_share", share)
+            if w.poorS > 0 && share > config.wearSignalPoorMaxShare { b.unknown(wearSignalPoor) }
+        }
+
+        /// The post-bout exclusion of one bout: the longest matching dose row, never below the floor.
+        public static func postBoutExclusionS(_ bout: BoutRef, _ config: EligibilityConfig) -> Int {
+            config.postBoutDoses
+                .filter { ($0.kind == nil || $0.kind == bout.kind) && bout.durationS >= $0.minDurationS }
+                .map(\.exclusionS).reduce(config.postBoutExclusionS, max)
         }
 
         private static func exertionEvidence(_ b: inout Builder, exertion: [ExertionWindowSummary],

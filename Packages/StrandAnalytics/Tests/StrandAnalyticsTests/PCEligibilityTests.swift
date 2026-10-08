@@ -537,3 +537,161 @@ final class PCEligibilityTests: XCTestCase {
         XCTAssertLessThan(defaultShare, table[0][0])
     }
 }
+
+/// Stable awake rest: postural settling after a decoder transition event, the source's confidence floor and the
+/// per-epoch wear-signal quality (D5-07, D3-06, D3-10, D3-11 / D6-15).
+final class PCEligibilityContextTests: XCTestCase {
+    typealias PC = PhysiologyContext
+    typealias F = PCSignalFixtures
+    typealias B = PhysiologyContext.Eligibility
+
+    var support: PC.Interval { PC.Interval(F.t0, F.t0 + 300) }
+    var quiet: PC.ResolvedTrack { F.track([(F.t0 - 1800, F.t0 + 600, "still")]) }
+    /// Decoder document coverage of the whole neighbourhood (the runs the events come from).
+    var decoderCoverage: PC.ResolvedTrack {
+        F.track([(F.t0 - 3600, F.t0 + 3600, "sitting")], source: .decoderIntervals, heartRateDependent: true)
+    }
+
+    func settling(_ events: [PC.TransitionEventInput], coverage: PC.ResolvedTrack? = nil,
+                  config: PC.EligibilityConfig = .init()) -> PC.TransitionEventSummary? {
+        PC.TransitionEvents.summary(PC.TransitionEvents.prepare(events, causalCutoff: nil),
+                                    over: PC.Interval(support.start - config.posturalSettlingS, support.end),
+                                    coverage: coverage ?? decoderCoverage)
+    }
+
+    func verdict(_ metric: PC.MetricKind = .hrvRmssd, track: PC.ResolvedTrack? = nil,
+                 settling: PC.TransitionEventSummary? = nil, wear: PC.WearSignalSummary? = nil,
+                 config: PC.EligibilityConfig = .init()) -> PC.EligibilityVerdict {
+        let t = track ?? quiet
+        return B.evaluate(.stableAwakeRest, metric: metric, support: support, validity: F.validSignal,
+                          activity: PC.IntervalAlgebra.composition(over: support, track: t),
+                          preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: t, lookbackS: 1800),
+                          sleepWear: F.awakeWorn, exertion: [], recentBouts: [], config: config,
+                          settlingTransitions: settling, wearSignal: wear)
+    }
+
+    func event(_ offset: Int, _ kind: ActivityTransitionKind = .sitToStandLike, p: Double = 0.8) -> PC.TransitionEventInput {
+        PC.TransitionEventInput(ts: F.t0 + offset, kind: kind.rawValue, probability: p, revision: 1)
+    }
+
+    func testPosturalTransitionInTheSupportOrItsSettlingTimeExcludes() {
+        // A 10-s stand 60 s before the support: inside the 120-s settling window.
+        let before = verdict(settling: settling([event(-60), event(-50, .standToSitLike)]))
+        XCTAssertEqual(before.state, .ineligible)
+        XCTAssertEqual(before.reasons.first, B.recentPosturalTransition)
+        XCTAssertEqual(before.evidence("postural_transitions_settling"), 2)
+        // Inside the support itself.
+        XCTAssertEqual(verdict(settling: settling([event(150)])).state, .ineligible)
+        // A weaker event: whether the posture changed is undetermined.
+        let weak = verdict(settling: settling([event(-30, p: 0.3)]))
+        XCTAssertEqual(weak.state, .unknown)
+        XCTAssertEqual(weak.reasons.first, B.possiblePosturalTransition)
+        // Outside the settling window (200 s before) or at the support end: no effect.
+        let older = verdict(settling: settling([event(-200), event(300)]))
+        XCTAssertEqual(older.state, .eligible, "\(older.reasons)")
+        // Locomotion events are not postural (locomotion is gated by the activity track).
+        XCTAssertEqual(verdict(settling: settling([event(-60, .walkStop)])).state, .eligible)
+    }
+
+    func testTransitionGateIsDeclaredHeartRateDependentAndUnobservedEventsGateNothing() {
+        let hr = verdict(.heartRate, settling: settling([]))
+        XCTAssertEqual(hr.state, .eligible)
+        XCTAssertTrue(hr.targetDependentGates.contains(B.gateDecoderTransitionEvents), "\(hr.targetDependentGates)")
+        XCTAssertTrue(hr.dependsOn.contains(B.transitionEventsReadHeartRate))
+        // No decoder document over the window: nil summary, nothing recorded (older days stay as they were).
+        let none = verdict(.heartRate, settling: nil)
+        XCTAssertEqual(none.state, .eligible)
+        XCTAssertEqual(none.targetDependentGates, [B.signalInvalid])
+        XCTAssertFalse(none.reasons.contains(B.transitionEventsPartlyObserved))
+        // A document covering only part of the window: "no event" is recorded as partly observed, not gated.
+        let partial = PC.IntervalAlgebra.resolve(
+            [PC.LabelRecord(interval: .init(F.t0 + 100, F.t0 + 300), label: "sitting", tieBreak: "p")],
+            source: .decoderIntervals, heartRateDependent: true)
+        let p = verdict(settling: settling([], coverage: partial))
+        XCTAssertEqual(p.state, .eligible)
+        XCTAssertTrue(p.notes.contains(B.transitionEventsPartlyObserved))
+    }
+
+    func testLowSourceConfidenceMakesStillnessUndetermined() {
+        func hart(_ confidence: Double) -> PC.ResolvedTrack {
+            PC.IntervalAlgebra.resolve([PC.LabelRecord(interval: .init(F.t0 - 1800, F.t0 + 600), label: "stationary",
+                                                       tieBreak: "h", confidence: confidence)],
+                                       source: .hartEpochs, heartRateDependent: false)
+        }
+        let low = verdict(track: hart(0.3))
+        XCTAssertEqual(low.state, .unknown)
+        XCTAssertEqual(low.reasons, [B.lowActivityConfidence])
+        XCTAssertEqual(low.evidence("activity_mean_confidence"), 0.3)
+        XCTAssertEqual(verdict(track: hart(0.9)).state, .eligible)
+    }
+
+    func testPostBoutExclusionScalesWithTheBoutsDose() {
+        func bout(_ kind: String, minutes: Int, endedMinutesAgo: Int) -> PC.BoutRef {
+            PC.BoutRef(boutId: "\(kind)\(minutes)", kind: kind, endedAt: F.t0 - endedMinutesAgo * 60,
+                       secondsBeforeMeasurement: endedMinutesAgo * 60, durationS: minutes * 60)
+        }
+        func state(_ bouts: [PC.BoutRef]) -> PC.EligibilityState {
+            B.evaluate(.stableAwakeRest, metric: .heartRate, support: support, validity: F.validSignal,
+                       activity: PC.IntervalAlgebra.composition(over: support, track: quiet),
+                       preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet, lookbackS: 1800),
+                       sleepWear: F.awakeWorn, exertion: [], recentBouts: bouts, config: .init()).state
+        }
+        // A short walk: the fixed 10-minute floor, as before.
+        XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 9)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 11)]), .eligible)
+        // A 70-minute walk is still light (below the first threshold, recovery 5-10 min): the floor only.
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 9)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 11)]), .eligible)
+        XCTAssertEqual(B.postBoutExclusionS(bout("walking", minutes: 120, endedMinutesAgo: 0), .init()), 600)
+        // A 40-minute run: 60 minutes; a 75-minute run: 90 minutes.
+        XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 45)]), .ineligible)
+        XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 61)]), .eligible)
+        XCTAssertEqual(state([bout("running", minutes: 75, endedMinutesAgo: 80)]), .ineligible)
+        // An older long run still excludes after a later short walk that no longer does.
+        XCTAssertEqual(state([bout("walking", minutes: 5, endedMinutesAgo: 15),
+                              bout("running", minutes: 75, endedMinutesAgo: 80)]), .ineligible)
+        XCTAssertEqual(B.postBoutExclusionS(bout("workout", minutes: 30, endedMinutesAgo: 0), .init()), 1800)
+        // The floor still disables everything.
+        var off = PC.EligibilityConfig()
+        off.postBoutExclusionS = 0
+        XCTAssertEqual(B.evaluate(.stableAwakeRest, metric: .heartRate, support: support, validity: F.validSignal,
+                                  activity: PC.IntervalAlgebra.composition(over: support, track: quiet),
+                                  preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet,
+                                                                                 lookbackS: 1800),
+                                  sleepWear: F.awakeWorn, exertion: [],
+                                  recentBouts: [bout("running", minutes: 75, endedMinutesAgo: 5)], config: off).state,
+                       .eligible)
+    }
+
+    func testPoorWearSignalMakesTheSupportUnknown() {
+        func wear(_ state: WearSignalState, seconds: Int) -> PC.WearSignalSummary? {
+            let epochs = [
+                PC.ActivityEpochInput(epoch: ActivityEpoch(startTs: F.t0, endTs: F.t0 + 300 - seconds, motion: .stationary,
+                                                           posture: .unknown, exercise: .unknown, sleepState: .unknown,
+                                                           exertion: .unknown, wear: .onWrist, wearSignal: .onWristGood,
+                                                           confidence: 0.9, observedS: 300 - seconds,
+                                                           validS: 300 - seconds), revision: 1),
+                PC.ActivityEpochInput(epoch: ActivityEpoch(startTs: F.t0 + 300 - seconds, endTs: F.t0 + 300,
+                                                           motion: .stationary, posture: .unknown, exercise: .unknown,
+                                                           sleepState: .unknown, exertion: .unknown, wear: .onWrist,
+                                                           wearSignal: state, confidence: 0.9, observedS: seconds,
+                                                           validS: seconds), revision: 1),
+            ]
+            return PC.WearSignal.summary(over: support, track: PC.WearSignal.track(epochs))
+        }
+        for state in [WearSignalState.onWristLoose, .motionArtifact, .sensorDropout, .offWrist] {
+            let w = wear(state, seconds: 30)
+            XCTAssertEqual(w?.poorS, 30)
+            let v = verdict(.hrvRmssd, wear: w)
+            XCTAssertEqual(v.state, .unknown, "\(state)")
+            XCTAssertEqual(v.reasons, [B.wearSignalPoor], "\(state)")
+            XCTAssertTrue(v.targetDependentGates.contains(B.gateWearSignalOpticalQuality))
+        }
+        let good = verdict(.hrvRmssd, wear: wear(.onWristGood, seconds: 30))
+        XCTAssertEqual(good.state, .eligible)
+        // A tolerance can be configured (default: any poor second).
+        var lenient = PC.EligibilityConfig()
+        lenient.wearSignalPoorMaxShare = 0.2
+        XCTAssertEqual(verdict(.hrvRmssd, wear: wear(.onWristLoose, seconds: 30), config: lenient).state, .eligible)
+    }
+}

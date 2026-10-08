@@ -176,37 +176,96 @@ enum ContextSQL {
          order by start_at, end_at, id
         """
 
-    /// v1 HART epochs overlapping the read window, every published revision (the engine resolves overlaps by
-    /// revision, then availability, then a stable id).
+    /// v1 HART epochs overlapping the read window, from ONE revision per UTC epoch day: the newest published
+    /// revision of each day (`$5`…`$6`), or in a causal job (`$7` = cutoff, unix seconds) the newest one published
+    /// at or before the cutoff — what a reader at the cutoff would have read. Older lineages are never merged in:
+    /// the publish keeps every fingerprint's rows, and an older lineage would fill seconds the newest one dropped
+    /// (D3-02). This is per UTC day, never one revision across the whole read window (each day is its own publish).
+    /// The per-day probe walks `activity_context_epochs_day_revision_rows` (20261007130000) when it exists; without
+    /// that index the query is still correct, only slower. Reading one revision instead of every lineage removes
+    /// the ~85x row amplification measured in production.
     static let activityEpochs = """
-        select start_ts::text as s, end_ts::text as e, motion_label, posture, exercise_session, sleep_state,
-               exertion_context, wear_state, confidence::text as confidence, observed_s::text as observed_s,
-               valid_s::text as valid_s, result_revision::text as revision,
-               ceil(extract(epoch from computed_at))::bigint::text as at
-          from public.activity_context_epochs
-         where user_id = $1::uuid and device_id = $2::uuid and start_ts < $4::bigint and end_ts > $3::bigint
-         order by start_ts, result_revision, fingerprint
+        with days as (
+          select g::date as day from generate_series($5::date, $6::date, interval '1 day') g
+        ), latest as (
+          select days.day,
+                 (select e.result_revision from public.activity_context_epochs e
+                   where e.user_id = $1::uuid and e.device_id = $2::uuid and e.day = days.day
+                     and (nullif($7, '') is null or e.computed_at <= to_timestamp(nullif($7, '')::bigint))
+                   order by e.result_revision desc limit 1) as rr
+            from days
+        )
+        select e.start_ts::text as s, e.end_ts::text as e, e.motion_label, e.posture, e.exercise_session,
+               e.sleep_state, e.exertion_context, e.wear_state, coalesce(e.wear_signal, '') as wear_signal,
+               e.confidence::text as confidence, e.observed_s::text as observed_s, e.valid_s::text as valid_s,
+               e.model_version, e.preprocessing_version, e.result_revision::text as revision,
+               ceil(extract(epoch from e.computed_at))::bigint::text as at
+          from latest l
+          join public.activity_context_epochs e on e.day = l.day and e.result_revision = l.rr
+         where user_id = $1::uuid and device_id = $2::uuid and e.start_ts < $4::bigint and e.end_ts > $3::bigint
+         order by e.start_ts, e.result_revision, e.fingerprint
         """
 
-    /// v2 decoder runs overlapping the read window, from the best document of each UTC day (raw-IMU before
-    /// stream days, `source_rank`), so two documents of one day never compete. `$5`/`$6` bound the UTC days.
-    static let activityRuns = """
-        with best as (
-          select day, min(source_rank) as source_rank
-            from public.activity_context_runs
-           where user_id = $1::uuid and device_id = $2::uuid and day >= $5::date and day <= $6::date
-           group by day
+    /// The ONE v2 decoder document per UTC day `$5`…`$6` the lane reads (D5-04), ranked:
+    ///  1. decoded by the worker's current decoder (`$7`, `ActivityContextVersions.decoder`) before another one;
+    ///  2. the newer decoder (`hsmm-X.Y` compared numerically, so 1.10 is after 1.9; unparseable last), so an
+    ///     older-decoder document never wins on a few seconds of `data_through` when neither is current;
+    ///  3. data through later (a document rebuilt from newer uploads first; unknown last);
+    ///  4. raw-IMU (HART, `source_rank` 1) before measurement-stream documents;
+    ///  5. computed later, then the higher result revision.
+    /// `says_in_bed`: the document's runs carry `in_bed` (written only when true, by decoder hsmm-1.3 and later,
+    /// ccd5f0dca). On an older document a run without it is "not said", never "not in bed".
+    /// A causal job (`$8` = cutoff) ranks only documents computed at or before its cutoff (documents are updated
+    /// in place, so a later one never stands in for what the decision could see). Runs and transition events are
+    /// read from the same chosen document, so they never disagree.
+    static let chosenActivityDocuments = """
+        with chosen as (
+          select distinct on (d.day) d.day, d.algorithm_version, d.decoder_version, d.result_revision,
+                 d.computed_at, d.document,
+                 (coalesce((regexp_match(d.decoder_version, '^hsmm-([0-9]+)[.]([0-9]+)$'))::int[] >= array[1, 3],
+                           false)
+                  or jsonb_path_exists(d.document, '$.runs[*].in_bed')) as says_in_bed
+            from public.activity_context_days d
+           where d.user_id = $1::uuid and d.device_id = $2::uuid and d.day >= $5::date and d.day <= $6::date
+             and (nullif($8, '') is null or d.computed_at <= to_timestamp(nullif($8, '')::bigint))
+           order by d.day, (d.decoder_version = $7::text) desc,
+                    (regexp_match(d.decoder_version, '^hsmm-([0-9]+)[.]([0-9]+)$'))::int[] desc nulls last,
+                    d.data_through desc nulls last,
+                    (case d.algorithm_version when 'hart-activity-1' then 1 else 2 end),
+                    d.computed_at desc, d.result_revision desc
         )
-        select r.start_ts::text as s, r.end_ts::text as e, coalesce(r.activity_class, 'unknown') as class,
-               coalesce(r.class_confidence, r.confidence, 0)::text as confidence,
-               coalesce(r.sleep_state, '') as sleep, coalesce(r.wear_state, '') as wear,
-               r.result_revision::text as revision,
-               ceil(extract(epoch from r.computed_at))::bigint::text as at
-          from public.activity_context_runs r
-          join best b on b.day = r.day and b.source_rank = r.source_rank
-         where r.user_id = $1::uuid and r.device_id = $2::uuid and r.day >= $5::date and r.day <= $6::date
-           and r.start_ts < $4::bigint and r.end_ts > $3::bigint
-         order by r.start_ts, r.end_ts, r.result_revision
+        """
+
+    /// v2 decoder runs overlapping the read window `[$3, $4)`, from the chosen document of each UTC day.
+    static let activityRuns = chosenActivityDocuments + """
+        select (r.value ->> 's')::bigint::text as s, (r.value ->> 'e')::bigint::text as e,
+               coalesce(r.value ->> 'activity_class', 'unknown') as class,
+               coalesce((r.value ->> 'class_confidence')::real, (r.value ->> 'overall_confidence')::real, 0)::text
+                 as confidence,
+               coalesce(r.value ->> 'sleep', '') as sleep, coalesce(r.value ->> 'wear', '') as wear,
+               case when c.says_in_bed then coalesce(r.value ->> 'in_bed', 'false') else '' end as in_bed,
+               c.algorithm_version, c.decoder_version, c.day::text as doc_day,
+               c.result_revision::text as revision,
+               ceil(extract(epoch from c.computed_at))::bigint::text as at
+          from chosen c
+         cross join lateral jsonb_array_elements(case when jsonb_typeof(c.document -> 'runs') = 'array'
+                                                      then c.document -> 'runs' else '[]'::jsonb end) as r(value)
+         where (r.value ->> 's')::bigint < $4::bigint and (r.value ->> 'e')::bigint > $3::bigint
+         order by (r.value ->> 's')::bigint, (r.value ->> 'e')::bigint, c.result_revision
+        """
+
+    /// Decoder transition events (`document.events`) flagged in the read window `[$3, $4)`, from the same chosen
+    /// document of each UTC day as `activityRuns` (the `activity_context_transitions` view reads every document).
+    static let activityTransitions = chosenActivityDocuments + """
+        select (x.value ->> 'ts')::bigint::text as ts, coalesce(x.value ->> 'kind', '') as kind,
+               coalesce(x.value ->> 'probability', '') as probability,
+               c.algorithm_version, c.decoder_version, c.result_revision::text as revision,
+               ceil(extract(epoch from c.computed_at))::bigint::text as at
+          from chosen c
+         cross join lateral jsonb_array_elements(case when jsonb_typeof(c.document -> 'events') = 'array'
+                                                      then c.document -> 'events' else '[]'::jsonb end) as x(value)
+         where (x.value ->> 'ts')::bigint >= $3::bigint and (x.value ->> 'ts')::bigint < $4::bigint
+         order by (x.value ->> 'ts')::bigint, coalesce(x.value ->> 'kind', ''), c.result_revision
         """
 
     /// Placement records in effect anywhere in the read window: the device's own and the owner's device-less

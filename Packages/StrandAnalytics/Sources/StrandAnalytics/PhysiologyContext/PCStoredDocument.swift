@@ -58,6 +58,10 @@ extension PhysiologyContext {
             public var eligibility: [Int]
             public var comparisons: Int
             public var finality: Finality
+            /// Indices into `posture` / `wearSignal` (absent on rows written before they existed, and when the
+            /// envelope has none).
+            public var posture: Int? = nil
+            public var wearSignal: Int? = nil
         }
 
         public var wireVersion: String
@@ -85,6 +89,10 @@ extension PhysiologyContext {
         public var eligibility: [EligibilityVerdict]
         public var comparisons: [[ReferenceComparison]]
         public var rows: [Row]
+        /// Posture contexts (no times inside) and wear-signal summaries (`interval` relative to the row's support
+        /// start). Additive: tables written before them decode with nil.
+        public var posture: [PostureContext]? = nil
+        public var wearSignal: [WearSignalSummary]? = nil
     }
 
     public enum StoredDocument {
@@ -142,6 +150,7 @@ extension PhysiologyContext {
             var exposureRefs = Pool<ExposureRef>(), exposures = Pool<[Int]>()
             var coverage = Pool<[ExposureCategoryStatus]>()
             var verdicts = Pool<EligibilityVerdict>(), comparisons = Pool<[ReferenceComparison]>()
+            var postures = Pool<PostureContext>(), wearSignals = Pool<WearSignalSummary>()
             var rows: [EnvelopeTable.Row] = []
             rows.reserveCapacity(envelopes.count)
             for e in envelopes {
@@ -179,7 +188,9 @@ extension PhysiologyContext {
                     }),
                     exposureCoverage: coverage.index(e.history.exposureCoverage),
                     eligibility: e.eligibility.map { verdicts.index($0) },
-                    comparisons: comparisons.index(e.comparisons), finality: e.finality))
+                    comparisons: comparisons.index(e.comparisons), finality: e.finality,
+                    posture: e.posture.map { postures.index($0) },
+                    wearSignal: e.wearSignal.map { wearSignals.index(shifted($0, by: -anchor)) }))
             }
             return EnvelopeTable(wireVersion: EnvelopeTable.wireVersion, metric: metric, methods: methods.values,
                                  validity: validity.values, activity: activity.values, preceding: preceding.values,
@@ -187,7 +198,9 @@ extension PhysiologyContext {
                                  exertion: exertion.values, exposureRefs: exposureRefs.values,
                                  exposures: exposures.values,
                                  exposureCoverage: coverage.values, eligibility: verdicts.values,
-                                 comparisons: comparisons.values, rows: rows)
+                                 comparisons: comparisons.values, rows: rows,
+                                 posture: postures.values.isEmpty ? nil : postures.values,
+                                 wearSignal: wearSignals.values.isEmpty ? nil : wearSignals.values)
         }
 
         // MARK: Decode
@@ -203,7 +216,9 @@ extension PhysiologyContext {
                       t.exposureCoverage.indices.contains(r.exposureCoverage),
                       t.comparisons.indices.contains(r.comparisons),
                       r.eligibility.allSatisfy(t.eligibility.indices.contains),
-                      r.decoderActivity.map(t.activity.indices.contains) ?? true else { return nil }
+                      r.decoderActivity.map(t.activity.indices.contains) ?? true,
+                      r.posture.map { (t.posture ?? []).indices.contains($0) } ?? true,
+                      r.wearSignal.map { (t.wearSignal ?? []).indices.contains($0) } ?? true else { return nil }
                 let anchor = r.support.start
                 let method = t.methods[r.method]
                 var wake = t.wake[r.wake]
@@ -232,7 +247,9 @@ extension PhysiologyContext {
                     decoderActivity: r.decoderActivity.map { shifted(t.activity[$0], by: anchor) },
                     preceding: shifted(t.preceding[r.preceding], by: anchor), sleepWear: t.sleepWear[r.sleepWear],
                     history: history, eligibility: r.eligibility.map { t.eligibility[$0] },
-                    comparisons: t.comparisons[r.comparisons], finality: r.finality)
+                    comparisons: t.comparisons[r.comparisons], finality: r.finality,
+                    posture: r.posture.map { t.posture![$0] },
+                    wearSignal: r.wearSignal.map { shifted(t.wearSignal![$0], by: anchor) })
             }
         }
 
@@ -255,10 +272,20 @@ extension PhysiologyContext {
         // Shifts wrap (two's complement), so storing times relative to the row and adding the anchor back is exactly
         // invertible for any value, including adversarial extremes.
         static func shifted(_ c: ActivityComposition, by d: Int) -> ActivityComposition {
-            var c = c; c.interval = Interval(c.interval.start &+ d, c.interval.end &+ d); return c
+            var c = c; c.interval = Interval(c.interval.start &+ d, c.interval.end &+ d)
+            c.transitionEvents = c.transitionEvents.map { shifted($0, by: d) }
+            return c
         }
         static func shifted(_ p: PrecedingHistory, by d: Int) -> PrecedingHistory {
-            var p = p; p.lookback = Interval(p.lookback.start &+ d, p.lookback.end &+ d); return p
+            var p = p; p.lookback = Interval(p.lookback.start &+ d, p.lookback.end &+ d)
+            p.transitionEvents = p.transitionEvents.map { shifted($0, by: d) }
+            return p
+        }
+        static func shifted(_ t: TransitionEventSummary, by d: Int) -> TransitionEventSummary {
+            var t = t; t.interval = Interval(t.interval.start &+ d, t.interval.end &+ d); return t
+        }
+        static func shifted(_ w: WearSignalSummary, by d: Int) -> WearSignalSummary {
+            var w = w; w.interval = Interval(w.interval.start &+ d, w.interval.end &+ d); return w
         }
         static func shifted(_ w: ExertionWindowSummary, by d: Int) -> ExertionWindowSummary {
             var w = w; w.interval = Interval(w.interval.start &+ d, w.interval.end &+ d); return w
