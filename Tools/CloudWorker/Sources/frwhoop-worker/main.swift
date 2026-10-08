@@ -573,7 +573,8 @@ var activity = ActivityLane(
         maxRequestBytes: 64 * 1024 * 1024,
         maxResponseLineBytes: 16 * 1024 * 1024,
         restartCap: 8,
-        restartCooldownSeconds: 30)),
+        // Thread caps, and HART's in-process ElderNet off: ElderNet has one route, its own stage below.
+        restartCooldownSeconds: 30).hartChild(threads: ActivityPythonService.Config.hartThreads(env))),
     leaseSeconds: config.activityLeaseSeconds,
     imuJobsEnabled: config.activityImu,
     contextDaysEnabled: config.activityContextV2,
@@ -839,6 +840,21 @@ if activityState.read().enabled {
                     $0.counters["eldernet_rows_pruned"] = activity.stats.eldernetRowsPruned
                     $0.counters["eldernet_prune_failures"] = activity.stats.eldernetPruneFailures
                 }
+                if activity.inertia != nil || activity.eldernet != nil {
+                    $0.counters["expert_selections"] = activity.stats.expertSelections
+                    $0.counters["expert_canonical_shaped"] = activity.stats.expertCanonicalShaped
+                }
+                // Only while an expert runs in candidate mode, so other heartbeats are unchanged.
+                if activity.storesCandidateDays {
+                    $0.counters["candidate_days_stored"] = activity.stats.candidateDaysStored
+                    $0.counters["candidate_days_fenced"] = activity.stats.candidateDaysFenced
+                    $0.counters["candidate_day_failures"] = activity.stats.candidateDayFailures
+                    $0.counters["candidate_joint_documents"] = activity.stats.candidateJointDocuments
+                    $0.counters["candidate_joint_withheld"] = activity.stats.candidateJointWithheld
+                    $0.counters["candidate_rows_pruned"] = activity.stats.candidateRowsPruned
+                    $0.counters["candidate_prune_failures"] = activity.stats.candidatePruneFailures
+                }
+                $0.identity = activity.identity
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind
                 $0.lastActivityAt = activity.stats.lastActivityAt

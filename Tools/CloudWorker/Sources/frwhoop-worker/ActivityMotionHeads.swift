@@ -442,6 +442,9 @@ enum ActivityMotionHeadsDays {
         /// dry-run attachment otherwise (attached / dropped counts; the decoder-side counters stay 0). nil when
         /// there was no decoder input to attach to (ActivityContext v2 off).
         var trackReport: MotionHeadsTrackReport?
+        /// The shared policy's inputs and decision for this row (ActivityExpertAuthority); the migration's trigger
+        /// copies it into the row's `authority` column. Left out when the caller has no selection.
+        var authority: ActivityExpertAuthority? = nil
 
         enum CodingKeys: String, CodingKey {
             case nWindows = "n_windows", nOOD = "n_ood", nDroppedNonfinite = "n_dropped_nonfinite"
@@ -450,6 +453,7 @@ enum ActivityMotionHeadsDays {
             case topClassWindows = "top_class_windows", transitionEvents = "transition_events"
             case windowsOmitted = "windows_omitted", candidateStamp = "candidate_stamp"
             case trackReport = "track_report"
+            case authority
         }
 
         func encode(to encoder: Encoder) throws {
@@ -467,6 +471,7 @@ enum ActivityMotionHeadsDays {
             try c.encode(windowsOmitted, forKey: .windowsOmitted)
             if let s = candidateStamp { try c.encode(s, forKey: .candidateStamp) } else { try c.encodeNil(forKey: .candidateStamp) }
             if let r = trackReport { try c.encode(r, forKey: .trackReport) } else { try c.encodeNil(forKey: .trackReport) }
+            try c.encodeIfPresent(authority, forKey: .authority)
         }
     }
 
@@ -502,20 +507,26 @@ enum ActivityMotionHeadsDays {
     /// The candidate comparison for one day: the same input the published v2 document was decoded from, plus
     /// the Inertia windows, decoded with Inertia as candidate evidence. Refused bundles are withheld, and so is
     /// everything when the deployment has not pinned the bundle digest (candidate mode requires the pin).
+    ///
+    /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
+    /// nil): HART plus the motion-heads channel exactly, with the config and release the policy built from the row.
     static func candidate(mode: InertiaSettings.Mode, heads: MotionHeadsTrackInput,
                           input: ActivityContextTrackInput?, generatedAt: Int,
-                          expectedBundleSHA256: String?) -> Candidate {
+                          expectedBundleSHA256: String?, selection: ActivityExpertSelection? = nil) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedBundleSHA256 else { return .withheld("bundle_sha256_not_pinned") }
         // The candidate defaults (INERTIA1.md §7).
         let evidence = MotionHeadsEvidenceConfig(mode: .candidate, bundle: heads.bundle,
                                                  expectedBundleSHA256: expectedBundleSHA256)
         if let why = evidence.evidenceRefusal { return .withheld(why) }
-        guard var input else { return .withheld("context_days_disabled") }
-        input.motionHeads = heads
-        var config = ActivityDecoderConfig()
-        config.motionHeads = evidence
-        let built = ActivityContextDays.dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config)
+        guard let input else { return .withheld("context_days_disabled") }
+        let selection = selection ?? ActivityExpertSelection.select(motionHeads: [
+            MotionHeadsSource(track: heads, mode: .candidate, expectedBundleSHA256: expectedBundleSHA256)])
+        guard selection.use(of: .motionHeads) != .none else {
+            return .withheld(selection.decision(for: .motionHeads)?.reason ?? "motion_heads_not_admitted")
+        }
+        let d = selection.decode(input, base: ActivityDecoderConfig(), channels: [.motionHeads])
+        let built = ActivityContextDays.dayDocumentAndReport(input: d.input, generatedAt: generatedAt, config: d.config)
         // A comparison must name the evidence that shaped it; a decode the evidence never reached is withheld.
         guard built.document.versions.motionHeads != nil else {
             return .withheld(built.report?.refusal ?? "motion_heads_not_accepted")
@@ -526,7 +537,8 @@ enum ActivityMotionHeadsDays {
     /// The RPC payload (sorted keys), or nil when no chunk produced a valid response. `attachment` is the
     /// dry-run attachment report used when there is no candidate decode (see `Summary.trackReport`).
     static func payload(day: String, mode: InertiaSettings.Mode, collector: MotionHeadsCollector,
-                        candidate: Candidate, attachment: MotionHeadsTrackReport? = nil) throws -> String? {
+                        candidate: Candidate, attachment: MotionHeadsTrackReport? = nil,
+                        authority: ActivityExpertAuthority? = nil) throws -> String? {
         guard let heads = collector.trackInput else { return nil }
         let bundle = heads.bundle
         let order: [MotionHead: [String]] = Dictionary(uniqueKeysWithValues: MotionHead.allCases.map {
@@ -567,7 +579,7 @@ enum ActivityMotionHeadsDays {
             classOrder: Dictionary(uniqueKeysWithValues: order.map { ($0.key.rawValue, $0.value) }),
             meanMovementIntensity: intensityN > 0 ? rounded(intensitySum / Double(intensityN)) : nil,
             topClassWindows: top, transitionEvents: events, windowsOmitted: windows == nil, candidateStamp: stamp,
-            trackReport: report)
+            trackReport: report, authority: authority)
         let payload = Payload(day: day, mode: mode.rawValue, bundle: bundle, summary: summary, windows: windows,
                               withheldReason: withheld, candidateDocument: document)
         let data = try encoder.encode(payload)

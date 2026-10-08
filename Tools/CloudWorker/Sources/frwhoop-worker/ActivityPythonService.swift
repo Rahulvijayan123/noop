@@ -61,6 +61,13 @@ final class ActivityPythonService {
             return c
         }
 
+        /// FRWHOOP_ACTIVITY_THREADS: the HART child's torch and numerical-library threads (1…16, default 1; an
+        /// invalid value is 1). Every activity child shares the worker's cgroup.
+        static func hartThreads(_ env: [String: String]) -> Int {
+            guard let raw = env["FRWHOOP_ACTIVITY_THREADS"], let n = Int(raw), (1...16).contains(n) else { return 1 }
+            return n
+        }
+
         /// FRWHOOP_ACTIVITY_PYTHON (default python3), FRWHOOP_ACTIVITY_HOME
         /// (default <cwd>/Tools/ActivityContext), FRWHOOP_ACTIVITY_MODEL_DIR,
         /// FRWHOOP_ACTIVITY_TIMEOUT_SECONDS (default 60),

@@ -96,17 +96,68 @@ enum ActivityCandidateDays {
         }
     }
 
+    /// The shared policy's selection for one raw-IMU job, from the job's own expert results: each stage's windows
+    /// under the release its mode allows, with the pins and π it enforced, the job's input revision and day. The
+    /// HART-embedded ElderNet windows join as their own (shadow) route; the standalone source supersedes them.
+    /// Every decode of the job (the published one, each single-expert candidate, the joint candidate and its
+    /// ablations) reads this one selection.
+    static func selection(day: String, inputRevision: Int64,
+                          gait: GaitQualityTrackInput?, eldernet: ElderNetStage?,
+                          heads: MotionHeadsTrackInput?, inertia: InertiaStage?,
+                          embedded: [ActivityGaitWindow] = []) -> ActivityExpertSelection {
+        var gaitSources: [GaitQualitySource] = []
+        if let gait, let eldernet {
+            gaitSources.append(GaitQualitySource(
+                track: gait, releaseMode: eldernet.mode == .candidate ? .candidate : .shadow, route: .standalone,
+                expectedModelVersion: eldernet.expectedModelVersion, expectedWeightsDigest: eldernet.expectedWeightsDigest,
+                gaitPrior: eldernet.gaitPrior, inputRevision: inputRevision, day: day))
+        }
+        var motionSources: [MotionHeadsSource] = []
+        if let heads, let inertia {
+            motionSources.append(MotionHeadsSource(
+                track: heads, mode: inertia.mode == .candidate ? .candidate : .shadow,
+                expectedBundleSHA256: inertia.expectedBundleSHA256, inputRevision: inputRevision, day: day))
+        }
+        return ActivityExpertSelection.select(
+            revisions: [day: inputRevision], gaitQuality: gaitSources, motionHeads: motionSources,
+            embeddedGait: embedded.isEmpty ? nil : EmbeddedGaitSource(windows: embedded))
+    }
+
+    /// The authority block stored with an expert row (`summary.authority`): the selection's decision for the row's
+    /// channel and the pins the stage ran with. nil when the selection has no source for the channel.
+    static func authority(_ selection: ActivityExpertSelection, gait eldernet: ElderNetStage) -> ActivityExpertAuthority? {
+        selection.decision(for: .gaitQuality).map {
+            ActivityExpertAuthority(decision: $0, mode: eldernet.mode == .candidate ? .candidate : .shadow,
+                                    pinnedModelVersion: eldernet.expectedModelVersion,
+                                    pinnedWeightsDigest: eldernet.expectedWeightsDigest, gaitPrior: eldernet.gaitPrior)
+        }
+    }
+
+    static func authority(_ selection: ActivityExpertSelection, motion inertia: InertiaStage) -> ActivityExpertAuthority? {
+        selection.decision(for: .motionHeads).map {
+            ActivityExpertAuthority(decision: $0, mode: inertia.mode == .candidate ? .candidate : .shadow,
+                                    pinnedBundleSHA256: inertia.expectedBundleSHA256)
+        }
+    }
+
     static func documentDigest(_ document: ActivityContextDayDocument) -> String {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         return sha256Hex((try? encoder.encode(document)) ?? Data())
     }
 
+    /// A decode already made for an arm, with the track reports of that same decode.
+    struct Reused {
+        var document: ActivityContextDayDocument
+        var gaitQuality: GaitQualityTrackReport? = nil
+        var motionHeads: MotionHeadsTrackReport? = nil
+    }
+
     /// Decode every candidate arm of `selection` over `input` (the published decode's own input). `reuse` holds
-    /// documents already decoded for an arm name (HART alone is the canonical document when no channel is
-    /// production; the single-expert arms are the rows' candidate documents), so no arm is decoded twice.
+    /// decodes already made for an arm name (HART alone is the canonical document when no channel is production;
+    /// the single-expert arms are the rows' candidate documents with their reports), so no arm is decoded twice.
     static func decode(selection: ActivityExpertSelection, input: ActivityContextTrackInput?, generatedAt: Int,
-                       reuse: [String: ActivityContextDayDocument] = [:]) -> Decoded {
+                       reuse: [String: Reused] = [:]) -> Decoded {
         let arms = selection.candidateArms
         guard !arms.isEmpty else {
             let reason = selection.decisions.compactMap(\.reason).first.map { "no_candidate_channel: \($0)" }
@@ -117,15 +168,12 @@ enum ActivityCandidateDays {
         var documents: [String: ActivityContextDayDocument] = [:]
         var reports: [String: (GaitQualityTrackReport?, MotionHeadsTrackReport?)] = [:]
         for arm in arms {
-            let d = selection.decode(input, base: ActivityDecoderConfig(), channels: arm.channels)
-            if let cached = reuse[arm.name], arm.channels.isEmpty || reuse.keys.contains(arm.name) {
-                documents[arm.name] = cached
-                if !arm.channels.isEmpty {
-                    let track = ActivityContextTrackBuilder.observationsWithReports(for: d.input, config: d.config)
-                    reports[arm.name] = (track.gaitQuality, track.motionHeads)
-                }
+            if let cached = reuse[arm.name] {
+                documents[arm.name] = cached.document
+                reports[arm.name] = (cached.gaitQuality, cached.motionHeads)
                 continue
             }
+            let d = selection.decode(input, base: ActivityDecoderConfig(), channels: arm.channels)
             let built = ActivityContextDays.dayDocumentAndTrack(input: d.input, generatedAt: generatedAt, config: d.config)
             documents[arm.name] = built.document
             reports[arm.name] = (built.track.gaitQuality, built.track.motionHeads)

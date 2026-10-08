@@ -209,6 +209,22 @@ struct ActivityLane {
         var eldernetRowsPruned = 0
         var eldernetPruneFailures = 0
         var lastElderNetPruneError: String?
+        /// The shared release policy (ActivityExpertSelection) per raw-IMU job: jobs it decided for, and jobs whose
+        /// published decode some expert channel shaped (only a production-released expert can; none is today).
+        var expertSelections = 0
+        var expertCanonicalShaped = 0
+        var lastSelectionDigest: String?
+        /// The joint candidate rows (`activity_candidate_days`), written only while an expert runs in candidate mode.
+        var candidateDaysStored = 0
+        var candidateDaysFenced = 0
+        var candidateDayFailures = 0
+        var candidateJointDocuments = 0
+        var candidateJointWithheld = 0
+        var lastCandidateWithheldReason: String?
+        var lastCandidateDayError: String?
+        var candidateRowsPruned = 0
+        var candidatePruneFailures = 0
+        var lastCandidatePruneError: String?
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -242,6 +258,8 @@ struct ActivityLane {
     /// ElderNet retention, on the same cadence.
     var lastGaitWindowsPruneAt: Date?
     static let gaitWindowsPruneIntervalSeconds: TimeInterval = 6 * 3600
+    /// Joint candidate retention, on the same cadence.
+    var lastCandidateDaysPruneAt: Date?
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -304,6 +322,45 @@ struct ActivityLane {
         pruneCacheIfDue()
         pruneMotionHeadsIfDue()
         pruneGaitWindowsIfDue()
+        pruneCandidateDaysIfDue()
+    }
+
+    /// True while some expert runs in candidate mode: only then is a joint candidate decoded and stored.
+    var storesCandidateDays: Bool { inertia?.mode == .candidate || eldernet?.mode == .candidate }
+
+    /// Joint candidate retention, while some expert runs in candidate mode. Best effort, like the others.
+    mutating func pruneCandidateDaysIfDue(now: Date = Date()) {
+        guard storesCandidateDays else { return }
+        if let last = lastCandidateDaysPruneAt, now.timeIntervalSince(last) < Self.gaitWindowsPruneIntervalSeconds { return }
+        lastCandidateDaysPruneAt = now
+        do {
+            stats.candidateRowsPruned += try ActivityCandidateDays.prune(db: db)
+            stats.lastCandidatePruneError = nil
+        } catch {
+            stats.candidatePruneFailures += 1
+            let why = ActivityContextDays.safeReason(error)
+            if stats.lastCandidatePruneError != why {
+                FileHandle.standardError.write(
+                    ("frwhoop-worker: candidate-day retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
+            }
+            stats.lastCandidatePruneError = why
+        }
+    }
+
+    /// What the lane's children measured they loaded (`<child>.<key>`, from each ping's `loaded` map and its
+    /// `loaded_digest`), the policy version and the last job's selection digest: the heartbeat's
+    /// `meta.lanes[].identity`. Empty entries are left out; a child that was never pinged reports nothing.
+    var identity: [String: String] {
+        var out = ["expert_policy": ActivityExpertSelection.policy]
+        func add(_ name: String, _ service: ActivityPythonService) {
+            for (k, v) in service.loadedIdentity { out["\(name).\(k)"] = v }
+            if let d = service.loadedDigest { out["\(name).loaded_digest"] = d }
+        }
+        add("hart", service)
+        if let inertia { add("inertia", inertia.service); out["inertia.mode"] = inertia.mode.rawValue }
+        if let eldernet { add("eldernet", eldernet.service); out["eldernet.mode"] = eldernet.mode.rawValue }
+        if let d = stats.lastSelectionDigest { out["selection_digest"] = d }
+        return out
     }
 
     private mutating func pruneCacheIfDue(now: Date = Date()) {
@@ -746,6 +803,18 @@ struct ActivityLane {
         // HART-service ElderNet gait windows (the optional in-process gait expert; its own 10 s grid).
         let expertGaitWindows = inferred.expertGaitWindows
 
+        // 5b. The shared release policy over this job's own expert results (ActivityExpertSelection): every decode
+        //     below reads it. Only a production-released source may shape the published decode; no expert stage
+        //     can produce one (their modes are shadow / candidate), so the published documents are HART's alone.
+        let selection = ActivityCandidateDays.selection(
+            day: job.day, inputRevision: job.inputRevision,
+            gait: eldernet == nil ? nil : inferred.gaitQuality.trackInput, eldernet: eldernet,
+            heads: inertia == nil ? nil : inferred.motionHeads.trackInput, inertia: inertia,
+            embedded: expertGaitWindows)
+        stats.expertSelections += 1
+        if !selection.canonicalChannels.isEmpty { stats.expertCanonicalShaped += 1 }
+        stats.lastSelectionDigest = selection.digest
+
         // 6. Build the C10 document from the SHARED StrandAnalytics policy
         //    and join (`ActivityContextPolicy` + `ActivityContextJoin`) — the
         //    exact temporal fold the app runs, so server and phone compute
@@ -774,7 +843,7 @@ struct ActivityLane {
         let context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise,
-            transitionVersion: transitionVersions, gaitWindows: expertGaitWindows)
+            transitionVersion: transitionVersions, gaitWindows: expertGaitWindows, selection: selection)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
@@ -782,15 +851,28 @@ struct ActivityLane {
                                                    gaitWindows: expertGaitWindows)
 
         // 6d. Inertia shadow row (and candidate comparison): built from what 6b decoded, never changing it.
-        let motionHeads = motionHeadsPayload(job: job, collector: inferred.motionHeads, context: context)
+        let motionHeads = inertia.map {
+            Self.motionHeadsRow(day: job.day, inertia: $0, collector: inferred.motionHeads, context: context,
+                                stats: &stats)
+        }
         // 6e. ElderNet shadow row (and candidate comparison), the same way.
-        let gaitWindows = gaitWindowsPayload(job: job, collector: inferred.gaitQuality, context: context)
+        let gaitWindows = eldernet.map {
+            Self.gaitWindowsRow(day: job.day, eldernet: $0, collector: inferred.gaitQuality, context: context,
+                                stats: &stats)
+        }
+        // 6f. The joint candidate and its ablations, only while some expert runs in candidate mode.
+        let candidateDay = storesCandidateDays
+            ? Self.candidateDayPayload(day: job.day, inputRevision: job.inputRevision, context: context,
+                                       motionCandidate: motionHeads?.candidate, gaitCandidate: gaitWindows?.candidate,
+                                       stats: &stats)
+            : nil
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
         return try publishDay(job: job, payloadText: payloadText, dayDocument: context.built,
                               durationMS: durationMS, dayBounds: dayBounds, windowsPayload: windowsPayload,
-                              motionHeads: motionHeads, gaitWindows: gaitWindows)
+                              motionHeads: motionHeads?.payload, gaitWindows: gaitWindows?.payload,
+                              candidateDay: candidateDay)
     }
 
     /// What step 5 produced: the HART windows and versions exactly as before, plus the Inertia and ElderNet
@@ -1043,12 +1125,23 @@ struct ActivityLane {
     /// `gaitWindowsPayload` without the lane (no database involved), so the counters are testable.
     static func gaitWindowsPayload(day: String, eldernet: ElderNetStage, collector: GaitQualityCollector,
                                    context: ContextDayBuild, stats: inout Stats) -> String? {
-        guard let gait = collector.trackInput else { return nil }
+        gaitWindowsRow(day: day, eldernet: eldernet, collector: collector, context: context, stats: &stats).payload
+    }
+
+    /// The ElderNet row's payload and its candidate decode (the joint candidate reuses the document as its
+    /// HART + gait-quality arm). The decode and the row's authority block come from the job's selection
+    /// (`context.selection`), or from one built from these windows alone when the caller has none.
+    static func gaitWindowsRow(day: String, eldernet: ElderNetStage, collector: GaitQualityCollector,
+                               context: ContextDayBuild, stats: inout Stats)
+        -> (payload: String?, candidate: ActivityGaitWindowsDays.Candidate?) {
+        guard let gait = collector.trackInput else { return (nil, nil) }
+        let selection = context.selection ?? ActivityCandidateDays.selection(
+            day: day, inputRevision: context.inputRevision ?? 0, gait: gait, eldernet: eldernet, heads: nil, inertia: nil)
         let candidate = ActivityGaitWindowsDays.candidate(mode: eldernet.mode, gait: gait, input: context.input,
                                                           generatedAt: context.generatedAt,
                                                           expectedModelVersion: eldernet.expectedModelVersion,
                                                           expectedWeightsDigest: eldernet.expectedWeightsDigest,
-                                                          gaitPrior: eldernet.gaitPrior)
+                                                          gaitPrior: eldernet.gaitPrior, selection: selection)
         var report: GaitQualityTrackReport?
         switch candidate {
         case .notRequested: break
@@ -1068,13 +1161,16 @@ struct ActivityLane {
             stats.eldernetWindowsDropped += report.dropped
         }
         do {
-            return try ActivityGaitWindowsDays.payload(day: day, mode: eldernet.mode, collector: collector,
-                                                       candidate: candidate, attachment: report,
-                                                       gaitPrior: eldernet.gaitPrior)
+            return (try ActivityGaitWindowsDays.payload(day: day, mode: eldernet.mode, collector: collector,
+                                                        candidate: candidate, attachment: report,
+                                                        gaitPrior: eldernet.gaitPrior,
+                                                        authority: context.selection.flatMap {
+                                                            ActivityCandidateDays.authority($0, gait: eldernet)
+                                                        }), candidate)
         } catch {
             stats.eldernetShadowFailures += 1
             stats.lastElderNetShadowError = ActivityContextDays.safeReason(error)
-            return nil
+            return (nil, candidate)
         }
     }
 
@@ -1100,10 +1196,20 @@ struct ActivityLane {
     /// `motionHeadsPayload` without the lane (no database involved), so the counters are testable.
     static func motionHeadsPayload(day: String, inertia: InertiaStage, collector: MotionHeadsCollector,
                                    context: ContextDayBuild, stats: inout Stats) -> String? {
-        guard let heads = collector.trackInput else { return nil }
+        motionHeadsRow(day: day, inertia: inertia, collector: collector, context: context, stats: &stats).payload
+    }
+
+    /// The Inertia row's payload and its candidate decode, the same way as `gaitWindowsRow`.
+    static func motionHeadsRow(day: String, inertia: InertiaStage, collector: MotionHeadsCollector,
+                               context: ContextDayBuild, stats: inout Stats)
+        -> (payload: String?, candidate: ActivityMotionHeadsDays.Candidate?) {
+        guard let heads = collector.trackInput else { return (nil, nil) }
+        let selection = context.selection ?? ActivityCandidateDays.selection(
+            day: day, inputRevision: context.inputRevision ?? 0, gait: nil, eldernet: nil, heads: heads, inertia: inertia)
         let candidate = ActivityMotionHeadsDays.candidate(mode: inertia.mode, heads: heads, input: context.input,
                                                          generatedAt: context.generatedAt,
-                                                         expectedBundleSHA256: inertia.expectedBundleSHA256)
+                                                         expectedBundleSHA256: inertia.expectedBundleSHA256,
+                                                         selection: selection)
         var report: MotionHeadsTrackReport?
         switch candidate {
         case .notRequested: break
@@ -1124,11 +1230,51 @@ struct ActivityLane {
             stats.inertiaPostureOmitted += report.postureOmittedSleep
         }
         do {
-            return try ActivityMotionHeadsDays.payload(day: day, mode: inertia.mode, collector: collector,
-                                                      candidate: candidate, attachment: report)
+            return (try ActivityMotionHeadsDays.payload(day: day, mode: inertia.mode, collector: collector,
+                                                       candidate: candidate, attachment: report,
+                                                       authority: context.selection.flatMap {
+                                                           ActivityCandidateDays.authority($0, motion: inertia)
+                                                       }), candidate)
         } catch {
             stats.inertiaShadowFailures += 1
             stats.lastInertiaShadowError = ActivityContextDays.safeReason(error)
+            return (nil, candidate)
+        }
+    }
+
+    /// The joint candidate payload for this job: every candidate arm of the job's selection decoded over the published
+    /// decode's own input (the HART-alone arm is the published document while no channel is production, and each
+    /// single-expert arm is that row's candidate document, so nothing is decoded twice), or nil when there is no
+    /// decoder input or no selection. Never throws: a failure is counted and skipped.
+    static func candidateDayPayload(day: String, inputRevision: Int64, context: ContextDayBuild,
+                                    motionCandidate: ActivityMotionHeadsDays.Candidate?,
+                                    gaitCandidate: ActivityGaitWindowsDays.Candidate?,
+                                    stats: inout Stats) -> String? {
+        guard let selection = context.selection else { return nil }
+        var reuse: [String: ActivityCandidateDays.Reused] = [:]
+        if selection.canonicalChannels.isEmpty, let published = context.built?.document {
+            reuse["hart"] = ActivityCandidateDays.Reused(document: published)
+        }
+        if case .document(let d, let r)? = motionCandidate {
+            reuse["hart+\(ActivityExpertSelection.Channel.motionHeads.rawValue)"] =
+                ActivityCandidateDays.Reused(document: d, motionHeads: r)
+        }
+        if case .document(let d, let r)? = gaitCandidate {
+            reuse["hart+\(ActivityExpertSelection.Channel.gaitQuality.rawValue)"] =
+                ActivityCandidateDays.Reused(document: d, gaitQuality: r)
+        }
+        let decoded = ActivityCandidateDays.decode(selection: selection, input: context.input,
+                                                   generatedAt: context.generatedAt, reuse: reuse)
+        if decoded.joint != nil { stats.candidateJointDocuments += 1 } else {
+            stats.candidateJointWithheld += 1
+            stats.lastCandidateWithheldReason = decoded.withheldReason
+        }
+        do {
+            return try ActivityCandidateDays.payload(day: day, inputRevision: inputRevision, selection: selection,
+                                                     decoded: decoded)
+        } catch {
+            stats.candidateDayFailures += 1
+            stats.lastCandidateDayError = ActivityContextDays.safeReason(error)
             return nil
         }
     }
@@ -1150,10 +1296,14 @@ struct ActivityLane {
     ///
     /// `gaitWindows` (the ElderNet shadow row) follows the Inertia row the same way: its own savepoint and fenced
     /// RPC, before the v1 publish, never able to block it.
+    ///
+    /// `candidateDay` (the joint candidate row) follows the expert rows the same way: its own savepoint and fenced
+    /// RPC, before the v1 publish, never able to block it, and never published.
     mutating func publishDay(job: ActivityJob, payloadText: String,
                              dayDocument: ActivityContextDays.Built?, durationMS: Int,
                              dayBounds: (start: Int, end: Int), windowsPayload: String? = nil,
-                             motionHeads: String? = nil, gaitWindows: String? = nil) throws -> Bool {
+                             motionHeads: String? = nil, gaitWindows: String? = nil,
+                             candidateDay: String? = nil) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
             var windowsStored = false
@@ -1217,6 +1367,23 @@ struct ActivityLane {
                     stats.lastElderNetShadowError = why
                 }
             }
+            var candidateStored = false
+            if let candidateDay {
+                switch try ActivityCandidateDays.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision, payload: candidateDay) {
+                case .stored:
+                    candidateStored = true
+                case .fenced:
+                    stats.candidateDaysFenced += 1
+                case .rejected(let why):
+                    stats.candidateDayFailures += 1
+                    if stats.lastCandidateDayError != why {
+                        FileHandle.standardError.write(
+                            ("frwhoop-worker: candidate day skipped (publishes unaffected): \(why)\n").data(using: .utf8)!)
+                    }
+                    stats.lastCandidateDayError = why
+                }
+            }
             let publishJSON = try db.callFunctionForJSONRaw(
                 "SELECT public.publish_activity_context_v2($1::uuid,$2::bigint,$3::jsonb,$4::bigint)::text",
                 [job.leaseToken, String(job.inputRevision), payloadText, String(durationMS)])
@@ -1227,6 +1394,7 @@ struct ActivityLane {
                 if windowsStored { stats.windowSetsPublished += 1 }
                 if motionHeadsStored { stats.inertiaShadowStored += 1 }
                 if gaitStored { stats.eldernetShadowStored += 1 }
+                if candidateStored { stats.candidateDaysStored += 1 }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
@@ -1265,6 +1433,9 @@ struct ActivityLane {
         var built: ActivityContextDays.Built?
         var input: ActivityContextTrackInput?
         var generatedAt: Int
+        /// The job's release selection (what the published decode used); nil when the caller built none.
+        var selection: ActivityExpertSelection? = nil
+        var inputRevision: Int64? = nil
     }
 
     mutating func buildContextDayAndInput(
@@ -1275,9 +1446,18 @@ struct ActivityLane {
         inBed: [(start: Int, end: Int)] = [],
         exercise: [(start: Int, end: Int, sport: String)],
         transitionVersion: String = "none",
-        gaitWindows: [ActivityGaitWindow] = []) throws -> ContextDayBuild {
+        gaitWindows: [ActivityGaitWindow] = [],
+        selection: ActivityExpertSelection? = nil) throws -> ContextDayBuild {
         let started = Int(Date().timeIntervalSince1970)
-        guard contextDaysEnabled else { return ContextDayBuild(built: nil, input: nil, generatedAt: started) }
+        // The published decode reads only what the shared release policy lets shape it (no expert source here:
+        // the HART-embedded gait windows alone, which are shadow).
+        let selection = selection ?? ActivityExpertSelection.select(
+            revisions: [job.day: job.inputRevision],
+            embeddedGait: gaitWindows.isEmpty ? nil : EmbeddedGaitSource(windows: gaitWindows))
+        guard contextDaysEnabled else {
+            return ContextDayBuild(built: nil, input: nil, generatedAt: started, selection: selection,
+                                   inputRevision: job.inputRevision)
+        }
         var builtInput: ActivityContextTrackInput?
         var generatedAt = started
         do {
@@ -1298,15 +1478,18 @@ struct ActivityLane {
                 gaitWindows: gaitWindows)
             builtInput = input
             generatedAt = now
+            let canonical = selection.canonical(input, base: ActivityDecoderConfig())
             let built = try ActivityContextDays.build(
-                input: input, day: job.day, modelVersion: versions.model,
-                preprocessingVersion: versions.preprocessing, generatedAt: now)
-            return ContextDayBuild(built: built, input: input, generatedAt: now)
+                input: canonical.input, day: job.day, modelVersion: versions.model,
+                preprocessingVersion: versions.preprocessing, generatedAt: now, config: canonical.config)
+            return ContextDayBuild(built: built, input: input, generatedAt: now, selection: selection,
+                                   inputRevision: job.inputRevision)
         } catch let e as PostgresClient.Error where e.kind == .connectionLost || e.kind == .stale {
             throw e
         } catch {
             noteContextDayFailure(ActivityContextDays.safeReason(error))
-            return ContextDayBuild(built: nil, input: builtInput, generatedAt: generatedAt)
+            return ContextDayBuild(built: nil, input: builtInput, generatedAt: generatedAt, selection: selection,
+                                   inputRevision: job.inputRevision)
         }
     }
 
