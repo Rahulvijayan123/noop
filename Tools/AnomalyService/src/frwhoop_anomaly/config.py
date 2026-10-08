@@ -33,6 +33,8 @@ class Config:
   score_lookback_hours: int
   max_jobs_per_cycle: int
   dry_run: bool
+  units_train_windows: int = 1000        # UniTS prompt-tuning budget (VPS: 400 × 2 epochs ≈ 10 min on 1 core)
+  units_epochs: int = 3
   users: tuple[str, ...] = ()            # staged rollout: only these owners (empty = every scored owner)
 
   @staticmethod
@@ -61,5 +63,7 @@ class Config:
       score_lookback_hours=int(_env("FRWHOOP_ANOMALY_LOOKBACK_HOURS", "6")),
       max_jobs_per_cycle=int(_env("FRWHOOP_ANOMALY_MAX_JOBS_PER_CYCLE", "4")),
       dry_run=_env("FRWHOOP_ANOMALY_DRY_RUN", "0") == "1",
+      units_train_windows=int(_env("FRWHOOP_ANOMALY_UNITS_TRAIN_WINDOWS", "1000")),
+      units_epochs=int(_env("FRWHOOP_ANOMALY_UNITS_EPOCHS", "3")),
       users=tuple(u.strip() for u in (_env("FRWHOOP_ANOMALY_USERS", "") or "").split(",") if u.strip()),
     )

@@ -86,9 +86,9 @@ def test_backfill_does_not_rescore_windows_already_considered(tmp_path):
   hr = 60 + rs.normal(size=4 * 1440)
   stub, _, _ = run(tmp_path, hr)
   starts, counts = np.unique(stub.asked, return_counts=True)
-  # Each window is scored when it completes, and at most once more at the watermark edge (or once more as late
-  # data settles); a thin reference must not make every job re-score 30 h.
-  assert counts.max() <= 3, counts.max()
+  # Each window is scored once, when it completes; a thin reference must not make every job re-score 30 h.
+  assert counts.max() == 1, counts.max()
+  assert len(starts) >= 100                  # and every completed usable window was scored
 
 
 def test_sustained_shift_is_one_candidate_with_a_stable_key(tmp_path):

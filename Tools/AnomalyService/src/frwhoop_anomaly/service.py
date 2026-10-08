@@ -35,6 +35,7 @@ DATA_SETTLE_SECONDS = 5 * 60
 JOB_DEADLINE_SECONDS = 25 * 60
 BACKFILL_SECONDS = 30 * 3600
 RECENT_SECONDS = 12 * 3600
+BUCKETS = ("rest", "sleep")
 
 
 def sd_notify(msg: str) -> None:
@@ -202,9 +203,11 @@ class Service:
       floor = int(frame.minutes[0]) + getattr(scorer, "history_minutes", self.cfg.context_minutes) * 60
       f = max(score_to - self.cfg.score_lookback_hours * 3600, floor)
       if wm is not None:
-        f = max(f, wm - cand.WINDOW_S)     # re-score the last window at the watermark edge
-      if any(st.load_ref(scorer.name, b).shape[0] < MIN_REFERENCE for b in ("rest", "sleep")):
-        f = min(f, max(floor, score_to - BACKFILL_SECONDS, int(seen.get(scorer.name, 0)) + cand.WINDOW_S))
+        f = max(f, wm)                     # each window is scored once, when complete (windows() aligns down)
+      refs = [st.load_ref(scorer.name, b) for b in BUCKETS]
+      if any(r.shape[0] < MIN_REFERENCE for r in refs):
+        done = 0 if all(r.size == 0 for r in refs) else int(seen.get(scorer.name, 0))   # 0: new / re-trained
+        f = min(f, max(floor, score_to - BACKFILL_SECONDS, done + cand.WINDOW_S))
       froms[scorer.name] = f
     score_from = min(froms.values()) if froms else score_to
     if score_to - score_from < cand.WINDOW_S:
@@ -219,46 +222,49 @@ class Service:
       raw = scorer.score(frame, usable, state=st)   # list of (window, z (U, 30))
       self.counters["infer_ms"] += int((time.time() - t1) * 1000)
       versions[scorer.name] = scorer.version
-      out = []
-      for w, z in raw:
-        out.append(cand.ModelWindowResult(model=scorer.name, window=w, channel_scores=cand.directional(z),
-                                          signed_mean=cand.nanmean_rows(z)))
-      for bucket in ("rest", "sleep"):
+      out = [cand.ModelWindowResult(model=scorer.name, window=w, channel_scores=cand.directional(z),
+                                    signed_mean=cand.nanmean_rows(z)) for w, z in raw]
+      for bucket in BUCKETS:
         mine = [r for r in out if r.window.bucket == bucket]
         if not mine:
           continue
-        ref = st.load_ref(scorer.name, bucket)
-        mc = MultiChannel(ref) if ref.size else None
-        if mc is not None and mc.ready:
+        mc = MultiChannel(st.load_ref(scorer.name, bucket))
+        if mc.ready:
           p, per = mc.pvalue(np.stack([r.channel_scores for r in mine]))
           for r, pi, cp in zip(mine, p, per):
             r.p, r.channel_p, r.flagged = float(pi), cp, bool(pi < cand.ALPHA)
         else:
           for r in mine:
             r.calibrating = True
-        # Windows ≥ 1 h old are considered once: unflagged ones join the reference (a run still building up is not
-        # absorbed into "normal"; flagged ones never are).
-        meta_path = os.path.join(st.dir, f"refmeta_{scorer.name}_{bucket}.json")
-        last = self._load_json(st, os.path.basename(meta_path)).get("last", 0)
-        old = [r for r in mine if r.window.start > last and r.window.start + cand.WINDOW_S <= score_to - 3600]
-        new_rows = [r for r in old if not r.flagged]
-        if new_rows:
-          st.append_ref(scorer.name, bucket, np.stack([r.channel_scores for r in new_rows]))
-        if old:
-          self._save_json(st, os.path.basename(meta_path), {"last": max(r.window.start for r in old)})
-      considered = [w.start for w in ws if w.start >= froms[scorer.name] and w.start + cand.WINDOW_S <= score_to - 3600]
-      if considered:
-        seen[scorer.name] = max(int(seen.get(scorer.name, 0)), max(considered))
+      if out:
+        seen[scorer.name] = max(int(seen.get(scorer.name, 0)), max(r.window.start for r in out))
       results[scorer.name] = out
     self._save_json(st, "seen.json", seen)
     self.counters["windows"] += len(ws)
     combined, kept = self._load_recent(st, frame, results, score_to)
+    self._grow_references(st, combined, score_to)
     candidates = cand.form_candidates(combined, frame, versions)
     self._carry_run_keys(candidates, kept)
     self._save_recent(st, results, kept, candidates, score_to)
     iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
     return {"scored_from": iso(score_from), "scored_to": iso(score_to), "candidates": candidates,
             "window_scores": cand.window_score_rows(results, withheld)}
+
+  def _grow_references(self, st: UserState, combined: dict, score_to: int) -> None:
+    """Windows are scored when complete but join a model's calibration reference only once ≥ 1 h old (from the
+    persisted recent results), so a run still building up is never absorbed into "normal"; flagged windows never
+    join. Each window is considered once (refmeta "last")."""
+    for model, rs in combined.items():
+      for bucket in BUCKETS:
+        name = f"refmeta_{model}_{bucket}.json"
+        last = self._load_json(st, name).get("last", 0)
+        old = [r for r in rs if r.window.bucket == bucket and r.window.start > last
+               and r.window.start + cand.WINDOW_S <= score_to - 3600]
+        new_rows = [r for r in old if not r.flagged and np.isfinite(r.channel_scores).any()]
+        if new_rows:
+          st.append_ref(model, bucket, np.stack([r.channel_scores for r in sorted(new_rows, key=lambda r: r.window.start)]))
+        if old:
+          self._save_json(st, name, {"last": max(r.window.start for r in old)})
 
   # ---- small per-user state helpers ----------------------------------------------------------------------------
   @staticmethod
@@ -329,7 +335,7 @@ class Service:
 def load_scorers(cfg: Config) -> list:
   from .models.timesfm_scorer import TimesFMScorer
   from .models.units_scorer import UniTSScorer
-  return [TimesFMScorer(cfg), UniTSScorer(cfg)]
+  return [TimesFMScorer(cfg), UniTSScorer(cfg, train_windows=cfg.units_train_windows, epochs=cfg.units_epochs)]
 
 
 def main() -> None:
