@@ -20,7 +20,7 @@ async function fixture() {
   ]);
   await base.upsert('noop_app_installations', [{ user_id: USER, source_id: SOURCE }, { user_id: OTHER, source_id: OTHER_SOURCE }]);
 
-  const coach = new Map<string, any[]>([['coach_memory_items', []], ['coach_messages', []], ['profiles', []]]);
+  const coach = new Map<string, any[]>([['coach_memory_items', []], ['coach_messages', []], ['profiles', []], ['user_settings', []]]);
   const usage = new Map<string, number>();
   const query = (table: string, q = '') => {
     const params = new URLSearchParams(q);
@@ -389,4 +389,60 @@ Deno.test('coach profile: invalid values are rejected without touching the store
   assertEquals((rest as any).coach.get('profiles').length, 0);
   assertEquals((await handleCoachRequest(call('profile', { method: 'DELETE' }), deps)).status, 405);
   assertEquals((await handleCoachRequest(call('profile', { token: '' }), deps)).status, 401);
+});
+
+Deno.test('coach settings: the sign-up defaults are not a saved choice, and other keys in the row survive', async () => {
+  const { rest } = await fixture();
+  const deps = { rest, cfg };
+  // The row sign-up creates: column defaults nobody chose, plus a key an earlier client wrote.
+  (rest as any).coach.get('user_settings').push({ user_id: USER, units: 'imperial', extra_settings: { wear_location: 'wrist' } });
+  assertEquals(await (await handleCoachRequest(call('settings'), deps)).json(), { settings: null });
+
+  const put = await handleCoachRequest(call('settings', {
+    method: 'PUT', body: { units: 'metric', batteryAlerts: false, moveReminderMinutes: 45, hapticLiftRest: false },
+  }), deps);
+  assertEquals(put.status, 200);
+  assertEquals((await put.json()).settings, { units: 'metric', moveReminderMinutes: 45, batteryAlerts: false, hapticLiftRest: false });
+  const row = (rest as any).coach.get('user_settings')[0];
+  assertEquals(row.units, 'metric', 'units is mirrored to the typed column');
+  assertEquals(row.extra_settings.wear_location, 'wrist');
+
+  await handleCoachRequest(call('settings', { method: 'PUT', body: { sanaEnabled: false, batteryAlerts: true } }), deps);
+  const after = (await (await handleCoachRequest(call('settings'), deps)).json()).settings;
+  assertEquals(after, { units: 'metric', sanaEnabled: false, moveReminderMinutes: 45, batteryAlerts: true, hapticLiftRest: false });
+
+  assertEquals(await (await handleCoachRequest(call('settings', { token: 'noop_other' }), deps)).json(), { settings: null });
+  assertEquals((rest as any).coach.get('user_settings').map((r: any) => r.user_id), [USER]);
+});
+
+Deno.test('coach settings: a first save creates the row, and invalid values never reach it', async () => {
+  const { rest } = await fixture();
+  const deps = { rest, cfg };
+  const bad: [string, unknown][] = [
+    ['empty body', {}],
+    ['not an object', [true]],
+    ['unknown units', { units: 'nautical' }],
+    ['boolean as a string', { batteryAlerts: 'true' }],
+    ['minutes below range', { moveReminderMinutes: 5 }],
+    ['minutes not whole', { moveReminderMinutes: 47.5 }],
+    ['buzzes above range', { moveReminderBuzzes: 9 }],
+    ['minute of day past midnight', { moveReminderEndMinute: 1440 }],
+  ];
+  for (const [label, body] of bad) {
+    const res = await handleCoachRequest(call('settings', { method: 'PUT', body }), deps);
+    assertEquals(res.status, 400, label);
+    await res.body?.cancel();
+  }
+  assertEquals((rest as any).coach.get('user_settings').length, 0);
+  // A newer app's keys are not an error, and not stored either.
+  const unknown = await handleCoachRequest(call('settings', { method: 'PUT', body: { somethingNew: true } }), deps);
+  assertEquals(unknown.status, 200);
+  assertEquals(await unknown.json(), { settings: null });
+  assertEquals((rest as any).coach.get('user_settings').length, 0);
+
+  const put = await handleCoachRequest(call('settings', { method: 'PUT', body: { zoneCoaching: true, somethingNew: 1 } }), deps);
+  assertEquals((await put.json()).settings, { zoneCoaching: true });
+  assertEquals((rest as any).coach.get('user_settings')[0].extra_settings, { nara: { zoneCoaching: true } });
+  assertEquals((await handleCoachRequest(call('settings', { method: 'DELETE' }), deps)).status, 405);
+  assertEquals((await handleCoachRequest(call('settings', { token: '' }), deps)).status, 401);
 });

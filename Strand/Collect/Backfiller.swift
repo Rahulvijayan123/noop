@@ -116,6 +116,10 @@ final class Backfiller {
 
     /// "persisted N rows (M with motion) across K night(s)". Nights are day-keys (ts / 86400).
     private(set) var sessionRowsPersisted = 0
+    /// Newest timestamp among the heart-rate and gravity rows this session persisted. Tells a pass that reached
+    /// the present (a caught-up strap handing over its last few seconds) from one still draining old backlog,
+    /// which the auto-continue decision needs (`BackfillContinuation.shouldAutoContinue`).
+    private(set) var sessionNewestPersistedTs: Int?
     /// #42: set by `begin` when this session continues an auto-continue burst (#364) that already banked
     /// rows in an earlier session, so a trim=0xFFFFFFFF END here reads as "caught up", not "no history".
     /// Without it the fresh session's `sessionRowsPersisted` is 0 and the scary "charge to 100%" line
@@ -266,11 +270,20 @@ final class Backfiller {
     /// both platforms examine the same frames and dump the same records. Twin of Android `spo2Examined`.
     private var spo2Examined = 0
 
+    /// Intact v20/v21 raw records each session may still add to the reject archive, as a sample for the
+    /// channel mapping work. Archiving every one cost a hex-encode and fsync on about half of each chunk's
+    /// frames ahead of the ack, and kept the 5 MB archive rewriting itself at its cap.
+    static let rawSensorArchiveSampleBudget = 8
+    private var rawSensorArchiveBudget = Backfiller.rawSensorArchiveSampleBudget
+
     /// Durably archives undecodable record frames BEFORE the trim ack (#77 / #91). Returns true once
     /// the bytes are safe (written OR cap-reached — either way the chunk may be acked) and false on a
     /// genuine write failure, in which case `finishChunk` holds the cursor/ack so the strap re-sends.
     /// nil in non-production inits (tests/preview) → archiving is skipped and acks proceed as before.
-    private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)?
+    private let rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)?
+    /// Archives the rolling sample of intact v20/v21 raw records (`rawSensorArchiveSampleBudget`). nil in
+    /// tests and previews.
+    private let rawSampleSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)?
     /// Per-chunk outcome hook (#77 family): (didDecodeSensorRows, wasConsoleOnly). Lets BLEManager
     /// tally a session so a COMPLETED-but-empty offload (all console, no sensor records) can tell the
     /// user their strap isn't banking, without false-positiving a normal caught-up sync.
@@ -297,7 +310,8 @@ final class Backfiller {
                                                 gravity: Int)) -> Void = { _ in },
          enableRawCapture: Bool = false,
          log: ((String) -> Void)? = nil,
-         rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) -> Bool)? = nil,
+         rejectedSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)? = nil,
+         rawSampleSink: ((_ frames: [[UInt8]], _ trim: UInt32, _ family: DeviceFamily) async -> Bool)? = nil,
          onChunk: ((_ decoded: Bool, _ console: Bool) -> Void)? = nil,
          connectionActive: @escaping () -> Bool = { false },
          connectionLog: ((String) -> Void)? = nil,
@@ -316,6 +330,7 @@ final class Backfiller {
         self.enableRawCapture = enableRawCapture
         self.log = log
         self.rejectedSink = rejectedSink
+        self.rawSampleSink = rawSampleSink
         self.onChunk = onChunk
         self.connectionActive = connectionActive
         self.connectionLog = connectionLog
@@ -342,6 +357,7 @@ final class Backfiller {
         chunk.removeAll(keepingCapacity: true)
         chunkOpen = true
         sessionRowsPersisted = 0
+        sessionNewestPersistedTs = nil
         sessionDiscarded = HistoryFenceReport()
         sessionRrOffered = 0
         sessionRrInserted = 0
@@ -367,6 +383,7 @@ final class Backfiller {
         spo2Dumped = 0
         spo2DumpedByVersion = [:]
         spo2Examined = 0
+        rawSensorArchiveBudget = Backfiller.rawSensorArchiveSampleBudget
         // #547: the range markers belong to a connection's GET_DATA_RANGE, which BLEManager re-sets per
         // connect; clear them here so a fresh session never reuses a previous strap's window. BLEManager
         // re-publishes them as soon as the range reply arrives.
@@ -591,7 +608,7 @@ final class Backfiller {
     /// both platforms; localizing that surface is its own change. No em-dash (project rule).
     nonisolated static func staleRecordBanner(newestUnix: Int, wallNowUnix: Int) -> String {
         let ageDays = max(0, wallNowUnix - newestUnix) / 86_400
-        return "Synced, but your strap handed over no stored history, and its newest saved record is about \(ageDays) day(s) old. If you have been wearing it since then, it has stopped saving to flash. Charge it to 100% and reconnect; NOOP already re-sets its clock every connect, so if that does not help, try Restart strap in Devices, then forget and re-pair. If the official WHOOP app is missing these days too, the strap is the cause and not NOOP."
+        return "Synced, but your strap handed over no stored history, and its newest saved record is about \(ageDays) day(s) old. If you have been wearing it since then, it has stopped saving to flash. Charge it to 100% and reconnect; Nara already re-sets its clock every connect, so if that does not help, try Restart strap in Devices, then forget and re-pair. If the official WHOOP app is missing these days too, the strap is the cause and not Nara."
     }
 
     /// #1754: the banner for an empty offload whose flash cursor is VALID and ADVANCING — the strap is
@@ -623,6 +640,9 @@ final class Backfiller {
         let parsed: [ParsedFrame]
         let decoded: Streams
         let rejected: [[UInt8]]
+        /// Intact v20/v21 raw sensor records: sensor data the strap banked, not console output, even
+        /// though they yield no rows (see `whoop5RawSensorHistoricalVersions`).
+        let rawSensor: [[UInt8]]
     }
 
     private func finishChunk(unix: UInt32, trim: UInt32, endFrame: [UInt8]) async {
@@ -673,7 +693,10 @@ final class Backfiller {
                 let parsed = frames.map { parseFrame($0, family: fam) }
                 let decoded = extractFn(parsed, dev, wall, fam, oldest, newest)
                 let rejected = rejectedHistoricalRecords(frames, family: fam)
-                return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected)
+                let rawSensor = fam == .whoop5
+                    ? zip(frames, parsed).filter { isIntactWhoop5RawSensorRecord($0.0, parsed: $0.1) }.map(\.0)
+                    : []
+                return DecodedChunk(parsed: parsed, decoded: decoded, rejected: rejected, rawSensor: rawSensor)
             }.value
             // A new owner's offload: whatever is dated before the pairing is read so the ack can free it, and
             // goes no further. It is cut here, after decode and before every sink below (the store, the cloud
@@ -695,7 +718,8 @@ final class Backfiller {
                     onHistoryDiscarded?(cut.report)
                 }
                 let undatable = fenced || cut.streams.isEmpty
-                d = DecodedChunk(parsed: d.parsed, decoded: cut.streams, rejected: undatable ? [] : d.rejected)
+                d = DecodedChunk(parsed: d.parsed, decoded: cut.streams, rejected: undatable ? [] : d.rejected,
+                                 rawSensor: undatable ? [] : d.rawSensor)
             }
             let parsed = d.parsed
             // #1008: per-chunk clock basis + R-R packing. The session summary logs only the FIRST chunk's
@@ -874,10 +898,14 @@ final class Backfiller {
             // caught-up one (#77 family): did it decode sensor rows, and was it console-only?
             // A chunk whose records were all cut by the fence was not console output either: it held sensor
             // records, they just were not this owner's.
-            onChunk?(!decoded.isEmpty || fenced, decoded.isEmpty && rejected.isEmpty && !fenced)
+            // Intact v20/v21 raw records count as sensor data too: they yield no rows by design, and a chunk
+            // made only of them is the strap banking, not the strap emitting console output.
+            let rawSensor = !d.rawSensor.isEmpty
+            onChunk?(!decoded.isEmpty || fenced || rawSensor,
+                     decoded.isEmpty && rejected.isEmpty && !fenced && !rawSensor)
             // A chunk that produced no rows AND held no genuine rejects was pure console output — say
             // so calmly so it doesn't read as data loss (the "rejected frames" red herring, #77/#120).
-            if decoded.isEmpty && rejected.isEmpty && !fenced {
+            if decoded.isEmpty && rejected.isEmpty && !fenced && !rawSensor {
                 log?("Backfill: \(frames.count) frame(s) this chunk carried no sensor records (strap console/diagnostic output) — normal, nothing to persist (trim=\(trim)).")
             }
             // Log + hex-sample the GENUINE rejects whenever there are any — INCLUDING a partially-decoded
@@ -938,8 +966,13 @@ final class Backfiller {
             }
             // Success-side observability (#150): tally what actually persisted so the session can emit
             // "persisted N rows (M with motion) across K night(s)" — the win-rate signal a log never had.
-            let tally = Backfiller.chunkTally(counts: counts, timestamps: decoded.gravity.map(\.ts) + decoded.hr.map(\.ts))
+            let persistedTimestamps = decoded.gravity.map(\.ts) + decoded.hr.map(\.ts)
+            let tally = Backfiller.chunkTally(counts: counts, timestamps: persistedTimestamps)
             sessionRowsPersisted += tally.rows
+            // R-R too: a 5/MG layout can bank intervals with no per-second heart rate or motion.
+            if tally.rows > 0, let newest = (persistedTimestamps + decoded.rr.map(\.ts)).max() {
+                sessionNewestPersistedTs = max(sessionNewestPersistedTs ?? newest, newest)
+            }
             // #1008/#1118 census accumulation (pre-storage `offered` vs post-key `inserted`).
             sessionRrOffered += rrCensus.intervals
             sessionRrInserted += counts.rr
@@ -967,8 +1000,19 @@ final class Backfiller {
             // copy of an unmapped firmware's records. A genuine archive write FAILURE aborts the
             // chunk (no setCursor, no ack) so the strap re-sends it next session — no data loss
             // either way. (A full archive is reported as success by the sink; we still ack.)
+            // Intact v20/v21 raw records are no longer rejects, but their channels are still being mapped,
+            // so a small rolling sample keeps going to the archive (`rawSensorArchiveSampleBudget`).
+            // Kept apart from the rejects: those drive the "couldn't be decoded" sync status, and these
+            // decode fine. A failed sample write is logged, never a reason to hold the ack.
+            if rawSensorArchiveBudget > 0, !d.rawSensor.isEmpty, let rawSampleSink {
+                let rawSample = Array(d.rawSensor.prefix(rawSensorArchiveBudget))
+                rawSensorArchiveBudget -= rawSample.count
+                if !(await rawSampleSink(rawSample, trim, family)) {
+                    log?("Backfill: could not archive the raw v20/v21 sample (trim=\(trim)) - not holding the ack for it.")
+                }
+            }
             if !rejected.isEmpty, let rejectedSink {
-                guard rejectedSink(rejected, trim, family) else {
+                guard await rejectedSink(rejected, trim, family) else {
                     log?("Backfill: rejected-frame archive failed (trim=\(trim)) — holding ack so the strap re-sends.")
                     persistStalled = true   // #57
                     return

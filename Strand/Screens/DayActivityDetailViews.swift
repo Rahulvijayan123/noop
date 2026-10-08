@@ -347,13 +347,13 @@ struct WalkingQualityCard: View {
     let dayStart: Date
     let window: ClosedRange<Date>
 
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceRaw = ""
     @State private var reading: WalkingDayReading?
     @State private var loaded = false
 
     private var system: UnitSystem {
-        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .metric, override: distanceRaw)
+        UnitPrefs.resolveDistance(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial, override: distanceRaw)
     }
 
     var body: some View {

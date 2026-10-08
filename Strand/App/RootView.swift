@@ -62,7 +62,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .backupSync: return "Backup & Sync"
         case .fusedRecord: return "Your Data, Fused"
         case .devices: return "Devices"
-        case .noopLimitations: return "NOOP Limitations"
+        case .noopLimitations: return "Nara Limitations"
         case .notifications: return "Notifications"
         case .automation: return "Automations"
         // "Alarms" is the ONE alarm surface (#766): the strap's silent wake-alarm (moved in from
@@ -106,7 +106,7 @@ enum NavItem: String, CaseIterable, Identifiable, Hashable {
         case .backupSync: return String(localized: "Backup & Sync")
         case .fusedRecord: return String(localized: "Your Data, Fused")
         case .devices: return String(localized: "Devices")
-        case .noopLimitations: return String(localized: "NOOP Limitations")
+        case .noopLimitations: return String(localized: "Nara Limitations")
         case .notifications: return String(localized: "Notifications")
         case .automation: return String(localized: "Automations")
         // Mirrors the `titleKey` remap above (#766): the row reads "Alarms", not the raw "Smart Alarm".
@@ -341,6 +341,12 @@ struct RootView: View {
             }
             if dest != nil { router.requestedDestination = nil }
         }
+        // The Today and Monitor gears ask for Settings; on the Mac that is the Settings sidebar item.
+        .onChangeCompat(of: router.settingsRequested) { requested in
+            guard requested else { return }
+            selection = .settings
+            router.settingsRequested = false
+        }
         .sheet(item: $engineSheet) { dest in
             NavigationStack {
                 Group {
@@ -434,7 +440,7 @@ struct RootView: View {
     private var brand: some View {
         HStack(spacing: 8) {
             BrandMark(size: 22)
-            Text("NOOP")
+            Text("Nara")
                 .font(StrandFont.title2)
                 .foregroundStyle(StrandPalette.textPrimary)
             Spacer()

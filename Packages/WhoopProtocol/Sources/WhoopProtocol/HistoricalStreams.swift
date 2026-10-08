@@ -121,6 +121,18 @@ public func rejectedHistoricalRecords(_ rawFrames: [[UInt8]], family: DeviceFami
             let p = parseFrame(f, family: family)
             return !(p.ok && p.crcOK != false)
         }
+        // v20 optical / v21 IMU: mapped layouts whose intact records carry no HR and no gravity BY DESIGN,
+        // so the decode-outcome test at the bottom misread every one of them as undecodable. During raw
+        // capture that archived about half the frames of every chunk (hex-encoded, fsynced, ahead of the
+        // ack), kept the 5 MB archive permanently at its cap rewriting itself, and evicted the genuinely
+        // unknown records the archive exists for. Nothing reads them back: `replay` re-decodes looking for
+        // rows these layouts cannot yield. Same rule as v26 above: skip only on an intact verdict, so a
+        // corrupt one is still archived.
+        if family == .whoop5, f.count > versionIndex,
+           whoop5RawSensorHistoricalVersions.contains(Int(f[versionIndex])) {
+            let p = parseFrame(f, family: family)
+            return !(p.ok && p.crcOK != false)
+        }
         // UNMAPPED LAYOUT (5/MG) — archive UNCONDITIONALLY, whatever it decoded.
         //
         // The decode-outcome test below is the wrong question for a layout NOOP has no field map for.
@@ -131,7 +143,8 @@ public func rejectedHistoricalRecords(_ rawFrames: [[UInt8]], family: DeviceFami
         // shape a novel record type (a new firmware's rollup, an on-demand capture) can take.
         //
         // This cannot flood the archive with records we already understand: v18/v20/v21/v26 are in
-        // `mappedWhoop5HistoricalVersions` and never reach here. Retention for the records that DO
+        // `mappedWhoop5HistoricalVersions` and never reach here (and intact v20/v21/v26 never reach the
+        // decode-outcome test below either). Retention for the records that DO
         // (`RawHistoryArchive.evictLines`) evicts entirely-zero-payload frames first, so a firmware that
         // banks empty placeholder records at 1 Hz cannot push out the one informative frame either.
         if family == .whoop5, isUnmappedWhoop5HistoricalRecord(f) { return true }

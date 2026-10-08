@@ -493,11 +493,11 @@ private extension View {
 /// so the rendered output matches the previous inline code.
 private struct SensorRowIfPresent: View {
     @EnvironmentObject private var live: LiveState
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
 
@@ -550,11 +550,11 @@ private struct SensorRowIfPresent: View {
 /// gated distance/pace row in `LiveWorkoutScreen`.
 private struct DistancePaceRowIfPresent: View {
     @ObservedObject var recorder: GpsWorkoutRecorder
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
 

@@ -88,13 +88,13 @@ extension Repository {
             if (try? await store.newestHeartRateTs(deviceId: id, from: start, to: end)) != nil { ownerId = id }
         }
 
-        var stepByTs: [Int: StepSample] = [:]
+        var stepLists: [[StepSample]] = []
         var counter: [StepSample] = []
         var events: [WhoopEvent] = []
         for id in rawIds {
             let samples = (try? await store.stepSamples(deviceId: id, from: start, to: end, limit: 200_000)) ?? []
             if counter.isEmpty { counter = samples }
-            for s in samples where stepByTs[s.ts] == nil { stepByTs[s.ts] = s }
+            stepLists.append(samples)
             // Reach back so a WRIST_OFF before midnight still opens the span that runs into this day.
             events += (try? await store.events(deviceId: id, from: start - 6 * 3600, to: end, limit: 50_000)) ?? []
         }
@@ -117,9 +117,18 @@ extension Repository {
                 .map { DayStateSpan(start: $0.start, end: $0.end) }
         }.value
 
+        // The day's step rows deduped by second, the first id winning; off the main actor like the merges above.
+        let stepLabels: [StepSample] = await Task.detached(priority: .userInitiated) { [stepLists] in
+            var stepByTs: [Int: StepSample] = [:]
+            for samples in stepLists {
+                for s in samples where stepByTs[s.ts] == nil { stepByTs[s.ts] = s }
+            }
+            return Array(stepByTs.values)
+        }.value
+
         return DayStreams(sourceKey: importedReadIds.joined(separator: "+"), ownerId: ownerId, start: start, end: end,
                           isLiveDay: now < dayEndTs, hr: hr, gravity: gravity,
-                          stepLabels: Array(stepByTs.values), stepCounter: counter,
+                          stepLabels: stepLabels, stepCounter: counter,
                           sleep: sleep, inBed: inBed, workouts: workouts, offWrist: offWrist)
     }
 

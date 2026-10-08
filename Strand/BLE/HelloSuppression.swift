@@ -97,6 +97,92 @@ func countsAsBondRefusal(
     return isAuthRefusalStatus || helloUnacked
 }
 
+/// How long a CLIENT_HELLO must have been outstanding at the drop before the drop can be blamed on it.
+///
+/// The #1635 signature is a drop locked to the write at 3.155-3.159 s, cycle after cycle. A link that dies
+/// sooner than this was not ended by the strap timing out the handshake. Kotlin twin:
+/// `MIN_HELLO_OUTSTANDING_MS_FOR_REFUSAL`.
+let minHelloOutstandingMsForRefusal = 2_500
+
+/// How many inbound frames the link must have carried before an unanswered hello on it counts.
+///
+/// #1635's strap streamed live HR over the standard profile the whole time, so its links always carried
+/// traffic. A link at the edge of range comes up, delivers nothing and drops on the supervision timeout,
+/// whether or not a hello went out: a 2026-10-07 log has seven such links in four minutes with no hello at
+/// all, between the three that had one. Counting those three latched the suppression on a strap that had
+/// acknowledged the hello three times that day. Kotlin twin: `MIN_INBOUND_FRAMES_FOR_REFUSAL`.
+let minInboundFramesForRefusal = 2
+
+/// Is an unanswered CLIENT_HELLO at disconnect evidence that the strap refuses the handshake?
+///
+/// Only when the link was otherwise healthy (it carried traffic) and the hello had been waiting long enough
+/// for the strap to have timed it out. Otherwise the drop is the radio's, and it says nothing about the
+/// handshake: blaming it there turns an out-of-range walk into a persisted "this strap cannot pair" verdict
+/// that switches history sync off.
+///
+/// `helloOutstandingMs` is nil when no hello was outstanding. Pure so the rule is pinned without a radio.
+/// Kotlin twin: `helloUnansweredIsEvidence`.
+func helloUnansweredIsEvidence(helloOutstandingMs: Int?, inboundFramesOnLink: Int) -> Bool {
+    guard let ms = helloOutstandingMs else { return false }
+    return ms >= minHelloOutstandingMsForRefusal && inboundFramesOnLink >= minInboundFramesForRefusal
+}
+
+/// When a SUPPRESSED strap gets an automatic handshake retry (#1635 follow-up).
+///
+/// The latch used to be cleared only by a genuine bond, forgetting the strap, or a Connect tap, so a strap
+/// latched by mistake stayed on "not fully paired" with history sync off until someone found the button.
+/// The retry costs at most one link drop when the strap really does refuse, so it waits for a link that has
+/// held for `stableLinkSeconds` and then backs off: 30 min, doubling, capped at 6 h. A genuine ack clears
+/// the latch through the normal bond path. Pure apart from the store below.
+enum SuppressedHelloRetry {
+    static let stableLinkSeconds: TimeInterval = 5 * 60
+    static let firstBackoffSeconds: TimeInterval = 30 * 60
+    static let maxBackoffSeconds: TimeInterval = 6 * 60 * 60
+
+    /// Backoff after the `attempts`-th automatic retry (1-based).
+    static func backoff(afterAttempts attempts: Int) -> TimeInterval {
+        let doublings = max(0, min(attempts - 1, 16))
+        return min(firstBackoffSeconds * pow(2, Double(doublings)), maxBackoffSeconds)
+    }
+
+    /// Is a retry due on this link right now?
+    static func isDue(now: Date, linkUpSeconds: TimeInterval, nextRetryAt: Date?) -> Bool {
+        guard linkUpSeconds >= stableLinkSeconds else { return false }
+        guard let nextRetryAt else { return true }
+        return now >= nextRetryAt
+    }
+
+    private static func key(_ peripheralId: String?, _ field: String) -> String? {
+        helloSuppressionPrefKey(peripheralId).map { "\($0).retry.\(field)" }
+    }
+
+    static func attempts(_ peripheralId: String?) -> Int {
+        key(peripheralId, "attempts").map { UserDefaults.standard.integer(forKey: $0) } ?? 0
+    }
+
+    static func nextRetryAt(_ peripheralId: String?) -> Date? {
+        guard let k = key(peripheralId, "nextAt") else { return nil }
+        let t = UserDefaults.standard.double(forKey: k)
+        return t > 0 ? Date(timeIntervalSince1970: t) : nil
+    }
+
+    /// Record an automatic retry going out, and schedule the next one.
+    static func noteAttempt(_ peripheralId: String?, now: Date = Date()) {
+        guard let a = key(peripheralId, "attempts"), let n = key(peripheralId, "nextAt") else { return }
+        let attempts = UserDefaults.standard.integer(forKey: a) + 1
+        UserDefaults.standard.set(attempts, forKey: a)
+        UserDefaults.standard.set(now.addingTimeInterval(backoff(afterAttempts: attempts)).timeIntervalSince1970,
+                                  forKey: n)
+    }
+
+    /// Forget the retry schedule: the handshake succeeded or the strap was removed.
+    static func clear(_ peripheralId: String?) {
+        for field in ["attempts", "nextAt"] {
+            if let k = key(peripheralId, field) { UserDefaults.standard.removeObject(forKey: k) }
+        }
+    }
+}
+
 /// UserDefaults key holding the hello-suppression latch for one strap.
 ///
 /// Per device, and lowercased for the same reason the firmware key is: the same strap can present its

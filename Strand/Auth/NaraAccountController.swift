@@ -77,6 +77,11 @@ public final class NaraAccountController: ObservableObject {
     private let runtime: any CloudRuntimeControlling
     private let store: CloudPushIdentityStore
     private let defaults: UserDefaults
+    /// `confirmWearableIfNeeded`'s request in flight, its next allowed attempt and its failures in a row, per
+    /// (account, source, strap). In memory: a relaunch may ask again at once.
+    private var wearableConfirmInFlight: [String: Task<Bool, Never>] = [:]
+    private var wearableConfirmRetryAt: [String: Date] = [:]
+    private var wearableConfirmFailures: [String: Int] = [:]
     private let appVersion: String
     private let isConfigured: () -> Bool
     private let uploadsEnabled: () -> Bool
@@ -437,18 +442,60 @@ public final class NaraAccountController: ObservableObject {
         let key = Self.wearableKey(scope: identity.scope)
         let value = "\(provisionalDeviceId.lowercased())|\(serial)"
         if defaults.string(forKey: key) == value { return true }
-        do {
-            _ = try await provisioner.confirmWearable(identity: identity,
-                                                      provisionalExternalDeviceId: provisionalDeviceId,
-                                                      serial: serial)
-            defaults.set(value, forKey: key)
-            return true
-        } catch CloudReceiverError.credentialRejected {
-            credentialRejected(scope: identity.scope, status: 401)
-            return false
-        } catch {
-            return false
+        // One confirm at a time, and none again soon after one failed. Every foreground runs this from two paths
+        // (the scene becoming active and the account reconcile it starts), and the strap's serial being read
+        // runs it again; failed confirms then went out in pairs a tenth of a second apart. The server answers a
+        // busy confirm with a 503 and locks both devices' inputs while it checks, which turned away the uploads
+        // arriving meanwhile with 503s of their own.
+        let attempt = "\(key)|\(value)"
+        if let running = wearableConfirmInFlight[attempt] { return await running.value }
+        if let notBefore = wearableConfirmRetryAt[attempt], Date() < notBefore { return false }
+        let shared = Task { @MainActor [weak self, provisioner] () -> Bool in
+            let outcome: Result<Void, Error>
+            do {
+                _ = try await provisioner.confirmWearable(identity: identity,
+                                                          provisionalExternalDeviceId: provisionalDeviceId,
+                                                          serial: serial)
+                outcome = .success(())
+            } catch {
+                outcome = .failure(error)
+            }
+            guard let self else { return false }
+            self.wearableConfirmInFlight[attempt] = nil
+            switch outcome {
+            case .success:
+                self.defaults.set(value, forKey: key)
+                self.wearableConfirmRetryAt[attempt] = nil
+                self.wearableConfirmFailures[attempt] = nil
+                return true
+            case .failure(let error):
+                let receiverError = error as? CloudReceiverError
+                if receiverError == .credentialRejected {
+                    // Not held back: the reconcile this starts brings a fresh credential and asks again.
+                    self.credentialRejected(scope: identity.scope, status: 401)
+                    return false
+                }
+                // A request that never reached the server waits a minute without counting toward the doubling,
+                // so a spell offline does not hold the first try back online for half an hour.
+                let failures = (self.wearableConfirmFailures[attempt] ?? 0) + (receiverError == .transport ? 0 : 1)
+                self.wearableConfirmFailures[attempt] = failures
+                self.wearableConfirmRetryAt[attempt] = Date().addingTimeInterval(
+                    Self.wearableConfirmBackoff(failures: failures, error: error))
+                return false
+            }
         }
+        wearableConfirmInFlight[attempt] = shared
+        return await shared.value
+    }
+
+    /// How long to wait after the `failures`-th failed confirm in a row that reached the server: a minute, doubling
+    /// to half an hour, or what the server asked for when it rate-limited. A transport failure waits a minute.
+    static func wearableConfirmBackoff(failures: Int, error: Error) -> TimeInterval {
+        if let receiverError = error as? CloudReceiverError {
+            if case .rateLimited(let retryAfter?) = receiverError { return max(retryAfter, 60) }
+            if receiverError == .transport { return 60 }
+        }
+        return min(60 * pow(2, Double(max(0, failures - 1))), 1_800)
     }
 
     static func wearableKey(scope: CloudDataScope) -> String {

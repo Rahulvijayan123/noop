@@ -39,11 +39,11 @@ struct WorkoutsView: View {
     @EnvironmentObject var intelligence: IntelligenceEngine
 
     // Exercise-distance preference (#1913). Unset follows the original combined preference.
-    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.metric.rawValue
+    @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.distanceSystemKey) private var distanceSystemRaw = ""
     private var distanceUnitSystem: UnitSystem {
         UnitPrefs.resolveDistance(
-            system: UnitSystem(rawValue: unitSystemRaw) ?? .metric,
+            system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial,
             override: distanceSystemRaw)
     }
 

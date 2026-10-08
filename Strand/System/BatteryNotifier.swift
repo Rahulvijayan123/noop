@@ -222,7 +222,7 @@ enum BatteryNotifier {
         let age = StaleBatteryAlertPolicy.ageLabel(decision.ageSeconds)
         post(identifier: "battery-stale",
              title: String(localized: "WHOOP last seen low"),
-             body: String(localized: "\(lastSocPct)% when NOOP last heard from it, \(age) ago. Charge it before tonight."),
+             body: String(localized: "\(lastSocPct)% when Nara last heard from it, \(age) ago. Charge it before tonight."),
              interruptionLevel: .timeSensitive)
         // Persisted AFTER posting, keyed on the reading, so a failed post retries on the next wake.
         d.set(lastTsSec, forKey: staleAlertedTsKey)

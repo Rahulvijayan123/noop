@@ -41,7 +41,8 @@ final class InactivityPrefs: ObservableObject {
     @Published var activeEndMinutes: Int    { didSet { d.set(activeEndMinutes, forKey: K.activeEnd) } }
 
     private let d = UserDefaults.standard
-    private enum K {
+    private var syncSubscription: AnyCancellable?
+    enum K {
         static let enabled     = "inactivity.enabled"
         static let threshold   = "inactivity.thresholdMinutes"
         static let reNudge     = "inactivity.reNudgeMinutes"
@@ -59,8 +60,9 @@ final class InactivityPrefs: ObservableObject {
         static let standLastRemindAt     = "inactivity.stand.lastRemindAt"
     }
 
-    // Defaults match SedentaryDetector / the PR #419 numbers.
-    init() {
+    // Defaults match SedentaryDetector / the PR #419 numbers. `followsSyncedSettings` is off only for the
+    // throwaway read `reload()` makes.
+    init(followsSyncedSettings: Bool = true) {
         enabled            = d.object(forKey: K.enabled) as? Bool ?? false
         thresholdMinutes   = d.object(forKey: K.threshold) as? Int ?? StandReminderEngine.defaultWindowMinutes  // 50
         reNudgeMinutes     = d.object(forKey: K.reNudge) as? Int ?? SedentaryDetector.defaultReNudgeMinutes      // 30
@@ -68,6 +70,22 @@ final class InactivityPrefs: ObservableObject {
         activeHoursEnabled = d.object(forKey: K.activeOn) as? Bool ?? true
         activeStartMinutes = d.object(forKey: K.activeStart) as? Int ?? SedentaryDetector.defaultActiveStartMin  // 09:00
         activeEndMinutes   = d.object(forKey: K.activeEnd) as? Int ?? SedentaryDetector.defaultActiveEndMin      // 17:00
+        if followsSyncedSettings {
+            syncSubscription = NotificationCenter.default.publisher(for: .syncedSettingsDidApply)
+                .sink { [weak self] _ in Task { @MainActor in self?.reload() } }
+        }
+    }
+
+    /// Re-reads the knobs after settings arrived from the account, so an open Alerts page shows them.
+    func reload() {
+        let stored = InactivityPrefs(followsSyncedSettings: false)
+        if enabled != stored.enabled { enabled = stored.enabled }
+        if thresholdMinutes != stored.thresholdMinutes { thresholdMinutes = stored.thresholdMinutes }
+        if reNudgeMinutes != stored.reNudgeMinutes { reNudgeMinutes = stored.reNudgeMinutes }
+        if buzzLoops != stored.buzzLoops { buzzLoops = stored.buzzLoops }
+        if activeHoursEnabled != stored.activeHoursEnabled { activeHoursEnabled = stored.activeHoursEnabled }
+        if activeStartMinutes != stored.activeStartMinutes { activeStartMinutes = stored.activeStartMinutes }
+        if activeEndMinutes != stored.activeEndMinutes { activeEndMinutes = stored.activeEndMinutes }
     }
 
     // MARK: - Engine seams (UserDefaults-direct; safe to call off the UI store)

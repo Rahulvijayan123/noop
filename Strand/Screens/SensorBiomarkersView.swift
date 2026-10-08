@@ -42,26 +42,9 @@ struct SensorBiomarkersView: View {
     var body: some View {
         ScreenScaffold(title: "Sensor biomarkers") {
             VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                SettingsGroup(footer: "Computed on Nara's server from your strap's raw motion recordings. Descriptive measurements only, not a health score or a diagnosis.") {
-                    HStack(alignment: .center, spacing: NoopMetrics.space4) {
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text("Show sensor biomarkers")
-                                .font(StrandFont.body)
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Wrist movement, still periods and small wrist oscillation, per day.")
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textTertiary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        Spacer(minLength: NoopMetrics.space3)
-                        Toggle("", isOn: $enabled)
-                            .labelsHidden()
-                            .toggleStyle(.switch)
-                            .tint(StrandPalette.accent)
-                            .accessibilityLabel("Show sensor biomarkers")
-                    }
-                    .padding(.horizontal, NoopMetrics.space4)
-                    .frame(minHeight: 64)
+                SettingsGroup(footer: "Daily wrist movement, still periods and small wrist oscillation, measured from your strap's motion. Not a diagnosis.") {
+                    SettingsToggleRow("Show sensor biomarkers", isOn: $enabled)
+                        .accessibilityIdentifier("sensorBiomarkers.toggle")
                 }
                 if enabled {
                     dayStepper

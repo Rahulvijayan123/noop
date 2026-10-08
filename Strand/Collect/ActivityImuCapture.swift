@@ -40,6 +40,28 @@ enum ActivityImuCapture {
     /// takes over while Power saving is on.
     static let defaultPauseBatteryPct = 15
 
+    /// Lean raw capture: after arming the live IMU stream, ask the strap NOT to bank the raw optical and IMU
+    /// records to flash and not to stream optical live. Raw collection otherwise banks one 2140 B optical
+    /// and one 1244 B IMU record per second, about 87% of every offload's bytes, while 98% of the IMU it
+    /// banks has already arrived live and nothing reads the optical. On by default; the key turns it off.
+    static let leanRawCaptureKey = "activityImuLeanRawCapture"
+    static func leanRawCapture(_ defaults: UserDefaults = .standard) -> Bool {
+        defaults.object(forKey: leanRawCaptureKey) == nil ? true : defaults.bool(forKey: leanRawCaptureKey)
+    }
+
+    /// How long the IMU-only arm (105 + 106, no raw start) has to produce a live IMU frame before the
+    /// capture falls back to the shared raw start for the rest of the process.
+    static let imuOnlyVerifySeconds: TimeInterval = 6
+
+    /// The OFF writes sent after a shared raw start, in order. Revision-1 boolean bodies `[1, 0]`. On a 5/MG
+    /// the strap acknowledges 107 and 105 but keeps banking while the raw start holds its own request, so
+    /// what these still buy there is 108: no live optical stream that nothing reads.
+    static let leanRawCaptureCommands: [(command: WhoopCommand, payload: [UInt8])] = [
+        (.enableOpticalData, [0x01, 0x00]),   // 107 optical session saving off
+        (.toggleOpticalLive, [0x01, 0x00]),   // 108 optical live transport off
+        (.toggleIMUSaving, [0x01, 0x00]),     // 105 IMU session saving off (live IMU, 106, stays on)
+    ]
+
     /// The always-open IMU store window this capture writes through, one per local device id. The store
     /// keeps a frame only while a window of its device covers it, which is what made recording session-only.
     static let windowPrefix = "activity-"

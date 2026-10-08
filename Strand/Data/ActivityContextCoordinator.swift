@@ -42,6 +42,12 @@ final class ActivityContextCoordinator {
     /// an older day is decoded from its samples, a few per pass.
     nonisolated static let defaultHorizonDays = 120
     nonisolated static let retryAfterFailureS = 900
+    /// How often a day still in progress, whose saved context is current, is re-derived for new heart rate
+    /// alone. A worn strap adds heart rate every second, so the planner always finds today stale, and every
+    /// completed sync (once a minute in cloud mode, foreground and background alike) re-derived the whole day
+    /// so far: about 600 intervals over up to 250,000 beats, rewritten in full, for a table only the coach
+    /// reads. A first derivation, a stale ledger, a day that has just closed and a failed write are not held.
+    nonisolated static let openDayRederiveFloorS = 900
     /// Stops a backlog drain that never finishes from running for ever in one session.
     nonisolated static let maxChainedPasses = 80
     nonisolated static let pauseBetweenBacklogPassesNs: UInt64 = 20_000_000_000
@@ -197,7 +203,11 @@ final class ActivityContextCoordinator {
         }
 
         let planned = ActivityContextMaterialization.plan(candidates, now: nowSec)
-        let due = planned.filter { day in failures[day.start].map { nowSec - $0 >= Self.retryAfterFailureS } ?? true }
+        let due = planned.filter { day in
+            if let failedAt = failures[day.start], nowSec - failedAt < Self.retryAfterFailureS { return false }
+            return !holdsOpenDay(day, ledger: owners[day.start].flatMap { ledgers[$0.deviceId]?[day.start] },
+                                 now: nowSec)
+        }
         for day in due {
             guard let owner = owners[day.start] else { continue }
             await materialize(day, owner: owner, ledger: ledgers[owner.deviceId]?[day.start],
@@ -207,6 +217,14 @@ final class ActivityContextCoordinator {
         }
         let oldDays = planned.filter { !ActivityContextMaterialization.isRecent($0, now: nowSec) }.count
         return oldDays >= ActivityContextMaterialization.Config().maxBacklogPerPass
+    }
+
+    /// Whether `day` is still in progress, already has a current saved context, and was derived less than
+    /// `openDayRederiveFloorS` ago (see there).
+    private func holdsOpenDay(_ day: Day, ledger: ActivityContextDayRow?, now: Int) -> Bool {
+        guard day.end > now, let ledger, ActivityContextPersistence.isCurrent(ledger),
+              let last = checks[day.start]?.at else { return false }
+        return now - last < Self.openDayRederiveFloorS
     }
 
     private func materialize(_ day: Day, owner: Repository.ActivityContextOwner, ledger: ActivityContextDayRow?,
