@@ -24,6 +24,12 @@
 //     3000 ms compute budget. A timeout publishes the core snapshot with
 //     `sleep_features.status = "timeout"` — never an error, never a hang; the
 //     ordinary next eligible scoring pass retries.
+//   * Backpressure: a sidecar that cannot admit the request answers 429 `busy`
+//     at once. The core snapshot publishes as usual with a worker-built
+//     `sleep_features.status = "busy"` document (every block withheld,
+//     reason `sidecar_busy`); the next scoring pass of the day replaces it.
+//     Phones decode an unknown document status as `.unknown`, so old clients
+//     tolerate it (docs/model-integration/runtime-bounds.md).
 //   * One enrichment request per claimed day, inside the payload build (a
 //     plain loopback JSON call, not the waveform download / model inference
 //     the spec keeps out of the repeatable-read transaction).
@@ -59,9 +65,26 @@ enum SleepFeatureEnrichment {
 
     static let algorithmVersion = "nara-sleep-features-1"
     static let schemaVersion = 1
-    /// Transport budget around the sidecar's 3000 ms compute budget.
-    static let budgetMS = 3500
+    /// Transport budget around the sidecar's compute budget (3000 ms by default,
+    /// `FRWHOOP_SLEEP_FEATURES_BUDGET_MS` on the sidecar). Raising the sidecar's
+    /// budget means raising this one too (`FRWHOOP_SLEEP_FEATURES_TIMEOUT_MS`):
+    /// it must stay above the sidecar's so its `timeout` document arrives instead
+    /// of a client-side timeout. Bounded, because the v2 scoring transaction is
+    /// open while this call runs.
+    static let defaultBudgetMS = 3500
+    static let budgetMS = transportBudgetMS(ProcessInfo.processInfo.environment)
     static let maxResponseBytes = 8 << 20
+
+    static func transportBudgetMS(_ env: [String: String]) -> Int {
+        guard let raw = env["FRWHOOP_SLEEP_FEATURES_TIMEOUT_MS"], let value = Int(raw) else {
+            return defaultBudgetMS
+        }
+        return min(30_000, max(500, value))
+    }
+
+    /// The document status the worker attaches when the sidecar answered `busy`.
+    static let busyStatus = "busy"
+    static let busyReason = "sidecar_busy"
 
     // MARK: - Request assembly (pure; unit-tested)
 
@@ -210,6 +233,8 @@ enum SleepFeatureEnrichment {
     /// caller then publishes the snapshot without the key — or, for a
     /// `timeout`/`error` status body, attaches the degraded status document
     /// so the client can say "unavailable right now" instead of nothing).
+    /// A `busy` answer returns `busyDocument`: nothing was computed, and the
+    /// core publish never waits for the enrichment.
     static func enrich(request: [String: Any], client: InferenceClient) -> [String: Any]? {
         do {
             guard JSONSerialization.isValidJSONObject(request),
@@ -218,9 +243,43 @@ enum SleepFeatureEnrichment {
             }
             let raw = try client.sleepFeatures(body: body, timeoutMSOverride: budgetMS)
             return validateResponse(raw)
+        } catch let error as InferenceClientError where error.isBusy {
+            return busyDocument(for: request, retryAfterSeconds: error.retryAfterSeconds)
         } catch {
             return nil
         }
+    }
+
+    /// The document attached when the sidecar could not admit the request: the
+    /// sidecar's degraded-document shape (the same keys as its `timeout` body),
+    /// built from the request's own nights, every block withheld `sidecar_busy`.
+    static func busyDocument(for request: [String: Any], retryAfterSeconds: Int?) -> [String: Any] {
+        let withheld: [String: Any] = ["status": "withheld", "reasons": [busyReason]]
+        let stageVersion = (request["context"] as? [String: Any])?["stage_algorithm_version"]
+        let nights: [[String: Any]] = ((request["nights"] as? [[String: Any]]) ?? []).map { night in
+            var entry: [String: Any] = [
+                "stage_source": "sleep-v2",
+                "continuity": withheld, "architecture": withheld, "stage_physiology": withheld,
+                "settling": withheld, "thermal": withheld, "respiratory_variability": withheld,
+                "metric_status": ["night_gate": withheld, "module_errors": [] as [String]] as [String: Any],
+                "coverage": [:] as [String: Any],
+            ]
+            for key in ["night_id", "start_utc", "end_utc", "is_nap", "user_edited"] {
+                if let value = night[key] { entry[key] = value }
+            }
+            if let stageVersion { entry["stage_algorithm_version"] = stageVersion }
+            return entry
+        }
+        var doc: [String: Any] = [
+            "schema_version": schemaVersion,
+            "algorithm_version": algorithmVersion,
+            "status": busyStatus,
+            "status_reasons": [busyReason],
+            "nights": nights,
+            "regularity": withheld,
+        ]
+        if let retryAfterSeconds { doc["retry_after_s"] = retryAfterSeconds }
+        return doc
     }
 
     // MARK: - History loader (DB; one bounded query)

@@ -2,6 +2,10 @@
 
 Required coverage: healthz, providers listing, infer happy path, unknown metric
 404, malformed 400, not-ready 503, non-loopback refusal, timeout budget.
+
+Every computation runs in a worker process (``frwhoop_inference.execution``), so the
+custom providers these tests register live in ``execution_fakes`` (a worker imports them
+by name); the bounds themselves are covered in ``test_execution.py``.
 """
 
 from __future__ import annotations
@@ -12,10 +16,40 @@ import time
 import pytest
 
 from conftest import MANIFEST_PATH, hrv_body, iso
-from frwhoop_inference.contract import MAX_BODY_BYTES, Beat, ProviderResult, Window
+from execution_fakes import ExplodingProvider, SlowProvider, UnreadyProvider
+from frwhoop_inference.contract import MAX_BODY_BYTES, Beat, Window
 from frwhoop_inference.providers import ProviderRegistry
-from frwhoop_inference.providers.hrv import HrvProductionProvider
 from frwhoop_inference.server import Application, create_server, is_loopback_host, main
+
+
+class _WarmServer:
+    """A conftest ``LiveServer`` whose first ``/v1/infer`` waits for the warm worker.
+
+    Every computation runs in a worker process that imports and warms the registry once
+    (seconds on a loaded machine). A test measures the route, not that one-off start, so
+    the wait happens here, outside the request's own 30 s client timeout."""
+
+    def __init__(self, inner):
+        self._inner = inner
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+    def warm(self, timeout: float = 300.0) -> None:
+        assert self._inner.server.lanes["infer"].wait_ready(timeout), "infer worker never warmed"
+
+    def post(self, path, body, raw=None):
+        if path == "/v1/infer":
+            self.warm()
+        return self._inner.post(path, body, raw=raw)
+
+
+@pytest.fixture
+def live_server(live_server):
+    def factory(**kwargs):
+        return _WarmServer(live_server(**kwargs))
+
+    return factory
 
 
 def _beats(count: int = 60) -> list[Beat]:
@@ -362,6 +396,7 @@ def test_a_normal_request_still_keeps_the_connection_alive(live_server):
     import socket
 
     server = live_server()
+    server.warm()
     host, port = server.server.server_address[0], server.server.server_address[1]
     payload = _json.dumps(_body()).encode("utf-8")
     request = (b"POST /v1/infer HTTP/1.1\r\nHost: 127.0.0.1\r\n"
@@ -579,12 +614,6 @@ def test_a_broken_manifest_does_not_crash_the_server(tmp_path, live_server):
 
 
 def test_provider_level_readiness_failure_is_503(live_server):
-    class UnreadyProvider(HrvProductionProvider):
-        provider_id = "unready.runs.v1"
-
-        def readiness(self):
-            return False, "blocked_license: not licensed for product use"
-
     registry = ProviderRegistry([UnreadyProvider()])
     server = live_server(registry=registry, manifest_path=MANIFEST_PATH)
     status, health = server.get("/healthz")
@@ -599,15 +628,10 @@ def test_provider_level_readiness_failure_is_503(live_server):
 
 
 def test_request_timeout_budget_withholds_instead_of_hanging(live_server):
-    class SlowProvider(HrvProductionProvider):
-        provider_id = "slow.runs.v1"
-
-        def infer(self, request):  # pragma: no cover - the budget fires first
-            time.sleep(5.0)
-            return ProviderResult(status="ok", value=1.0, unit="ms")
-
-    registry = ProviderRegistry([SlowProvider()])
+    registry = ProviderRegistry([SlowProvider(seconds=5.0)])
     server = live_server(registry=registry, manifest_path=MANIFEST_PATH, timeout_ms=150)
+    # Time the request, not the worker's one-off warm-up.
+    server.warm()
     started = time.monotonic()
     status, body = server.post("/v1/infer", _body())
     elapsed = time.monotonic() - started
@@ -616,16 +640,11 @@ def test_request_timeout_budget_withholds_instead_of_hanging(live_server):
     assert body["withheld_reason"] == "timeout"
     assert body["result"] is None
     assert body["diagnostics"]["withheld_detail"] == "request_budget_exceeded"
+    assert body["diagnostics"]["worker_terminated"] is True
     assert elapsed < 3.0, "the request must not wait for the provider"
 
 
 def test_provider_exception_becomes_a_500_error_body(live_server):
-    class ExplodingProvider(HrvProductionProvider):
-        provider_id = "boom.runs.v1"
-
-        def infer(self, request):
-            raise RuntimeError("kaboom")
-
     registry = ProviderRegistry([ExplodingProvider()])
     server = live_server(registry=registry, manifest_path=MANIFEST_PATH)
     status, body = server.post("/v1/infer", _body())

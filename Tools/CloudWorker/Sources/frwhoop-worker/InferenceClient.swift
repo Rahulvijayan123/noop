@@ -30,6 +30,10 @@ import FoundationNetworking
 //     the machine-readable withheld reasons the candidate contract accepts
 //     (`timeout`, `not_ready`, `provider_error`), so the scoring path always
 //     settles deterministically instead of retrying without bound.
+//   * Backpressure is not a failure. HTTP 429 with error code `busy` (the
+//     sidecar could not admit the request; docs/model-integration/README.md)
+//     becomes `.busy`, which no caller records as a result: the work stays
+//     pending and the caller comes back after `Retry-After`.
 
 /// Withheld reasons the candidate contract accepts (implementation plan,
 /// "Shared contracts" -> withheld reasons). The three `isClientFailure` cases are
@@ -69,6 +73,10 @@ enum InferenceClientError: Error, CustomStringConvertible {
     case timeout(String)
     /// HTTP 503: the sidecar is up but the provider is not ready.
     case notReady(String)
+    /// HTTP 429 `busy`: the sidecar did not admit the request (every worker busy, or
+    /// still warming up). Transient and never a result: nothing was computed, so the
+    /// caller leaves the work pending. The detail starts `retry_after_s=N`.
+    case busy(String)
     /// Any other non-200 status.
     case non200(Int, String)
     /// The body could not be decoded into the contract shape, or failed
@@ -78,13 +86,29 @@ enum InferenceClientError: Error, CustomStringConvertible {
     case transport(String)
 
     /// The machine-readable reason this failure settles as.
+    ///
+    /// `.busy` maps to `not_ready` only so the switch stays total: no caller ever
+    /// records a busy answer (CandidateStage keeps the work pending instead).
     var withheldReason: CandidateWithheldReason {
         switch self {
         case .timeout: return .timeout
-        case .notReady: return .notReady
+        case .notReady, .busy: return .notReady
         case .disabled, .nonLoopbackURL, .refused, .non200, .malformed, .transport:
             return .providerError
         }
+    }
+
+    /// True for the sidecar's backpressure answer.
+    var isBusy: Bool {
+        if case .busy = self { return true }
+        return false
+    }
+
+    /// The `Retry-After` a busy answer carried, in seconds.
+    var retryAfterSeconds: Int? {
+        guard case .busy(let detail) = self, detail.hasPrefix("retry_after_s=") else { return nil }
+        let digits = detail.dropFirst("retry_after_s=".count).prefix { $0.isNumber }
+        return Int(digits)
     }
 
     var description: String {
@@ -94,6 +118,7 @@ enum InferenceClientError: Error, CustomStringConvertible {
         case .refused(let d): return "inference_refused:\(d)"
         case .timeout(let d): return "inference_timeout:\(d)"
         case .notReady(let d): return "inference_not_ready:\(d)"
+        case .busy(let d): return "inference_busy:\(d)"
         case .non200(let code, let d): return "inference_http_\(code):\(d)"
         case .malformed(let d): return "inference_malformed:\(d)"
         case .transport(let d): return "inference_transport:\(d)"
@@ -713,14 +738,37 @@ final class InferenceClient {
     }
 
     /// HTTP status policy: 200 is the only success; 503 is `not_ready` (the
-    /// sidecar is up, the provider is not); everything else is `provider_error`.
+    /// sidecar is up, the provider is not); 429 with error code `busy` is
+    /// backpressure (`.busy`); everything else is `provider_error`.
     static func checkStatus(_ http: HTTPURLResponse, data: Data) throws {
         if http.statusCode == 200 { return }
         let snippet = Self.bodySnippet(data)
         if http.statusCode == 503 {
             throw InferenceClientError.notReady(snippet)
         }
+        if http.statusCode == 429, Self.errorCode(data) == "busy" {
+            let retryAfter = Self.retryAfterSeconds(http) ?? Self.defaultBusyRetryAfterSeconds
+            throw InferenceClientError.busy("retry_after_s=\(retryAfter) \(snippet)")
+        }
         throw InferenceClientError.non200(http.statusCode, snippet)
+    }
+
+    /// Used when a busy answer carries no usable `Retry-After`.
+    static let defaultBusyRetryAfterSeconds = 5
+
+    /// `Retry-After` as whole seconds (the sidecar always sends delta-seconds),
+    /// clamped to 1...300 so a hostile header cannot park work for hours.
+    static func retryAfterSeconds(_ http: HTTPURLResponse) -> Int? {
+        guard let raw = http.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespaces), let seconds = Int(raw) else { return nil }
+        return min(300, max(1, seconds))
+    }
+
+    /// `error.code` of a JSON error body, or nil.
+    static func errorCode(_ data: Data) -> String? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data.prefix(64 << 10))) as? [String: Any],
+              let error = obj["error"] as? [String: Any] else { return nil }
+        return error["code"] as? String
     }
 
     static func decodeInferenceResponse(_ data: Data, http: HTTPURLResponse,
