@@ -377,6 +377,13 @@ public enum StressOnsetDetector {
     /// stream (gravity is offloaded), so an older run is no evidence at all (`.none`), never "still".
     public static let contextMaxAgeSeconds: Int = 300
 
+    /// Shortest active / locomotion BOUT that counts as exertion for the post-exertion gate. Adjacent active
+    /// runs (gap <= `exertionBoutMergeGapSeconds`) form one bout. A two-minute shuffle to the kitchen is
+    /// `.moving` while it lasts, but it must not open the full `postExertionSeconds` window (which blocks
+    /// firing and freezes the slow EMA): repeated short light runs would disable the detector all day.
+    public static let exertionMinBoutSeconds: Int = 300
+    public static let exertionBoutMergeGapSeconds: Int = 60
+
     /// The best available `LiveContext` from the stored activity-context intervals (any order).
     ///
     /// - `activity`: from the run covering `nowSec`, or the newest run ending within
@@ -387,7 +394,8 @@ public enum StressOnsetDetector {
     ///   (recumbent / seated / upright / active), the coarse transitions the wrist can support. A change
     ///   between `stationary` (posture unresolved) and a resolved posture is NOT counted: that is the
     ///   decoder resolving, not the body moving.
-    /// - `lastExertionEndAt`: the end of the newest active / locomotion run that has ended.
+    /// - `lastExertionEndAt`: the end of the newest ended active / locomotion BOUT (adjacent active runs
+    ///   merged) lasting at least `exertionMinBoutSeconds`. Shorter bouts never set it.
     public static func liveContext(intervals: [ActivityContextInterval], nowSec: Int) -> LiveContext {
         let runs = intervals.filter { $0.end > $0.start && $0.start <= nowSec }.sorted { $0.start < $1.start }
         guard !runs.isEmpty else { return .none }
@@ -417,7 +425,17 @@ public enum StressOnsetDetector {
             if let lf = lastFamily, lf != f, r.start <= nowSec { ctx.lastTransitionAt = r.start }
             lastFamily = f
         }
-        ctx.lastExertionEndAt = runs.filter { isActive($0.activityClass) && $0.end <= nowSec }.map(\.end).max()
+        var bouts: [(start: Int, end: Int)] = []
+        for r in runs where isActive(r.activityClass) {
+            if let last = bouts.last, r.start - last.end <= exertionBoutMergeGapSeconds {
+                bouts[bouts.count - 1].end = max(last.end, r.end)
+            } else {
+                bouts.append((r.start, r.end))
+            }
+        }
+        ctx.lastExertionEndAt = bouts
+            .filter { $0.end <= nowSec && $0.end - $0.start >= exertionMinBoutSeconds }
+            .map(\.end).max()
         return ctx
     }
 }

@@ -155,4 +155,17 @@ final class StressOnsetLiveContextTests: XCTestCase {
         let sleep = StressOnsetDetector.liveContext(intervals: [iv(0, 600, .sleeping)], nowSec: 300)
         XCTAssertTrue(sleep.asleep)
     }
+
+    /// Review: a two-minute light shuffle (or a short walk) is `.moving` while it lasts, but it is not a
+    /// workout and must not open the 30-minute post-exertion window. Adjacent active runs merge into one
+    /// bout, so a 3-min walk + 3-min brisk walk does count. Before the fix every ended active run set it.
+    func testShortActiveRunsDoNotOpenThePostExertionWindow() {
+        let shuffle = [iv(0, 1_000, .sitting), iv(1_000, 1_120, .lightActivity), iv(1_120, 2_000, .sitting)]
+        XCTAssertNil(StressOnsetDetector.liveContext(intervals: shuffle, nowSec: 1_500).lastExertionEndAt)
+        XCTAssertEqual(StressOnsetDetector.liveContext(intervals: shuffle, nowSec: 1_060).activity, .moving)
+        let shortWalk = [iv(0, 120, .walking), iv(120, 900, .sitting)]
+        XCTAssertNil(StressOnsetDetector.liveContext(intervals: shortWalk, nowSec: 600).lastExertionEndAt)
+        let merged = [iv(0, 180, .walking), iv(200, 380, .briskWalking), iv(380, 900, .sitting)]
+        XCTAssertEqual(StressOnsetDetector.liveContext(intervals: merged, nowSec: 600).lastExertionEndAt, 380)
+    }
 }
