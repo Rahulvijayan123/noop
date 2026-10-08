@@ -113,6 +113,13 @@ async function fixture() {
     async rpc(name: string, args: any) {
       if (name === 'coach_messages_save_v1') return saveRows(args.p_user, args.p_rows);
       if (name === 'coach_memory_apply_v1') return applyOps(args.p_user, args.p_ops);
+      // coach_thread_delete_v1 with no thread: every thread and message of the owner.
+      if (name === 'coach_thread_delete_v1' && args.p_thread == null) {
+        const threads = coach.get('coach_threads')!.filter((r) => r.user_id === args.p_user).length;
+        coach.set('coach_messages', coach.get('coach_messages')!.filter((r) => r.user_id !== args.p_user));
+        coach.set('coach_threads', coach.get('coach_threads')!.filter((r) => r.user_id !== args.p_user));
+        return { deleted: threads };
+      }
       assertEquals(name, 'coach_take_quota');
       const used = (usage.get(args.p_user_id) ?? 0) + 1;
       if (used > args.p_limit) return false;

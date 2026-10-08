@@ -5,7 +5,6 @@
 // thread stats triggers, lexical search, memory ranking with safety pins, the lease, and audited memory ops
 // with the 200-row cap. The SQL itself is proven against Postgres in coach_threads_sql_test.ts.
 import { type CoachConfig, coachConfig, handleCoachRequest } from '../_shared/coach.ts';
-import { RestAuthorityError } from '../_shared/rest.ts';
 import { hashIngestToken } from '../_shared/tokens.ts';
 import { makeMemRest } from './helpers.ts';
 
@@ -16,7 +15,8 @@ const OTHER_SOURCE = '44444444-4444-4444-8444-444444444444';
 
 const TS_COLUMNS = new Set([
   'created_at', 'updated_at', 'last_message_at', 'last_confirmed_at', 'summary_through', 'curated_through', 'summarized_at',
-  'maintenance_until', 'retired_at', 'deleted_at', 'suggestions_at', 'consolidated_at', 'consolidation_until', 'memory_floor_at',
+  'maintenance_until', 'maintenance_claimed_at', 'retired_at', 'deleted_at', 'suggestions_at', 'consolidated_at', 'consolidation_until',
+  'memory_floor_at',
 ]);
 const TS = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}/;
 
@@ -37,6 +37,34 @@ export function pgTime(us: number): string {
 }
 
 const normTs = (v: unknown) => (typeof v === 'string' && TS.test(v) && Number.isFinite(Date.parse(v)) ? pgTime(micros(v)) : v);
+
+/**
+ * Every CoachSafety refusal text an app build has shipped (internal.coach_is_refusal): old builds store a refused turn
+ * without meta.blocked, so the save marks it, and the user row right before it, as blocked.
+ */
+export const SHIPPED_REFUSALS = [
+  'I\'m your health assistant, not a doctor — I can\'t diagnose conditions, interpret symptoms, or recommend treatments. Pain, injuries, or health symptoms need a licensed healthcare provider who can properly assess you. I\'m here to help with your training, recovery, and sleep once you\'re cleared.',
+  'I\'m Sana, your health assistant — I\'m here to help with your charge, effort, sleep, training, and nutrition. Let\'s keep it about your goals. What would you like to work on?',
+  'I can\'t provide advice on performance-enhancing drugs, steroids, or related substances. These carry serious health risks and legal implications. If you\'re curious about optimizing performance naturally, I\'m happy to help with evidence-based training, sleep, and nutrition strategies. For anything pharmaceutical, please consult a licensed physician.',
+  'I can\'t recommend extreme caloric restriction — it\'s counterproductive for training and can be harmful to your health. Sustainable fat loss typically works best at a moderate deficit (300–500 calories below maintenance). If you\'re struggling with your relationship with food, please consider speaking with a registered dietitian or your doctor.',
+  'I\'m not equipped to help with what you\'re going through, but I want you to know that support is available. Please reach out to the **988 Suicide & Crisis Lifeline** (call or text **988** in the US) or the **Crisis Text Line** (text **HOME** to **741741**). You deserve support from someone trained to help.',
+  'I\'m a coach, not a medical professional. I can\'t diagnose conditions, prescribe treatments, or provide medical advice. For health concerns, please consult a licensed healthcare provider. I\'m here to help with your training and recovery goals.',
+  'I hear you, and I want to be honest — what you\'re describing sounds like it could benefit from support beyond what a coach can offer. There\'s no shame in that. The **National Eating Disorders Association** helpline is available at **1-800-931-2237**, or you can text **NEDA** to **741741**. I\'m here for your training whenever you\'re ready.',
+  'Some training approaches aren\'t recommended for younger athletes. I\'ll focus on age-appropriate training that builds a strong foundation. For anything health-related, it\'s important to involve a parent or guardian and your doctor.',
+  'I can\'t recommend specific dosages or protocols for supplements that carry significant health risks. Some of these substances can cause serious harm, especially without medical supervision. If you\'re interested in safe supplementation, I\'m happy to discuss evidence-based options. For anything beyond that, please consult a doctor.',
+  'I\'m your coach, not a doctor — I can\'t diagnose conditions, interpret symptoms, or recommend treatments. Pain, injuries, or health symptoms need a licensed healthcare provider who can properly assess you. I\'m here to help with your training, recovery, and sleep once you\'re cleared.',
+  'I\'m your recovery and performance coach — I\'m here to help with your charge, effort, sleep, training, and nutrition. Let\'s keep it about your goals. What would you like to work on?',
+];
+const isRefusal = (text: unknown) => typeof text === 'string' && SHIPPED_REFUSALS.includes(text.replace(/\s+/g, ' ').trim());
+
+/** internal.coach_thread_title: the collapsed text cut at a word boundary to at most 60 characters. */
+function legacyTitle(text: unknown): string | null {
+  const v = String(text ?? '').slice(0, 4000).replace(/\s+/g, ' ').trim();
+  if (!v) return null;
+  if (v.length <= 60) return v;
+  const cut = /^(.*) /.exec(v.slice(0, 61))?.[1]?.trimEnd();
+  return cut || v.slice(0, 60);
+}
 
 function restError(status: number, message = 'conflict'): Error {
   return Object.assign(new Error(`fake ${status} ${message}`), { status });
@@ -211,8 +239,8 @@ const KEYS: Record<string, string[]> = {
 export class FakeCoachDb {
   /** Wall clock in ms; every default timestamp and lease check reads it. */
   clock = Date.UTC(2026, 9, 7, 12, 0, 0);
-  /** Microseconds added to successive `now()` stamps so rows written in one tick still order. */
-  private tick = 0;
+  /** The last `now()` stamp in microseconds: successive stamps always increase, so rows written in one tick still order. */
+  private lastStamp = 0;
   private eventSeq = 0;
   messageCap = 50_000;
   readonly usage = new Map<string, { calls: number; utility_calls: number; utility_tokens: number }>();
@@ -228,7 +256,8 @@ export class FakeCoachDb {
   }
 
   now(): string {
-    return pgTime(this.clock * 1000 + (this.tick++ % 1000));
+    this.lastStamp = Math.max(this.clock * 1000, this.lastStamp + 1);
+    return pgTime(this.lastStamp);
   }
 
   advance(ms: number): void { this.clock += ms; }
@@ -240,6 +269,7 @@ export class FakeCoachDb {
         title: null, title_source: 'none', folder_id: null, pinned: false, origin: 'app', created_at: now, updated_at: now,
         last_message_at: null, message_count: 0, preview: null, summary: null, summary_topics: [], open_loops: [],
         summary_through: null, summary_messages: 0, curated_through: null, summarized_at: null, maintenance_token: null, maintenance_until: null,
+        maintenance_claimed_at: null,
       };
       case 'coach_folders': return { sort_order: 0, created_at: now, updated_at: now };
       case 'coach_messages': return { id: crypto.randomUUID(), meta: {}, thread_id: null, client_id: null, created_at: now };
@@ -278,8 +308,8 @@ export class FakeCoachDb {
   private check(table: string, row: any): void {
     if (table === 'coach_threads' && row.folder_id) {
       const folder = this.rows('coach_folders').find((f) => f.id === row.folder_id);
-      if (folder && folder.user_id !== row.user_id) throw new RestAuthorityError(403, 'folder_not_owned');
-      if (!folder) throw restError(409, 'folder fk');
+      // coach_threads_folder_fkey is (folder_id, user_id): another owner's folder fails like a missing one (23503, 409).
+      if (!folder || folder.user_id !== row.user_id) throw restError(409, 'folder fk');
     }
     if (table === 'coach_messages' && row.thread_id
         && !this.rows('coach_threads').some((t) => t.id === row.thread_id && t.user_id === row.user_id)) {
@@ -399,6 +429,7 @@ export class FakeCoachDb {
       case 'coach_thread_publish_v1': return this.publish(args.p_user, args.p_thread, args.p_token, args.p_patch, args.p_ops);
       case 'coach_memory_apply_v1': return this.applyOps(args.p_user, args.p_ops, args.p_actor, args.p_thread ?? null);
       case 'coach_consolidation_claim_v1': return this.claimConsolidation(args.p_user, args.p_lease_seconds ?? 120);
+      case 'coach_thread_delete_v1': return this.deleteThreads(args.p_user, args.p_thread ?? null);
       default: throw new Error(`fake rpc ${name} not implemented`);
     }
   }
@@ -459,6 +490,17 @@ export class FakeCoachDb {
       }
       work.push({ ord, r, clientId, thread, legacy: !r.thread_id, created, title: r.thread_title ? String(r.thread_title).slice(0, 120) : null });
     }
+    // Old builds store a refused turn without meta.blocked: a shipped refusal text marks itself, and the user row right
+    // before it (within 3 s), as blocked. Within the batch first, so a new legacy thread's title skips them.
+    const marked = new Set<any>();
+    const byTime = [...work].sort((x, y) => (micros(x.created) - micros(y.created)) || x.ord - y.ord);
+    byTime.forEach((w, i) => {
+      if (w.r.role !== 'assistant' || !isRefusal(w.r.content)) return;
+      marked.add(w);
+      const prev = byTime.slice(0, i).reverse().find((x) => x.thread === w.thread);
+      if (prev?.r.role === 'user' && micros(w.created) - micros(prev.created) <= 3_000_000) marked.add(prev);
+    });
+    const blockedRow = (w: any) => marked.has(w) || this.normalise('coach_messages', { meta: w.r.meta ?? {} }).blocked;
     const status = new Map<string, string>();
     for (const thread of new Set(work.map((w) => w.thread))) {
       const group = work.filter((w) => w.thread === thread);
@@ -470,9 +512,13 @@ export class FakeCoachDb {
       const title = group.find((w) => w.title)?.title ?? null;
       if (!existing) {
         const first = group.map((w) => w.created).sort((a, b) => micros(a) - micros(b))[0];
+        const legacyThread = group.every((w) => w.legacy);
+        // An old build sends no title: like the backfill, its first non-blocked question names the thread.
+        const legacyName = !title && legacyThread
+          ? legacyTitle(byTime.find((w) => w.thread === thread && w.r.role === 'user' && !blockedRow(w))?.r.content) : null;
         this.insert('coach_threads', {
-          id: thread, user_id: user, title, title_source: title ? 'fallback' : 'none',
-          origin: group.every((w) => w.legacy) ? 'legacy_client' : 'app', created_at: first,
+          id: thread, user_id: user, title: title ?? legacyName, title_source: title ? 'fallback' : legacyName ? 'legacy' : 'none',
+          origin: legacyThread ? 'legacy_client' : 'app', created_at: first,
         });
         status.set(thread, 'ok');
         threads.push({ id: thread, created: true });
@@ -492,7 +538,8 @@ export class FakeCoachDb {
         rejected.push({ client_id: w.clientId, reason: status.get(w.thread) });
         continue;
       }
-      const meta = w.r.meta && typeof w.r.meta === 'object' && !Array.isArray(w.r.meta) ? w.r.meta : {};
+      const given = w.r.meta && typeof w.r.meta === 'object' && !Array.isArray(w.r.meta) ? w.r.meta : {};
+      const meta = marked.has(w) ? { ...given, blocked: true } : given;
       const prior = this.rows('coach_messages').find((m) => m.user_id === user && m.client_id === w.clientId);
       if (prior) {
         const oldThread = prior.thread_id;
@@ -503,6 +550,18 @@ export class FakeCoachDb {
         this.insert('coach_messages', { user_id: user, client_id: w.clientId, thread_id: w.thread, role: w.r.role, content: w.r.content, meta, created_at: w.created });
       }
       saved++;
+    }
+    // A refusal whose question was saved by an earlier call: the stored row right before it in the thread.
+    for (const w of work) {
+      if (!marked.has(w) || w.r.role !== 'assistant' || status.get(w.thread) !== 'ok') continue;
+      const row = this.rows('coach_messages').find((m) => m.user_id === user && m.client_id === w.clientId);
+      if (!row) continue;
+      const prev = sortRows(this.rows('coach_messages').filter((m) => m.user_id === user && m.thread_id === row.thread_id && m !== row
+        && (micros(m.created_at) < micros(row.created_at) || (micros(m.created_at) === micros(row.created_at) && m.id < row.id))), 'created_at.desc,id.desc')[0];
+      if (prev?.role === 'user' && !prev.blocked && micros(row.created_at) - micros(prev.created_at) <= 3_000_000) {
+        prev.meta = { ...prev.meta, blocked: true };
+        this.normalise('coach_messages', prev);
+      }
     }
     const mine = sortRows(this.rows('coach_messages').filter((m) => m.user_id === user), 'created_at.desc,id.desc');
     if (mine.length > this.messageCap) {
@@ -571,6 +630,17 @@ export class FakeCoachDb {
       .slice(0, threadLimit);
     const months = new Map<string, number>();
     for (const x of matches) months.set(x.m.created_at.slice(0, 7), (months.get(x.m.created_at.slice(0, 7)) ?? 0) + 1);
+    if (a.p_light === true) {
+      // Light: no counts, months or hit list; snippets for the returned threads only.
+      return {
+        terms: kept, dropped_terms: dropped, total_hits: null, months: [], hits: [],
+        threads: top.map((x) => ({
+          thread_id: x.id, title: x.t.title, last_message_at: x.t.last_message_at, hits: x.hits, best_rank: x.best,
+          snippet: x.bestMsg ? mark(x.bestMsg.content, keep) : mark(`${x.t.summary ?? x.t.title ?? ''}`, keep),
+          summary: x.t.summary ? String(x.t.summary).slice(0, 300) : null, topics: x.t.summary_topics ?? [],
+        })),
+      };
+    }
     return {
       terms: kept, dropped_terms: dropped, total_hits: matches.length,
       months: [...months].sort().map(([month, hits]) => ({ month, hits })),
@@ -613,7 +683,7 @@ export class FakeCoachDb {
     const nonEmpty = this.rows('coach_threads').filter((x) => x.user_id === user && x.message_count > 0);
     const others = sortRows(nonEmpty.filter((x) => x.id !== threadId), 'last_message_at.desc.nullslast,id.asc');
     const relevant = lexemes(query ?? '').size
-      ? this.search({ p_user: user, p_query: query, p_limit: 1, p_thread_limit: 3, p_exclude_thread: threadId }).threads
+      ? this.search({ p_user: user, p_query: query, p_limit: 1, p_thread_limit: 3, p_exclude_thread: threadId, p_light: true }).threads
         .map((x: any) => ({ id: x.thread_id, title: x.title, last_message_at: x.last_message_at, snippet: x.snippet }))
       : [];
     const weekAgo = this.clock - 7 * 86_400_000;
@@ -627,7 +697,8 @@ export class FakeCoachDb {
         message_count: t.message_count, open_loops: t.open_loops,
       } : null,
       library: {
-        thread_count: nonEmpty.length,
+        // Earlier chats: the current one is not counted.
+        thread_count: nonEmpty.filter((x) => x.id !== threadId).length,
         first_at: sortRows(nonEmpty, 'created_at.asc')[0]?.created_at ?? null,
         last_at: sortRows(nonEmpty, 'last_message_at.desc')[0]?.last_message_at ?? null,
         recent: others.slice(0, 5).map((x) => ({ id: x.id, title: x.title, last_message_at: x.last_message_at })),
@@ -643,10 +714,12 @@ export class FakeCoachDb {
     if (!t || (t.maintenance_until && micros(t.maintenance_until) / 1000 > this.clock)) return { claimed: false };
     t.maintenance_token = crypto.randomUUID();
     t.maintenance_until = pgTime((this.clock + lease * 1000) * 1000);
+    t.maintenance_claimed_at = this.now();
     return {
       claimed: true, token: t.maintenance_token, summary: t.summary, summary_through: t.summary_through,
       summary_messages: t.summary_messages, curated_through: t.curated_through, message_count: t.message_count, title: t.title,
       title_source: t.title_source, memory_floor_at: this.rows('coach_user_state').find((s) => s.user_id === user)?.memory_floor_at ?? null,
+      maintenance_claimed_at: t.maintenance_claimed_at, last_message_at: t.last_message_at,
     };
   }
 
@@ -655,10 +728,18 @@ export class FakeCoachDb {
     if (!t || !token || t.maintenance_token !== token || !t.maintenance_until || micros(t.maintenance_until) / 1000 <= this.clock) {
       return { applied: false, reason: 'lease_lost', ops: [] };
     }
-    const allowed = ['summary', 'summary_topics', 'open_loops', 'summary_through', 'summary_messages', 'curated_through', 'summarized_at'];
+    // A forget-all or a forget that landed after the claim: the pass's ops were judged against memories that are gone,
+    // so none apply and curated_through stays, to be mined again against the new floor and tombstones.
+    const state = this.state(user);
+    const claimed = micros(t.maintenance_claimed_at);
+    const reset = Number.isFinite(claimed) && ((state.memory_floor_at && micros(state.memory_floor_at) >= claimed)
+      || this.rows('coach_memory_events').some((e) => e.user_id === user && e.op === 'forget' && micros(e.created_at) >= claimed));
+    const allowed = ['summary', 'summary_topics', 'open_loops', 'summary_through', 'summary_messages', 'summarized_at',
+      ...(reset ? [] : ['curated_through'])];
     for (const k of allowed) if (patch && k in patch) t[k] = TS_COLUMNS.has(k) ? normTs(patch[k]) : structuredClone(patch[k]);
     t.maintenance_token = null;
     t.maintenance_until = null;
+    if (reset) return { applied: true, reason: 'memory_reset', ops: [] };
     return { applied: true, reason: 'published', ops: Array.isArray(ops) && ops.length ? this.applyOps(user, ops, 'curator', threadId) : [] };
   }
 
@@ -681,10 +762,31 @@ export class FakeCoachDb {
     const imp = (v: unknown, d: number) => (Number.isFinite(Number(v)) && v != null ? Math.max(1, Math.min(5, Math.round(Number(v)))) : d);
     const content = (v: unknown) => (typeof v === 'string' && v.trim().length >= 1 && v.trim().length <= 500 ? v.trim() : null);
     const tokensOf = (m: any, op: any) => (Array.isArray(op.tokens) ? op.tokens.slice(0, 64) : [...lexemes(m.content)]);
+    // Optional version guards: a merge's `versions` (keep_id and every id) and an update's or retire's `expect_version`.
+    // A named row that is missing, retired or at another version makes the whole op `stale`.
+    const stale = (op: any): boolean => {
+      const at = (rowId: unknown) => items().find((m) => m.id === String(rowId ?? '').toLowerCase() && m.user_id === user);
+      if (op?.op === 'merge' && op.versions && typeof op.versions === 'object') {
+        return [op.keep_id, ...(Array.isArray(op.ids) ? op.ids : [])].some((rowId) => {
+          const m = at(rowId);
+          const want = op.versions[String(rowId)];
+          return !m || m.retired_at || (want != null && Number(want) !== m.version);
+        });
+      }
+      if ((op?.op === 'update' || op?.op === 'retire') && op.expect_version != null) {
+        const m = at(op.id);
+        return !m || Boolean(m.retired_at) || Number(op.expect_version) !== m.version;
+      }
+      return false;
+    };
     for (const op of ops) {
       const kind = op?.op;
       const id = op?.id ?? op?.keep_id;
       const now = this.now();
+      if (stale(op)) {
+        results.push({ op: kind, id, applied: false, reason: 'stale' });
+        continue;
+      }
       if (kind === 'add') {
         const text = content(op.content);
         if (!text) { results.push({ op: 'add', id: null, applied: false, reason: 'invalid_content' }); continue; }
@@ -774,6 +876,20 @@ export class FakeCoachDb {
     this.tables.set('coach_memory_items', items().filter((m) => !(m.user_id === user && m.retired_at && micros(m.retired_at) / 1000 < month)));
     if (bump) state.memory_revision += 1;
     return results;
+  }
+
+  /** coach_thread_delete_v1: tombstone (even for an unknown id) and delete one thread, or every thread and thread-less row. */
+  deleteThreads(user: string, threadId: string | null): any {
+    const stamp = this.now();
+    const ids = threadId ? [String(threadId).toLowerCase()] : this.rows('coach_threads').filter((t) => t.user_id === user).map((t) => t.id);
+    for (const id of ids) {
+      if (!this.rows('coach_thread_tombstones').some((t) => t.user_id === user && t.thread_id === id)) {
+        this.rows('coach_thread_tombstones').push({ user_id: user, thread_id: id, deleted_at: stamp });
+      }
+    }
+    const gone = this.remove('coach_threads', `user_id=eq.${user}&id=in.(${ids.join(',')})`);
+    if (!threadId) this.remove('coach_messages', `user_id=eq.${user}`);
+    return { deleted: gone.length };
   }
 
   claimConsolidation(user: string, lease: number): boolean {

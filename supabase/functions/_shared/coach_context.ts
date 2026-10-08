@@ -98,8 +98,12 @@ async function search(d: CoachDeps, userId: string, body: Record<string, any>) {
     p_user: userId, p_query: query, p_limit: limit, p_thread_limit: query ? 8 : Math.max(8, Math.min(30, limit)),
     p_exclude_thread: exclude, p_from: from, p_to: to,
   }) ?? {};
-  const threads: any[] = Array.isArray(res.threads) ? res.threads.filter(isObject) : [];
-  const hits: any[] = Array.isArray(res.hits) ? res.hits.filter(isObject) : [];
+  const terms: string[] = Array.isArray(res.terms) ? res.terms : [];
+  // A query with no searchable words (only stop words or punctuation) makes the RPC browse the newest chats.
+  // Browsing is for an empty query; here nothing matched, and recent chats must not read as matches.
+  const noTerms = query !== '' && !terms.length;
+  const threads: any[] = !noTerms && Array.isArray(res.threads) ? res.threads.filter(isObject) : [];
+  const hits: any[] = !noTerms && Array.isArray(res.hits) ? res.hits.filter(isObject) : [];
   const titles = new Map<string, string | null>(threads.map((t) => [String(t.thread_id), str(t.title)]));
   const missing = [...new Set(hits.map((h) => String(h.thread_id)).filter((id) => !titles.has(id) && uuidOf(id)))];
   if (missing.length) {
@@ -107,10 +111,10 @@ async function search(d: CoachDeps, userId: string, body: Record<string, any>) {
     for (const r of rows) titles.set(String(r.id), str(r.title));
   }
   return {
-    terms: Array.isArray(res.terms) ? res.terms : [],
+    terms,
     droppedTerms: Array.isArray(res.dropped_terms) ? res.dropped_terms : [],
-    totalHits: num(res.total_hits),
-    months: Array.isArray(res.months) ? res.months.filter(isObject).map((m: any) => ({ month: String(m.month), hits: num(m.hits) })) : [],
+    totalHits: noTerms ? 0 : num(res.total_hits),
+    months: !noTerms && Array.isArray(res.months) ? res.months.filter(isObject).map((m: any) => ({ month: String(m.month), hits: num(m.hits) })) : [],
     hits: hits.map((h) => ({
       threadId: h.thread_id, title: titles.get(String(h.thread_id)) ?? null, at: iso(h.created_at), role: h.role, snippet: str(h.snippet),
     })),
@@ -118,6 +122,7 @@ async function search(d: CoachDeps, userId: string, body: Record<string, any>) {
       threadId: t.thread_id, title: str(t.title), lastMessageAt: iso(t.last_message_at), hits: num(t.hits),
       snippet: str(t.snippet), summary: str(t.summary), topics: Array.isArray(t.topics) ? t.topics : [],
     })),
+    ...(noTerms ? { noTerms: true } : {}),
   };
 }
 
@@ -242,6 +247,16 @@ const messageLine = (m: any) =>
 
 const unmark = (s: unknown) => collapse(typeof s === 'string' ? s.replace(/[«»]/g, '') : '');
 
+/**
+ * Each matched chat's share of the four chunks, so one long chat cannot crowd out the rest. It follows how
+ * `packChunks` fills them: with k = ceil(chats / 4) sections per chunk, k sections and their separators fit in one
+ * chunk, so up to 16 chats are all examined (10,000 characters each for up to 4 chats, 4,999 for 5 to 8).
+ */
+export function recallShare(chats: number): number {
+  const k = Math.ceil(Math.max(1, chats) / MAX_CHUNKS);
+  return Math.max(2_000, Math.floor((CHUNK_CHARS - 2 * (k - 1)) / k));
+}
+
 /** Packs sections into at most four chunks of 10,000 characters; a section too large for one is split. */
 function packChunks(sections: Section[], perChunk: number): { chunks: Chunk[]; dropped: Section[] } {
   const pieces: Section[] = [];
@@ -349,8 +364,7 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
       hitsByThread.set(String(h.thread_id), [...(hitsByThread.get(String(h.thread_id)) ?? []), h]);
     }
     const windows = await Promise.all(ids.map((id) => hitWindows(d, userId, id, hitsByThread.get(id) ?? [])));
-    // An even share of the four chunks per chat, so one long chat cannot crowd out the rest.
-    const share = Math.max(2_000, Math.min(CHUNK_CHARS, Math.floor((MAX_CHUNKS * CHUNK_CHARS * 0.95) / Math.max(1, ids.length))));
+    const share = recallShare(ids.length);
     ids.forEach((id, i) => {
       const t = byId.get(id);
       if (!t) return;
@@ -367,9 +381,14 @@ async function recall(d: CoachDeps, userId: string, body: Record<string, any>) {
         const at = loaded.findIndex((r: any) => r.id === h.message_id);
         // Not loaded (the window read is capped): reported through coverage rather than dropped silently.
         if (at < 0) { hitsLeft++; continue; }
-        const group = loaded.slice(Math.max(0, at - 1), at + 2).filter((r: any) => !picked.has(r.id));
-        const add = group.reduce((n: number, r: any) => n + messageLine(r).length + 1, 0);
-        if (picked.size && size + add > share) { hitsLeft++; continue; }
+        let group = loaded.slice(Math.max(0, at - 1), at + 2).filter((r: any) => !picked.has(r.id));
+        let add = group.reduce((n: number, r: any) => n + messageLine(r).length + 1, 0);
+        // The first hit always gets in, if need be without its neighbours, so the section stays within its share.
+        if (!picked.size && size + add > share) {
+          group = [loaded[at]];
+          add = messageLine(loaded[at]).length + 1;
+        }
+        if (size + add > share) { hitsLeft++; continue; }
         for (const r of group) picked.set(r.id, r);
         size += add;
       }

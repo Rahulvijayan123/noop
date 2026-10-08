@@ -4,15 +4,27 @@
 // 200 active rows (soft eviction) and keeps tombstones for forgotten facts. Reads ignore retired rows. A save
 // that near-duplicates an active row (same topic family, §6) confirms or updates that row instead of adding.
 import {
-  clampInt, collapse, type CoachDeps, fail, findNearDuplicate, iso, memoryTokens, memoryTopic, MEMORY_TOPICS,
-  readJson, SMALL_BODY_BYTES, tsKey, uuidOf,
+  clampInt, collapse, type CoachDeps, fail, findNearDuplicate, iso, jaccard, memoryTokens, memoryTopic, MEMORY_TOPICS,
+  readJson, sameFamily, SMALL_BODY_BYTES, tokenSet, toolOverlap, tsKey, uuidOf, wordTokens,
 } from './coach_llm.ts';
 
 const DEFAULT_LIST = 50;
 const MAX_LIST = 200;
 /** Every active row (the cap is 200) plus headroom for rows evicted in the same breath. */
 export const ACTIVE_SCAN = 400;
-export const MEMORY_COLUMNS = 'id,content,topic,importance,created_at,updated_at,last_confirmed_at,source,source_thread_id,confirmations';
+export const MEMORY_COLUMNS = 'id,content,topic,importance,created_at,updated_at,last_confirmed_at,source,source_thread_id,confirmations,version';
+
+/** The `expect_version` guard of an update or retire (coach_memory_apply_v1 answers `stale` when it moved). */
+export const versionGuard = (r: any) => (Number.isInteger(Number(r?.version)) && r?.version != null ? { expect_version: Number(r.version) } : {});
+
+/** Forgetting one memory also drops the cached starters, which may quote it. Best effort. */
+async function dropStarterCache(d: CoachDeps, userId: string): Promise<void> {
+  try {
+    await d.rest.patch('coach_user_state', {
+      suggestions: [], suggestions_fingerprint: null, suggestions_at: null, updated_at: new Date(d.now()).toISOString(),
+    }, `user_id=eq.${userId}`);
+  } catch { /* the cache also expires on its own */ }
+}
 
 /** The `memories` row shape: the original fields, plus the optional ones a thread-aware server knows. */
 export function publicMemory(r: any) {
@@ -52,7 +64,10 @@ export async function memoriesRoute(req: Request, userId: string, tail: string[]
       if (!id) throw fail('invalid_id', 400);
       // The tombstone keeps the fact's tokens (never its text), so the curator will not learn it again.
       const [row] = await d.rest.select('coach_memory_items', `user_id=eq.${userId}&id=eq.${id}&select=id,content`);
-      if (row) await applyMemoryOps(d, userId, [{ op: 'forget', id, tokens: memoryTokens(row.content) }], 'user');
+      if (row) {
+        const [res] = await applyMemoryOps(d, userId, [{ op: 'forget', id, tokens: memoryTokens(row.content) }], 'user');
+        if (res?.applied) await dropStarterCache(d, userId);
+      }
     } else {
       await forgetAll(d, userId);
     }
@@ -100,26 +115,51 @@ async function listMemories(req: Request, userId: string, d: CoachDeps): Promise
   return Response.json({ memories: rows.filter((r) => !topic || r.topic === topic).slice(0, limit).map(publicMemory) });
 }
 
+/**
+ * The active row a save repeats, and whether the save replaces its text or only confirms it: first the §6
+ * near-duplicate rules, then the save path's looser overlap (a same-family row with word-jaccard >= 0.45 that the
+ * new text fully restates and extends, or that already says everything the new text does).
+ */
+export function saveTarget(content: string, topic: string, active: any[]): { row: any; update: boolean } | null {
+  const match = findNearDuplicate(content, topic, active);
+  if (match) return { row: match.row, update: match.kind === 'supersede' || match.kind === 'longer' };
+  const mine = wordTokens(tokenSet(content));
+  let best: { row: any; update: boolean; score: number } | null = null;
+  for (const row of active) {
+    if (!sameFamily(topic, row.topic)) continue;
+    const kind = toolOverlap(content, row.content);
+    if (!kind) continue;
+    const score = jaccard(mine, wordTokens(tokenSet(row.content)));
+    if (!best || score > best.score) best = { row, update: kind === 'supersedes', score };
+  }
+  return best && { row: best.row, update: best.update };
+}
+
 async function saveMemory(req: Request, userId: string, d: CoachDeps): Promise<Response> {
   const body = await readJson(req, SMALL_BODY_BYTES);
   const input = memoryInput(body);
   const threadId = uuidOf(body?.threadId);
-  const active = await activeMemories(d, userId);
   // The user asked for this explicitly, so a near-match of a forgotten fact is still saved; duplicates are not.
-  const match = findNearDuplicate(input.content, input.topic, active);
-  if (match) {
-    const { row, kind } = match;
-    if (kind === 'supersede' || kind === 'longer') {
+  // The update is guarded by the row's version; when another writer moved it first, the match is redone once.
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const target = saveTarget(input.content, input.topic, await activeMemories(d, userId));
+    if (!target) break;
+    const { row } = target;
+    if (target.update) {
       const importance = Math.max(Number(row.importance ?? 3), input.importance);
       const topic = row.topic === 'general' ? input.topic : row.topic;
-      const [res] = await applyMemoryOps(d, userId, [{ op: 'update', id: row.id, content: input.content, topic, importance }], 'tool', threadId);
+      const [res] = await applyMemoryOps(d, userId,
+        [{ op: 'update', id: row.id, content: input.content, topic, importance, ...versionGuard(row) }], 'tool', threadId);
       if (res?.applied) {
         const stamp = new Date(d.now()).toISOString();
         return Response.json({ memory: publicMemory({ ...row, content: input.content, topic, importance, updated_at: stamp }), deduped: true, updated: true });
       }
+      if (res?.reason !== 'stale') break;
     } else {
-      await applyMemoryOps(d, userId, [{ op: 'confirm', id: row.id }], 'tool', threadId);
-      return Response.json({ memory: publicMemory({ ...row, confirmations: Number(row.confirmations ?? 1) + 1 }), deduped: true });
+      const [res] = await applyMemoryOps(d, userId, [{ op: 'confirm', id: row.id }], 'tool', threadId);
+      if (res?.applied) {
+        return Response.json({ memory: publicMemory({ ...row, confirmations: Number(row.confirmations ?? 1) + 1 }), deduped: true });
+      }
     }
   }
   const results = await applyMemoryOps(d, userId, [{ op: 'add', ...input, source: 'tool' }], 'tool', threadId);

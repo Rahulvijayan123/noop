@@ -1,8 +1,11 @@
 // The cheap-model side calls (docs/COACH_MEMORY.md §5): titles, follow-ups, starter suggestions, and per-thread
 // maintenance (rolling summary + memory curation, then consolidation), over the in-memory fake and a scripted model.
 import { assert, assertEquals } from 'jsr:@std/assert';
-import { curatorLine, keywordFollowUps, maintenanceBatches, validFollowUps } from '../_shared/coach_curator.ts';
-import { iso, memoryTokens } from '../_shared/coach_llm.ts';
+import {
+  curatorLine, duplicatePairs, keywordFollowUps, maintenanceBatches, mergedAttributes, resolveConsolidationOps, resolveCuratorOps,
+  validFollowUps,
+} from '../_shared/coach_curator.ts';
+import { iso, memoryTokens, Refs, tokenSet } from '../_shared/coach_llm.ts';
 import { type Harness, harness, type ModelCall, OTHER, reply, USER, uuidsIn } from './coach_fake.ts';
 
 const uuid = () => crypto.randomUUID();
@@ -18,6 +21,8 @@ function seed(h: Harness, turns: Turn[], over: Record<string, unknown> = {}, sta
 }
 
 const maintain = (h: Harness, id: string, token?: string) => h.json(`threads/${id}/maintain`, { method: 'POST', body: {}, token });
+/** Sets the clock to `at(minute)`: right after a turn the chat is not quiet yet, 10 minutes later it is. */
+const clockAt = (h: Harness, minute: number) => { h.db.clock = Date.parse(at(minute)); };
 const exhaust = (h: Harness, user = USER) => h.db.usage.set(user, { calls: 0, utility_calls: h.cfg.dailyUtilityLimit, utility_tokens: 0 });
 const promptOf = (c: ModelCall) => `${c.system}\n${c.user}`;
 /** The short ref the model was shown for the memory line containing `needle`. */
@@ -352,20 +357,25 @@ Deno.test('coach maintain: a first exchange gets a summary and curated memory, p
   assertEquals(h.db.threadRow(t.id).maintenance_token, null);
 });
 
-Deno.test('coach maintain: memory ops need a new user message; the summary needs 4 new messages (2 for the first)', async () => {
+Deno.test('coach maintain: memory ops need a new user message; the summary needs 4 new messages (2 for the first, 1 once quiet)', async () => {
   const h = await harness({ curator: (c: ModelCall) => (c.system.includes('"summary"') ? summaryReply('The user and Sana kept talking about training.') : { memory_ops: [] }) });
   const summarised = { summary: 'Earlier summary of the chat.', summary_through: at(0), curated_through: at(0), summary_messages: 1 };
-  const cases: [string, Turn[], Record<string, unknown>, string][] = [
+  const cases: [string, Turn[], Record<string, unknown>, string, boolean?][] = [
     ['three assistant messages', [['assistant', 'a'], ['assistant', 'b'], ['assistant', 'c']], summarised, 'skipped'],
     ['one user message', [['user', 'I run on Tuesdays']], summarised, 'memory'],
     ['four assistant messages', [['assistant', 'a'], ['assistant', 'b'], ['assistant', 'c'], ['assistant', 'd']], summarised, 'summary'],
     ['a lone first question', [['user', 'I run on Tuesdays']], {}, 'memory'],
     ['a first exchange', [['user', 'I run on Tuesdays'], ['assistant', 'Nice.']], {}, 'both'],
+    // Quiet for 10 minutes: whatever is left is folded, so a finished chat's last turns reach the summary.
+    ['three assistant messages, quiet', [['assistant', 'a'], ['assistant', 'b'], ['assistant', 'c']], summarised, 'summary', true],
+    ['one user message, quiet', [['user', 'I run on Tuesdays']], summarised, 'both', true],
+    ['a lone first question, quiet', [['user', 'I run on Tuesdays']], {}, 'both', true],
   ];
-  for (const [label, turns, over, expected] of cases) {
+  for (const [label, turns, over, expected, quiet] of cases) {
     const t = h.db.thread(USER, over);
     if (over.summary) h.db.message(USER, t.id, 'user', 'old message', { created_at: at(0) });
     turns.forEach(([role, content], i) => h.db.message(USER, t.id, role, content, { created_at: at(10 + i) }));
+    clockAt(h, 10 + turns.length - 1 + (quiet ? 10 : 1));
     const before = h.model.calls.length;
     const { body } = await maintain(h, t.id);
     const call = h.model.calls[before];
@@ -395,9 +405,61 @@ Deno.test('coach maintain: blocked turns right after the folded messages move th
   // A later turn is new material again, counted once.
   h.db.message(USER, t.id, 'user', 'And for a half marathon?', { created_at: at(10) });
   h.db.message(USER, t.id, 'assistant', 'Hold back for the first 5 km.', { created_at: at(11) });
+  clockAt(h, 12);
   await maintain(h, t.id);
   assertEquals(iso(h.db.threadRow(t.id).curated_through), at(11));
-  assertEquals((await h.json(`threads/${t.id}`)).body.thread.pendingMessages, 2, 'two new messages wait for the next summary');
+  assertEquals((await h.json(`threads/${t.id}`)).body.thread.pendingMessages, 2, 'right after the turn two new messages wait for more');
+});
+
+Deno.test('coach maintain: a quiet chat folds its last turns into the summary, then needs no more maintenance (finding 10)', async () => {
+  const h = await harness({ curator: (c: ModelCall) => (c.system.includes('"summary"')
+    ? summaryReply('The user will test the new taper next week and report back.', { open_loops: ['Report back on the new taper'] }) : { memory_ops: [] }) });
+  const t = seed(h, [['user', 'How should I taper?'], ['assistant', 'Cut volume by a third.']]);
+  clockAt(h, 2);
+  assertEquals((await maintain(h, t.id)).body.summarized, true, 'the first exchange');
+  h.db.message(USER, t.id, 'user', "I'll test the new taper next week and report back", { created_at: at(5) });
+  h.db.message(USER, t.id, 'assistant', 'Great, tell me how it goes.', { created_at: at(6) });
+  clockAt(h, 7);
+  assertEquals((await maintain(h, t.id)).body.summarized, false, 'right after the turn: memory only');
+  let thread = (await h.json(`threads/${t.id}`)).body.thread;
+  assertEquals([thread.pendingMessages, thread.needsMaintenance], [2, false], 'nothing to do until the chat goes quiet');
+
+  clockAt(h, 16);
+  thread = (await h.json(`threads/${t.id}`)).body.thread;
+  assertEquals([thread.pendingMessages, thread.needsMaintenance], [2, true], 'quiet: the tail is due');
+  const res = (await maintain(h, t.id)).body;
+  assertEquals([res.status, res.summarized], ['done', true]);
+  const row = h.db.threadRow(t.id);
+  assertEquals([iso(row.summary_through), row.open_loops], [at(6), ['Report back on the new taper']]);
+  thread = (await h.json(`threads/${t.id}`)).body.thread;
+  assertEquals([thread.pendingMessages, thread.needsMaintenance], [0, false]);
+  const calls = h.model.calls.length;
+  assertEquals((await maintain(h, t.id)).body.status, 'skipped');
+  assertEquals(h.model.calls.length, calls, 'and the next launch does nothing');
+});
+
+Deno.test('coach maintain: a skipped pass steps the memory cursor over a reply saved after the curated question (I7)', async () => {
+  const h = await harness({ curator: (c: ModelCall) => (c.system.includes('"summary"') ? summaryReply('The user asked about tapering.') : { memory_ops: [] }) });
+  const t = seed(h, [['user', 'How should I taper?'], ['assistant', 'Cut volume by a third.']]);
+  clockAt(h, 2);
+  await maintain(h, t.id);
+  // The pass ran between the question's save and the answer's.
+  h.db.message(USER, t.id, 'user', 'And the week before?', { created_at: at(5) });
+  clockAt(h, 5.5);
+  assertEquals((await maintain(h, t.id)).body.summarized, false);
+  assertEquals(iso(h.db.threadRow(t.id).curated_through), at(5));
+  h.db.message(USER, t.id, 'assistant', 'Keep one short session.', { created_at: at(6) });
+  clockAt(h, 7);
+  assertEquals((await h.json(`threads/${t.id}`)).body.thread.needsMaintenance, true, 'something arrived after the cursor');
+  const calls = h.model.calls.length;
+  assertEquals((await maintain(h, t.id)).body.status, 'skipped');
+  assertEquals(h.model.calls.length, calls, 'no new question: no model call');
+  assertEquals(iso(h.db.threadRow(t.id).curated_through), at(6));
+  assertEquals((await h.json(`threads/${t.id}`)).body.thread.needsMaintenance, false, 'so the chat is not offered again right away');
+  clockAt(h, 17);
+  assertEquals((await h.json(`threads/${t.id}`)).body.thread.needsMaintenance, true, 'until it goes quiet with turns to fold');
+  assertEquals((await maintain(h, t.id)).body.summarized, true);
+  assertEquals((await h.json(`threads/${t.id}`)).body.thread.needsMaintenance, false);
 });
 
 Deno.test('coach maintain: the curator never mines messages older than forget-all, nor blocked turns', async () => {
@@ -490,6 +552,7 @@ Deno.test('coach maintain: refs map back, number-aware supersede, and every §6 
     'My left hamstring is tight again. I switched my marathon goal to 3:30. I don\'t drink coffee anymore.',
     'I slept 5 hours last night. My wife Sarah runs with me. I\'m allergic to peanuts. I swim on Mondays and I cycle on Fridays.',
   ].join(' '), { created_at: at(5) });
+  clockAt(h, 6);
 
   const res = await maintain(h, t.id);
   assertEquals(res.body, { status: 'done', summarized: false, memoryOps: 4, consolidated: false });
@@ -525,6 +588,7 @@ Deno.test('coach maintain: "remember" lets a sensitive fact through; duplicates 
   });
   const ham = h.db.memory(USER, 'User has a tight left hamstring', { topic: 'injury', importance: 4 });
   const t = seed(h, [['user', 'Please remember my wife Sarah runs with me. My left hamstring is still tight. I want to run a marathon right now.']]);
+  clockAt(h, 1);
   const { body } = await maintain(h, t.id);
   assertEquals(body.memoryOps, 2);
   assert(h.db.activeMemories().some((m) => m.content === "User's wife Sarah runs with them"));
@@ -601,6 +665,7 @@ Deno.test('coach maintain: consolidation merges into the oldest row and retires 
       };
     },
   });
+  clockAt(h, 0);
   const older = h.db.memory(USER, 'User runs five days a week', { topic: 'training', created_at: '2026-01-01T00:00:00Z' });
   const newer = h.db.memory(USER, 'User runs 5 days a week, mostly easy', { topic: 'training', created_at: '2026-05-01T00:00:00Z' });
   const oat = h.db.memory(USER, 'User likes oat milk', { topic: 'preference' });
@@ -609,6 +674,7 @@ Deno.test('coach maintain: consolidation merges into the oldest row and retires 
   const t = h.db.thread(USER, { summary: 'An earlier summary.', summary_through: at(0), curated_through: at(0) });
   h.db.message(USER, t.id, 'user', 'old', { created_at: at(0) });
   h.db.message(USER, t.id, 'user', 'Thanks for that', { created_at: at(1) });
+  clockAt(h, 2);
 
   assertEquals((await maintain(h, t.id)).body, { status: 'done', summarized: false, memoryOps: 0, consolidated: true });
   assertEquals(consolidationCall!.body.max_tokens, 2_400);
@@ -622,10 +688,285 @@ Deno.test('coach maintain: consolidation merges into the oldest row and retires 
   const state = h.db.rows('coach_user_state').find((s) => s.user_id === USER);
   assert(state.consolidated_at && !state.consolidation_until);
 
-  // Consolidated recently and under 120 rows: not claimed again.
-  h.db.message(USER, t.id, 'user', 'And another thing', { created_at: at(2) });
+  // Consolidated recently and under 120 rows: not claimed again (and, 40 minutes on, no pair is fresh enough for a
+  // targeted pass either).
+  h.db.message(USER, t.id, 'user', 'And another thing', { created_at: at(40) });
+  clockAt(h, 41);
   assertEquals((await maintain(h, t.id)).body.consolidated, false);
   assertEquals(h.model.of('consolidation').length, 1);
   assertEquals((await h.json(`threads/${t.id}/maintain`, { method: 'POST', token: 'noop_other' })).status, 404);
   assert(!h.db.rows('coach_memory_items').some((m) => m.user_id === OTHER));
+});
+
+// ------------------------------------------------------------------------------------------------
+// Review fixes
+// ------------------------------------------------------------------------------------------------
+
+/** Letters-only words unique to `i`, so seeded memories never look alike. */
+const tag = (i: number) => `${'abcdefghijklmnopqrstuvwxyz'[i % 26]}${'abcdefghijklmnopqrstuvwxyz'[Math.floor(i / 26) % 26]}`;
+const distinct = (i: number) => `User likes ${tag(i)}x ${tag(i)}w ${tag(i)}z`;
+const applied = (h: Harness) => h.db.rpcCalls.filter((c) => c.name === 'coach_memory_apply_v1' || c.name === 'coach_thread_publish_v1')
+  .flatMap((c) => c.args.p_ops ?? []);
+
+Deno.test('coach maintain: a forget-all or a forget that lands while the curator runs is honoured (finding 6)', async () => {
+  let during: () => Promise<unknown> = async () => {};
+  const h = await harness({
+    curator: async () => {
+      await during();
+      return summaryReply('The user is training for the Berlin marathon on 2027-04-25.', {
+        memory_ops: [{ op: 'add', topic: 'goal', importance: 4, content: 'User is training for the Berlin marathon on 2027-04-25' }],
+      });
+    },
+  });
+  clockAt(h, 0);
+  h.db.memory(USER, 'User likes oat milk', { topic: 'preference' });
+  const t = seed(h, [['user', 'I am training for the Berlin marathon on 2027-04-25'], ['assistant', 'Great, let us plan it.']]);
+  clockAt(h, 2);
+  during = () => h.json('memories', { method: 'DELETE' });
+  const res = (await maintain(h, t.id)).body;
+  assertEquals([res.status, res.summarized, res.memoryOps], ['done', true, 0]);
+  assertEquals(h.db.activeMemories(), [], 'nothing mined before Forget all comes back');
+  const row = h.db.threadRow(t.id);
+  assertEquals([row.summary, row.curated_through], ['The user is training for the Berlin marathon on 2027-04-25.', null], 'the summary lands, curation does not');
+  const thread = (await h.json(`threads/${t.id}`)).body.thread;
+  assertEquals([thread.pendingMessages, thread.needsMaintenance], [0, false], 'messages older than the floor are not maintenance');
+  during = async () => {};
+  assertEquals((await maintain(h, t.id)).body.status, 'skipped', 'the floor keeps them out of the next pass');
+  assertEquals(h.db.activeMemories(), []);
+
+  // A single forget: the curator words the fact under another topic, so the stale pool would not catch it.
+  let forget: () => Promise<unknown> = async () => {};
+  const g = await harness({
+    curator: async () => {
+      await forget();
+      return { memory_ops: [{ op: 'add', topic: 'training', importance: 4, content: 'User has a sore left knee since 2026-09-20' }] };
+    },
+  });
+  clockAt(g, 0);
+  const knee = g.db.memory(USER, 'User has a sore left knee since 2026-09-20', { topic: 'injury', importance: 4 });
+  const u = seed(g, [['user', 'My left knee has been sore since 2026-09-20']]);
+  clockAt(g, 1);
+  forget = () => g.json(`memories/${knee.id}`, { method: 'DELETE' });
+  assertEquals((await maintain(g, u.id)).body.memoryOps, 0);
+  assertEquals(g.db.activeMemories(), []);
+  assertEquals(g.db.threadRow(u.id).curated_through, null);
+  forget = async () => {};
+  const again = (await maintain(g, u.id)).body;
+  assertEquals([again.status, again.memoryOps], ['done', 0], 'mined again, now against the tombstone');
+  assertEquals(g.db.activeMemories(), []);
+});
+
+Deno.test('coach maintain: above 120 memories consolidation waits for 6 hours or 8 changed memories (finding 7)', async () => {
+  const h = await harness({
+    curator: (c: ModelCall) => (c.system.includes('"summary"') ? summaryReply('The user kept sharing thoughts.') : { memory_ops: [] }),
+    consolidation: { ops: [] },
+  });
+  clockAt(h, 0);
+  for (let i = 0; i < 130; i++) h.db.memory(USER, distinct(i), { topic: 'preference', importance: 2 });
+  const t = h.db.thread(USER, { summary: 'An earlier summary.', summary_through: at(0), curated_through: at(0), summary_messages: 1 });
+  h.db.message(USER, t.id, 'user', 'old', { created_at: at(0) });
+  let minute = 1;
+  const turn = async () => {
+    h.db.message(USER, t.id, 'user', `Another thought number ${tag(minute)}x`, { created_at: new Date(h.db.clock + 1_000).toISOString() });
+    h.db.advance(2_000);
+    minute++;
+    return (await maintain(h, t.id)).body.consolidated;
+  };
+  assertEquals(await turn(), true, 'the first pass is due');
+  for (let i = 0; i < 3; i++) assertEquals(await turn(), false, 'nothing changed since: not again');
+  assertEquals(h.model.of('consolidation').length, 1);
+  for (let i = 0; i < 8; i++) h.db.memory(USER, distinct(200 + i), { topic: 'preference', importance: 2 });
+  assertEquals(await turn(), true, 'eight new memories');
+  assertEquals(await turn(), false);
+  h.db.advance(6 * 3_600_000);
+  assertEquals(await turn(), true, 'six hours later');
+  assertEquals(h.model.of('consolidation').length, 3);
+});
+
+Deno.test('coach followups: a title asked for before the first save lands comes back as titlePending (finding 18)', async () => {
+  const h = await harness({ followups: { follow_ups: ['How should I pace my long run?'], title: 'Never Stored' }, title: { title: 'Taper Plan' } });
+  const id = uuid();
+  const body = { threadId: id, question: 'How do I taper?', answer: 'Cut volume by a third.', wantTitle: true };
+  const res = await h.json('followups', { method: 'POST', body });
+  assertEquals(res.body, { followUps: ['How should I pace my long run?'], titlePending: true });
+  assert(!h.model.of('followups')[0].system.includes('"title"'), 'no title is asked of the model yet');
+  assertEquals(h.db.threadRow(id), undefined);
+  // Once the rows are saved the phone asks once, and the first-words title is replaced.
+  await h.json('messages', { method: 'POST', body: { messages: [{ clientId: uuid(), threadId: id, role: 'user', content: 'How do I taper?', createdAt: at(0), threadTitle: 'How do I taper' }] } });
+  assertEquals((await h.json(`threads/${id}/title`, { method: 'POST', body: { question: body.question, answer: body.answer } })).body,
+    { title: 'Taper Plan', titleSource: 'auto', generated: true });
+  // A saved thread, no wantTitle, or no threadId: no flag.
+  assert(!('titlePending' in (await h.json('followups', { method: 'POST', body })).body));
+  assert(!('titlePending' in (await h.json('followups', { method: 'POST', body: { ...body, threadId: uuid(), wantTitle: false } })).body));
+  assert(!('titlePending' in (await h.json('followups', { method: 'POST', body: { question: 'q here?', answer: 'An answer.', wantTitle: true } })).body));
+});
+
+Deno.test('coach suggestions: forgetting one memory drops the cached starters that may quote it (findings 19, 36)', async () => {
+  const h = await harness({ suggestions: { suggestions: [{ text: 'Plan lactose-free meals for this week', kind: 'goal' }] } });
+  const pref = (await h.json('memories', { method: 'POST', body: { content: 'User is lactose intolerant', topic: 'preference', importance: 3 } })).body.memory;
+  const body = { state: { dayPart: 'morning' }, fallback: ['How did I sleep?'] };
+  assertEquals((await h.json('suggestions', { method: 'POST', body })).body.source, 'model');
+  assertEquals((await h.json('suggestions', { method: 'POST', body })).body.source, 'cache');
+  const state = () => h.db.rows('coach_user_state').find((r) => r.user_id === USER);
+  const revision = state().memory_revision;
+  await h.json(`memories/${pref.id}`, { method: 'DELETE' });
+  assertEquals([state().suggestions, state().suggestions_fingerprint, state().suggestions_at], [[], null, null]);
+  assertEquals(state().memory_revision, revision, 'the revision rule is unchanged');
+  assertEquals((await h.json('suggestions', { method: 'POST', body })).body.source, 'model');
+  assert(!h.model.of('suggestions')[1].user.includes('lactose'));
+  // Forgetting an id that is not there leaves the cache alone.
+  await h.json(`memories/${uuid()}`, { method: 'DELETE' });
+  assertEquals((await h.json('suggestions', { method: 'POST', body })).body.source, 'cache');
+});
+
+Deno.test('coach consolidation: a merge never strips the safety pin or lowers importance; ops carry versions (findings 24, I3)', () => {
+  const rows = [
+    { id: 'acl', content: 'User tore the left ACL on 2026-03-02', topic: 'injury', importance: 5, created_at: '2026-03-02T00:00:00Z', version: 1 },
+    { id: 'rehab', content: 'User does knee rehab twice a week', topic: 'routine', importance: 3, created_at: '2026-04-01T00:00:00Z', version: 3 },
+    { id: 'oat', content: 'User likes oat milk', topic: 'preference', importance: 2, created_at: '2026-04-01T00:00:00Z', version: 1 },
+    { id: 'oat2', content: 'User likes oat milk in coffee', topic: 'preference', importance: 2, created_at: '2026-05-01T00:00:00Z', version: 2 },
+  ];
+  const refs = new Refs('m');
+  rows.forEach((r) => refs.ref(r.id));
+  const content = 'User tore the left ACL on 2026-03-02 and does knee rehab twice a week';
+  for (const topic of ['training', 'injuries', undefined]) {
+    const [merge] = resolveConsolidationOps([{ op: 'merge', refs: ['m1', 'm2'], content, topic, importance: 3 }], refs, rows);
+    assertEquals([merge.keep_id, merge.ids, merge.topic, merge.importance, merge.versions], ['acl', ['rehab'], 'injury', 5, { acl: 1, rehab: 3 }], String(topic));
+  }
+  assertEquals(mergedAttributes({ topic: 'health', importance: 1 }, rows.slice(0, 2), rows[0]), { topic: 'health', importance: 5 });
+  assertEquals(mergedAttributes({ topic: 'lifestyle', importance: 1 }, rows.slice(2), rows[2]), { topic: 'lifestyle', importance: 2 });
+  assertEquals(mergedAttributes({ topic: 'bogus' }, rows.slice(2), rows[2]), { topic: 'preference', importance: 2 });
+  const [retire] = resolveConsolidationOps([{ op: 'retire', ref: 'm3', reason: 'duplicate' }], refs, rows);
+  assertEquals([retire.op, retire.id, retire.expect_version], ['retire', 'oat', 1]);
+});
+
+Deno.test('coach maintain: a merge or retire against memories that changed meanwhile is stale and changes nothing (I3)', async () => {
+  let row: any;
+  const h = await harness({
+    curator: { memory_ops: [] },
+    consolidation: (c: ModelCall) => {
+      // Another writer (a tool save) updates one member while the model is thinking.
+      const stored = h.db.rows('coach_memory_items').find((m) => m.id === row.id);
+      Object.assign(stored, { content: 'User runs 6 days a week now', version: stored.version + 1 });
+      return { ops: [{ op: 'merge', refs: [refOf(c, 'runs five days'), refOf(c, 'runs 5 days')], content: 'User runs 5 days a week' }] };
+    },
+  });
+  clockAt(h, 0);
+  h.db.memory(USER, 'User runs five days a week', { topic: 'training', created_at: '2026-01-01T00:00:00Z' });
+  row = h.db.memory(USER, 'User runs 5 days a week, mostly easy', { topic: 'training' });
+  for (let i = 0; i < 40; i++) h.db.memory(USER, distinct(i), { importance: 1 });
+  const t = seed(h, [['user', 'Thanks for the plan'], ['assistant', 'Any time.']], { summary: 'An earlier summary.', summary_through: at(-1), curated_through: at(-1) });
+  clockAt(h, 2);
+  assertEquals((await maintain(h, t.id)).body.consolidated, true);
+  const merge = applied(h).find((o: any) => o.op === 'merge');
+  assertEquals(Object.keys(merge.versions).length, 2);
+  assertEquals(h.db.activeMemories().filter((m) => m.topic === 'training').map((m) => m.content).sort(), ['User runs 6 days a week now', 'User runs five days a week']);
+  assert(h.db.rows('coach_memory_events').every((e) => e.op !== 'merge'), 'the whole merge was refused as stale');
+});
+
+Deno.test('coach maintain: the curator merges a memory the tool saved in this chat into the older copy (I10)', async () => {
+  let shown: ModelCall | undefined;
+  const merged = 'User had left knee pain on long runs; a physio found mild IT band irritation and the knee no longer hurts';
+  const h = await harness({
+    curator: (c: ModelCall) => {
+      shown = c;
+      return summaryReply('The user saw a physio about the knee.', {
+        memory_ops: [{ op: 'merge', refs: [refOf(c, 'saw a physio'), refOf(c, 'left knee pain')], content: merged, topic: 'training', importance: 3 }],
+      });
+    },
+  });
+  clockAt(h, 0);
+  const old = h.db.memory(USER, 'User has left knee pain on long runs', { topic: 'injury', importance: 4, source: 'curator', created_at: '2026-09-20T00:00:00Z' });
+  h.db.memory(USER, 'User likes oat milk', { topic: 'preference' });
+  const t = seed(h, [['user', 'Saw a physio: mild IT band irritation, my knee no longer hurts.'], ['assistant', 'Good news.']]);
+  const tool = h.db.memory(USER, 'User saw a physio: mild IT band irritation in the left knee, which no longer hurts',
+    { topic: 'injury', importance: 4, source: 'tool', source_thread_id: t.id });
+  clockAt(h, 2);
+  const res = (await maintain(h, t.id)).body;
+  assertEquals(res.memoryOps, 1);
+  assert(/^Saved during this chat:\nm1 \[injury, importance 4\] User saw a physio[^\n]*\nSaved earlier:\nm2 /m.test(shown!.user), shown!.user);
+  assert(shown!.system.includes('"op":"merge"') && shown!.system.includes('merge them'));
+  const byId = (id: string) => h.db.rows('coach_memory_items').find((m) => m.id === id);
+  assertEquals([byId(old.id).content, byId(old.id).topic, byId(old.id).importance, byId(old.id).version, byId(old.id).retired_at], [merged, 'injury', 4, 2, null],
+    'kept in the older row, still pinned as an injury');
+  assertEquals(byId(tool.id).retired_reason, 'merged');
+  assertEquals(applied(h).find((o: any) => o.op === 'merge').versions, { [old.id]: 1, [tool.id]: 1 });
+  assertEquals(h.db.activeMemories().filter((m) => m.topic === 'injury').length, 1);
+});
+
+Deno.test('coach maintain: an update that restates a memory the tool saved in this chat becomes a merge (simulator run)', async () => {
+  // The real model updated the old injury memory and left the tool's copy beside it.
+  const h = await harness({
+    curator: (c: ModelCall) => ({ memory_ops: [{ op: 'update', ref: refOf(c, 'left knee pain'), content: 'User saw a physio for mild IT band irritation in the left knee, which no longer hurts' }] }),
+  });
+  clockAt(h, 0);
+  const old = h.db.memory(USER, 'User has left knee pain on long runs', { topic: 'injury', importance: 4, source: 'curator', created_at: '2026-09-20T00:00:00Z' });
+  const t = seed(h, [['user', 'Saw a physio: mild IT band irritation in the left knee, it no longer hurts. I run 5 days a week at 6am.']]);
+  const tool = h.db.memory(USER, 'User saw a physio: mild IT band irritation in the left knee, which no longer hurts',
+    { topic: 'injury', importance: 4, source: 'tool', source_thread_id: t.id });
+  const routine = h.db.memory(USER, 'User runs 5 days a week at 6am and is training for the Berlin marathon',
+    { topic: 'routine', importance: 3, source: 'tool', source_thread_id: t.id });
+  clockAt(h, 1);
+  assertEquals((await maintain(h, t.id)).body.memoryOps, 1);
+  const injuries = h.db.activeMemories().filter((m) => m.topic === 'injury');
+  assertEquals(injuries.map((m) => [m.id, m.content]), [[old.id, 'User saw a physio for mild IT band irritation in the left knee, which no longer hurts']]);
+  assertEquals(h.db.rows('coach_memory_items').find((m) => m.id === tool.id).retired_reason, 'merged');
+  assert(h.db.activeMemories().some((m) => m.id === routine.id), 'another family is never folded in');
+
+  // The rule in isolation: only what the new text fully restates, only memories saved in this chat.
+  const pool = [
+    { id: 'o', content: 'User has left knee pain on long runs', topic: 'injury', importance: 4, version: 1, created_at: '2026-01-01T00:00:00Z' },
+    { id: 'x', content: 'User has right knee pain', topic: 'injury', importance: 3, version: 1, source: 'tool', source_thread_id: 'T', created_at: '2026-02-01T00:00:00Z' },
+  ];
+  const refs = new Refs('m');
+  pool.forEach((p) => refs.ref(p.id));
+  const text = 'I have left knee pain on long runs and on hills';
+  const guard = { userTokens: tokenSet(text), userText: text, tombstones: [] };
+  const ops = resolveCuratorOps([{ op: 'update', ref: 'm1', content: 'User has left knee pain on long runs and on hills' }], refs, structuredClone(pool), guard, 'T');
+  assertEquals(ops, [{ op: 'update', id: 'o', content: 'User has left knee pain on long runs and on hills', expect_version: 1 }]);
+});
+
+Deno.test('coach maintain: two memories that look alike get a targeted consolidation, at most once per 30 minutes (I10)', async () => {
+  let dedupe: ModelCall | undefined;
+  const h = await harness({
+    curator: (c: ModelCall) => (c.system.includes('"summary"') ? summaryReply('The user described a running routine.') : { memory_ops: [] }),
+    consolidation: (c: ModelCall) => {
+      dedupe = c;
+      return { ops: [{ op: 'merge', refs: [refOf(c, 'before work'), refOf(c, 'at 6am$')], content: 'User runs 5 days a week at 6am before work' }] };
+    },
+  });
+  clockAt(h, 0);
+  const older = h.db.memory(USER, 'User runs 5 days a week at 6am', { topic: 'routine', source: 'curator', created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z' });
+  for (let i = 0; i < 5; i++) h.db.memory(USER, distinct(i), { created_at: '2026-09-01T00:00:00Z', updated_at: '2026-09-01T00:00:00Z' });
+  const t = seed(h, [['user', 'I run 5 days a week at 6am before work'], ['assistant', 'Nice routine.']]);
+  const tool = h.db.memory(USER, 'User runs 5 days a week at 6am before work', { topic: 'routine', source: 'tool', source_thread_id: t.id });
+  clockAt(h, 2);
+  assertEquals((await maintain(h, t.id)).body.consolidated, true);
+  assert(dedupe!.system.includes('look alike'));
+  assertEquals(dedupe!.user.split('\n').filter((l) => /^m\d+ \[/.test(l)).length, 2, 'only the pair');
+  assertEquals(h.db.activeMemories().filter((m) => m.topic === 'routine').map((m) => [m.id, m.content]), [[older.id, 'User runs 5 days a week at 6am before work']]);
+  assertEquals(h.db.rows('coach_memory_items').find((m) => m.id === tool.id).retired_reason, 'merged');
+  const lease = h.db.rows('coach_user_state').find((s) => s.user_id === USER).consolidation_until;
+  assertEquals(Date.parse(lease), h.db.clock + 30 * 60_000);
+
+  // Another fresh pair inside the 30 minutes waits; after them it is reviewed.
+  h.db.memory(USER, 'User swims 2 days a week at the lake', { topic: 'routine', source: 'tool', source_thread_id: t.id });
+  h.db.memory(USER, 'User swims 2 days a week at the lake in summer', { topic: 'routine' });
+  h.db.message(USER, t.id, 'user', 'I swim 2 days a week at the lake', { created_at: at(3) });
+  clockAt(h, 4);
+  assertEquals((await maintain(h, t.id)).body.consolidated, false);
+  assertEquals(h.model.of('consolidation').length, 1);
+  h.db.message(USER, t.id, 'user', 'Mostly in summer', { created_at: at(33) });
+  clockAt(h, 34);
+  await maintain(h, t.id);
+  assertEquals(h.model.of('consolidation').length, 2);
+
+  // Only pairs with a fresh member are offered, so a pair the model left alone is not offered again.
+  const rows = [
+    { id: 'a', content: 'User has a tight left hamstring', topic: 'injury' },
+    { id: 'b', content: 'User has a tight right hamstring', topic: 'injury' },
+    { id: 'c', content: 'User likes oat milk', topic: 'preference' },
+  ];
+  assertEquals(duplicatePairs(rows, () => false), []);
+  assertEquals(duplicatePairs(rows, (m) => m.id === 'b').map((m) => m.id).sort(), ['a', 'b']);
 });

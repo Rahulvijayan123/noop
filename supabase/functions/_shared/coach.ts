@@ -34,6 +34,12 @@ export interface CoachConfig {
   allowLegacyFleetUploads: boolean;
   allowLegacyEnrollment?: boolean;
   jevKey: string;
+  /**
+   * COACH_THREADS_DISABLED=1: the rollback switch. GET status stops advertising `features`, so thread-aware apps
+   * fall back to single-thread behaviour, while every data rule (50,000-message retention, 200 active memories,
+   * retired rows hidden, forget tombstones) stays as it is. Redeploying an older function would not keep them.
+   */
+  threadsDisabled?: boolean;
 }
 
 export function coachConfig(env: Record<string, string | undefined> = Deno.env.toObject()): CoachConfig {
@@ -58,6 +64,7 @@ export function coachConfig(env: Record<string, string | undefined> = Deno.env.t
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS', '').toLowerCase() === 'true',
     allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT', '').toLowerCase() === 'true',
     jevKey: pick('TYPESAFE_API_KEY', ''),
+    threadsDisabled: ['1', 'true'].includes(pick('COACH_THREADS_DISABLED', '').toLowerCase()),
   };
 }
 
@@ -379,10 +386,11 @@ export async function handleCoachRequest(req: Request, deps: CoachRequestDeps): 
     const tail = new URL(req.url).pathname.replace(/^.*\/coach(?=\/|$)/, '').split('/').filter(Boolean);
     const [route, ...sub] = tail;
     if (route === 'status' && req.method === 'GET') {
-      // `features` tells a thread-aware app it may use threads and the context tools; old servers never send it.
+      // `features` tells a thread-aware app it may use threads and the context tools; old servers never send it,
+      // and neither does this one while COACH_THREADS_DISABLED is set.
       return Response.json({
         ok: true, configured: Boolean(d.cfg.fireworksKey), dailyCallLimit: d.cfg.dailyCallLimit,
-        features: { threads: 1, context: 1 },
+        ...(d.cfg.threadsDisabled ? {} : { features: { threads: 1, context: 1 } }),
       });
     }
     if (route === 'chat' && req.method === 'POST') return await chat(req, identity.id, d);

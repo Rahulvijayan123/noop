@@ -1,15 +1,17 @@
 // Durable memories (docs/COACH_MEMORY.md §3-§4) and the deterministic rules of §6 they are held to.
 import { assert, assertEquals } from 'jsr:@std/assert';
 import {
-  clip, containment, fallbackTitle, findNearDuplicate, guardMemoryContent, isSensitive, jaccard, memoryTokens, nearDuplicate,
-  parseJsonReply, Refs, sameFamily, sanitizeTitle, tokenSet, tsKey, windowBound,
+  clip, containment, covers, fallbackTitle, findNearDuplicate, guardMemoryContent, isFigureToken, isSensitive, jaccard,
+  likelyDuplicates, memoryTokens, nearDuplicate, parseJsonReply, Refs, sameFamily, sanitizeTitle, tokenSet, tokensNearMatch,
+  toolOverlap, tsKey, windowBound,
 } from '../_shared/coach_llm.ts';
+import { saveTarget } from '../_shared/coach_memory.ts';
 import { harness, OTHER, USER } from './coach_fake.ts';
 
 const save = (h: any, body: unknown, token = 'noop_personal') => h.json('memories', { method: 'POST', body, token });
 
 Deno.test('memory tokens: numbers and dates always kept, stop words dropped, light stemming, negations kept', () => {
-  assertEquals(memoryTokens('User runs 5k on 2026-10-07 at 6:30'), ['run', '5', '2026-10-07', '6:30']);
+  assertEquals(memoryTokens('User runs 5k on 2026-10-07 at 6:30'), ['run', '5k', '2026-10-07', '6:30']);
   assertEquals(new Set(memoryTokens('Running races')), new Set(memoryTokens('runs a race')));
   assertEquals(new Set(memoryTokens('hamstrings')), new Set(memoryTokens('hamstring')));
   assertEquals(memoryTokens('The user is in it'), []);
@@ -20,17 +22,31 @@ Deno.test('memory tokens: numbers and dates always kept, stop words dropped, lig
   assertEquals(memoryTokens('ＦＵＬＬ　ｗｉｄｔｈ'), ['full', 'width'], 'NFKC first');
 });
 
+Deno.test('memory tokens: a unit stays on its number; a distance is a word, a measurement a figure', () => {
+  assertEquals(memoryTokens("User's 10K PR is 47:10"), ['10k', '47:10']);
+  assertEquals(memoryTokens('400m repeats 3x a week, squat 100kg at 6am'), ['400m', 'repeat', '3x', 'week', 'squat', '100kg', '6am']);
+  assertEquals(memoryTokens('Two 5ks and a 1,500 m swim'), ['two', '5k', '1,500', 'swim']);
+  assertEquals(memoryTokens('half-marathon'), memoryTokens('Half Marathons'));
+  assertEquals(memoryTokens('half marathon'), ['halfmarathon']);
+  for (const t of ['5k', '10km', '400m', '26.2mi']) assert(!isFigureToken(t), `${t} names the event`);
+  for (const t of ['100kg', '3x', '6am', '2nd', '47:10', '2026-10-07', 'april']) assert(isFigureToken(t), `${t} is a figure`);
+});
+
 Deno.test('near-duplicates: same, number-aware supersede, longer, covered, and distinct facts', () => {
   assertEquals(nearDuplicate('has a TIGHT left hamstring', 'Has a tight left hamstring'), 'same');
   assertEquals(nearDuplicate("User's marathon goal is 3:30", "User's marathon goal is 3:45"), 'supersede');
   assertEquals(nearDuplicate('User trains for a marathon on 3 May 2027', 'User trains for a marathon on 12 April 2027'), 'supersede');
-  assertEquals(nearDuplicate('User is vegetarian and avoids eggs at breakfast', 'User is vegetarian'), 'longer');
-  assertEquals(nearDuplicate('User is vegetarian', 'User is vegetarian and avoids eggs at breakfast'), 'covered');
+  assertEquals(nearDuplicate('User has a tight left hamstring and foam rolls it', 'User has a tight left hamstring'), 'longer');
+  assertEquals(nearDuplicate('User has a tight left hamstring', 'User has a tight left hamstring and foam rolls it'), 'covered');
+  // A one-word memory is not "contained" in every longer sentence that uses its word.
+  assertEquals(nearDuplicate('User is vegetarian and avoids eggs at breakfast', 'User is vegetarian'), null);
+  assertEquals(nearDuplicate('User is vegetarian', 'User is vegetarian and avoids eggs at breakfast'), null);
   // Saying less never overwrites a figure: no numbers in the new text means it is covered by the old row.
   assertEquals(nearDuplicate('User has a marathon goal time', "User's marathon goal time is 3:45"), 'covered');
   assertEquals(nearDuplicate('User does not eat meat', 'User eats meat'), 'supersede');
   assertEquals(nearDuplicate('User eats meat again', 'User does not eat meat again'), 'supersede');
   assertEquals(nearDuplicate('User swims on Mondays', 'User has a tight hamstring'), null);
+  assertEquals(nearDuplicate("User's 5k personal best is 21:50", "User's 5k personal best is 22:30"), 'supersede', 'same distance, new time');
   assertEquals(jaccard(new Set(['a', 'b']), new Set(['b', 'c'])), 1 / 3);
   assertEquals(containment(new Set(['a', 'b']), new Set(['a', 'b', 'c', 'd'])), 1);
   assert(sameFamily('goal', 'training') && sameFamily('injury', 'health') && sameFamily('sleep', 'nutrition'));
@@ -41,6 +57,77 @@ Deno.test('near-duplicates: same, number-aware supersede, longer, covered, and d
   ];
   assertEquals(findNearDuplicate('User has a tight left hamstring', 'health', pool)?.row.id, 'a', 'within the topic family only');
   assertEquals(findNearDuplicate('User has a tight left hamstring', 'preference', pool), null);
+});
+
+Deno.test('near-duplicates: different distances are different facts, never a supersede (finding 4)', () => {
+  const pairs: [string, string][] = [
+    ["User's 10k personal best is 47:10", "User's 5k personal best is 22:30"],
+    ['User wants to run a 10k in under 50 minutes', 'User wants to run a 5k in under 25 minutes'],
+    ['User is training for a 10k race in November', 'User is training for a 5k race in November'],
+    ["User's 10K PR is 47 minutes", "User's 5K PR is 22 minutes"],
+    ['User does 800m repeats 3x a week', 'User does 400m repeats 3x a week'],
+    ["User's half marathon personal best is 1:45:00", "User's marathon personal best is 3:50:00"],
+    // Words swapped is another fact, even with most words shared.
+    ['User has a torn meniscus in the right knee since 2026-03-02 and does rehab twice a week',
+      'User has a torn meniscus in the left knee since 2026-03-01 and does rehab twice a week'],
+  ];
+  for (const [next, old] of pairs) {
+    assertEquals(nearDuplicate(next, old), null, `${next} / ${old}`);
+    assertEquals(nearDuplicate(old, next), null, `${old} / ${next}`);
+    assert(!tokensNearMatch(tokenSet(next), tokenSet(old)), `tombstone: ${next} / ${old}`);
+  }
+  const pb5 = { id: 'pb5', content: "User's 5k personal best is 22:30", topic: 'achievement' };
+  assertEquals(findNearDuplicate("User's 10k personal best is 47:10", 'achievement', [pb5]), null);
+  // Forgetting the 5k goal does not stop the 10k goal from being learned.
+  const userText = 'I want to run a 10k in under 50 minutes';
+  const ctx = { userTokens: tokenSet(userText), userText, tombstones: [tokenSet('User wants to run a 5k in under 25 minutes')] };
+  assertEquals(guardMemoryContent('User wants to run a 10k in under 50 minutes', ctx), null);
+});
+
+Deno.test("near-duplicates: a fact about someone else is never the user's own (finding 5)", () => {
+  const pairs: [string, string][] = [
+    ["User's daughter has asthma", 'User has asthma'],
+    ["User's daughter has asthma and uses an inhaler", 'User has asthma'],
+    ["User's partner is vegan and cooks plant-based meals", 'User is vegan'],
+    ["User's mother has type 2 diabetes", 'User has type 2 diabetes'],
+    ['User coaches a vegan athlete', 'User is vegan'],
+  ];
+  for (const [next, old] of pairs) {
+    assertEquals(nearDuplicate(next, old), null, `${next} / ${old}`);
+    assertEquals(nearDuplicate(old, next), null, `${old} / ${next}`);
+    assert(!tokensNearMatch(tokenSet(next), tokenSet(old)), `cover/tombstone: ${next} / ${old}`);
+  }
+  const own = { id: 'own', content: 'User has asthma', topic: 'health' };
+  assertEquals(findNearDuplicate("User's daughter has asthma", 'health', [own]), null);
+  // Forgetting the daughter's fact does not block the user's own; forgetting a fact still covers its parts.
+  assert(!tokensNearMatch(tokenSet('User has asthma'), tokenSet("User's daughter has asthma")));
+  assert(tokensNearMatch(tokenSet('User has a dog'), tokenSet('User has a dog named Max')));
+});
+
+Deno.test('near-duplicates: the save path overlap, the duplicate-pair check and covering (I10)', () => {
+  assertEquals(toolOverlap('User has mild IT band irritation in the left knee per the physio', 'User has mild IT band irritation in the left knee'), 'supersedes');
+  assertEquals(toolOverlap('User has mild IT band irritation in the knee', 'User has mild IT band irritation in the left knee'), 'covered');
+  assertEquals(toolOverlap('User has IT band irritation', 'User has mild IT band irritation in the left knee'), null, 'too little overlap');
+  assertEquals(toolOverlap('User has right knee pain', 'User has left knee pain'), null, 'swapped words are another fact');
+  assertEquals(toolOverlap("User's daughter has mild IT band irritation", 'User has mild IT band irritation'), null);
+  const injury = (id: string, content: string) => ({ id, content, topic: 'injury' });
+  assert(likelyDuplicates(injury('a', 'User saw a physio for mild IT band irritation; the knee no longer hurts'),
+    injury('b', 'User had mild IT band irritation in the knee, which no longer hurts after physio')));
+  assert(!likelyDuplicates(injury('a', 'User has mild IT band irritation'), { id: 'b', content: 'User has mild IT band irritation', topic: 'goal' }));
+  assert(!likelyDuplicates(injury('a', 'User has asthma'), injury('b', "User's daughter has asthma")));
+  assert(!likelyDuplicates({ id: 'a', content: 'User runs on Tuesdays', topic: 'routine' }, { id: 'b', content: 'User swims on Tuesdays', topic: 'routine' }));
+  assert(covers('User had mild IT band irritation in the left knee; a physio saw it and it no longer hurts', 'User saw a physio: mild IT band irritation, no longer hurts'));
+  assert(!covers('User has left knee pain', 'User has right knee pain'));
+  assert(!covers('User has asthma and uses an inhaler', "User's daughter has asthma"));
+
+  const active = [
+    { id: 'old', content: 'User has mild IT band irritation in the left knee', topic: 'injury', importance: 4 },
+    { id: 'pb', content: "User's 5k personal best is 22:30", topic: 'achievement', importance: 3 },
+  ];
+  assertEquals(saveTarget('User has mild IT band irritation in the left knee, confirmed by a physio', 'injury', active), { row: active[0], update: true });
+  assertEquals(saveTarget('User has mild IT band irritation in the knee', 'health', active), { row: active[0], update: false });
+  assertEquals(saveTarget("User's 10k personal best is 47:10", 'achievement', active), null, 'a new distance is a new fact');
+  assertEquals(saveTarget('User has mild IT band irritation in the left knee', 'goal', active), null, 'another topic family');
 });
 
 Deno.test('curator guards: grounding, transient phrasing, metric readings, sensitive facts, tombstones', () => {
@@ -179,4 +266,34 @@ Deno.test('coach memories: forget keeps a token tombstone without the text; forg
   assertEquals((await h.json('memories')).body.memories, []);
   assert(h.db.rows('coach_memory_events').some((e) => e.op === 'forget' && e.memory_id === b.id));
   assertEquals((await h.json('memories', { token: 'noop_other' })).body.memories.map((m: any) => m.content), ['Only mine']);
+});
+
+Deno.test('coach memories: a save that updates a row is version-guarded; when another writer moved it first the match is redone (I3)', async () => {
+  const h = await harness();
+  const goal = (await save(h, { content: "User's marathon goal is 3:45", topic: 'goal' })).body.memory;
+  const rpc = h.rest.rpc;
+  let raced = false;
+  h.rest.rpc = async (name: string, args: any) => {
+    if (name === 'coach_memory_apply_v1' && args.p_ops?.[0]?.op === 'update' && !raced) {
+      raced = true;
+      // The curator rewrites the row between this save's read and its write.
+      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'update', id: goal.id, content: "User's marathon goal is 3:40" }], p_actor: 'curator' });
+    }
+    return await rpc(name, args);
+  };
+  const res = (await save(h, { content: "User's marathon goal is 3:30", topic: 'goal' })).body;
+  assertEquals([res.updated, res.memory.id, res.memory.content], [true, goal.id, "User's marathon goal is 3:30"]);
+  const updates = h.db.rpcCalls.filter((c) => c.name === 'coach_memory_apply_v1' && c.args.p_ops[0].op === 'update' && c.args.p_actor === 'tool');
+  assertEquals(updates.map((c) => c.args.p_ops[0].expect_version), [1, 2], 'the first attempt was stale, the second read the new version');
+  assertEquals(h.db.activeMemories().map((m) => [m.content, m.version]), [["User's marathon goal is 3:30", 3]]);
+  // A row forgotten in between: the save is simply added.
+  const knee = (await save(h, { content: 'User has a sore left knee', topic: 'injury' })).body.memory;
+  h.rest.rpc = async (name: string, args: any) => {
+    if (name === 'coach_memory_apply_v1' && args.p_ops?.[0]?.op === 'update') {
+      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'forget', id: knee.id }], p_actor: 'user' });
+    }
+    return await rpc(name, args);
+  };
+  const again = (await save(h, { content: 'User has a sore left knee and ices it after runs', topic: 'injury' })).body;
+  assertEquals([again.kept, again.memory.content], [true, 'User has a sore left knee and ices it after runs']);
 });

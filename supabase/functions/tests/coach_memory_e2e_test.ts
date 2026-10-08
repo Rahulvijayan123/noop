@@ -17,7 +17,11 @@ import {
 //     loops), search (ranked and browse-by-date), thread excerpts and recall (map/reduce with coverage);
 //  5. starter suggestions (personalised, cached, re-keyed by a recorded search) and follow-ups;
 //  6. rename, pin and folders; deletes with tombstones; forget with tombstones; consolidation; forget-all and
-//     the memory floor; an old app build's thread-less rows; the meta merge;
+//     the memory floor; a forget that lands mid-pass (memory_reset); needsMaintenance through a quiet fold; a
+//     save_memory row the curator restates folded into one memory; a targeted consolidation of a look-alike pair
+//     and its 30-minute lease; a first-answer title that comes back pending;
+//     deletes racing saves; an old app build's thread-less rows, its refusals marked blocked by their text; the
+//     COACH_THREADS_DISABLED rollback switch; the meta merge;
 //  7. a second account that reaches none of it on any route; and with the utility budget spent, every pass
 //     falls back deterministically without a model call.
 
@@ -29,6 +33,7 @@ const NOW = Date.now();
 const iso = (ms: number) => new Date(ms).toISOString();
 const dayOf = (ms: number) => iso(ms).slice(0, 10);
 const uuid = () => crypto.randomUUID();
+const pause = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
 const UUID_RE = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i;
 
 interface Row { clientId: string; threadId?: string; role: 'user' | 'assistant'; content: string; meta?: Record<string, unknown>; createdAt: string; threadTitle?: string }
@@ -211,8 +216,9 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       const t1 = list.body.threads[1];
       assert.equal(t1.preview, t1Turn2.answer.replace(/\s+/g, ' ').slice(0, 160).trimEnd());
       assert.equal(t1.lastMessageAt, iso(T1_AT + 6 * MINUTE));
-      assert.deepEqual(Object.keys(t1).sort(), ['createdAt', 'folderId', 'id', 'lastMessageAt', 'messageCount', 'origin', 'pendingMessages',
-        'pinned', 'preview', 'title', 'titleSource', 'topics', 'updatedAt'].sort());
+      assert.deepEqual(Object.keys(t1).sort(), ['createdAt', 'folderId', 'id', 'lastMessageAt', 'messageCount', 'needsMaintenance', 'origin',
+        'pendingMessages', 'pinned', 'preview', 'title', 'titleSource', 'topics', 'updatedAt'].sort());
+      assert.equal(t1.needsMaintenance, false, 'maintained: nothing left to curate or fold');
 
       const first = await a.get('threads?limit=1');
       assert.deepEqual(first.body.threads.map((th: any) => th.id), [T2]);
@@ -534,6 +540,180 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       assert.deepEqual((await a.get('memories')).body.memories.map((m: any) => m.content), ['User has mild asthma']);
     });
 
+    await t.step('a forget that lands while a maintenance pass runs drops that pass\'s memory ops; the next pass mines again', async () => {
+      const T8 = uuid();
+      const asthma = (await a.get('memories')).body.memories.find((m: any) => m.content === 'User has mild asthma');
+      assert.ok(asthma);
+      await turn(a, T8, 'I cycle to work on weekdays, about 8 km each way. Does that count as easy mileage?', Date.now(),
+        { threadTitle: 'I cycle to work on weekdays' });
+      // The user forgets a memory from the sheet while the curator is still thinking about this chat.
+      upstream.duringNext('curator', async () => {
+        assert.deepEqual((await a.del(`memories/${asthma.id}`)).body, { deleted: true });
+      });
+      const fenced = await a.post(`threads/${T8}/maintain`, {});
+      assert.deepEqual(fenced.body, { status: 'done', summarized: true, memoryOps: 0, consolidated: false });
+      const call = upstream.of('curator').at(-1)!;
+      assert.match(JSON.stringify(scriptedJson('curator', call.system, call.user)), /User cycles to work on weekdays/, 'the stale pass proposed an add');
+      assert.deepEqual((await a.get('memories')).body.memories, [], 'nothing the stale pass mined was written');
+      assert.equal(await one(`select curated_through is null and summary is not null and maintenance_token is null
+        from coach_threads where id='${T8}'`), 't', 'the summary was kept, the memory cursor stayed and the lease was released');
+      assert.equal(await one(`select count(*) from coach_memory_events where thread_id='${T8}'`), '0');
+      assert.equal((await a.get(`threads/${T8}`)).body.thread.needsMaintenance, true, 'the chat is still owed a memory pass');
+
+      const again = await a.post(`threads/${T8}/maintain`, {});
+      assert.deepEqual(again.body, { status: 'done', summarized: false, memoryOps: 1, consolidated: false });
+      assert.deepEqual((await a.get('memories')).body.memories.map((m: any) => m.content), ['User cycles to work on weekdays']);
+      assert.equal((await a.get(`threads/${T8}`)).body.thread.needsMaintenance, false);
+    });
+
+    await t.step('needsMaintenance: turns left over wait until the chat goes quiet, then one fold clears them', async () => {
+      const TQ = uuid();
+      await turn(a, TQ, 'What should my next hard session be after a long run?', Date.now() - 40 * MINUTE,
+        { threadTitle: 'What should my next hard session' });
+      assert.equal((await a.post(`threads/${TQ}/maintain`, {})).body.summarized, true);
+      await turn(a, TQ, 'Thanks, that helps. Anything else for this week?', Date.now());
+      let thread = (await a.get(`threads/${TQ}`)).body.thread;
+      assert.deepEqual([thread.pendingMessages, thread.needsMaintenance], [2, true]);
+      // Right after the turn (the app maintains once the answer is saved): memory only, the two rows wait.
+      assert.deepEqual((await a.post(`threads/${TQ}/maintain`, {})).body, { status: 'done', summarized: false, memoryOps: 0, consolidated: false });
+      thread = (await a.get(`threads/${TQ}`)).body.thread;
+      assert.deepEqual([thread.pendingMessages, thread.needsMaintenance], [2, false], 'not offered again until it goes quiet');
+      // Fifteen minutes pass: the turn's rows and the thread's cursors move back by that much.
+      await db.sql(`update coach_messages set created_at = created_at - interval '15 minutes'
+          where thread_id = '${TQ}' and created_at > now() - interval '5 minutes';
+        update coach_threads set last_message_at = last_message_at - interval '15 minutes',
+          curated_through = curated_through - interval '15 minutes' where id = '${TQ}';`);
+      thread = (await a.get(`threads/${TQ}`)).body.thread;
+      assert.deepEqual([thread.pendingMessages, thread.needsMaintenance], [2, true], 'quiet: the tail is due');
+      const mark = upstream.calls.length;
+      assert.deepEqual((await a.post(`threads/${TQ}/maintain`, {})).body, { status: 'done', summarized: true, memoryOps: 0, consolidated: false });
+      assert.doesNotMatch(upstream.since(mark).find((c) => c.pass === 'curator')!.system, /"memory_ops"/, 'a summary-only pass');
+      thread = (await a.get(`threads/${TQ}`)).body.thread;
+      assert.deepEqual([thread.pendingMessages, thread.needsMaintenance], [0, false]);
+      const calls = upstream.calls.length;
+      assert.equal((await a.post(`threads/${TQ}/maintain`, {})).body.status, 'skipped');
+      assert.equal(upstream.calls.length, calls, 'and a later launch costs nothing');
+    });
+
+    await t.step('a fact Sana\'s save_memory tool wrote and the curator restated ends up as one memory (the physio / IT band run)', async () => {
+      const TK1 = uuid();
+      const TK2 = uuid();
+      await turn(a, TK1, 'My left knee hurts on long runs. Should I cut my mileage?', Date.now(), { threadTitle: 'My left knee hurts on long' });
+      assert.equal((await a.post(`threads/${TK1}/maintain`, {})).body.memoryOps, 1);
+      const knee = (await a.get('memories?topic=injury')).body.memories;
+      assert.deepEqual(knee.map((m: any) => m.content), ['User has left knee pain on long runs']);
+
+      // A later chat: while it answers, Sana's save_memory tool stores the physio's finding.
+      const physio = 'Saw a physio today: it is mild IT band irritation in my left knee, and it no longer hurts. Can I run hills again?';
+      await turn(a, TK2, physio, Date.now() + 2 * MINUTE, { threadTitle: 'Saw a physio today' });
+      const tool = await a.post('memories', {
+        content: 'User saw a physio: mild IT band irritation in the left knee, which no longer hurts', topic: 'injury', importance: 4, threadId: TK2,
+      });
+      assert.equal(tool.status, 200, tool.text);
+      assert.equal(tool.body.kept, true, 'not the same fact as the older memory, so the save stores it');
+      assert.equal((await a.get('memories?topic=injury')).body.memories.length, 2);
+
+      const maintained = await a.post(`threads/${TK2}/maintain`, {});
+      assert.deepEqual(maintained.body, { status: 'done', summarized: true, memoryOps: 1, consolidated: false });
+      const curator = upstream.of('curator').at(-1)!;
+      assert.match(curator.user, /^Saved during this chat:\nm1 \[injury, importance 4\] User saw a physio/m);
+      assert.match(curator.user, /^Saved earlier:\nm\d+ \[/m);
+      // The model updated the older row and left the tool's copy; the server folded the two into the older row.
+      assert.deepEqual((scriptedJson('curator', curator.system, curator.user)!.memory_ops as any[]).map((o) => o.op), ['update']);
+      const injuries = (await a.get('memories?topic=injury')).body.memories;
+      assert.deepEqual(injuries.map((m: any) => [m.id, m.content, m.importance]),
+        [[knee[0].id, 'User saw a physio for mild IT band irritation in the left knee, which no longer hurts', 4]]);
+      assert.equal(await one(`select retired_reason || ' ' || (merged_into = '${knee[0].id}')::text from coach_memory_items
+        where id='${tool.body.memory.id}'`), 'merged true');
+      assert.equal(await one(`select count(*) from coach_memory_events where thread_id='${TK2}' and op='merge'`), '2');
+      // No near-duplicate pair is left, so the targeted consolidation had nothing to review.
+      assert.equal(upstream.since(upstream.calls.indexOf(curator)).filter((c) => c.pass === 'consolidation').length, 0);
+      const manifest = (await a.post('context', { question: 'Can I run hills with my knee now?' })).body;
+      assert.equal(manifest.memories.filter((m: any) => /knee/.test(m.content)).length, 1, 'the next chat sees one fact');
+      assert.equal(manifest.memories[0].pinned, true, 'still pinned as an injury');
+    });
+
+    await t.step('two memories that look like one fact get a targeted consolidation pass, at most once per 30 minutes', async () => {
+      // Written straight to the table (as another device or an older build could leave them), so no save path
+      // folded them on the way in.
+      await db.sql(`insert into coach_memory_items (user_id, content, topic, importance, source)
+        values ('${USER_A}', 'User stretches for ten minutes after every run', 'routine', 3, 'tool'),
+               ('${USER_A}', 'User stretches for ten minutes after every run', 'routine', 3, 'curator');`);
+      const TD = uuid();
+      // (Both turns stay before the old-build rows below, which must be the newest two.)
+      await turn(a, TD, 'Is my post-run stretching enough mobility work?', Date.now() + MINUTE, { threadTitle: 'Is my post-run stretching enough' });
+      const mark = upstream.calls.length;
+      const maintained = await a.post(`threads/${TD}/maintain`, {});
+      assert.deepEqual(maintained.body, { status: 'done', summarized: true, memoryOps: 0, consolidated: true });
+      const dedupe = upstream.since(mark).filter((c) => c.pass === 'consolidation');
+      assert.equal(dedupe.length, 1);
+      assert.match(dedupe[0].system, /look alike/);
+      assert.equal(dedupe[0].user.split('\n').filter((l) => /^m\d+ \[/.test(l)).length, 2, 'only the pair is shown');
+      assert.equal((await a.get('memories?topic=routine')).body.memories.filter((m: any) => /stretches/.test(m.content)).length, 1);
+      assert.equal(await one(`select count(*) from coach_memory_items where user_id='${USER_A}' and retired_reason='merged'
+        and content='User stretches for ten minutes after every run'`), '1');
+      assert.equal(await one(`select consolidation_until between now() + interval '29 minutes' and now() + interval '31 minutes'
+        from coach_user_state where user_id='${USER_A}'`), 't', 'the 30-minute lease is held');
+      // Another look-alike pair inside the 30 minutes waits for the lease.
+      await db.sql(`insert into coach_memory_items (user_id, content, topic, importance, source)
+        values ('${USER_A}', 'User foam rolls on rest days', 'routine', 2, 'tool'), ('${USER_A}', 'User foam rolls on rest days', 'routine', 2, 'tool');`);
+      await turn(a, TD, 'Should I foam roll too?', Date.now() + 3 * MINUTE);
+      const before = upstream.of('consolidation').length;
+      assert.equal((await a.post(`threads/${TD}/maintain`, {})).body.consolidated, false);
+      assert.equal(upstream.of('consolidation').length, before);
+      await db.sql(`delete from coach_memory_items where user_id='${USER_A}' and content='User foam rolls on rest days'`);
+    });
+
+    await t.step('a first-answer title asked for before the chat is saved comes back pending; the title route names it once saved', async () => {
+      const TP = uuid();
+      const question = 'How should I fuel a three-hour bike ride?';
+      const answer = 'Take 60 to 90 g of carbohydrate an hour from the first 30 minutes, and drink to thirst.';
+      const mark = upstream.calls.length;
+      const follow = await a.post('followups', { threadId: TP, question, answer, asked: [question], locale: 'en-US', wantTitle: true });
+      assert.equal(follow.status, 200, follow.text);
+      assert.equal(follow.body.titlePending, true);
+      assert.equal('title' in follow.body, false);
+      assert.ok(follow.body.followUps.length >= 1);
+      assert.doesNotMatch(upstream.since(mark).find((c) => c.pass === 'followups')!.system, /^title:/m, 'no title the server could not store');
+      assert.equal((await a.get(`threads/${TP}`)).status, 404);
+      // The outbox lands the rows (with the first-words title); then the app asks for the title once.
+      assert.deepEqual(await save(a, [
+        { clientId: uuid(), threadId: TP, role: 'user', content: question, meta: {}, createdAt: iso(Date.now()), threadTitle: 'How should I fuel a three-hour' },
+        { clientId: uuid(), threadId: TP, role: 'assistant', content: answer, meta: {}, createdAt: iso(Date.now() + 1000) },
+      ]), { saved: 2, rejected: [] });
+      const titled = await a.post(`threads/${TP}/title`, { question, answer });
+      assert.deepEqual(titled.body, { title: 'Fueling Long Bike Rides', titleSource: 'auto', generated: true });
+      assert.equal((await a.get(`threads/${TP}`)).body.thread.title, 'Fueling Long Bike Rides');
+      const later = await a.post('followups', { threadId: TP, question, answer, wantTitle: true });
+      assert.equal('titlePending' in later.body, false);
+      assert.equal('title' in later.body, false, 'a model title is never regenerated');
+    });
+
+    await t.step('a delete racing an in-flight save: the tombstone always wins, whichever lands first', async () => {
+      for (let round = 0; round < 6; round++) {
+        const id = uuid();
+        const rows: Row[] = Array.from({ length: 40 }, (_, i) => ({
+          clientId: uuid(), threadId: id, role: i % 2 ? 'assistant' : 'user', content: `Race ${round}.${i}: tempo intervals`, meta: {},
+          createdAt: iso(Date.now() + i), ...(i === 0 ? { threadTitle: 'Tempo intervals' } : {}),
+        }));
+        const removal = round % 3 === 2 ? `messages?threadId=${id}` : `threads/${id}`;
+        const [saved, deleted] = await Promise.all([
+          a.post('messages', { messages: rows }),
+          pause(round % 2 ? round : 0).then(() => a.del(removal)),
+        ]);
+        assert.equal(saved.status, 200, saved.text);
+        assert.deepEqual(deleted.body, { deleted: true });
+        const reasons = new Set(saved.body.rejected.map((r: any) => r.reason));
+        assert.ok((saved.body.saved === 40 && reasons.size === 0) || (saved.body.saved === 0 && [...reasons].join() === 'thread_deleted'),
+          JSON.stringify(saved.body));
+        assert.equal(await one(`select (select count(*) from coach_threads where id='${id}') || ' ' || (select count(*) from coach_messages
+          where thread_id='${id}') || ' ' || (select count(*) from coach_thread_tombstones where thread_id='${id}')`), '0 0 1', `round ${round}`);
+        const late = uuid();
+        assert.deepEqual(await save(a, [{ clientId: late, threadId: id, role: 'user', content: 'Still there?', createdAt: iso(Date.now()) }]),
+          { saved: 0, rejected: [{ clientId: late, reason: 'thread_deleted' }] });
+      }
+    });
+
     await t.step('a deleted chat stays deleted: later saves are rejected and its content is gone', async () => {
       assert.deepEqual((await a.del(`threads/${T2}`)).body, { deleted: true });
       assert.equal((await a.get(`threads/${T2}`)).status, 404);
@@ -579,6 +759,7 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       const legacy = (await a.get('threads')).body.threads.find((th: any) => th.origin === 'legacy_client');
       assert.ok(legacy, 'a legacy_client chat was created');
       assert.equal(legacy.messageCount, 2);
+      assert.deepEqual([legacy.title, legacy.titleSource], ['How was my sleep last night?', 'legacy'], 'named after its first question');
       const read = await a.get('messages?limit=2');
       assert.deepEqual(read.body.messages.map((m: any) => m.clientId), [u, v]);
       assert.deepEqual(read.body.messages.map((m: any) => Object.keys(m).sort()), [
@@ -588,6 +769,64 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       assert.deepEqual((await a.post('messages', { messages: [{ clientId: w, role: 'user', content: 'And the night before?', createdAt: iso(stamp + MINUTE) }] })).body,
         { saved: 1, rejected: [] });
       assert.equal((await a.get(`threads/${legacy.id}`)).body.thread.messageCount, 3, 'the next old-build row joins the same chat');
+    });
+
+    await t.step('COACH_THREADS_DISABLED: status stops announcing features while every data rule stays', async () => {
+      const off = serveCoach(watched.rest, coachConfig({
+        FIREWORKS_AI_API_KEY: 'fw-e2e-test-key', COACH_UPSTREAM_URL: upstream.url, COACH_THREADS_DISABLED: '1',
+      }), { onError: (e) => errors.push(e) });
+      try {
+        const client = coachClient(off.url, TOKEN_A);
+        const status = await client.get('status');
+        assert.equal(status.status, 200);
+        assert.equal(status.body.configured, true);
+        assert.equal('features' in status.body, false, 'a thread-aware app falls back to one conversation');
+        // What an app in single-thread mode does: thread-less rows, which still join the old-build chat.
+        const legacy = (await client.get('threads')).body.threads.find((th: any) => th.origin === 'legacy_client');
+        const w = uuid();
+        assert.deepEqual((await client.post('messages', { messages: [
+          { clientId: w, role: 'user', content: 'Back to one conversation', createdAt: iso(Date.now() + 7 * MINUTE) },
+        ] })).body, { saved: 1, rejected: [] });
+        assert.deepEqual((await client.get('messages?limit=1')).body.messages.map((m: any) => m.clientId), [w]);
+        assert.equal((await client.get(`threads/${legacy.id}`)).body.thread.messageCount, legacy.messageCount + 1);
+        // A deleted chat stays deleted and forgotten memories stay forgotten, as on the thread-aware server.
+        const late = uuid();
+        assert.deepEqual((await client.post('messages', { messages: [
+          { clientId: late, threadId: T2, role: 'user', content: 'Back again', createdAt: iso(Date.now()) },
+        ] })).body, { saved: 0, rejected: [{ clientId: late, reason: 'thread_deleted' }] });
+        assert.deepEqual((await client.get('memories')).body, (await a.get('memories')).body);
+      } finally {
+        await off.close();
+      }
+      assert.deepEqual((await a.get('status')).body.features, { threads: 1, context: 1 }, 'unset, the features come back');
+    });
+
+    await t.step('an old build\'s refused question and its refusal are marked blocked by their text and never name the chat', async () => {
+      // More than 3 hours after the other old-build rows, so these start an old-build chat of their own.
+      const stamp = Date.now() + 4 * 60 * MINUTE;
+      const ids = [uuid(), uuid(), uuid(), uuid()];
+      const refusal = "I hear you, and I want to be honest — what you're describing sounds like it could benefit from support beyond "
+        + "what a coach can offer. There's no shame in that. The **National Eating Disorders Association** helpline is available "
+        + "at **1-800-931-2237**, or you can text **NEDA** to **741741**. I'm here for your training whenever you're ready.";
+      const saved = await a.post('messages', { messages: [
+        { clientId: ids[0], role: 'user', content: 'How do I hide zebrafasting from my family before races?', meta: {}, createdAt: iso(stamp) },
+        { clientId: ids[1], role: 'assistant', content: refusal, meta: {}, createdAt: iso(stamp + 40) },
+        { clientId: ids[2], role: 'user', content: 'Fine. How much protein should I eat on rest days?', meta: {}, createdAt: iso(stamp + 2 * MINUTE) },
+        { clientId: ids[3], role: 'assistant', content: 'About 1.6 g per kg of body weight, over three or four meals.', meta: {}, createdAt: iso(stamp + 3 * MINUTE) },
+      ] });
+      assert.deepEqual(saved.body, { saved: 4, rejected: [] });
+      const rows = JSON.parse(await one(`select json_agg(json_build_object('blocked', blocked, 'thread', thread_id) order by created_at)
+        from coach_messages where client_id in (${ids.map((i) => `'${i}'`).join(',')})`));
+      assert.deepEqual(rows.map((r: any) => r.blocked), [true, true, false, false]);
+      const threadId = rows[0].thread;
+      assert.ok(rows.every((r: any) => r.thread === threadId));
+      const thread = (await a.get(`threads/${threadId}`)).body.thread;
+      assert.deepEqual([thread.origin, thread.title, thread.titleSource], ['legacy_client', 'Fine. How much protein should I eat on rest days?', 'legacy']);
+      assert.deepEqual((await a.post('context/search', { query: 'zebrafasting' })).body.threads, []);
+      assert.equal((await a.post(`threads/${threadId}/maintain`, {})).body.status, 'done');
+      assert.doesNotMatch(upstream.of('curator').at(-1)!.user, /zebrafasting|Eating Disorders/);
+      assert.match(upstream.of('curator').at(-1)!.user, /User: Fine\. How much protein/);
+      assert.deepEqual((await a.del(`threads/${threadId}`)).body, { deleted: true });
     });
 
     await t.step('a second account reaches none of it on any route', async () => {
@@ -645,7 +884,7 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
         { saved: 1, rejected: [] });
     });
 
-    await t.step('recall over a long history: four chunks mapped at once, then reduced; coverage says what was left out', async () => {
+    await t.step('recall over a long history: every matched chat read in packed chunks, then reduced; coverage says what was left out', async () => {
       const filler = 'Keep the hips back, brace before each rep, breathe out at the top and rest a full minute between rounds. ';
       const threads = Array.from({ length: 6 }, () => uuid());
       for (const [i, id] of threads.entries()) {
@@ -663,15 +902,17 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       const r = recalled.body;
       assert.equal(r.status, 'answered');
       assert.match(r.answer, /^Across the earlier chats: /, 'more notes than fit as they are go through the reduce step');
-      assert.deepEqual(r.examined.chunks, 4);
-      assert.deepEqual(r.examined.subcalls, 5);
+      // Six chats get a 4,999-character share each, so two fit in a chunk and none is left out; the hits that did
+      // not fit a chat's share are what `truncated` reports.
+      assert.deepEqual(r.examined.chunks, 3);
+      assert.deepEqual(r.examined.subcalls, 4);
       assert.equal(r.coverage.threadsMatched, 6);
-      assert.equal(r.coverage.threadsExamined, 4);
+      assert.equal(r.coverage.threadsExamined, 6);
       assert.equal(r.coverage.truncated, true);
       assert.ok(r.coverage.totalHits >= 36);
       assert.ok(r.sources.length >= 1 && r.sources.every((s: any) => threads.includes(s.threadId)));
       const calls = upstream.since(mark);
-      assert.deepEqual(calls.map((c) => c.pass), ['map', 'map', 'map', 'map', 'reduce']);
+      assert.deepEqual(calls.map((c) => c.pass), ['map', 'map', 'map', 'reduce']);
       for (const c of calls.filter((x) => x.pass === 'map')) assert.ok(c.user.length <= 10_500, 'each chunk stays within 10,000 characters');
     });
 

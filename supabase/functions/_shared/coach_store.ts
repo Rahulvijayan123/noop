@@ -7,19 +7,48 @@
 // from the raw database values so microsecond timestamps never skip or repeat a row.
 import { isUuid } from './keys.ts';
 import {
-  clampInt, collapse, type CoachDeps, enc, fail, isObject, iso, quoted, readJson, SMALL_BODY_BYTES, uuidOf,
+  clampInt, collapse, type CoachDeps, enc, fail, isObject, iso, quoted, readJson, SMALL_BODY_BYTES, tsKey, uuidOf,
 } from './coach_llm.ts';
 
 const MAX_TEXT_CHARS = 60_000;
 const MAX_SAVE_ROWS = 40;
 
 export const THREAD_COLUMNS =
-  'id,title,title_source,folder_id,pinned,origin,created_at,updated_at,last_message_at,message_count,preview,summary_topics,summary_messages';
+  'id,title,title_source,folder_id,pinned,origin,created_at,updated_at,last_message_at,message_count,preview,summary_topics,'
+  + 'summary_messages,curated_through,summarized_at';
 const FOLDER_COLUMNS = 'id,name,sort_order,created_at,updated_at';
 const MESSAGE_COLUMNS = 'id,client_id,thread_id,role,content,meta,created_at';
 
+/** A thread whose newest message is at least this old is quiet: maintenance folds whatever is left of it. */
+export const QUIET_MS = 10 * 60_000;
+
+/**
+ * The summary rule of a maintenance pass (docs/COACH_MEMORY.md §5 Maintain step 3): 4 new messages, 2 when there
+ * is no summary yet, or any once the chat has gone quiet.
+ */
+export const summaryDue = (pending: number, hasSummary: boolean, quiet: boolean) =>
+  pending >= 4 || (!hasSummary && pending >= 2) || (quiet && pending >= 1);
+
+/** What `needsMaintenance` is judged against: the clock and the owner's forget-all floor. */
+export interface ThreadView { now: number; floor: string | null }
+
+/**
+ * Whether POST threads/:id/maintain would do work now, judged from the thread row: memory curation is due when
+ * something arrived after both `curated_through` and the forget-all floor, the summary by `summaryDue`. Blocked
+ * turns are counted until a pass steps the cursors over them, which the next pass always does.
+ */
+export function needsMaintenance(r: any, view: ThreadView): boolean {
+  const last = tsKey(r.last_message_at);
+  if (!Number.isFinite(last)) return false;
+  const mineAfter = Math.max(tsKey(r.curated_through) || -Infinity, tsKey(view.floor) || -Infinity);
+  if (last > mineAfter) return true;
+  const pending = Math.max(0, Number(r.message_count ?? 0) - Number(r.summary_messages ?? 0));
+  const quiet = view.now * 1000 - last >= QUIET_MS * 1000;
+  return summaryDue(pending, r.summarized_at != null, quiet);
+}
+
 /** The `Thread` shape; `snippet` only on search results. */
-export function publicThread(r: any, snippet?: string | null) {
+export function publicThread(r: any, view: ThreadView, snippet?: string | null) {
   const count = Number(r.message_count ?? 0);
   return {
     id: r.id, title: r.title ?? null, titleSource: r.title_source ?? 'none', folderId: r.folder_id ?? null,
@@ -27,8 +56,15 @@ export function publicThread(r: any, snippet?: string | null) {
     lastMessageAt: iso(r.last_message_at), messageCount: count, preview: r.preview ?? null,
     topics: Array.isArray(r.summary_topics) ? r.summary_topics : [],
     pendingMessages: Math.max(0, count - Number(r.summary_messages ?? 0)),
+    needsMaintenance: needsMaintenance(r, view),
     ...(snippet !== undefined ? { snippet } : {}),
   };
+}
+
+/** The view for `publicThread`. The floor is read best effort: without it, curation is judged by the cursor alone. */
+export async function threadView(d: CoachDeps, userId: string): Promise<ThreadView> {
+  const rows = await d.rest.select('coach_user_state', `user_id=eq.${userId}&select=memory_floor_at`).catch(() => []);
+  return { now: d.now(), floor: typeof rows?.[0]?.memory_floor_at === 'string' ? rows[0].memory_floor_at : null };
 }
 
 export const publicFolder = (r: any) => ({
@@ -165,30 +201,21 @@ async function threadPage(d: CoachDeps, userId: string, rawId: string, params: U
   });
 }
 
-/** Tombstone first, so an outbox save still in flight can never bring the thread back. */
+/**
+ * coach_thread_delete_v1 tombstones and deletes under the owner's thread lock, which coach_messages_save_v1 takes
+ * too, so an outbox save still in flight can never bring the thread back. Messages go with their thread.
+ */
 async function deleteThread(d: CoachDeps, userId: string, threadId: string): Promise<void> {
-  await d.rest.upsert('coach_thread_tombstones', { user_id: userId, thread_id: threadId, deleted_at: new Date(d.now()).toISOString() },
-    { onConflict: 'user_id,thread_id', prefer: 'resolution=merge-duplicates,return=minimal' });
-  // Messages go with their thread through the composite foreign key.
-  await d.rest.delete('coach_threads', `user_id=eq.${userId}&id=eq.${threadId}`);
+  await d.rest.rpc('coach_thread_delete_v1', { p_user: userId, p_thread: threadId });
 }
 
+/** Every thread and every thread-less message, in the same locked call; then the caches that name them. */
 async function deleteEverything(d: CoachDeps, userId: string): Promise<void> {
-  const stamp = new Date(d.now()).toISOString();
-  let after = '';
-  for (;;) {
-    const ids = await d.rest.select('coach_threads', `user_id=eq.${userId}${after}&order=id.asc&limit=1000&select=id`);
-    if (!ids.length) break;
-    await d.rest.upsert('coach_thread_tombstones', ids.map((r: any) => ({ user_id: userId, thread_id: r.id, deleted_at: stamp })),
-      { onConflict: 'user_id,thread_id', prefer: 'resolution=merge-duplicates,return=minimal' });
-    if (ids.length < 1000) break;
-    after = `&id=gt.${ids[ids.length - 1].id}`;
-  }
-  await d.rest.delete('coach_threads', `user_id=eq.${userId}`);
-  await d.rest.delete('coach_messages', `user_id=eq.${userId}`);
+  await d.rest.rpc('coach_thread_delete_v1', { p_user: userId, p_thread: null });
   // Starters can point at deleted chats and searches name them; both go with the history.
-  await d.rest.patch('coach_user_state', { suggestions: [], suggestions_fingerprint: null, suggestions_at: null, recent_searches: [], updated_at: stamp },
-    `user_id=eq.${userId}`);
+  await d.rest.patch('coach_user_state', {
+    suggestions: [], suggestions_fingerprint: null, suggestions_at: null, recent_searches: [], updated_at: new Date(d.now()).toISOString(),
+  }, `user_id=eq.${userId}`);
 }
 
 // ------------------------------------------------------------------------------------------------
@@ -225,9 +252,9 @@ export async function threadsRoute(req: Request, userId: string, sub: string[], 
   const id = uuidOf(sub[0]);
   if (!id) throw fail('invalid_id', 400);
   if (req.method === 'GET') {
-    const row = await loadThread(d, userId, id);
+    const [row, view] = await Promise.all([loadThread(d, userId, id), threadView(d, userId)]);
     if (!row) throw fail('thread_not_found', 404);
-    return Response.json({ thread: publicThread(row) });
+    return Response.json({ thread: publicThread(row, view) });
   }
   if (req.method === 'PATCH') {
     const body = await readJson(req, SMALL_BODY_BYTES);
@@ -254,7 +281,7 @@ export async function threadsRoute(req: Request, userId: string, sub: string[], 
     patch.updated_at = new Date(d.now()).toISOString();
     const [row] = await d.rest.patch('coach_threads', patch, `user_id=eq.${userId}&id=eq.${id}&select=${THREAD_COLUMNS}`) ?? [];
     if (!row) throw fail('thread_not_found', 404);
-    return Response.json({ thread: publicThread(row) });
+    return Response.json({ thread: publicThread(row, await threadView(d, userId)) });
   }
   if (req.method === 'DELETE') {
     await deleteThread(d, userId, id);
@@ -262,6 +289,9 @@ export async function threadsRoute(req: Request, userId: string, sub: string[], 
   }
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
 }
+
+/** Filed chats the unfiltered first page of GET threads carries beyond its date page (finding 9). */
+const FILED_ON_FIRST_PAGE = 200;
 
 async function listThreads(d: CoachDeps, userId: string, params: URLSearchParams): Promise<Response> {
   const limit = clampInt(params.get('limit') ?? '50', 1, 100, 50);
@@ -276,17 +306,25 @@ async function listThreads(d: CoachDeps, userId: string, params: URLSearchParams
   const cursor = params.get('cursor') ? decodeCursor(params.get('cursor'), true) : null;
   const base = `user_id=eq.${userId}${inFolder}`;
   const order = 'order=last_message_at.desc.nullslast,id.desc';
-  // Pinned threads lead the first page; the cursor walks the unpinned ones only.
-  const [pinned, rows, folders] = await Promise.all([
+  // Pinned threads lead the first page; the cursor walks the unpinned ones only. The unfiltered first page also
+  // carries the chats filed in a folder (up to FILED_ON_FIRST_PAGE) that are not on it already: the sidebar
+  // builds each folder and its count from the loaded list, and a chat moved into a folder keeps its date, so
+  // an older one would otherwise be missing from its folder until the date list was scrolled that far. Later
+  // pages may list one of them again; the phone keeps one row per id.
+  const [pinned, rows, filed, folders, view] = await Promise.all([
     cursor ? Promise.resolve([]) : d.rest.select('coach_threads', `${base}&pinned=is.true&${order}&limit=100&select=${THREAD_COLUMNS}`),
     d.rest.select('coach_threads', `${base}&pinned=is.false${cursor ? threadsAfter(cursor) : ''}&${order}&limit=${limit + 1}&select=${THREAD_COLUMNS}`),
+    cursor || inFolder ? Promise.resolve([]) : d.rest.select('coach_threads',
+      `${base}&pinned=is.false&folder_id=not.is.null&${order}&limit=${FILED_ON_FIRST_PAGE}&select=${THREAD_COLUMNS}`),
     d.rest.select('coach_folders', `user_id=eq.${userId}&order=sort_order.asc,created_at.asc,id.asc&limit=500&select=${FOLDER_COLUMNS}`),
+    threadView(d, userId),
   ]);
   const page = rows.slice(0, limit);
   const last = page[page.length - 1];
   const hasMore = rows.length > limit;
+  const onPage = new Set(page.map((r: any) => String(r.id)));
   return Response.json({
-    threads: [...pinned, ...page].map((r: any) => publicThread(r)),
+    threads: [...pinned, ...page, ...filed.filter((r: any) => !onPage.has(String(r.id)))].map((r: any) => publicThread(r, view)),
     folders: folders.map(publicFolder),
     hasMore, nextCursor: hasMore && last ? encodeCursor(last.last_message_at ?? null, last.id) : null,
   });
@@ -295,8 +333,10 @@ async function listThreads(d: CoachDeps, userId: string, params: URLSearchParams
 async function searchThreads(d: CoachDeps, userId: string, q: string, params: URLSearchParams): Promise<Response> {
   const limit = clampInt(params.get('limit') ?? '20', 1, 30, 20);
   const record = params.get('record') === '1' && q.length >= 3;
-  const [result] = await Promise.all([
-    d.rest.rpc('coach_search_v1', { p_user: userId, p_query: q, p_limit: 1, p_thread_limit: limit }),
+  // Light: the sidebar shows threads and their snippets only, never the hit list, counts or months.
+  const [result, view] = await Promise.all([
+    d.rest.rpc('coach_search_v1', { p_user: userId, p_query: q, p_limit: 1, p_thread_limit: limit, p_light: true }),
+    threadView(d, userId),
     record ? recordSearch(d, userId, q) : Promise.resolve(),
   ]);
   // A query with no searchable words would browse by date; the sidebar wants matches only.
@@ -309,7 +349,7 @@ async function searchThreads(d: CoachDeps, userId: string, q: string, params: UR
   const threads = hits
     .map((h) => {
       const row = byId.get(String(h?.thread_id ?? '').toLowerCase());
-      return row ? publicThread(row, typeof h.snippet === 'string' ? h.snippet : null) : null;
+      return row ? publicThread(row, view, typeof h.snippet === 'string' ? h.snippet : null) : null;
     })
     .filter(Boolean);
   return Response.json({ threads, query: q });
@@ -338,14 +378,15 @@ async function createThread(req: Request, userId: string, d: CoachDeps): Promise
     folderId = uuidOf(body.folderId);
     if (!folderId) throw fail('invalid_thread', 400);
   }
-  const [[existing], tombstones] = await Promise.all([
+  const [[existing], tombstones, view] = await Promise.all([
     d.rest.select('coach_threads', `id=eq.${id}&select=user_id,${THREAD_COLUMNS}`),
     d.rest.select('coach_thread_tombstones', `user_id=eq.${userId}&thread_id=eq.${id}&select=thread_id`),
+    threadView(d, userId),
   ]);
   if (tombstones.length) throw fail('thread_deleted', 410);
   if (existing) {
     if (existing.user_id !== userId) throw fail('thread_conflict', 409);
-    return Response.json({ thread: publicThread(existing) });
+    return Response.json({ thread: publicThread(existing, view) });
   }
   if (folderId) await ownedFolder(d, userId, folderId);
   const stamp = new Date(d.now()).toISOString();
@@ -355,13 +396,13 @@ async function createThread(req: Request, userId: string, d: CoachDeps): Promise
       method: 'POST', query: `select=${THREAD_COLUMNS}`,
       body: { id, user_id: userId, title, title_source: title ? 'fallback' : 'none', folder_id: folderId, origin: 'app', created_at: stamp, updated_at: stamp },
     });
-    return Response.json({ thread: publicThread(row) });
+    return Response.json({ thread: publicThread(row, view) });
   } catch (err: any) {
     if (err?.status !== 409) throw err;
     // Lost a race with a message save or another device: the winner decides.
     const [row] = await d.rest.select('coach_threads', `id=eq.${id}&select=user_id,${THREAD_COLUMNS}`);
     if (!row || row.user_id !== userId) throw fail('thread_conflict', 409);
-    return Response.json({ thread: publicThread(row) });
+    return Response.json({ thread: publicThread(row, view) });
   }
 }
 

@@ -1,7 +1,7 @@
 // The context library (docs/COACH_MEMORY.md §4-§5): the manifest, search, thread excerpts and the RLM-style
 // recall (partition, one concurrent map wave, optional reduce, hard deadline), over the in-memory fake.
 import { assert, assertEquals } from 'jsr:@std/assert';
-import { orQuery } from '../_shared/coach_context.ts';
+import { orQuery, recallShare } from '../_shared/coach_context.ts';
 import { iso } from '../_shared/coach_llm.ts';
 import { type Harness, harness, type ModelCall, OTHER, reply, USER, uuidsIn } from './coach_fake.ts';
 
@@ -48,7 +48,7 @@ Deno.test('coach context: the manifest names what exists in camelCase, with no m
     id: current.id, title: 'Taper week', summary: 'The user is tapering.', summaryThrough: '2026-10-07T09:01:00.000Z',
     summaryMessages: 2, messageCount: 2, openLoops: ['Check HRV on Friday'],
   });
-  assertEquals(body.library.threadCount, 3, 'empty chats do not count');
+  assertEquals(body.library.threadCount, 2, 'earlier chats: neither empty chats nor the current one count');
   assertEquals([body.library.firstAt, body.library.lastAt], [iso(fuel.created_at), '2026-10-07T09:01:00.000Z']);
   assertEquals(body.library.recent, [
     { id: knee.id, title: 'Knee pain', lastMessageAt: '2026-10-06T09:01:00.000Z' },
@@ -104,6 +104,18 @@ Deno.test('coach context/search: ranked hits grouped by chat, blocked turns excl
   for (const bad of [{ from: '2026-02-31' }, { to: 'soon' }, { excludeThreadId: 'x' }]) assertEquals((await post(h, '/search', bad)).status, 400);
   assertEquals((await post(h, '/search', { query: 'knee' }, 'noop_other')).body.threads, []);
   assertEquals(h.model.calls.length, 0);
+});
+
+Deno.test('coach context/search: a query with no searchable words matches nothing instead of browsing recent chats', async () => {
+  const h = await harness();
+  for (let i = 0; i < 10; i++) seed(h, [['user', `Chat number ${i} about intervals`]], { title: `Chat ${i}`, summary: `Summary ${i}.` }, `2026-10-0${(i % 7) + 1}T09:00:00Z`);
+  const { body } = await post(h, '/search', { query: 'what did we do' });
+  assertEquals([body.terms, body.threads, body.hits, body.totalHits, body.months, body.noTerms], [[], [], [], 0, [], true]);
+  const rpc = h.db.rpcCalls.filter((c) => c.name === 'coach_search_v1').at(-1)!;
+  assertEquals(rpc.args.p_query, 'what did we do');
+  // An empty query still browses, and a real match has no flag.
+  assertEquals((await post(h, '/search', { days: 30 })).body.threads.length, 10);
+  assert(!('noTerms' in (await post(h, '/search', { query: 'intervals' })).body));
 });
 
 Deno.test('coach context/search: words that match most of a long history are dropped', async () => {
@@ -216,18 +228,38 @@ Deno.test('coach context/recall: at most four chunks of 10,000 characters, mappe
   }
   const { body } = await post(h, '/recall', { question: 'What did we say about ferritin?' });
   const maps = h.model.of('map');
-  assertEquals(maps.length, 4);
-  assertEquals(h.model.stats.maxInFlight, 4, 'one wave: every chunk at once');
+  // Each chat's share is sized for packing (4,999 characters for 5 to 8 chats), so two fit in a chunk and all six
+  // are read; the hits that did not fit their chat's share are reported through `truncated`.
+  assertEquals(maps.length, 3);
+  assertEquals(h.model.stats.maxInFlight, 3, 'one wave: every chunk at once');
   for (const m of maps) assert(excerpts(m).length <= 10_000, `${excerpts(m).length} characters`);
+  assertEquals(maps.map((m) => sections(m).length), [2, 2, 2]);
   assertEquals(body.status, 'answered');
   assertEquals(body.answer, 'In August the user planned a 16-week block; by September the long run was 32 km.');
-  assertEquals(body.coverage, { threadsMatched: 6, threadsExamined: 4, totalHits: 36, truncated: true });
-  assertEquals([body.examined.chunks, body.examined.subcalls], [4, 5]);
-  assertEquals(body.sources.length, 4);
+  assertEquals(body.coverage, { threadsMatched: 6, threadsExamined: 6, totalHits: 36, truncated: true });
+  assertEquals([body.examined.chunks, body.examined.subcalls], [3, 4]);
+  assertEquals(body.sources.length, 6);
   const [reduce] = h.model.of('reduce');
   assertEquals(reduce.body.max_tokens, 600);
   assert(reduce.user.includes('Notes:\n[Iron chat'));
-  assertEquals(h.db.usage.get(USER)?.utility_calls, 5);
+  assertEquals(h.db.usage.get(USER)?.utility_calls, 4);
+});
+
+Deno.test('coach context/recall: five matched chats whose sections the old share left at 5,000-7,600 characters are all read', async () => {
+  const h = await harness({ map: notesFor, reduce: { briefing: 'Ferritin came up in five chats.' } });
+  for (let i = 0; i < 5; i++) {
+    const turns: Turn[] = [];
+    for (let j = 0; j < 4; j++) turns.push(['user', `ferritin question ${j} ${'about iron stores '.repeat(16)}`], ['assistant', long('reply')]);
+    seed(h, turns, { title: `Iron chat ${i}`, summary: `The user tracked iron. ${'Notes on diet and training. '.repeat(40)}` },
+      `2026-09-${String(10 + i).padStart(2, '0')}T09:00:00Z`);
+  }
+  const { body } = await post(h, '/recall', { question: 'ferritin levels?' });
+  const maps = h.model.of('map');
+  assertEquals(body.coverage.threadsExamined, 5, 'none of the five is dropped');
+  assertEquals(body.coverage.threadsMatched, 5);
+  assert(maps.length <= 4 && maps.every((m) => excerpts(m).length <= 10_000));
+  for (const m of maps) for (const part of excerpts(m).split(/\n\n(?=## )/)) assert(part.length <= recallShare(5), `${part.length} characters`);
+  assertEquals([recallShare(1), recallShare(4), recallShare(5), recallShare(8), recallShare(9)], [10_000, 10_000, 4_999, 4_999, 3_332]);
 });
 
 Deno.test('coach context/recall: the hard deadline returns the notes gathered so far as partial', async () => {

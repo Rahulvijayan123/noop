@@ -168,6 +168,7 @@ function titleFor(question: string): string {
   if (/protein|vegetarian/i.test(question)) return 'Vegetarian Protein Ideas';
   if (/sleep/i.test(question)) return 'Sleep After Late Workouts';
   if (/swim/i.test(question)) return 'Weekly Swim Routine';
+  if (/\bbike\b|\bride\b/i.test(question)) return 'Fueling Long Bike Rides';
   if (/asthma/i.test(question)) return 'Running With Asthma';
   return 'Weekly Training Check';
 }
@@ -203,6 +204,16 @@ function curatorOps(userLines: string[], sanaLines: string[], saved: { ref: stri
     if (/\bvegetarian\b/i.test(text)) ops.push({ op: 'add', topic: 'nutrition', importance: 3, content: 'User is vegetarian' });
     if (/\bswim/i.test(text) && /tuesday/i.test(text)) ops.push({ op: 'add', topic: 'routine', importance: 3, content: 'User swims on Tuesdays' });
     if (/\basthma\b/i.test(text)) ops.push({ op: 'add', topic: 'health', importance: 4, content: 'User has mild asthma' });
+    if (/\bcycle to work\b/i.test(text)) ops.push({ op: 'add', topic: 'routine', importance: 3, content: 'User cycles to work on weekdays' });
+    if (/left knee (hurts|pain) on long runs/i.test(text)) {
+      ops.push({ op: 'add', topic: 'injury', importance: 4, content: 'User has left knee pain on long runs' });
+    }
+    // What the real model did in the simulator run: it updated the older knee memory to the physio's finding and
+    // left the copy Sana's save_memory tool had written in this chat beside it (the server folds the two).
+    const knee = saved.find((s) => /left knee pain/i.test(s.content));
+    if (/\bphysio\b/i.test(text) && /\bIT band\b/i.test(text) && knee) {
+      ops.push({ op: 'update', ref: knee.ref, content: 'User saw a physio for mild IT band irritation in the left knee, which no longer hurts' });
+    }
     const slept = /slept (\d+) hours last night/i.exec(text);
     // A passing state: the transient guard must drop it.
     if (slept) ops.push({ op: 'add', topic: 'sleep', importance: 2, content: `User slept ${slept[1]} hours last night` });
@@ -324,6 +335,8 @@ export function startScriptedUpstream(override?: (call: UpstreamCall) => Respons
   const calls: UpstreamCall[] = [];
   /** Passes whose next call fails with a provider error (each entry is used once). */
   const failNext: (Pass | 'chat')[] = [];
+  /** Work to run while a pass's next call is in flight, before it is answered (each entry is used once). */
+  const holdNext: { pass: Pass | 'chat'; work: (call: UpstreamCall) => Promise<void> }[] = [];
   const server = Deno.serve({ hostname: '127.0.0.1', port: 0, onListen() {} }, async (req) => {
     const body = await req.json().catch(() => null);
     if (!body || !Array.isArray(body.messages)) return Response.json({ error: 'bad request' }, { status: 400 });
@@ -337,6 +350,8 @@ export function startScriptedUpstream(override?: (call: UpstreamCall) => Respons
       failNext.splice(fault, 1);
       return Response.json({ error: { message: 'scripted provider fault' } }, { status: 503 });
     }
+    const hold = holdNext.findIndex((h) => h.pass === call.pass);
+    if (hold >= 0) await holdNext.splice(hold, 1)[0].work(call);
     const custom = override?.(call);
     if (custom instanceof Response) return custom;
     if (isChat) {
@@ -356,6 +371,8 @@ export function startScriptedUpstream(override?: (call: UpstreamCall) => Respons
   return {
     url, calls,
     failOnce: (pass: Pass | 'chat') => { failNext.push(pass); },
+    /** Runs `work` while the next `pass` call waits for its answer: something the user does mid-pass. */
+    duringNext: (pass: Pass | 'chat', work: (call: UpstreamCall) => Promise<void>) => { holdNext.push({ pass, work }); },
     of: (pass: Pass | 'chat') => calls.filter((c) => c.pass === pass),
     since: (mark: number) => calls.slice(mark),
     close: () => server.shutdown(),

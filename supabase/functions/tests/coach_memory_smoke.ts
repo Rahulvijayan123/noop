@@ -3,7 +3,9 @@
 // function as coach_memory_e2e_test.ts, but with the real upstream, seeds two invented conversations over HTTP
 // (no real account or data), and prints what the cheap model produced for each pass: titles, follow-ups,
 // curator ops with the resulting memories and summaries, a recall answer with its coverage, starter
-// suggestions, and per-pass latency with the utility token totals.
+// suggestions, and per-pass latency with the utility token totals. It ends with the follow-up from the
+// simulator run: a knee-pain chat, then a physio visit that Sana's save_memory tool records while the curator
+// already holds the older knee memory, and a check that no two active memories look like the same fact.
 //
 //   cd supabase/functions && set -a && . <path to .env> && set +a && \
 //     EDGE_TEST_ARTIFACTS=/tmp/edgeart DENO_DIR=/tmp/deno-cache deno run -A --no-lock tests/coach_memory_smoke.ts
@@ -14,6 +16,7 @@ import { startLocalPostgres, USER_A } from './local_postgres.ts';
 import { coachConfig } from '../_shared/coach.ts';
 import { coachClient, readSse, seedInstallation, serveCoach, watchRest } from './coach_e2e_support.ts';
 import { passOf } from './coach_fake.ts';
+import { likelyDuplicates } from '../_shared/coach_llm.ts';
 
 const key = (Deno.env.get('FIREWORKS_AI_API_KEY') ?? '').trim();
 if (!key) {
@@ -90,6 +93,8 @@ const T1 = crypto.randomUUID();
 const T2 = crypto.randomUUID();
 const T3 = crypto.randomUUID();
 const T4 = crypto.randomUUID();
+const K1 = crypto.randomUUID();
+const K2 = crypto.randomUUID();
 const TOKEN = `noop_smoke_${crypto.randomUUID().replaceAll('-', '')}`;
 
 type Turn = { q: string; a?: string };
@@ -119,6 +124,16 @@ const THREAD_3: Turn[] = [
     a: 'Yes, carefully. Keep one tempo and add a short interval session on flat ground, at least 48 hours apart, and keep the '
       + 'sixth day truly easy. If the Achilles stiffens the next morning, drop the intervals for a week.' },
 ];
+
+// The simulator run's follow-up: knee pain first, then the physio's finding. In the app Sana's save_memory tool
+// wrote the finding while answering, and the curator then updated the older knee memory and left the tool's copy.
+const KNEE_1: Turn[] = [
+  { q: 'My left knee has been hurting on the outside during long runs for two weeks. Should I cut my mileage?' },
+];
+const KNEE_2: Turn[] = [
+  { q: "I saw a physio today: it's mild IT band irritation in my left knee, and it no longer hurts. Can I run hills again this week?" },
+];
+const KNEE_TOOL_SAVE = 'User saw a physio: mild IT band irritation in the left knee, which no longer hurts';
 
 const header = (s: string) => console.log(`\n=== ${s} ${'='.repeat(Math.max(0, 90 - s.length))}`);
 const show = (label: string, v: unknown) => console.log(`${label}:`, typeof v === 'string' ? v : JSON.stringify(v, null, 2));
@@ -226,6 +241,31 @@ try {
   show('suggestions', starters.body);
   const cached = await timed('POST suggestions', api.post('suggestions', { state, fallback, locale: 'en-US' }));
   show('second call source', cached.body?.source);
+
+  header('Physio follow-up: a save_memory row next to the curator\'s copy (the simulator run)');
+  const hk1: { role: string; content: string }[] = [];
+  const k1 = await runTurn(K1, KNEE_1[0], NOW - 5 * DAY, hk1, 'My left knee has been hurting');
+  show('answer (knee pain)', k1);
+  show('maintain knee chat', (await timed('POST threads/:id/maintain', api.post(`threads/${K1}/maintain`, {}))).body);
+  const k2 = await runTurn(K2, KNEE_2[0], NOW - 20 * MINUTE, [], 'I saw a physio today');
+  show('answer (physio)', k2);
+  // What Sana's save_memory tool did during that answer.
+  const tool = await timed('POST memories', api.post('memories', { content: KNEE_TOOL_SAVE, topic: 'injury', importance: 4, threadId: K2 }));
+  show('save_memory (tool)', tool.body);
+  show('maintain physio chat', (await timed('POST threads/:id/maintain', api.post(`threads/${K2}/maintain`, {}))).body);
+  const kneeEvents = JSON.parse(await db.sql(`select coalesce(json_agg(json_build_object('op', op, 'actor', actor,
+      'content', coalesce(after->>'content', before->>'content'), 'reason', reason) order by id), '[]'::json)
+    from coach_memory_events where thread_id = '${K2}' or (actor = 'consolidator' and created_at > now() - interval '5 minutes')`));
+  show('memory ops for the physio chat (curator and consolidator)', kneeEvents);
+  const after = (await api.get('memories?limit=200')).body?.memories ?? [];
+  show('memories after the physio chat', after.map((m: any) => `[${m.topic}, ${m.importance}, ${m.source}] ${m.content}`));
+  const pairs: string[] = [];
+  for (const [i, a] of after.entries()) {
+    for (const b of after.slice(i + 1)) if (likelyDuplicates(a, b)) pairs.push(`"${a.content}" ~ "${b.content}"`);
+  }
+  const knee = after.filter((m: any) => /\bknee\b|IT band/i.test(m.content));
+  console.log(`knee memories: ${knee.length}; near-duplicate pairs: ${pairs.length ? pairs.join(' | ') : 'none'}`);
+  console.log(pairs.length || knee.length !== 1 ? 'RESULT: the memory set still holds a near-duplicate' : 'RESULT: one knee memory, no near-duplicates');
 
   header('Per-pass latency (upstream round trip) and tokens');
   for (const [pass, s] of stats) {

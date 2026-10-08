@@ -6,13 +6,14 @@
 // trusted as written: titles and lines are sanitised, thread and memory references are short refs mapped back
 // here, and memory ops pass the §6 guards before coach_thread_publish_v1 applies them with the summary.
 import {
-  callUtility, type ChatTurn, cleanLocale, clip, collapse, type CoachDeps, day, enc, fail, fallbackTitle,
-  findNearDuplicate, guardMemoryContent, type GuardContext, isObject, languageName, lineKey, memoryTokens,
-  memoryTopic, mentions, offLimits, readJson, readOptionalJson, Refs, sanitizeLine, sanitizeTitle, SMALL_BODY_BYTES,
-  takeUtilityUnits, tokenSet, tokensNearMatch, tsKey, uuidOf, jaccard,
+  callUtility, type ChatTurn, cleanLocale, clip, collapse, type CoachDeps, covers, day, enc, fail, fallbackTitle,
+  findNearDuplicate, guardMemoryContent, type GuardContext, isObject, isSensitive, languageName, likelyDuplicates,
+  lineKey, MEMORY_TOPICS, memoryTokens, memoryTopic, mentions, METRIC_READING, offLimits, quoted, readJson,
+  readOptionalJson, Refs, sameFamily, sanitizeLine, sanitizeTitle, SMALL_BODY_BYTES, takeUtilityUnits, tokenSet,
+  tokensNearMatch, TRANSIENT, tsKey, uuidOf, jaccard,
 } from './coach_llm.ts';
-import { activeMemories, applyMemoryOps } from './coach_memory.ts';
-import { loadThread } from './coach_store.ts';
+import { activeMemories, applyMemoryOps, versionGuard } from './coach_memory.ts';
+import { loadThread, QUIET_MS, summaryDue } from './coach_store.ts';
 
 const REGENERABLE = new Set(['none', 'fallback', 'legacy']);
 
@@ -167,6 +168,9 @@ export async function followupsRoute(req: Request, userId: string, d: CoachDeps)
   const memories = (Array.isArray(ranked?.memories) ? ranked.memories : []).slice(0, 4);
   const minor = ageBelow18(profile?.[0]?.date_of_birth, d.now());
   const wantTitle = body?.wantTitle === true && !!thread && REGENERABLE.has(thread.title_source);
+  // The first answer's title was asked for before the chat's first save landed (a slow or retried outbox flush):
+  // the phone asks POST threads/:id/title once the rows are saved, instead of keeping the first-words title.
+  const titlePending = body?.wantTitle === true && !!threadId && !thread;
 
   const raw = await callUtility(d, userId, 'followups', [
     { role: 'system', content: followUpsSystem(language, minor, wantTitle) },
@@ -183,7 +187,7 @@ export async function followupsRoute(req: Request, userId: string, d: CoachDeps)
   let followUps = validFollowUps(raw?.follow_ups ?? raw?.followUps, question, asked);
   // The keyword fallback is English; other languages get none and the phone shows its own.
   if (!followUps.length && locale.toLowerCase().startsWith('en')) followUps = keywordFollowUps(question, answer, asked);
-  const result: { followUps: string[]; title?: string } = { followUps };
+  const result: { followUps: string[]; title?: string; titlePending?: boolean } = { followUps, ...(titlePending ? { titlePending } : {}) };
   if (wantTitle && thread) {
     let title = sanitizeTitle(raw?.title);
     if (!title) {
@@ -361,7 +365,10 @@ const SUMMARY_CHARS = 1_200;
 
 export interface MaintainResult { status: 'done' | 'skipped' | 'busy'; summarized: boolean; memoryOps: number; consolidated: boolean }
 
-interface PoolMemory { id: string; content: string; topic: string; importance: number; source?: string; source_thread_id?: string | null; pending?: boolean }
+interface PoolMemory {
+  id: string; content: string; topic: string; importance: number; source?: string; source_thread_id?: string | null;
+  created_at?: string; updated_at?: string; version?: number; pending?: boolean;
+}
 
 export async function maintainRoute(req: Request, userId: string, rawId: string, d: CoachDeps): Promise<Response> {
   const threadId = uuidOf(rawId);
@@ -406,7 +413,12 @@ export function maintenanceBatches(rows: any[]): any[][] {
   return batches.slice(0, MAX_BATCHES);
 }
 
-function curatorPrompt(o: { summary: string | null; batch: any[]; candidates: PoolMemory[]; refs: Refs; wantSummary: boolean; wantMemory: boolean }): ChatTurn[] {
+/** A memory the assistant's save_memory tool wrote during this chat. */
+const savedHere = (m: PoolMemory, threadId: string) => m.source === 'tool' && m.source_thread_id === threadId;
+
+function curatorPrompt(o: {
+  summary: string | null; batch: any[]; candidates: PoolMemory[]; refs: Refs; wantSummary: boolean; wantMemory: boolean; threadId: string;
+}): ChatTurn[] {
   const keys = [
     o.wantSummary ? '"summary": "...", "topics": ["..."], "open_loops": ["..."]' : '',
     o.wantMemory ? '"memory_ops": [...]' : '',
@@ -428,16 +440,24 @@ function curatorPrompt(o: { summary: string | null; batch: any[]; candidates: Po
     rules.push(
       'memory_ops: at most 4 of {"op":"add","topic":"goal|injury|preference|achievement|lifestyle|routine|health|training|nutrition|sleep|general",'
         + '"importance":1-5,"content":"..."}, {"op":"update","ref":"m3","content":"...","importance":1-5}, {"op":"confirm","ref":"m2"}, '
-        + '{"op":"retire","ref":"m5","reason":"..."}.',
+        + '{"op":"retire","ref":"m5","reason":"..."}, {"op":"merge","refs":["m1","m4"],"content":"...","topic":"...","importance":1-5}.',
       'Memory rules: store only durable facts the USER stated about themselves (goals, injuries, conditions, preferences, routines, '
         + "equipment, schedule, achievements). Never store Sana's advice, daily metric readings or passing states (how they feel today, "
         + 'last night\'s sleep). Content is one fact in the third person ("User ..."), at most 200 characters, with an absolute date '
         + '(YYYY-MM-DD) for anything time-bound (a race, when an injury started) and no date on a lasting fact. '
         + 'If a saved memory already says it, confirm or update that memory instead of adding. Use retire only when a user message '
         + 'here contradicts the memory. No ops is the preferred outcome: return [] unless the user said something durable and new.',
+      'Memories listed as saved during this chat were written by Sana while it answered. When one of them states the same fact '
+        + 'as another saved memory, or updates it, merge them: one merge op with both refs and the combined fact (the newest '
+        + 'information, every date and figure kept). Never update one copy and leave the other.',
     );
   }
-  const memoryLines = o.candidates.map((m) => `${o.refs.ref(m.id)} [${m.topic}, importance ${m.importance}] ${clip(collapse(m.content), 300)}`);
+  const line = (m: PoolMemory) => `${o.refs.ref(m.id)} [${m.topic}, importance ${m.importance}] ${clip(collapse(m.content), 300)}`;
+  const here = o.candidates.filter((m) => savedHere(m, o.threadId));
+  const others = o.candidates.filter((m) => !savedHere(m, o.threadId));
+  const memoryLines = here.length
+    ? ['Saved during this chat:', ...here.map(line), ...(others.length ? ['Saved earlier:', ...others.map(line)] : [])]
+    : others.map(line);
   const user = [
     o.wantSummary ? `Summary so far: ${o.summary ? clip(o.summary, 2400) : '(none yet)'}` : '',
     o.wantMemory ? `Saved memories (from all of the user's chats; for memory_ops only):\n${memoryLines.join('\n') || '(none)'}` : '',
@@ -463,14 +483,80 @@ const cleanList = (v: unknown, max: number, len: number) =>
   (Array.isArray(v) ? v : []).map((x) => collapse(typeof x === 'string' ? x : isObject(x) ? x.text : ''))
     .filter(Boolean).slice(0, max).map((s) => clip(s, len));
 
+const SAFETY_TOPICS = new Set(['injury', 'health']);
+const isSafety = (m: any) => SAFETY_TOPICS.has(m?.topic) && Number(m?.importance ?? 3) >= 4;
+
+/**
+ * The topic and importance of a merged row. Importance is never below its strongest member's, and a safety
+ * memory (injury or health, importance 4+) keeps its topic, so a merge can never unpin it from the prompt. An
+ * unknown topic keeps the kept row's.
+ */
+export function mergedAttributes(op: any, members: any[], keep: any): { topic: string; importance: number } {
+  const strongest = Math.max(...members.map((m) => Number(m.importance ?? 3)));
+  const importance = Math.max(importanceOf(op?.importance, strongest), strongest);
+  const asked = typeof op?.topic === 'string' ? op.topic.trim().toLowerCase() : '';
+  const wanted = MEMORY_TOPICS.has(asked) ? asked : memoryTopic(keep.topic);
+  const safety = members.filter(isSafety).sort((a, b) => Number(b.importance) - Number(a.importance))[0];
+  return { topic: safety && !SAFETY_TOPICS.has(wanted) ? safety.topic : wanted, importance };
+}
+
+/** The version guard of a merge: every member at the version it was read at (coach_memory_apply_v1 `versions`). */
+function versionsOf(members: any[]): { versions?: Record<string, number> } {
+  const known = members.filter((m) => Number.isInteger(Number(m.version)) && m.version != null);
+  return known.length === members.length ? { versions: Object.fromEntries(known.map((m) => [m.id, Number(m.version)])) } : {};
+}
+
+const oldestFirst = (a: any, b: any) => (tsKey(a.created_at) - tsKey(b.created_at)) || String(a.id).localeCompare(String(b.id));
+
+/** A merge into the oldest member, with its guards. */
+function mergeOp(members: any[], content: string, op: any = {}) {
+  const [keep, ...others] = [...members].sort(oldestFirst);
+  const { topic, importance } = mergedAttributes(op, members, keep);
+  return { keep, others, topic, importance, op: { op: 'merge', keep_id: keep.id, ids: others.map((m) => m.id), content, topic, importance, ...versionsOf(members) } };
+}
+
+/** A merged text restates its members and what the user said in this batch, and is never a passing state. */
+function mergeAllowed(content: string, members: PoolMemory[], guard: GuardContext): boolean {
+  const own = memoryTokens(content);
+  if (!own.length) return false;
+  const pooled = new Set([...members.flatMap((m) => memoryTokens(m.content)), ...guard.userTokens]);
+  if (own.filter((t) => pooled.has(t)).length / own.length < 0.8) return false;
+  if (TRANSIENT.test(content) || METRIC_READING.test(content)) return false;
+  return !isSensitive(content) || members.some((m) => isSensitive(m.content)) || /\bremember\b/i.test(guard.userText);
+}
+
 /**
  * The curator's ops, resolved against this batch's refs and held to the §6 guards. Adds that near-duplicate an
- * existing row become a confirm or an update of it (number-aware), so the store never gains a second copy.
+ * existing row become a confirm or an update of it (number-aware), so the store never gains a second copy. A
+ * `merge` folds duplicates (typically a memory the save_memory tool wrote in this chat) into the oldest row; and an
+ * update whose new text fully restates a memory saved in this chat (or that is itself such a memory, restating an
+ * older one) becomes that merge too, so one fact never ends up in two rows. Updates, retires and merges carry the
+ * version each row was read at, so a row another writer changed or forgot meanwhile is left alone (`stale`).
  */
-export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], guard: GuardContext): any[] {
+export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], guard: GuardContext, threadId: string | null = null): any[] {
   const out: any[] = [];
   const touched = new Set<string>();
   const byId = (id: string | undefined) => (id ? pool.find((p) => p.id === id && !p.pending) : undefined);
+  const bump = (row: PoolMemory) => { if (row.version != null) row.version = Number(row.version) + 1; };
+  const merge = (members: PoolMemory[], content: string, op: any = {}) => {
+    const m = mergeOp(members, content, op);
+    out.push(m.op);
+    Object.assign(m.keep, { content, topic: m.topic, importance: m.importance });
+    bump(m.keep);
+    for (const r of members) touched.add(r.id);
+    for (const r of m.others) pool.splice(pool.indexOf(r), 1);
+  };
+  // An update of `row` to `content`, or a merge when that content also restates a memory saved in this chat.
+  const update = (row: PoolMemory, content: string, importance: number | null) => {
+    const fold = threadId ? pool.find((p) => !p.pending && p.id !== row.id && !touched.has(p.id) && sameFamily(p.topic, row.topic)
+      && (savedHere(p, threadId) || savedHere(row, threadId)) && covers(content, p.content)) : undefined;
+    if (fold) return merge([row, fold], content, importance != null ? { importance } : {});
+    out.push({ op: 'update', id: row.id, content, ...(importance != null ? { importance } : {}), ...versionGuard(row) });
+    row.content = content;
+    if (importance != null) row.importance = importance;
+    bump(row);
+    touched.add(row.id);
+  };
   for (const op of Array.isArray(raw) ? raw.slice(0, 16) : []) {
     if (out.length >= MAX_OPS) break;
     if (!isObject(op)) continue;
@@ -483,12 +569,11 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
       if (dup) {
         const row = dup.row;
         if (row.pending || touched.has(row.id)) continue;
-        touched.add(row.id);
         if (dup.kind === 'supersede' || dup.kind === 'longer') {
-          out.push({ op: 'update', id: row.id, content, importance: Math.max(row.importance, importance) });
-          row.content = content;
+          update(row, content, Math.max(row.importance, importance));
         } else {
           out.push({ op: 'confirm', id: row.id });
+          touched.add(row.id);
         }
         continue;
       }
@@ -505,12 +590,22 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
       if (sameText && (importance == null || importance === row.importance)) {
         if (!mentions(row.content, guard.userTokens)) continue;
         out.push({ op: 'confirm', id: row.id });
+        touched.add(row.id);
+      } else if (content && !sameText) {
+        update(row, content, importance);
       } else {
-        out.push({ op: 'update', id: row.id, ...(content && !sameText ? { content } : {}), ...(importance != null ? { importance } : {}) });
-        if (content) row.content = content;
+        out.push({ op: 'update', id: row.id, ...(importance != null ? { importance } : {}), ...versionGuard(row) });
         if (importance != null) row.importance = importance;
+        bump(row);
+        touched.add(row.id);
       }
-      touched.add(row.id);
+    } else if (op.op === 'merge') {
+      const ids = [...new Set((Array.isArray(op.refs) ? op.refs : []).map((r: unknown) => refs.resolve(r)))];
+      const members = ids.map((id) => byId(id as string | undefined)).filter((m): m is PoolMemory => !!m && !touched.has(m.id));
+      if (members.length < 2 || members.length !== ids.length) continue;
+      const content = cleanMemory(op.content);
+      if (!content || !mergeAllowed(content, members, guard)) continue;
+      merge(members, content, op);
     } else if (op.op === 'confirm') {
       const row = byId(refs.resolve(op.ref));
       if (!row || touched.has(row.id) || !mentions(row.content, guard.userTokens)) continue;
@@ -520,7 +615,7 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
       // Retiring needs a contradiction in the user's own words: at least the memory's subject must come up.
       const row = byId(refs.resolve(op.ref));
       if (!row || touched.has(row.id) || !mentions(row.content, guard.userTokens)) continue;
-      out.push({ op: 'retire', id: row.id, reason: clip(collapse(op.reason), 120) || 'contradicted', tokens: memoryTokens(row.content) });
+      out.push({ op: 'retire', id: row.id, reason: clip(collapse(op.reason), 120) || 'contradicted', tokens: memoryTokens(row.content), ...versionGuard(row) });
       touched.add(row.id);
       pool.splice(pool.indexOf(row), 1);
     }
@@ -597,18 +692,25 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
       return patch;
     };
 
-    // 3. Memory ops on any new user message; the summary on 4 new messages, or 2 when there is none yet.
+    // 3. Memory ops on any new user message; the summary on 4 new messages, 2 when there is none yet, or whatever
+    // is left once the chat has been quiet for 10 minutes (so the last turns of a finished chat are folded too).
     const wantMemory = rows.some(newForMemory);
     const pending = rows.filter(newForSummary).length;
-    const wantSummary = pending >= 4 || (!claim.summary && pending >= 2);
+    const lastAt: unknown = claim.last_message_at ?? loaded[loaded.length - 1]?.created_at;
+    const quiet = Number.isFinite(tsKey(lastAt)) && d.now() * 1000 - tsKey(lastAt) >= QUIET_MS * 1000;
+    const wantSummary = summaryDue(pending, Boolean(claim.summary), quiet);
     if (!wantMemory && !wantSummary) {
-      await publish(cursorPatch(overBlocked(null), null), []);
+      // Nothing new from the user to mine: the memory cursor steps over what was read (Sana's replies, blocked
+      // turns, messages older than the forget-all floor), so `needsMaintenance` stops offering the chat until
+      // something new arrives or it goes quiet with turns left to fold.
+      await publish(cursorPatch(overBlocked(null), loaded.length ? loaded[loaded.length - 1].created_at : null), []);
       return idle('skipped');
     }
 
     const pool: PoolMemory[] = wantMemory ? (await activeMemories(d, userId)).map((r: any) => ({
       id: r.id, content: r.content, topic: r.topic, importance: Number(r.importance ?? 3), source: r.source,
-      source_thread_id: r.source_thread_id ?? null,
+      source_thread_id: r.source_thread_id ?? null, created_at: r.created_at, updated_at: r.updated_at,
+      ...(r.version != null ? { version: Number(r.version) } : {}),
     })) : [];
     const tombstones = wantMemory ? await loadTombstones(d, userId) : [];
     let summary: string | null = claim.summary ?? null;
@@ -633,7 +735,7 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
       const refs = new Refs('m');
       candidates.forEach((c) => refs.ref(c.id));
       const raw = await callUtility(d, userId, 'curator',
-        curatorPrompt({ summary, batch, candidates, refs, wantSummary: batchSummary, wantMemory: batchMemory }));
+        curatorPrompt({ summary, batch, candidates, refs, wantSummary: batchSummary, wantMemory: batchMemory, threadId }));
       if (!raw) break;
       if (batchSummary) {
         const next = cleanSummary(raw.summary);
@@ -644,7 +746,7 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
         summaryThrough = end;
       }
       if (batchMemory) {
-        ops.push(...resolveCuratorOps(raw.memory_ops, refs, pool, { userTokens: tokenSet(userText), userText, tombstones }));
+        ops.push(...resolveCuratorOps(raw.memory_ops, refs, pool, { userTokens: tokenSet(userText), userText, tombstones }, threadId));
       }
       curatedThrough = end;
     }
@@ -660,8 +762,14 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
     }
     const result = await publish(patch, ops);
     if (result?.applied !== true) return idle('busy');
-    const memoryOps = (Array.isArray(result.ops) ? result.ops : []).filter((o: any) => o?.applied && o.op !== 'evict').length;
-    const consolidated = await consolidate(d, userId);
+    // memory_reset: a forget or forget-all landed while this pass ran. Publish applied the summary but none of the
+    // ops and kept curated_through, so the next pass mines those messages again against the new floor and tombstones.
+    const reset = result.reason === 'memory_reset';
+    const memoryOps = reset ? 0 : (Array.isArray(result.ops) ? result.ops : []).filter((o: any) => o?.applied && o.op !== 'evict').length;
+    // 9. The periodic consolidation when it is due; otherwise, after memory work, a targeted pass over any pair of
+    // memories that now look like one fact told twice (a tool save next to the curator's copy, say).
+    const full = await consolidate(d, userId);
+    const consolidated = full ?? (wantMemory && !reset ? await dedupePairs(d, userId) : false);
     return { status: 'done', summarized: Boolean(summaryThrough), memoryOps, consolidated };
   } finally {
     if (!published) {
@@ -677,9 +785,13 @@ const consolidationSystem = () => [
   'Reply with JSON only: {"ops": [...]} with at most 12 of {"op":"merge","refs":["m1","m4"],"content":"...","topic":"...","importance":1-5} '
     + 'and {"op":"retire","ref":"m7","reason":"superseded|duplicate"}.',
   'merge two or more memories that state the same fact or one fact in pieces; content is the combined fact in the third person '
-    + '("User ..."), at most 200 characters, keeping every date and figure. retire a memory only when another memory says the same '
-    + 'or replaces it with newer information. Never invent facts. No ops is fine when the memory is already tidy.',
+    + '("User ..."), at most 200 characters, keeping every date and figure, the highest importance and an injury or health topic. '
+    + 'retire a memory only when another memory says the same or replaces it with newer information. Never invent facts. '
+    + 'No ops is fine when the memory is already tidy.',
 ].join('\n');
+
+const DEDUPE_NOTE = 'These memories were picked because some of them look alike. Merge the ones that state the same fact (or one fact '
+  + 'in pieces) and leave the others alone; they may be different facts that only share words.';
 
 export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): any[] {
   const out: any[] = [];
@@ -691,15 +803,14 @@ export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): 
       const ids = [...new Set((Array.isArray(op.refs) ? op.refs : []).map((r: unknown) => refs.resolve(r)).filter((id: unknown): id is string => !!id))];
       if (ids.length < 2 || ids.some((id) => used.has(id))) continue;
       const members = ids.map((id) => byId.get(id)).filter(Boolean);
+      if (members.length < 2) continue;
       const content = cleanMemory(op.content);
       if (!content) continue;
       // The merged text may only restate its members.
       const pooled = new Set(members.flatMap((m: any) => memoryTokens(m.content)));
       const own = memoryTokens(content);
       if (!own.length || own.filter((t) => pooled.has(t)).length / own.length < 0.6) continue;
-      const [keep, ...others] = [...members].sort((a: any, b: any) => (tsKey(a.created_at) - tsKey(b.created_at)) || String(a.id).localeCompare(String(b.id)));
-      const importance = importanceOf(op.importance, Math.max(...members.map((m: any) => Number(m.importance ?? 3))));
-      out.push({ op: 'merge', keep_id: keep.id, ids: others.map((m: any) => m.id), content, topic: memoryTopic(op.topic ?? keep.topic), importance });
+      out.push(mergeOp(members, content, op).op);
       ids.forEach((id) => used.add(id));
     } else if (op.op === 'retire') {
       const id = refs.resolve(op.ref);
@@ -709,24 +820,46 @@ export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): 
       const mine = tokenSet(row.content);
       const covered = rows.some((r) => r.id !== row.id && !used.has(r.id) && tokensNearMatch(mine, tokenSet(r.content)));
       if (!covered) continue;
-      out.push({ op: 'retire', id: row.id, reason: op.reason === 'superseded' ? 'superseded' : 'duplicate', tokens: [...mine] });
+      out.push({ op: 'retire', id: row.id, reason: op.reason === 'superseded' ? 'superseded' : 'duplicate', tokens: [...mine], ...versionGuard(row) });
       used.add(row.id);
     }
   }
   return out;
 }
 
-async function consolidate(d: CoachDeps, userId: string): Promise<boolean> {
+const memoryLine = (refs: Refs) => (r: any) =>
+  `${refs.ref(r.id)} [${r.topic}, importance ${r.importance}, ${day(r.created_at)}] ${clip(collapse(r.content), 300)}`;
+
+/** Re-reviewing the same memories gains nothing: within 6 h of the last pass it takes 8 new or changed ones. */
+const CONSOLIDATION_GAP_MS = 6 * 3_600_000;
+const CONSOLIDATION_GROWTH = 8;
+
+/**
+ * Whether the count-based pass may be claimed now. coach_consolidation_claim_v1 claims above 120 active memories
+ * however recent the last pass was, so on its own a user near the 200 cap would get a full pass after every turn.
+ */
+async function consolidationDue(d: CoachDeps, userId: string): Promise<boolean> {
+  const [state] = await d.rest.select('coach_user_state', `user_id=eq.${userId}&select=consolidated_at`);
+  const at = state?.consolidated_at;
+  if (typeof at !== 'string' || !(d.now() - Date.parse(at) < CONSOLIDATION_GAP_MS)) return true;
+  const since = enc(quoted(at));
+  const changed = await d.rest.select('coach_memory_items',
+    `user_id=eq.${userId}&retired_at=is.null&or=(created_at.gt.${since},updated_at.gt.${since})&select=id&limit=${CONSOLIDATION_GROWTH}`);
+  return changed.length >= CONSOLIDATION_GROWTH;
+}
+
+/** The count-based pass: true when it ran, false when it was claimed but failed, null when it was not due. */
+async function consolidate(d: CoachDeps, userId: string): Promise<boolean | null> {
   try {
-    if ((await d.rest.rpc('coach_consolidation_claim_v1', { p_user: userId, p_lease_seconds: LEASE_SECONDS })) !== true) return false;
+    if (!(await consolidationDue(d, userId))) return null;
+    if ((await d.rest.rpc('coach_consolidation_claim_v1', { p_user: userId, p_lease_seconds: LEASE_SECONDS })) !== true) return null;
     // Without budget the lease simply expires and a later pass tries again.
     if (!(await takeUtilityUnits(d, userId, 1))) return false;
     const rows = await activeMemories(d, userId, 200);
     const refs = new Refs('m');
-    const lines = rows.map((r: any) => `${refs.ref(r.id)} [${r.topic}, importance ${r.importance}, ${day(r.created_at)}] ${clip(collapse(r.content), 300)}`);
     const raw = await callUtility(d, userId, 'consolidation', [
       { role: 'system', content: consolidationSystem() },
-      { role: 'user', content: `Memories:\n${lines.join('\n')}` },
+      { role: 'user', content: `Memories:\n${rows.map(memoryLine(refs)).join('\n')}` },
     ], { prepaid: true });
     // A failed pass still closes the lease, so a broken reply is not retried on every maintenance call.
     const ops = raw ? resolveConsolidationOps(raw.ops, refs, rows) : [];
@@ -737,3 +870,58 @@ async function consolidate(d: CoachDeps, userId: string): Promise<boolean> {
   }
 }
 
+const DEDUPE_WINDOW_MS = 30 * 60_000;
+const DEDUPE_MAX_ROWS = 12;
+
+/** The members of every pair of active memories that look like duplicates (`likelyDuplicates`) with a fresh member, at most `max` rows. */
+export function duplicatePairs(rows: any[], fresh: (m: any) => boolean, max = DEDUPE_MAX_ROWS): any[] {
+  const picked = new Map<string, any>();
+  const recent = rows.filter(fresh);
+  for (const a of recent) {
+    for (const b of rows) {
+      if (a.id === b.id || (picked.has(a.id) && picked.has(b.id)) || !likelyDuplicates(a, b)) continue;
+      if (picked.size + (picked.has(a.id) ? 0 : 1) + (picked.has(b.id) ? 0 : 1) > max) continue;
+      picked.set(a.id, a);
+      picked.set(b.id, b);
+    }
+  }
+  return [...picked.values()];
+}
+
+/**
+ * The targeted consolidation (separate from the count-based one): when a maintenance pass leaves two memories that
+ * look like one fact, the cheap model sees just those and may merge them. At most once per 30 minutes per user: the
+ * pass holds coach_user_state.consolidation_until for that long (the count-based claim waits for it too). Only pairs
+ * with a member written since the last review are offered, so a pair the model left alone is not offered again; the
+ * last review is the last full pass (`consolidated_at`) or the start of the last targeted one (its lease minus 30
+ * minutes), so a pair that forms while the lease is held is still reviewed by the next pass.
+ */
+async function dedupePairs(d: CoachDeps, userId: string): Promise<boolean> {
+  try {
+    const [state] = await d.rest.select('coach_user_state', `user_id=eq.${userId}&select=consolidated_at,consolidation_until`);
+    const until = tsKey(state?.consolidation_until);
+    if (until > d.now() * 1000) return false;
+    const reviewed = Math.max(tsKey(state?.consolidated_at) || -Infinity, Number.isFinite(until) ? until - DEDUPE_WINDOW_MS * 1000 : -Infinity);
+    const rows = await activeMemories(d, userId, 200);
+    const fresh = (m: any) => Math.max(tsKey(m.created_at) || -Infinity, tsKey(m.updated_at) || -Infinity) > reviewed;
+    const picked = duplicatePairs(rows, fresh);
+    if (!picked.length) return false;
+    const stamp = new Date(d.now()).toISOString();
+    await d.rest.upsert('coach_user_state', { user_id: userId }, { onConflict: 'user_id', prefer: 'resolution=ignore-duplicates,return=minimal' });
+    const leased = await d.rest.patch('coach_user_state',
+      { consolidation_until: new Date(d.now() + DEDUPE_WINDOW_MS).toISOString(), updated_at: stamp },
+      `user_id=eq.${userId}&or=(consolidation_until.is.null,consolidation_until.lte.${enc(quoted(stamp))})&select=user_id`);
+    if (!Array.isArray(leased) || !leased.length) return false;
+    const refs = new Refs('m');
+    const raw = await callUtility(d, userId, 'consolidation', [
+      { role: 'system', content: `${consolidationSystem()}\n${DEDUPE_NOTE}` },
+      { role: 'user', content: `Memories:\n${picked.map(memoryLine(refs)).join('\n')}` },
+    ]);
+    if (!raw) return false;
+    const ops = resolveConsolidationOps(raw.ops, refs, picked);
+    if (ops.length) await applyMemoryOps(d, userId, ops, 'consolidator');
+    return true;
+  } catch {
+    return false;
+  }
+}

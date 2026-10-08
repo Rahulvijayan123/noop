@@ -310,20 +310,29 @@ function stem(w: string): string {
   return s;
 }
 
-/** A number or date token: anything with a digit, or a month name. */
-export const isFigureToken = (t: string) => /[0-9]/.test(t) || MONTHS.has(t) || t === 'may';
+// A distance or event marker ("5k", "10km", "400m", "26.2mi") names what a fact is about, so it counts as a
+// word: "5k personal best" and "10k personal best" are two facts, not one whose figure changed. Other units
+// ("100kg", "3x", "6am", "2nd") are measurements and stay figures.
+const SUBJECT_FIGURE = /^[0-9]+(?:[.,][0-9]+)?(?:k|km|mi|m)$/;
+
+/** A number or date token: anything with a digit (except a distance like "5k"), or a month name. */
+export const isFigureToken = (t: string) => !SUBJECT_FIGURE.test(t) && (/[0-9]/.test(t) || MONTHS.has(t) || t === 'may');
 
 /**
  * Normalised tokens: NFKC, lowercase, words of 3+ characters minus stop words with light stemming, and
- * every number and date token whatever its length ("5", "10:30", "2026-10-07", "april").
+ * every number and date token whatever its length ("5", "10:30", "2026-10-07", "april"). A unit written
+ * against its number stays on it ("10k", "400m", "100kg"), and "half marathon" is one word, so neither
+ * distance reads as the other.
  */
 export function memoryTokens(text: unknown): string[] {
   if (typeof text !== 'string') return [];
-  const norm = text.slice(0, 4000).normalize('NFKC').toLowerCase().replace(/n[’']t\b/g, ' not');
-  const raw = norm.match(/[0-9]+(?:[./:-][0-9]+)*|\p{L}+/gu) ?? [];
+  const norm = text.slice(0, 4000).normalize('NFKC').toLowerCase().replace(/n[’']t\b/g, ' not')
+    .replace(/\b(half|ultra)[\s-]+marathon/g, '$1marathon');
+  const raw = norm.match(/[0-9]+(?:[.,:/-][0-9]+)*(?:[a-z]{1,3}(?!\p{L}))?|\p{L}+/gu) ?? [];
   const out = new Set<string>();
   raw.forEach((w, i) => {
-    if (/[0-9]/.test(w) || MONTHS.has(w)) out.add(w);
+    if (/[0-9]/.test(w)) out.add(w.replace(/^([0-9]+(?:[.,][0-9]+)?(?:k|km))s$/, '$1'));
+    else if (MONTHS.has(w)) out.add(w);
     // "may" is a month only next to a number ("3 May", "May 12").
     else if (w === 'may') { if (/[0-9]/.test(raw[i - 1] ?? '') || /[0-9]/.test(raw[i + 1] ?? '')) out.add(w); }
     else if (w === 'no' || w === 'never') out.add('not');
@@ -353,9 +362,34 @@ export function containment(a: Set<string>, b: Set<string>): number {
 }
 
 const setEq = (a: Set<string>, b: Set<string>) => a.size === b.size && intersection(a, b) === a.size;
-const words = (s: Set<string>) => new Set([...s].filter((t) => !isFigureToken(t)));
+const subsetOf = (a: Set<string>, b: Set<string>) => intersection(a, b) === a.size;
+export const wordTokens = (s: Set<string>) => new Set([...s].filter((t) => !isFigureToken(t)));
+const words = wordTokens;
 const figures = (s: Set<string>) => new Set([...s].filter(isFigureToken));
 const without = (s: Set<string>, t: string) => new Set([...s].filter((x) => x !== t));
+
+// Who a fact is about. "User's daughter has asthma" is not "User has asthma", however many words they share.
+const RELATION = new Set([
+  'partner', 'wife', 'wives', 'husband', 'spouse', 'fiance', 'fiancee', 'girlfriend', 'boyfriend', 'daughter', 'son',
+  'kid', 'child', 'children', 'baby', 'mother', 'father', 'mom', 'mum', 'dad', 'parent', 'brother', 'sister', 'sibling',
+  'grandmother', 'grandfather', 'family', 'friend', 'coach', 'trainer', 'client', 'athlete', 'teammate', 'colleague',
+  'coworker', 'boss', 'roommate', 'dog', 'cat', 'pet',
+].map(stem));
+const relations = (s: Set<string>) => new Set([...s].filter((t) => RELATION.has(t)));
+
+/** Both texts are about the same person: the same relation words (none, for the user's own facts). */
+export const sameSubject = (a: Set<string>, b: Set<string>) => setEq(relations(a), relations(b));
+
+/**
+ * The same statement in words, figures aside: word-jaccard >= 0.72 over at least two shared words (or one
+ * identical word), with nothing swapped ("left knee" / "right knee"): the smaller side's words all appear in
+ * the larger one.
+ */
+function sameWords(aw: Set<string>, bw: Set<string>): boolean {
+  if (!aw.size || !bw.size || jaccard(aw, bw) < 0.72) return false;
+  if (intersection(aw, bw) < 2 && !setEq(aw, bw)) return false;
+  return aw.size <= bw.size ? subsetOf(aw, bw) : subsetOf(bw, aw);
+}
 
 /**
  * How a new memory relates to an existing one:
@@ -364,7 +398,7 @@ const without = (s: Set<string>, t: string) => new Set([...s].filter((x) => x !=
  *   row to the new content);
  * - `longer`: a near-duplicate that says more (update to the new content);
  * - `covered`: a near-duplicate the old row already covers (confirm);
- * - null: a different fact.
+ * - null: a different fact, including one about someone else.
  */
 export type NearDuplicate = 'same' | 'supersede' | 'longer' | 'covered';
 
@@ -373,14 +407,18 @@ export function nearDuplicate(next: string, old: string): NearDuplicate | null {
   const b = tokenSet(old);
   if (!a.size || !b.size) return null;
   if (setEq(a, b)) return 'same';
+  if (!sameSubject(a, b)) return null;
   const aw = words(a);
   const bw = words(b);
   const af = figures(a);
   const bf = figures(b);
-  if (af.size && !setEq(af, bf) && aw.size && bw.size && jaccard(aw, bw) >= 0.72) return 'supersede';
+  if (af.size && !setEq(af, bf) && sameWords(aw, bw)) return 'supersede';
   // The same statement with its polarity flipped ("eats meat" / "does not eat meat") replaces the old one too.
-  if (a.has('not') !== b.has('not') && jaccard(without(aw, 'not'), without(bw, 'not')) >= 0.72) return 'supersede';
-  if (jaccard(a, b) >= 0.72 || containment(a, b) >= 0.9) {
+  if (a.has('not') !== b.has('not') && sameWords(without(aw, 'not'), without(bw, 'not'))) return 'supersede';
+  // Containment only counts when the smaller side says enough: "User is vegan" is contained in many longer
+  // sentences that are not the same fact.
+  const contained = containment(a, b) >= 0.9 && (Math.min(a.size, b.size) >= 3 || jaccard(a, b) >= 0.5);
+  if (jaccard(a, b) >= 0.72 || contained) {
     // Longer only replaces when nothing specific is lost: every number or date of the old row survives.
     const keepsFigures = [...bf].every((t) => a.has(t));
     return next.length > old.length && keepsFigures ? 'longer' : 'covered';
@@ -388,13 +426,59 @@ export function nearDuplicate(next: string, old: string): NearDuplicate | null {
   return null;
 }
 
-/** Token-set similarity used against forget tombstones (which keep tokens only). */
+/**
+ * Token-set similarity used against forget tombstones (which keep tokens only) and for "another memory already
+ * covers this one". Containment stays broad here (forgetting "has a dog named Max" also keeps "has a dog" out),
+ * but a fact about someone else never matches the user's own, and the words-only match needs the same words.
+ */
 export function tokensNearMatch(a: Set<string>, b: Set<string>): boolean {
   if (!a.size || !b.size) return false;
-  if (setEq(a, b) || jaccard(a, b) >= 0.72 || containment(a, b) >= 0.9) return true;
+  if (setEq(a, b)) return true;
+  if (!sameSubject(a, b)) return false;
+  if (jaccard(a, b) >= 0.72 || containment(a, b) >= 0.9) return true;
+  return sameWords(words(a), words(b));
+}
+
+/**
+ * The save_memory path's looser match against one same-family row (word-jaccard >= 0.45, same subject):
+ * `supersedes` when the new text keeps every word and figure of the old one and says more (update the row),
+ * `covered` when the old row already says everything the new one does (confirm it), null otherwise.
+ */
+export function toolOverlap(next: string, old: string): 'supersedes' | 'covered' | null {
+  const a = tokenSet(next);
+  const b = tokenSet(old);
+  if (!a.size || !b.size || !sameSubject(a, b)) return null;
   const aw = words(a);
   const bw = words(b);
-  return aw.size > 0 && bw.size > 0 && jaccard(aw, bw) >= 0.72;
+  if (!aw.size || !bw.size || jaccard(aw, bw) < 0.45) return null;
+  if (subsetOf(b, a) && a.size > b.size) return 'supersedes';
+  if (subsetOf(a, b)) return 'covered';
+  return null;
+}
+
+/**
+ * Two memories that look like one fact told twice: same topic family and subject, and word-jaccard >= 0.45 or
+ * containment >= 0.8 with at least 4 tokens on the smaller side. Cheap and deliberately loose; it only decides
+ * which pairs a targeted consolidation pass shows the model.
+ */
+export function likelyDuplicates(a: MemoryLike, b: MemoryLike): boolean {
+  if (!sameFamily(a.topic, b.topic)) return false;
+  const ta = tokenSet(a.content);
+  const tb = tokenSet(b.content);
+  if (!ta.size || !tb.size || !sameSubject(ta, tb)) return false;
+  const aw = words(ta);
+  const bw = words(tb);
+  if (aw.size && bw.size && jaccard(aw, bw) >= 0.45) return true;
+  return Math.min(ta.size, tb.size) >= 4 && containment(ta, tb) >= 0.8;
+}
+
+/** Every word of `part` (at least `share` of them) and every figure of it appear in `whole`. */
+export function covers(whole: string, part: string, share = 0.8): boolean {
+  const w = tokenSet(whole);
+  const p = tokenSet(part);
+  const pw = words(p);
+  if (!pw.size || !sameSubject(w, p)) return false;
+  return intersection(pw, w) / pw.size >= share && [...figures(p)].every((t) => w.has(t));
 }
 
 export const MEMORY_TOPICS = new Set([

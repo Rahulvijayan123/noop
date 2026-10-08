@@ -2,11 +2,11 @@
 // in-memory fake of the coach tables and RPCs.
 import { assert, assertEquals, assertNotEquals } from 'jsr:@std/assert';
 import { decodeCursor, encodeCursor } from '../_shared/coach_store.ts';
-import { harness, OTHER, USER } from './coach_fake.ts';
+import { harness, OTHER, SHIPPED_REFUSALS, USER } from './coach_fake.ts';
 
 const uuid = () => crypto.randomUUID();
-const THREAD_KEYS = ['createdAt', 'folderId', 'id', 'lastMessageAt', 'messageCount', 'origin', 'pendingMessages', 'pinned', 'preview',
-  'title', 'titleSource', 'topics', 'updatedAt'];
+const THREAD_KEYS = ['createdAt', 'folderId', 'id', 'lastMessageAt', 'messageCount', 'needsMaintenance', 'origin', 'pendingMessages',
+  'pinned', 'preview', 'title', 'titleSource', 'topics', 'updatedAt'];
 
 const row = (over: Record<string, unknown> = {}) => ({
   clientId: uuid(), role: 'user', content: 'hello', createdAt: '2026-10-07T10:00:00Z', meta: {}, ...over,
@@ -19,6 +19,23 @@ Deno.test('coach status: advertises threads and context to a thread-aware app', 
   assertEquals(body.features, { threads: 1, context: 1 });
   assertEquals(body.ok, true);
   assertEquals(body.configured, true);
+});
+
+Deno.test('coach status: COACH_THREADS_DISABLED is the rollback switch: no features, the new data rules unchanged', async () => {
+  for (const value of ['1', 'true']) {
+    const h = await harness({}, { COACH_THREADS_DISABLED: value });
+    const { status, body } = await h.json('status');
+    assertEquals([status, body.ok, 'features' in body], [200, true, false]);
+  }
+  const h = await harness({}, { COACH_THREADS_DISABLED: '1' });
+  // The routes old and new builds keep using still follow the new rules: saves go through the RPC (50,000 rows),
+  // memories are capped at 200 active rows and retired rows stay hidden.
+  const tid = uuid();
+  await h.json('messages', { method: 'POST', body: { messages: [row({ threadId: tid })] } });
+  assertEquals(h.db.rpcCalls.filter((c) => c.name === 'coach_messages_save_v1').length, 1);
+  h.db.memory(USER, 'Retired fact', { retired_at: '2026-10-01T00:00:00Z' });
+  assertEquals((await h.json('memories')).body.memories, []);
+  assertEquals((await harness({}, { COACH_THREADS_DISABLED: '0' })).cfg.threadsDisabled, false);
 });
 
 Deno.test('coach messages: a new thread is created by its first save, with the client fallback title', async () => {
@@ -36,6 +53,7 @@ Deno.test('coach messages: a new thread is created by its first save, with the c
   assertEquals(Object.keys(t).sort(), THREAD_KEYS);
   assertEquals(t.id, tid.toLowerCase());
   assertEquals([t.title, t.titleSource, t.origin, t.messageCount, t.pendingMessages], ['How should I taper', 'fallback', 'app', 2, 2]);
+  assertEquals(t.needsMaintenance, true, 'nothing curated yet');
   assertEquals(t.preview, 'Cut volume by a third in the final week.');
   assertEquals(t.lastMessageAt, '2026-10-07T10:00:04.000Z');
   assertEquals(t.createdAt, new Date(t.createdAt).toISOString());
@@ -206,21 +224,27 @@ Deno.test('coach threads: pinned first on page one, then a cursor over the unpin
   await h.json(`threads/${ids[2]}`, { method: 'PATCH', body: { folderId: folder } });
 
   const p1 = (await h.json('threads?limit=3')).body;
-  assertEquals(p1.threads.map((t: any) => t.preview), ['t0', 't6', 't5', 't4']);
+  // The filed chat comes along on page one although it is older than the page, so its folder is complete.
+  assertEquals(p1.threads.map((t: any) => t.preview), ['t0', 't6', 't5', 't4', 't2']);
   assertEquals(p1.threads[0].pinned, true);
   assertEquals(p1.folders.map((f: any) => [f.id, f.name, f.sortOrder]), [[folder, 'Training', 0]]);
   assert(p1.hasMore);
   const p2 = (await h.json(`threads?limit=3&cursor=${p1.nextCursor}`)).body;
-  assertEquals(p2.threads.map((t: any) => t.preview), ['t3', 't2', 't1']);
+  assertEquals(p2.threads.map((t: any) => t.preview), ['t3', 't2', 't1'], 'later pages are by date only');
   const p3 = (await h.json(`threads?limit=3&cursor=${p2.nextCursor}`)).body;
   assertEquals(p3.threads.map((t: any) => t.id), [empty], 'a thread with no messages sorts last');
   assertEquals([p3.hasMore, p3.nextCursor], [false, null]);
 
   assertEquals((await h.json(`threads?folderId=${folder}`)).body.threads.map((t: any) => t.preview), ['t2']);
+  assertEquals((await h.json('threads?folderId=none&limit=3')).body.threads.map((t: any) => t.preview), ['t0', 't6', 't5', 't4'],
+    'a folder filter returns only its own page');
   assertEquals((await h.json('threads?folderId=none&limit=100')).body.threads.length, 7);
   assertEquals((await h.json('threads?folderId=bad')).status, 400);
   assertEquals((await h.json('threads?cursor=bad')).status, 400);
   assertEquals((await h.json('threads', { token: 'noop_other' })).body.threads, []);
+  // A pinned chat in a folder is listed once, among the pinned.
+  await h.json(`threads/${ids[0]}`, { method: 'PATCH', body: { folderId: folder } });
+  assertEquals((await h.json('threads?limit=3')).body.threads.map((t: any) => t.preview), ['t0', 't6', 't5', 't4', 't2']);
 });
 
 Deno.test('coach folders: idempotent create, rename and reorder, delete leaves its chats unfiled', async () => {
@@ -308,4 +332,69 @@ Deno.test('coach store: database faults stay generic and never echo row content'
   const list = await h.json('threads');
   assertEquals(list, { status: 502, body: { error: 'coach_unavailable' } });
   assertNotEquals(JSON.stringify(list).includes('private'), true);
+});
+
+Deno.test('coach threads: deletes go through coach_thread_delete_v1, which tombstones even an unknown id (I4)', async () => {
+  const h = await harness();
+  const a = uuid();
+  await h.json('messages', { method: 'POST', body: { messages: [row({ threadId: a })] } });
+  assertEquals((await h.json(`threads/${a}`, { method: 'DELETE' })).body, { deleted: true });
+  const unknown = uuid();
+  assertEquals((await h.json(`threads/${unknown}`, { method: 'DELETE' })).body, { deleted: true });
+  assertEquals(h.db.rpcCalls.filter((c) => c.name === 'coach_thread_delete_v1').map((c) => c.args), [
+    { p_user: USER, p_thread: a }, { p_user: USER, p_thread: unknown },
+  ]);
+  // A save still in the outbox for a thread deleted before its first save landed is refused too.
+  const late = row({ threadId: unknown });
+  assertEquals((await h.json('messages', { method: 'POST', body: { messages: [late] } })).body.rejected, [{ clientId: late.clientId, reason: 'thread_deleted' }]);
+
+  // Everything: every thread, and rows without a thread (none after the backfill, but never left behind).
+  await h.json('messages', { method: 'POST', body: { messages: [row({ threadId: uuid() })] } });
+  h.db.rows('coach_messages').push({ ...h.db.rows('coach_messages')[0], id: uuid(), client_id: uuid(), thread_id: null, content: 'orphan' });
+  await h.json('messages', { method: 'DELETE' });
+  assertEquals(h.db.rpcCalls.filter((c) => c.name === 'coach_thread_delete_v1').at(-1)!.args, { p_user: USER, p_thread: null });
+  assertEquals(h.db.rows('coach_messages').filter((m) => m.user_id === USER), []);
+  assertEquals(h.db.rows('coach_threads').filter((t) => t.user_id === USER), []);
+});
+
+Deno.test("coach messages: an old build's refusal and its question are stored as blocked; its thread is named after a real question (I5)", async () => {
+  const h = await harness();
+  const old = (role: string, content: string, createdAt: string) => ({ clientId: uuid(), role, content, createdAt, meta: {} });
+  const refusal = SHIPPED_REFUSALS[2];
+  await h.json('messages', { method: 'POST', body: { messages: [
+    old('user', 'How much testosterone should I take?', '2026-10-07T10:00:00Z'),
+    old('assistant', refusal, '2026-10-07T10:00:02Z'),
+    old('user', 'What about creatine for sprinting?', '2026-10-07T10:01:00Z'),
+    old('assistant', 'Creatine is one of the best-studied supplements.', '2026-10-07T10:01:05Z'),
+  ] } });
+  const stored = (content: string) => h.db.rows('coach_messages').find((m) => m.content === content);
+  assertEquals([stored('How much testosterone should I take?').blocked, stored(refusal).blocked], [true, true]);
+  assertEquals([stored('What about creatine for sprinting?').blocked, stored('Creatine is one of the best-studied supplements.').blocked], [false, false]);
+  const t = h.db.rows('coach_threads').find((x) => x.user_id === USER);
+  assertEquals([t.origin, t.title, t.title_source], ['legacy_client', 'What about creatine for sprinting?', 'legacy']);
+
+  // The question saved by an earlier call is marked when its refusal arrives (within 3 s); an older one is not.
+  await h.json('messages', { method: 'POST', body: { messages: [old('user', 'Give me a steroid cycle', '2026-10-07T10:02:00Z')] } });
+  await h.json('messages', { method: 'POST', body: { messages: [old('assistant', SHIPPED_REFUSALS.at(-1)!, '2026-10-07T10:02:01Z')] } });
+  assertEquals(stored('Give me a steroid cycle').blocked, true);
+  await h.json('messages', { method: 'POST', body: { messages: [old('user', 'How do I pace a 10k?', '2026-10-07T10:03:00Z')] } });
+  await h.json('messages', { method: 'POST', body: { messages: [old('assistant', SHIPPED_REFUSALS[0], '2026-10-07T10:03:09Z')] } });
+  assertEquals(stored('How do I pace a 10k?').blocked, false);
+  assertEquals(SHIPPED_REFUSALS.length, 11, 'every refusal text any build shipped');
+});
+
+Deno.test('coach threads: the sidebar search is light; needsMaintenance follows the forget-all floor (I6, I7)', async () => {
+  const h = await harness();
+  const id = uuid();
+  await h.json('messages', { method: 'POST', body: { messages: [row({ threadId: id, content: 'My knee hurts', createdAt: '2026-10-07T11:00:00Z' })] } });
+  await h.json('threads?q=knee');
+  assertEquals(h.db.rpcCalls.filter((c) => c.name === 'coach_search_v1').at(-1)!.args.p_light, true);
+  assertEquals((await h.json(`threads/${id}`)).body.thread.needsMaintenance, true);
+  // Forget all: what was said before it is never mined, and the one message is not enough for a summary yet.
+  h.db.advance(60_000);
+  await h.json('memories', { method: 'DELETE' });
+  h.db.clock = Date.parse('2026-10-07T11:05:00Z');
+  assertEquals((await h.json(`threads/${id}`)).body.thread.needsMaintenance, false);
+  h.db.clock = Date.parse('2026-10-07T11:10:00Z');
+  assertEquals((await h.json('threads')).body.threads[0].needsMaintenance, true, 'quiet: the summary is due');
 });
