@@ -59,11 +59,12 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertEqual(iv.confidence, 0.7)
     }
 
-    /// `iv` with the context fields that `ActivityContextIntervalRow` does not (yet) carry put back to their defaults.
+    /// `iv` as the store keeps it today: the ctx-int-2 context fields `ActivityContextIntervalRow` has no columns for
+    /// (yet) not recorded (nil), which is exactly how a row reads back.
     static func rowFieldsOnly(_ iv: ActivityContextInterval) -> ActivityContextInterval {
         var out = iv
-        out.inBed = false; out.uncertainty = 0; out.experts = []; out.transitionCount = 0
-        out.absorbedClasses = []; out.absorbedSeconds = 0; out.precededByGapS = nil; out.settlingSeconds = 0
+        out.inBed = nil; out.uncertainty = nil; out.experts = nil; out.transitionCount = nil
+        out.absorbedClasses = nil; out.absorbedSeconds = nil; out.precededByGapS = nil; out.settlingSeconds = nil
         return out
     }
 
@@ -83,9 +84,11 @@ final class ActivityContextPersistenceTests: XCTestCase {
 
         let rows = try await store.activityContextIntervals(deviceId: dev, from: document.dayStart, to: document.dayEnd)
         // The ctx-int-2 context fields (in-bed, uncertainty, experts, transitions, absorbed fragments, gap, settling)
-        // have no store columns until the WhoopStore row carries them; everything the row does carry round-trips.
+        // have no store columns until the WhoopStore row carries them: they read back as not recorded (nil), never as
+        // a measured 0 / false, and everything the row does carry round-trips exactly.
         func stored(_ iv: ActivityContextInterval?) -> ActivityContextInterval? { iv.map(Self.rowFieldsOnly) }
-        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)).map(Self.rowFieldsOnly), intervals.map(Self.rowFieldsOnly))
+        XCTAssertTrue(intervals.allSatisfy { $0.transitionCount != nil && $0.uncertainty != nil && $0.settlingSeconds != nil })
+        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)), intervals.map(Self.rowFieldsOnly))
 
         let live = ActivityContextLookup(intervals: intervals)
         let storedLookup = ActivityContextLookup(rows: rows)

@@ -21,15 +21,16 @@ import WhoopProtocol
 // "consecutive published states with the same belief". Three things happen on the way:
 //   1. each run is classified (`ActivityClassifier`), and neighbours with the same class, sleep and wear
 //      context are merged (duration-weighted), so a seat/desk wording flip inside one situation is one row;
-//   2. a non-movement fragment shorter than `foldFragmentS` between two stretches of the same situation is
-//      absorbed, and the interval says so (`absorbedClasses`, `absorbedSeconds`): a sustained-state row stays
-//      stable without pretending the stand never happened. A brief light-activity reading (a reach, shifting in
-//      the chair, the burst of a stand-up and sit-down) is absorbed the same way. A GAIT, cycling or vigorous
-//      fragment is never folded away (a six-second walk to the kitchen is behaviour worth labelling, and the
-//      stand reminder cares about every second of it), and neither is an off-wrist or no-claim (`unknown`)
-//      fragment or one whose wear, sleep or in-bed context differs: absorbing those would assert a context the
-//      evidence never gave. The short changes themselves are kept as events (`ActivityContextDayDocument.events`,
-//      counted per row in `transitionCount`);
+//   2. short fragments between two stretches of the same situation are absorbed, and the interval says so
+//      (`absorbedClasses`, `absorbedSeconds`): a sustained-state row stays stable without pretending the
+//      fragment never happened. Inside a still stretch that is a still-family reading under `stillDwellS` (the
+//      posture head hedging between seated, upright and unresolved for a few ticks); anywhere, a light-activity
+//      blip or an on-wrist no-claim (`unknown`) reading under `foldFragmentS` (a reach, the burst of a stand-up
+//      and sit-down, a few unreadable seconds). A GAIT, cycling or vigorous fragment is never folded away (a
+//      six-second walk to the kitchen is behaviour worth labelling, and the stand reminder cares about every
+//      second of it), and neither is an off-wrist fragment or one whose wear, sleep or in-bed context differs:
+//      absorbing those would assert a context the evidence never gave. The short changes themselves are kept
+//      as events (`ActivityContextDayDocument.events`, counted per row in `transitionCount`);
 //   3. intervals longer than `maxIntervalS` are cut into near-equal parts, so every row's statistics are
 //      local (a 15-minute HRV, not an eight-hour one) and "which interval contains t" is a bounded index
 //      range.
@@ -105,28 +106,30 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// `ActivityContextIntervalRow`: the phone's store does not hold it.
     public var gait: ActivityGaitSummary?
 
-    // Context (ctx-int-2). Plain stored values with defaults; absent keys decode to them, so an interval written
-    // before they existed reads back as "nothing recorded".
+    // Context (ctx-int-2). nil = not recorded: an interval written before these existed, or read back from a store
+    // row that has no column for them, says so instead of reading as a measured zero / false. The builder sets
+    // every one of them (`precededByGapS` stays nil on the first row of a build: nothing before it to measure).
     /// Inside a detected night's in-bed window (lying awake in bed vs on a sofa).
-    public var inBed: Bool
+    public var inBed: Bool?
     /// Duration-weighted mean of the decoder's overall uncertainty over the interval's runs, in [0, 1].
-    public var uncertainty: Double
+    public var uncertainty: Double?
     /// Experts that spoke during the interval's runs (`ActivityContextRun.experts`, union, fixed order).
-    public var experts: [String]
-    /// Decoder events (any kind: a change of position, a walk or run starting or stopping) flagged inside
-    /// `[start, end)` by their detection second. A sitting row with a stand inside it says so here.
-    public var transitionCount: Int
+    public var experts: [String]?
+    /// Decoder events (any kind and probability: a change of position, a walk or run starting or stopping)
+    /// flagged inside `[start, end)` by their detection second. A sitting row with a stand inside it says so here.
+    public var transitionCount: Int?
     /// Classes of the short fragments the sustained-state fold absorbed into this row, most seconds first, and
     /// their total seconds. Empty / 0 when the row is what its runs said throughout.
-    public var absorbedClasses: [ActivityClass]
-    public var absorbedSeconds: Int
+    public var absorbedClasses: [ActivityClass]?
+    public var absorbedSeconds: Int?
     /// Seconds without any decoded state between the previous row's end and this row's start (0 when they
     /// touch). nil for the first row of a build (nothing before it to measure from).
     public var precededByGapS: Int?
     /// Seconds of the row within `ActivityContextIntervalBuilder.Config.settlingS` (~2 min, the orthostatic
-    /// settling time) after a preceding movement row ended or a change of position / end of a walk was flagged.
-    /// Rest statistics over those seconds still carry the recovery. 0 for movement rows.
-    public var settlingSeconds: Int
+    /// settling time) after a preceding movement row ended, or a change of position / end of a walk was flagged at
+    /// `PositionChanges.minimumProbability` or more (weaker postural readings are mostly shifting in a chair or
+    /// in bed). Rest statistics over those seconds still carry the recovery. 0 for movement rows.
+    public var settlingSeconds: Int?
 
     public var durationSeconds: Int { end - start }
 
@@ -140,9 +143,9 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 hrSlope: Double? = nil, rmssd: Double? = nil, rrBeats: Int = 0,
                 rrDiffSqSumMs2: Double = 0, rrDiffCount: Int = 0,
                 respRateBpm: Double? = nil, respBreaths: Int = 0, gait: ActivityGaitSummary? = nil,
-                inBed: Bool = false, uncertainty: Double = 0, experts: [String] = [], transitionCount: Int = 0,
-                absorbedClasses: [ActivityClass] = [], absorbedSeconds: Int = 0, precededByGapS: Int? = nil,
-                settlingSeconds: Int = 0) {
+                inBed: Bool? = nil, uncertainty: Double? = nil, experts: [String]? = nil, transitionCount: Int? = nil,
+                absorbedClasses: [ActivityClass]? = nil, absorbedSeconds: Int? = nil, precededByGapS: Int? = nil,
+                settlingSeconds: Int? = nil) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -191,14 +194,14 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         respRateBpm = try c.decodeIfPresent(Double.self, forKey: .respRateBpm)
         respBreaths = try c.decode(Int.self, forKey: .respBreaths)
         gait = try c.decodeIfPresent(ActivityGaitSummary.self, forKey: .gait)
-        inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed) ?? false
-        uncertainty = try c.decodeIfPresent(Double.self, forKey: .uncertainty) ?? 0
-        experts = try c.decodeIfPresent([String].self, forKey: .experts) ?? []
-        transitionCount = try c.decodeIfPresent(Int.self, forKey: .transitionCount) ?? 0
-        absorbedClasses = try c.decodeIfPresent([ActivityClass].self, forKey: .absorbedClasses) ?? []
-        absorbedSeconds = try c.decodeIfPresent(Int.self, forKey: .absorbedSeconds) ?? 0
+        inBed = try c.decodeIfPresent(Bool.self, forKey: .inBed)
+        uncertainty = try c.decodeIfPresent(Double.self, forKey: .uncertainty)
+        experts = try c.decodeIfPresent([String].self, forKey: .experts)
+        transitionCount = try c.decodeIfPresent(Int.self, forKey: .transitionCount)
+        absorbedClasses = try c.decodeIfPresent([ActivityClass].self, forKey: .absorbedClasses)
+        absorbedSeconds = try c.decodeIfPresent(Int.self, forKey: .absorbedSeconds)
         precededByGapS = try c.decodeIfPresent(Int.self, forKey: .precededByGapS)
-        settlingSeconds = try c.decodeIfPresent(Int.self, forKey: .settlingSeconds) ?? 0
+        settlingSeconds = try c.decodeIfPresent(Int.self, forKey: .settlingSeconds)
     }
 
     /// Whether `ts` falls inside the interval.
@@ -212,9 +215,13 @@ public enum ActivityContextIntervalBuilder {
     public struct Config: Equatable, Sendable {
         /// Largest gap between two runs of the same situation that still joins them.
         public var mergeGapS = 10
-        /// A still or light-activity stretch shorter than this, between two stretches of the same situation, is
-        /// absorbed (and recorded on the row that absorbs it).
+        /// A light-activity, no-claim or (outside a still stretch) still fragment shorter than this, between two
+        /// stretches of the same situation, is absorbed (and recorded on the row that absorbs it).
         public var foldFragmentS = 10
+        /// Inside a still stretch, still-family fragments (another posture reading, posture unresolved) totalling
+        /// less than this are absorbed the same way: a wrist cannot tell sitting from standing tick by tick, and a
+        /// hedge that flips for a few ticks is not a change of situation (the real changes stay as events).
+        public var stillDwellS = 30
         /// Longest single row; longer stretches are cut into near-equal parts.
         public var maxIntervalS = 900
         /// Shortest interval that gets an HRV / respiratory-rate reading.
@@ -421,8 +428,8 @@ public enum ActivityContextIntervalBuilder {
         let movement: [Bool]
         /// Event detection seconds, sorted (every kind, for `transitionCount`).
         let eventTs: [Int]
-        /// Seconds settling starts from, sorted: the end of each movement row, each change of position and each
-        /// end of a walk or run.
+        /// Seconds settling starts from, sorted: the end of each movement row, each change of position flagged at
+        /// `PositionChanges.minimumProbability` or more, and each end of a walk or run.
         let anchors: [Int]
         let settlingS: Int
 
@@ -430,7 +437,13 @@ public enum ActivityContextIntervalBuilder {
             starts = shaped.map(\.start); ends = shaped.map(\.end)
             movement = shaped.map { $0.activityClass.isMovement }
             eventTs = events.map(\.ts).sorted()
-            var a = events.filter { $0.isPostural || $0.kind == .walkStop || $0.kind == .runStop }.map(\.ts)
+            // Weak postural readings (under the display threshold) are mostly shifting in a chair or in bed: anchoring
+            // on them would mark most of a still row as settling. Walk / run stops always count (the movement-row
+            // end usually anchors them too).
+            var a = events.filter {
+                ($0.isPostural && $0.probability >= PositionChanges.minimumProbability)
+                    || $0.kind == .walkStop || $0.kind == .runStop
+            }.map(\.ts)
             for (i, s) in shaped.enumerated() where s.activityClass.isMovement { a.append(ends[i]) }
             anchors = a.sorted()
             settlingS = max(0, config.settlingS)
@@ -474,31 +487,62 @@ public enum ActivityContextIntervalBuilder {
         var out: [Accumulation] = []
         var i = 0
         while i < merged.count {
-            let cur = merged[i]
-            // Never absorbed: gait, cycling or vigorous effort (behaviour worth its own row), off the wrist or no
-            // claim (absorbing would assert a context nobody measured), or a fragment in another wear / sleep /
-            // in-bed context. A light-activity blip inside a still stretch is the stretch's (until the label hold
-            // stopped hiding it, it never reached a row at all).
-            let kept: Set<ActivityClass> = [.offWrist, .unknown, .cycling, .vigorousActivity]
-            let absorbable = !cur.activityClass.isGait && !kept.contains(cur.activityClass)
-            if cur.duration < config.foldFragmentS, absorbable,
-               let prev = out.last, i + 1 < merged.count {
-                let next = merged[i + 1]
-                if prev.sameSituation(next), cur.wear == prev.wear, cur.sleep == prev.sleep, cur.inBed == prev.inBed,
-                   cur.start - prev.end <= config.mergeGapS,
-                   next.start - cur.end <= config.mergeGapS {
-                    var joined = prev
-                    joined.absorb(cur, as: cur.activityClass)
-                    joined.absorb(next)
-                    out[out.count - 1] = joined
-                    i += 2
-                    continue
-                }
+            if let prev = out.last, let close = foldClose(merged, from: i, after: prev, config: config) {
+                var joined = prev
+                for f in merged[i..<close] { joined.absorb(f, as: f.activityClass) }
+                joined.absorb(merged[close])
+                out[out.count - 1] = joined
+                i = close + 1
+                continue
             }
-            out.append(cur)
+            out.append(merged[i])
             i += 1
         }
         return out
+    }
+
+    /// Whether the stretches from `i` on are short fragments that `prev`'s situation resumes after: the index of
+    /// the stretch that resumes it, nil when the fragments are not absorbable or the situation does not resume.
+    ///
+    /// What a fragment may be:
+    /// - never gait, cycling or vigorous effort (behaviour worth its own row), off the wrist (absorbing would
+    ///   assert a wear nobody measured), or in another wear / sleep / in-bed context;
+    /// - a light-activity blip or a no-claim (`unknown`) reading on the wrist, under `foldFragmentS` (a reach,
+    ///   the burst of a stand-up and sit-down, a few seconds the decoder could not read);
+    /// - inside a still stretch (sitting, standing, still, lying awake), a still-family reading under `stillDwellS`:
+    ///   the posture head hedging between seated, upright and unresolved for a few ticks inside one situation.
+    /// Several fragments in a row are absorbed together when their seconds stay under the same bound. Everything
+    /// absorbed is recorded on the row (`absorbedClasses`, `absorbedSeconds`), and the changes themselves are
+    /// kept as events (`transitionCount`).
+    static func foldClose(_ merged: [Accumulation], from i: Int, after prev: Accumulation, config: Config) -> Int? {
+        let still = prev.activityClass.isStationaryAwake || prev.activityClass == .lyingDown
+        let bound = still ? max(config.foldFragmentS, config.stillDwellS) : config.foldFragmentS
+        var total = 0
+        var lastEnd = prev.end
+        var j = i
+        while j < merged.count {
+            let f = merged[j]
+            guard f.start - lastEnd <= config.mergeGapS else { return nil }
+            if j > i, prev.sameSituation(f) { return j }
+            guard f.wear == prev.wear, f.sleep == prev.sleep, f.inBed == prev.inBed else { return nil }
+            let c = f.activityClass
+            let limit: Int
+            if c.isGait || c == .offWrist || c == .cycling || c == .vigorousActivity {
+                return nil
+            } else if c == .unknown {
+                guard f.wear == .onWrist else { return nil }
+                limit = config.foldFragmentS
+            } else if c == .lightActivity {
+                limit = config.foldFragmentS
+            } else {
+                limit = still ? bound : config.foldFragmentS
+            }
+            total += f.duration
+            guard f.duration < limit, total < bound else { return nil }
+            lastEnd = f.end
+            j += 1
+        }
+        return nil
     }
 
     static func split(_ stretches: [Accumulation], config: Config) -> [Accumulation] {

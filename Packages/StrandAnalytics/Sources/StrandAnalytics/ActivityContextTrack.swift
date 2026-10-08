@@ -544,6 +544,32 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     /// The canonical class of the run (see `ActivityClassifier`).
     public var classification: ActivityClassification { ActivityClassifier.classify(run: self) }
 
+    /// The run exactly as its stored JSON reads back: probabilities to 0.001 (entries under the report floor
+    /// dropped), confidence, uncertainty and intensity to 0.01, the gait fields to their stored precision. The
+    /// decoder hands out runs in this form, so a run, its class and everything built from it (intervals, the
+    /// day summary) are the same in memory and read back from a document.
+    var quantized: ActivityContextRun {
+        func r(_ x: Double, _ scale: Double) -> Double { (x * scale).rounded() / scale }
+        func head<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ h: HeadProbabilities<C>) -> HeadProbabilities<C>
+            where C.RawValue == String {
+            var m: [C: Double] = [:]
+            for (c, p) in h.values where p >= HeadProbabilities<C>.reportFloor { m[c] = r(p, 1000) }
+            return HeadProbabilities(m)
+        }
+        var q = self
+        q.posture = head(posture); q.locomotion = head(locomotion); q.armBehavior = head(armBehavior)
+        q.intensity = intensity.map { r($0, 100) }
+        q.overallConfidence = r(overallConfidence, 100)
+        q.overallUncertainty = r(overallUncertainty, 100)
+        q.gaitProbability = gaitStates > 0 ? gaitProbability.map { r($0, 1000) } : nil
+        q.gaitCadenceSpm = gaitCadenceSpm.map { r($0, 10) }
+        // The gait summary rounds itself on write; reading it back is the one exact way to get its stored form.
+        if let g = gait, let data = try? JSONEncoder().encode(g) {
+            q.gait = try? JSONDecoder().decode(ActivityGaitSummary.self, from: data)
+        }
+        return q
+    }
+
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(start, forKey: .start)
@@ -665,7 +691,10 @@ public enum ActivityContextRuns {
         let closed = rawSums.count
         var all = rawSums.map { $0.run(intervalS: intervalS) }
         if let a = acc { all.append(a.run(intervalS: intervalS)) }
-        let (folded, firstRaw) = foldFragmentsIndexed(all, maxFragmentS: 2 * max(intervalS, 1))
+        let (unrounded, firstRaw) = foldFragmentsIndexed(all, maxFragmentS: 2 * max(intervalS, 1), events: events,
+                                                         intervalS: intervalS)
+        // In their stored form, so a settled run read back from the document is the run this pass produced.
+        let folded = unrounded.map(\.quantized)
 
         // The settled runs, the last one's end put back where it was before the seam was aligned, then the rest.
         var runs = final
@@ -673,11 +702,7 @@ public enum ActivityContextRuns {
         let seam = runs.count
         runs += folded
         let wearChanges = offWrist.flatMap { [$0.start, $0.end] }.sorted()
-        // The last settled run's key as the pass that settled it read it (its stored form is rounded).
-        var knownKeys: [Int: String] = [:]
-        if seam > 0, let k = tail?.finalKey { knownKeys[seam - 1] = k }
-        runs = aligned(runs, to: events, intervalS: intervalS, fromBoundary: max(1, seam), wearChanges: wearChanges,
-                       knownKeys: knownKeys)
+        runs = aligned(runs, to: events, intervalS: intervalS, fromBoundary: max(1, seam), wearChanges: wearChanges)
 
         // What stays revisable: every run holding one of the last `revisableRawRuns` raw runs (a fold decision
         // looks one raw run ahead, and the last raw run is still growing), so everything before is settled.
@@ -685,9 +710,7 @@ public enum ActivityContextRuns {
         let fj = firstRaw.lastIndex { $0 <= keepFrom } ?? 0
         let rawStart = firstRaw.isEmpty ? closed : min(closed, firstRaw[fj])
         let finalEnd: Int? = fj > 0 ? folded[fj - 1].end : (seam > 0 ? (tail?.finalEnd ?? final.last?.end) : nil)
-        let finalKey: String? = fj > 0 ? ActivityClassifier.runKey(folded[fj - 1].classification)
-            : (seam > 0 ? tail?.finalKey : nil)
-        let next = ActivityContextRunsTail(finalRuns: seam + fj, finalEnd: finalEnd, finalKey: finalKey,
+        let next = ActivityContextRunsTail(finalRuns: seam + fj, finalEnd: finalEnd,
                                            raw: Array(rawSums[rawStart..<closed]), open: acc, previousGait: previousGait)
         return (runs, next)
     }
@@ -726,12 +749,12 @@ public enum ActivityContextRuns {
     /// strap taken off at 10:00:03 is off from 10:00:03, not from the next 5-s tick.
     static func aligned(_ runs: [ActivityContextRun], to events: [ActivityTransitionEvent],
                         intervalS: Int, fromBoundary first: Int = 1,
-                        wearChanges: [Int] = [], knownKeys: [Int: String] = [:]) -> [ActivityContextRun] {
+                        wearChanges: [Int] = []) -> [ActivityContextRun] {
         guard runs.count > 1, !(events.isEmpty && wearChanges.isEmpty), first < runs.count else { return runs }
         let step = max(1, intervalS)
         let ordered = events.sorted { $0.ts < $1.ts }
         var out = runs
-        let keys = runs.indices.map { knownKeys[$0] ?? ActivityClassifier.runKey(runs[$0].classification) }
+        let keys = runs.map { ActivityClassifier.runKey($0.classification) }
         var cursor = 0
         for i in max(1, first)..<out.count {
             let a = out[i - 1], b = out[i]
@@ -768,13 +791,31 @@ public enum ActivityContextRuns {
     /// wobble inside that situation (a posture head dipping for one tick), not a separate one: fold it in. A short
     /// run of a DIFFERENT class (a five-second stand between two sitting runs) is not a wobble and stays: the
     /// interval layer decides what a sustained stretch absorbs, and records it (`ActivityContextInterval`).
-    static func foldFragments(_ runs: [ActivityContextRun], maxFragmentS: Int) -> [ActivityContextRun] {
-        foldFragmentsIndexed(runs, maxFragmentS: maxFragmentS).runs
+    ///
+    /// One exception looks at the events: a single still tick straight before a walk or run whose start event
+    /// was flagged at that boundary is the walk's own first reading (the class lags the first steps by a tick), and
+    /// it joins the walk. Left alone it is a five-second still row carrying the walk's first raised heart rate.
+    static func foldFragments(_ runs: [ActivityContextRun], maxFragmentS: Int,
+                              events: [ActivityTransitionEvent] = [], intervalS: Int = 5) -> [ActivityContextRun] {
+        foldFragmentsIndexed(runs, maxFragmentS: maxFragmentS, events: events, intervalS: intervalS).runs
     }
 
     /// `foldFragments`, with the index of the first input run behind each output run.
-    static func foldFragmentsIndexed(_ runs: [ActivityContextRun], maxFragmentS: Int)
+    static func foldFragmentsIndexed(_ runs: [ActivityContextRun], maxFragmentS: Int,
+                                     events: [ActivityTransitionEvent] = [], intervalS: Int = 5)
         -> (runs: [ActivityContextRun], firstRaw: [Int]) {
+        let step = max(1, intervalS)
+        let still: Set<String> = ["seated", "upright", "stationary", "lying"]
+        let starts = events.filter { $0.kind == .walkStart || $0.kind == .runStart }.map(\.ts).sorted()
+        /// `r` is one still tick touching `next`, a walk or run whose start was flagged at their boundary.
+        func leadsInto(_ r: ActivityContextRun, _ next: ActivityContextRun) -> Bool {
+            guard r.count == 1, next.start == r.end, r.wear == next.wear, r.sleep == next.sleep, r.inBed == next.inBed
+            else { return false }
+            let from = ActivityClassifier.runKey(r.classification), to = ActivityClassifier.runKey(next.classification)
+            guard still.contains(from), to == "walking" || to == "running",
+                  starts.contains(where: { $0 >= next.start - step && $0 < next.start + step }) else { return false }
+            return ActivityClassifier.runKey(merged(r, next).classification) == to
+        }
         func sameSituation(_ a: ActivityContextRun, _ b: ActivityContextRun) -> Bool {
             ActivityClassifier.runKey(a.classification) == ActivityClassifier.runKey(b.classification)
                 && a.wear == b.wear && a.sleep == b.sleep && a.inBed == b.inBed
@@ -791,7 +832,7 @@ public enum ActivityContextRuns {
                     i += 1
                     continue
                 }
-                if i + 1 < runs.count, sameSituation(r, runs[i + 1]) {
+                if i + 1 < runs.count, sameSituation(r, runs[i + 1]) || leadsInto(r, runs[i + 1]) {
                     r = merged(r, runs[i + 1])
                     out.append(r); firstRaw.append(i)
                     i += 2
@@ -856,25 +897,6 @@ public enum ActivityContextRuns {
             }
         }
         return out
-    }
-
-    /// `new` after `old`, folding the last old run into the first new one when they describe the same
-    /// situation without a gap, so repeatedly extending a day does not leave a seam at every extension.
-    public static func append(_ old: [ActivityContextRun], _ new: [ActivityContextRun]) -> [ActivityContextRun] {
-        guard let last = old.last, let first = new.first else { return old + new }
-        guard first.start - last.end <= 5, last.displayContext == first.displayContext,
-              last.wear == first.wear, last.sleep == first.sleep,
-              distance(last.posture, first.posture) <= headTolerance,
-              distance(last.locomotion, first.locomotion) <= headTolerance else { return old + new }
-        var out = Array(old.dropLast())
-        out.append(merged(last, first))
-        out.append(contentsOf: new.dropFirst())
-        return out
-    }
-
-    static func distance<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ x: HeadProbabilities<C>, _ y: HeadProbabilities<C>) -> Double
-        where C.RawValue == String {
-        C.allCases.reduce(0) { $0 + abs(x[$1] - y[$1]) }
     }
 
     /// The running sums of one raw run. Codable, so a pass can stop with a run still open and continue it
@@ -980,14 +1002,12 @@ public enum ActivityContextRuns {
 public struct ActivityContextRunsTail: Codable, Equatable, Sendable {
     var finalRuns: Int
     var finalEnd: Int?
-    /// `ActivityClassifier.runKey` of the last settled run, as the pass that settled it read it.
-    var finalKey: String?
     var raw: [ActivityContextRuns.Accumulator]
     var open: ActivityContextRuns.Accumulator?
     var previousGait: GaitTotals?
 
     enum CodingKeys: String, CodingKey {
-        case finalRuns = "final_runs", finalEnd = "final_end", finalKey = "final_key", raw, open
+        case finalRuns = "final_runs", finalEnd = "final_end", raw, open
         case previousGait = "previous_gait"
     }
 }
@@ -1024,9 +1044,7 @@ public struct ActivityContextDaySummary: Codable, Equatable, Sendable {
             let seconds = r.end - r.start
             if let l = r.displayContext { labelSeconds[l, default: 0] += seconds } else { unclear += seconds }
             classSeconds[ActivityClassifier.classify(run: r).activityClass.rawValue, default: 0] += seconds
-            // At the precision a run is stored with, so a summary over runs read back from a stored document (a
-            // resumed day) equals the one over the same runs fresh from the decoder.
-            confSum += (r.overallConfidence * 100).rounded() / 100 * Double(seconds)
+            confSum += r.overallConfidence * Double(seconds)
             total += seconds
         }
         self.init(labelSeconds: labelSeconds, unclearSeconds: unclear,

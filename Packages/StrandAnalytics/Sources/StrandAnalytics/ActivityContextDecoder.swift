@@ -136,6 +136,9 @@ struct DecoderTracking: Codable, Equatable {
     var transitionRiseTs: Int?
     var movingRiseTs: Int?
     var runRiseTs: Int?
+    /// The last second the running mass stood at half (a run stop's onset; `lastMovingTs` is the moving mass).
+    /// nil in older snapshots, whose next run stop then carries no onset.
+    var lastRunningTs: Int?
     /// Whether the learned transition expert spoke (confident, not abstained) during the open postural
     /// excursion: the event's `source`.
     var expertInExcursion: Bool?
@@ -910,10 +913,12 @@ public struct ActivityContextDecoder: Sendable {
             record(.runStart, p: pRun, ts: ts, onset: onset(tracking.runRiseTs), source: decoderSource)
         } else if tracking.running, pRun <= 0.25 {
             tracking.running = false
-            let stop = tracking.lastMovingTs.map { min(ts, $0 + 1) }
+            // On the running mass, not the moving one: a run that slows into a walk keeps the moving mass high.
+            let stop = tracking.lastRunningTs.map { min(ts, $0 + 1) }
             record(.runStop, p: 1 - pRun, ts: ts, onset: onset(stop), source: decoderSource)
         }
         if pMoving >= 0.5 { tracking.lastMovingTs = ts }
+        if pRun >= 0.5 { tracking.lastRunningTs = ts }
 
         // Stationary run length.
         if pStationary >= 0.6 { if tracking.stationarySinceTs == nil { tracking.stationarySinceTs = ts } }

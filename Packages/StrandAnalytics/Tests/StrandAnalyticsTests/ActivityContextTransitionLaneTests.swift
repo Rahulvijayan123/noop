@@ -274,7 +274,7 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
                         // Every event lands on a stored row that counts it.
                         for e in postural {
                             let iv = try XCTUnwrap(lookup.interval(at: e.ts), name)
-                            XCTAssertGreaterThanOrEqual(iv.transitionCount, 1, name)
+                            XCTAssertGreaterThanOrEqual(iv.transitionCount ?? 0, 1, name)
                         }
                     }
                 }
@@ -397,10 +397,18 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         }
         for hart in [false, true] {
             let full = g.input(hart: hart, transitions: [(120, 123, 1), (193, 196, 2), (346, 349, 1), (359, 362, 2)])
-            let fresh = try stored(ActivityContextDayBuilder.update(cached: nil, input: full, now: 0).document)
+            let freshInMemory = ActivityContextDayBuilder.update(cached: nil, input: full, now: 0).document
+            let fresh = try stored(freshInMemory)
             let freshIv = ActivityContextIntervalBuilder.build(document: fresh, hr: full.hr, steps: full.steps)
+            // The decoder hands out runs in their stored form: the document as built and as read back are the same,
+            // and so is everything built from them (the phone builds intervals from the in-memory document).
+            XCTAssertEqual(freshInMemory.runs, fresh.runs, "hart=\(hart)")
+            XCTAssertEqual(freshInMemory.summary, fresh.summary, "hart=\(hart)")
+            XCTAssertEqual(ActivityContextIntervalBuilder.build(document: freshInMemory, hr: full.hr, steps: full.steps),
+                           freshIv, "hart=\(hart)")
             for step in [7, 13, 30, 61, 120] {
                 var cached: ActivityContextDayDocument?
+                var inMemory: ActivityContextDayDocument?
                 var cut = g.t0 + step
                 var resumed = 0
                 while true {
@@ -415,6 +423,7 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
                     part.transitionWindows = full.transitionWindows.filter { $0.endTs < hi }
                     let r = ActivityContextDayBuilder.update(cached: cached, input: part, now: 0)
                     if case .resumed = r.how { resumed += 1 }
+                    inMemory = r.document
                     cached = try stored(r.document)
                     if hi >= g.ts { break }
                     cut += step
@@ -427,6 +436,10 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
                 XCTAssertEqual(doc.runsTail, fresh.runsTail, name)
                 XCTAssertEqual(doc.summary, fresh.summary, name)
                 XCTAssertEqual(ActivityContextIntervalBuilder.build(document: doc, hr: full.hr, steps: full.steps), freshIv, name)
+                let live = try XCTUnwrap(inMemory)
+                XCTAssertEqual(live.runs, freshInMemory.runs, name)
+                XCTAssertEqual(live.summary, freshInMemory.summary, name)
+                XCTAssertEqual(ActivityContextIntervalBuilder.build(document: live, hr: full.hr, steps: full.steps), freshIv, name)
             }
         }
     }
@@ -477,7 +490,7 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(lookup.interval(at: g.t0 + 300)?.activityClass, .sleeping, name)
         let awake = try XCTUnwrap(lookup.interval(at: g.t0 + 660), name)
         XCTAssertEqual(awake.activityClass, .lyingDown, name)
-        XCTAssertTrue(awake.inBed, name)
+        XCTAssertEqual(awake.inBed, true, name)
         XCTAssertNotEqual(lookup.interval(at: g.t0 + 700)?.activityClass, .sleeping, "asleep is released at the staged wake")
         XCTAssertTrue(d.document.events.contains { $0.kind == .gettingUpLike && abs($0.ts - (g.t0 + 720)) <= 10 }, name)
         let walk = try XCTUnwrap(d.intervals.first { $0.activityClass.isGait }, name)
@@ -485,7 +498,7 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertLessThanOrEqual(abs(walk.end - (g.t0 + walkOff)), 10, name)
         // Sitting after the walk starts by settling.
         let sit = try XCTUnwrap(lookup.interval(at: g.t0 + walkOff + 60), name)
-        XCTAssertGreaterThan(sit.settlingSeconds, 0, name)
+        XCTAssertGreaterThan(sit.settlingSeconds ?? 0, 0, name)
     }
 
     func testOffWristAtANonGridSecondIsOffFromThatSecond() throws {
@@ -564,15 +577,63 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(walk.map(\.activityClass), [.sitting, .walking, .sitting])
     }
 
-    func testTheFoldNeverAbsorbsOffWristNoClaimOrAnotherContext() {
+    func testTheFoldNeverAbsorbsOffWristOrAnotherContext() {
         let offWrist = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], wear: .offWrist)
-        let noClaim = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], confidence: 0.1)
         let otherSleep = run(120, 125, posture: upright, sleep: .unknown)
-        for (name, mid) in [("off wrist", offWrist), ("unknown", noClaim), ("other sleep context", otherSleep)] {
+        let wearUnknown = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], wear: .unknown)
+        for (name, mid) in [("off wrist", offWrist), ("other sleep context", otherSleep), ("wear unknown", wearUnknown)] {
             let iv = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), mid, run(125, 240, posture: seated)])
             XCTAssertEqual(iv.count, 3, "\(name): \(iv.map(\.activityClass))")
             XCTAssertTrue(iv.allSatisfy { $0.absorbedSeconds == 0 }, name)
         }
+    }
+
+    func testAFewUnreadableSecondsOnTheWristAreAbsorbedAndRecordedAsUnknown() {
+        // Review fix: no-claim ticks inside a sustained stretch split it into three rows (2.6 unknown rows < 10 s per
+        // hour on capture-24, and sleep seconds stored as unknown went up 4x). Absorbed, they are recorded as such.
+        let noClaim = run(120, 125, posture: [.unknown: 1], locomotion: [.unknown: 1], confidence: 0.1)
+        let iv = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), noClaim, run(125, 240, posture: seated)])
+        XCTAssertEqual(iv.map(\.activityClass), [.sitting])
+        XCTAssertEqual(iv.first?.absorbedClasses, [.unknown])
+        XCTAssertEqual(iv.first?.absorbedSeconds, 5)
+        // Inside a night as well.
+        let night = ActivityContextIntervalBuilder.build(runs: [
+            run(0, 600, posture: lying, sleep: .asleep, inBed: true),
+            run(600, 605, posture: [.unknown: 1], locomotion: [.unknown: 1], sleep: .asleep, inBed: true, confidence: 0.1),
+            run(605, 1_200, posture: lying, sleep: .asleep, inBed: true)])
+        XCTAssertEqual(night.map(\.activityClass), [.sleeping, .sleeping], "one night, cut at the 15-minute cap only")
+        XCTAssertEqual(night.compactMap(\.absorbedClasses).flatMap { $0 }, [.unknown])
+        // Ten seconds or more of no claim is a row of its own.
+        let longer = run(120, 130, posture: [.unknown: 1], locomotion: [.unknown: 1], confidence: 0.1)
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), longer,
+                                                                   run(130, 240, posture: seated)]).count, 3)
+    }
+
+    func testAPostureHedgeFlippingForAFewTicksDoesNotSplitAStillRow() {
+        // Review fix: runs follow the per-state class, so a posture hedge that flips for a few ticks split a sitting
+        // stretch (stationary rows < 60 s went 3.1 -> 10.8 per hour on capture-24, and their seconds lost RMSSD).
+        let unresolved: [PostureClass: Double] = [.seatedLikely: 0.4, .uprightStationary: 0.35, .unknown: 0.25]
+        let moving: [LocomotionClass: Double] = [.other: 0.8, .stationary: 0.2]
+        let hedge = ActivityContextIntervalBuilder.build(runs: [
+            run(0, 300, posture: seated), run(300, 320, posture: unresolved), run(320, 600, posture: seated)])
+        XCTAssertEqual(hedge.map(\.activityClass), [.sitting])
+        XCTAssertEqual(hedge.first?.absorbedClasses, [.stationary])
+        XCTAssertEqual(hedge.first?.absorbedSeconds, 20)
+        // A chain of short readings, still and light, under the same 30 s.
+        let chain = ActivityContextIntervalBuilder.build(runs: [
+            run(0, 300, posture: seated), run(300, 315, posture: unresolved),
+            run(315, 320, posture: [.unknown: 1], locomotion: moving), run(320, 328, posture: upright),
+            run(328, 600, posture: seated)])
+        XCTAssertEqual(chain.map(\.activityClass), [.sitting])
+        XCTAssertEqual(chain.first?.absorbedSeconds, 28)
+        XCTAssertEqual(Set(chain.first?.absorbedClasses ?? []), [.stationary, .lightActivity, .standing])
+        // Thirty seconds of another reading is a row of its own; so is a still pause inside a walk past 10 s.
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: [
+            run(0, 300, posture: seated), run(300, 330, posture: unresolved), run(330, 600, posture: seated)]).count, 3)
+        let walking: [LocomotionClass: Double] = [.walking: 0.85, .stationary: 0.15]
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: [
+            run(0, 300, posture: upright, locomotion: walking), run(300, 315, posture: upright),
+            run(315, 600, posture: upright, locomotion: walking)]).count, 3)
     }
 
     func testLyingInBedAndLyingOnTheSofaAreDifferentSituations() {
@@ -592,6 +653,70 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(iv.count, 1)
         XCTAssertEqual(iv.first?.uncertainty ?? 0, 0.3, accuracy: 1e-9)
         XCTAssertEqual(iv.first?.experts, ["encoder", "transition"])
+    }
+
+    func testOnlyAChangeOfPositionWorthShowingStartsSettling() {
+        // Review fix: weak postural readings (under 0.40, mostly shifting in a chair or in bed) anchored settling, so
+        // 87 % of sitting seconds on capture-24 read as settling.
+        let runs = [run(0, 600, posture: seated)]
+        let weak = ActivityTransitionEvent(kind: .standToSitLike, probability: 0.3, ts: t0 + 300)
+        let shown = ActivityTransitionEvent(kind: .standToSitLike, probability: 0.5, ts: t0 + 300)
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: runs, events: [weak]).first?.settlingSeconds, 0)
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: runs, events: [weak]).first?.transitionCount, 1,
+                       "still counted as a transition inside the row")
+        XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: runs, events: [shown]).first?.settlingSeconds, 120)
+    }
+
+    func testTheStillTickBeforeAFlaggedWalkJoinsTheWalk() {
+        // Review fix: sit -> one still tick -> walk left a 5-s still row carrying the walk's first raised heart rate.
+        let walking: [LocomotionClass: Double] = [.walking: 0.85, .stationary: 0.15]
+        let unresolved: [PostureClass: Double] = [.seatedLikely: 0.4, .uprightStationary: 0.35, .unknown: 0.25]
+        let runs = [run(0, 120, posture: seated), run(120, 125, posture: unresolved),
+                    run(125, 185, posture: upright, locomotion: walking)]
+        let start = ActivityTransitionEvent(kind: .walkStart, probability: 0.8, ts: t0 + 125)
+        let folded = ActivityContextRuns.foldFragments(runs, maxFragmentS: 10, events: [start])
+        XCTAssertEqual(folded.map { ActivityClassifier.runKey($0.classification) }, ["seated", "walking"])
+        XCTAssertEqual(folded.last?.start, t0 + 120)
+        XCTAssertEqual(folded.last?.count, 13)
+        // Without a flagged start (or with one flagged elsewhere) the tick is the decoder's reading and stays.
+        XCTAssertEqual(ActivityContextRuns.foldFragments(runs, maxFragmentS: 10).count, 3)
+        let elsewhere = ActivityTransitionEvent(kind: .walkStart, probability: 0.8, ts: t0 + 160)
+        XCTAssertEqual(ActivityContextRuns.foldFragments(runs, maxFragmentS: 10, events: [elsewhere]).count, 3)
+    }
+
+    func testAContextFieldTheStoreDoesNotKeepReadsBackAsNotRecorded() throws {
+        // Review fix: the store row has no columns for the ctx-int-2 fields yet, and they read back as 0 / false
+        // (fully certain, no transitions, not in bed). They now read back as nil: not recorded.
+        let built = ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), run(120, 125, posture: upright),
+                                                                run(125, 240, posture: seated)])
+        let iv = try XCTUnwrap(built.first)
+        XCTAssertEqual(iv.inBed, false)
+        XCTAssertEqual(iv.uncertainty ?? -1, 0.2, accuracy: 1e-9)
+        XCTAssertEqual(iv.transitionCount, 0)
+        XCTAssertEqual(iv.absorbedSeconds, 5)
+        XCTAssertEqual(iv.settlingSeconds, 0)
+        let back = ActivityContextInterval(row: iv.storeRow)
+        XCTAssertNil(back.inBed)
+        XCTAssertNil(back.uncertainty)
+        XCTAssertNil(back.experts)
+        XCTAssertNil(back.transitionCount)
+        XCTAssertNil(back.absorbedClasses)
+        XCTAssertNil(back.absorbedSeconds)
+        XCTAssertNil(back.precededByGapS)
+        XCTAssertNil(back.settlingSeconds)
+    }
+
+    func testARunStopIsBackDatedToWhenTheRunningEnded() throws {
+        // Review fix: a run slowing into a walk keeps the moving mass high, so the run stop's onset (taken from the
+        // moving mass) was always its detection second.
+        var sim = ActivitySim(start: t0)
+        sim.desk(300); sim.run(180); sim.walk(180); sim.desk(300)
+        let input = sim.trackInput()
+        let events = ActivityContextTrackBuilder.build(input).events
+        let stop = try XCTUnwrap(events.first { $0.kind == .runStop }, "\(events.map(\.kind))")
+        let onset = try XCTUnwrap(stop.onsetTs)
+        XCTAssertLessThan(onset, stop.ts, "back-dated")
+        XCTAssertGreaterThanOrEqual(onset, stop.ts - ActivityTransitionEvent.maxOnsetLeadS)
     }
 
     func testSplitPartsReadTheirOwnIntensityAndConfidence() throws {
