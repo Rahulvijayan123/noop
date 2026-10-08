@@ -27,7 +27,7 @@ import com.noop.R
 enum class SleepSection(val raw: String, val title: String) {
     SLEEP_MARKS("sleepMarks", "Sleep marks"),
     STAGES("stages", "Stages"),
-    BODY_CLOCK("bodyClock", "Body clock"),
+    BODY_CLOCK("bodyClock", "Heart-rate rhythm"),
     NIGHT_DETAIL("nightDetail", "Night detail"),
     SLEEP_DEBT("sleepDebt", "Sleep-debt ledger"),
     STAGES_VS_TYPICAL("stagesVsTypical", "Stages vs typical"),

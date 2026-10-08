@@ -60,8 +60,11 @@ import kotlin.math.roundToInt
 //                            preference). Awareness only — NOT contraception, NOT a fertility/
 //                            ovulation predictor, NOT a diagnosis. Phase + cycle-day RANGE +
 //                            probabilistic next-period WINDOW (never a hard date).
-//   • BodyClockCard        — CircadianEngine.PhaseEstimate (+ optional JetLagPlan). LIGHT +
-//                            SLEEP TIMING only, never a supplement/drug.
+//   • BodyClockCard        — CircadianEngine.PhaseEstimate (+ optional JetLagPlan). An OBSERVED
+//                            HEART-RATE RHYTHM heuristic (cosinor over hourly mean HR — not a
+//                            temperature measurement, despite living in this section; spec-02 §3)
+//                            + a jet-lag / shift plan that is LIGHT + SLEEP TIMING only, never a
+//                            supplement/drug.
 //   • HeadsUpCard          — IllnessSignalEngine.Result. Confounder-suppressed illness
 //                            "heads-up". On-device estimate — not a diagnosis.
 //
@@ -217,8 +220,11 @@ fun CycleAwarenessOptInCard(onEnable: () -> Unit) {
 // MARK: - 2. Body Clock card
 
 /**
- * Estimated body-clock phase + an optional jet-lag / shift plan. LIGHT + SLEEP TIMING only —
- * never a supplement. Behavioural awareness, approximate.
+ * The observed heart-rate rhythm (cosinor over hourly mean HR) against the wearer's schedule + an
+ * optional jet-lag / shift plan. The plan is LIGHT + SLEEP TIMING only — never a supplement.
+ * Behavioural awareness, approximate. NOT a measured temperature minimum, melatonin onset,
+ * endogenous body clock or chronotype diagnosis (spec-02 §3): the copy names heart rate as the
+ * source, and shows the observed heart-rate PEAK time rather than an inferred temperature low.
  */
 @Composable
 fun BodyClockCard(
@@ -231,7 +237,7 @@ fun BodyClockCard(
         Column(verticalArrangement = Arrangement.spacedBy(Metrics.gap)) {
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
                 Column(modifier = Modifier.weight(1f)) {
-                    Overline("Body clock")
+                    Overline("Heart-rate rhythm")
                     Text(uiString(R.string.l10n_skin_temp_cards_screen_light_sleep_timing_only_df2a1552), style = NoopType.footnote, color = Palette.textTertiary)
                 }
                 StatePill(bodyClockConfidenceLabel(estimate.confidence), tone = bodyClockConfidenceTone(estimate.confidence))
@@ -241,10 +247,12 @@ fun BodyClockCard(
 
             Text(estimate.note, style = NoopType.subhead, color = Palette.textSecondary)
 
+            // The OBSERVED heart-rate peak (cosinor acrophase of hourly mean HR). The engine's
+            // `tempMinHour` (acrophase − 12 h) is a heuristic offset, never shown as a temperature low.
             Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 Icon(Icons.Filled.NightsStay, contentDescription = null, tint = hue, modifier = Modifier.size(14.dp))
                 Text(
-                    uiString(R.string.l10n_skin_temp_cards_screen_estimated_body_clock_low_around_clockstring_fb0f0790, clockString(estimate.tempMinHour)),
+                    uiString(R.string.l10n_skin_temp_cards_screen_estimated_body_clock_low_around_clockstring_fb0f0790, clockString(estimate.acrophaseHours)),
                     style = NoopType.footnote,
                     color = Palette.textTertiary,
                 )
