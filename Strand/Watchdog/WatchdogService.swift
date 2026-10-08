@@ -43,6 +43,9 @@ final class WatchdogService {
             carry = loadCarry(deviceId: model.deviceId)
             model.baseline.loadWatchdogSidecars(deviceId: model.deviceId)
         }
+        // Layer 1 awake tape + IMU usual belong to one strap era (local id + strap serial).
+        model.baseline.bindLayer1Tapes(deviceId: model.deviceId,
+                                       strapSerial: CloudStrapSerialStore.shared.serial(forLocalId: model.deviceId))
         captureLive(model)
         let now = Int(Date().timeIntervalSince1970)
         let liveAlerts = !model.live.backfilling
@@ -83,12 +86,16 @@ final class WatchdogService {
         if Task.isCancelled { return }
         carry = result.carry
         persistCarry(deviceId: model.deviceId)
-        if case .success(let built) = window,
-           Watchdog.shouldTrainUsual(result: result, dayLog: log) {
-            model.baseline.ingestImu(samples: built.imu, nowUnix: now)
-            model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
-                                              lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
-                                              sleepIntervals: sleepIntervals)
+        if case .success(let built) = window {
+            if Watchdog.shouldTrainUsual(result: result, dayLog: log) {
+                model.baseline.ingestImu(samples: built.imu, nowUnix: now, sleepIntervals: sleepIntervals)
+                model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
+                                                  lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
+                                                  sleepIntervals: sleepIntervals)
+            } else {
+                // The tape files the whole window now; a later quiet tick must not back-fill these minutes.
+                model.baseline.skipWatchdogTape(window: built)
+            }
         }
         model.baseline.activityContextNote = await activityContextNote(model: model, now: now)
         model.baseline.applyWatchdog(result)
