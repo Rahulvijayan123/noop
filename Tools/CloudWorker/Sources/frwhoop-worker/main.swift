@@ -127,6 +127,9 @@ import FoundationNetworking
 //                                sidecar's withheld/timeout verdict is the one that
 //                                arrives instead of a client-side timeout)
 //   FRWHOOP_INFERENCE_BUDGET     candidate runs per drain (default 2)
+//   FRWHOOP_CANDIDATE_SCHEDULER  persisted (default; needs 20261008110000) | memory
+//   FRWHOOP_CANDIDATE_MAX_ATTEMPTS / _REASSEMBLY_BUDGET / _LEASE_SECONDS  pending-queue
+//                                bounds (defaults 4 / 1 / 300; docs/model-integration/runtime-bounds.md)
 //   FRWHOOP_INFERENCE_ALLOW_NON_LOOPBACK  "1" allows a non-loopback host
 //                                (tests / an explicitly approved private network)
 //
@@ -643,6 +646,10 @@ if let rawURL = config.inferenceURL {
 if let inferenceClient {
     scoring.candidate = CandidateStage(client: inferenceClient,
                                        store: PostgresCandidateStore(db: dbScoring))
+    // Persisted fair scheduling (20261008110000); in memory while the migration is absent.
+    scoring.candidate?.configurePending(PostgresCandidatePendingStore(db: dbScoring),
+                                        environment: ProcessInfo.processInfo.environment,
+                                        owner: config.workerName)
     scoring.candidateBudget = config.inferenceBudget
     // Sleep-phenotype enrichment lane: the SAME sidecar, its own dedicated
     // /v1/sleep-features endpoint, with its own bounded budget. A candidate
@@ -719,6 +726,7 @@ if laneEnabled("scoring") {
                     counters["candidate_skipped_budget"] = candidate.skippedBudget
                     counters["candidate_skipped_deadline"] = candidate.skippedDeadline
                     counters["active_promotions_deferred"] = scoring.stats.activePromotionsDeferred
+                    counters.merge(scoring.candidate?.heartbeatCounters() ?? [:]) { current, _ in current }
                 }
                 $0.counters = counters
                 $0.lastError = scoring.stats.lastError
@@ -1018,6 +1026,10 @@ func inferenceHeartbeatMeta() -> Any {
             "active_substitutions": stats.activeSubstitutions,
             "active_promotions_deferred": scoring.stats.activePromotionsDeferred,
         ] as [String: Any]
+        if var candidateEntry = entry["candidate"] as? [String: Any], let stage = scoring.candidate {
+            candidateEntry.merge(stage.heartbeatMeta()) { current, _ in current }
+            entry["candidate"] = candidateEntry
+        }
         if let lastError = stats.lastError { entry["candidate_last_error"] = String(lastError.prefix(300)) }
         if let provider = stats.lastProviderId { entry["candidate_last_provider"] = provider }
         if let reason = stats.lastWithheldReason { entry["candidate_last_withheld_reason"] = reason }

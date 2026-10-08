@@ -297,6 +297,8 @@ class _Worker:
         self.job_deadline: float | None = None
         self.stop_reason: str | None = None
         self.stop_requested_at: float | None = None
+        #: SIGTERM already sent (and counted) by ``_begin_stop`` for the current process.
+        self.term_sent = False
         self.next_start_at = 0.0
         self.start_failures_in_row = 0
         self.started_wall: float | None = None
@@ -548,6 +550,10 @@ class WorkerLane:
                 proc.send_signal(signal.SIGTERM)
             except OSError:
                 pass
+            # Counted here: the process may be gone before the supervisor looks at it.
+            with self._cond:
+                worker.term_sent = True
+                self.counters["terminations"] += 1
 
     # -- supervision ----------------------------------------------------------------
 
@@ -598,7 +604,7 @@ class WorkerLane:
                     proc.send_signal(signal.SIGTERM)
                 except OSError:
                     pass
-                if count:
+                if count and not worker.term_sent:
                     with self._cond:
                         self.counters["terminations"] += 1
                 started = worker.stop_requested_at or time.monotonic()
@@ -639,6 +645,7 @@ class WorkerLane:
             worker.sock = None
             worker.pid = None
             worker.stop_requested_at = None
+            worker.term_sent = False
 
     def _child_env(self) -> dict[str, str]:
         env = dict(os.environ)
