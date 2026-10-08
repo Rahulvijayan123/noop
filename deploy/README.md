@@ -450,7 +450,7 @@ by the Spec 01 branch), the order matters; details are in `docs/model-integratio
 Resource notes. The sidecar's limits in `frwhoop-inference.service` fit one warm infer worker
 (measured about 373 MB for the parent plus both workers); raise `MemoryHigh` before setting
 `FRWHOOP_INFERENCE_MAX_ACTIVE=2`. The activity children run in the worker's unit. With every activity stage
-on, they add about 1.1 GiB (HART about 454 MB, ElderNet 302 MB, Inertia about 235 MB, an ActiNet encoder
+on, they add about 1.1 GiB (HART about 454 MB, ElderNet 302 MB, the Inertia stand-in fixture about 235 MB (no real checkpoint exists), an ActiNet encoder
 about 361 MB). Their math threads are capped at one each by default (`FRWHOOP_ACTIVITY_THREADS`,
 `FRWHOOP_ELDERNET_THREADS`, `FRWHOOP_INERTIA_THREADS`). `frwhoop-worker.service` sets no memory or task
 limit. Measure the worker's own RSS on the droplet before adding one (suggested: `MemoryHigh` at worker
