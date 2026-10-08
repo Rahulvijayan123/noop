@@ -8,6 +8,13 @@ repository code is authoritative for transport, units, identity and storage.
 Branch: `feat/sensor-biomarkers-20261006` (from `origin/main` fae049a). Preserve existing scoring
 behavior; nothing here may touch canonical scoring, HRV RR filtering or sleep pipelines.
 
+**Spec 01 (model integration) changes, 2026-10-08.** The request gained run, configuration and clock
+members (§4), PPG is computed per contiguous configuration-compatible run, optional families are reached
+through the aggregate route with distinct failure reasons (§3), and anchored v26 PPG is sent at its
+recorded 25 Hz. Details: `docs/model-integration/sensor-families.md` and
+`docs/model-integration/ppg-transport.md`; the shared segment rules are in
+`docs/model-integration/README.md`.
+
 ## 1. Tiers and families
 
 | Family | Tier | Provider revision | Enabled flag (worker env) |
@@ -92,6 +99,22 @@ Reason vocabulary (extends the sidecar `WithheldReason` enum with detail codes i
 `insufficient_eligible_time`, `unsupported_native_rate`, `preprocessing_unverified`,
 `artifact_unavailable`, `not_enough_valid_data`, plus the sidecar's existing enum values.
 
+Added by Spec 01: `family_disabled` (flag off), `runtime_unavailable` (an optional family's isolated
+runtime is missing), `adapter_broken` (status `error`; detail `adapter_import_error`,
+`adapter_interface_mismatch` or `adapter_exception` in `reason_counts`), `blocked_input` (for PPG:
+`clock.samples_per_second` differs from `native_rate_hz`), `ppg_run_id_discontinuity` (count: a `run_id`
+reused across a gap or a configuration change was split), `ppg_run_shorter_than_detector_window`,
+`ppg_run_no_pulses_detected`, `configuration_unidentified` (count: amplitude-bearing results withheld or
+reported per run because the transport did not identify gain/drive/channel) and
+`unverified_sample_clock_runs` (count, rhythm). A broken adapter, missing weights and a disabled flag are
+always distinguishable, and one failing family never discards another.
+
+`pulse_shape` documents add `computation: "per_run"`, `native_rate_hz`, `native_sample_period_ms`,
+`runs` (bounded listing of runs with their status and eligible seconds), `configurations[]` (one block per
+configuration identity; never pooled across identities; `pooled_across_configurations: false`) and, for
+unidentified configurations, `amplitude_scope: "per_run"` with `run_amplitudes` (one amplitude summary per
+run, at most 12 listed).
+
 ## 4. Sidecar request/response (POST /v1/infer, metric `sensor_biomarkers`)
 
 One request per (device, contiguous chunk-group); the lane is responsible for chunk/rejoin parity.
@@ -114,13 +137,16 @@ One request per (device, contiguous chunk-group); the lane is responsible for ch
       ]
     },
     "ppg": {
-      "native_rate_hz": 24,
+      "native_rate_hz": 25,
       "units": "adc_counts",
       "segments": [
-        {"start_unix": 1780917232, "duration_s": 300,
+        {"start_unix": 1780917232, "duration_s": 40,
          "samples": [ ... absolute reconstructed ADC counts ... ],
-         "sample_count_per_second": 24,
-         "config": {"stable": true}}
+         "sample_count_per_second": 25,
+         "run_id": "ppg-1780917232",
+         "config": {"stable": true, "identity": "unknown", "known": false},
+         "clock": {"source": "...", "grid": "...", "endpoint": "...",
+                   "samples_per_second": 25, "packet_timing_verified": false}}
       ]
     },
     "watch_side": "left|right|unknown",
@@ -134,8 +160,18 @@ Rules:
 - `imu`/`ppg` keys are omitted when no verified raw objects exist for that modality; the
   corresponding families answer `withheld` with a precise reason (`artifact_unavailable`).
 - PPG `samples` are ABSOLUTE reconstructed values (baseCode + cumulative deltas, per 1-second v26
-  record, 24 Hz native). Delta-only records (no baseCode) are never sent as amplitudes: the segment
-  builder withholds those seconds with `missing_ppg_anchor`.
+  record). Anchored records (NPB1 format 3, protocol 1.5) are sent at their recorded 25 Hz: the anchor
+  plus 24 deltas are 25 distinct samples and the next record's anchor is the 26th
+  (`docs/model-integration/ppg-transport.md` has the evidence and the one-place switch back to the
+  24-point convention). Older envelopes at 24 Hz still validate; the sidecar takes the rate from
+  `native_rate_hz` and never assumes one. Delta-only records (no baseCode) are never sent as
+  amplitudes: the segment builder withholds those seconds with `missing_ppg_anchor`.
+- `run_id`, `config.identity`/`config.known` and `clock` (all optional on the wire; always sent by the
+  Spec 01 worker) follow `docs/model-integration/README.md`. Segments sharing a `run_id` are one
+  contiguous run with one configuration; different runs are never joined into one signal. `config.identity`
+  is `"unknown"` and `config.known` false whenever the transport does not identify gain, drive and
+  channel (every v26 record). `clock.samples_per_second` must equal `native_rate_hz`;
+  `clock.packet_timing_verified` gates `rhythm_shadow`.
 - Segment boundaries carry no duplicated samples (endpoint ownership: a sample belongs to exactly one
   segment; consecutive segments share no endpoint sample).
 - Serialized request stays under the sidecar `MAX_BODY_BYTES` (8 MiB); shorten chunks if needed.
@@ -149,6 +185,12 @@ re-assembles `families` from `stages`.
 
 Provider id: `sensor.biomarkers.v1` (mode `production`, `publishable` = true only for descriptive
 families; research/shadow families carry `release_tier` inside the stage object).
+
+The aggregate provider is the worker's only route to every family, optional ones included: tremor and
+arm_swing (ParaDigMa) and rhythm_shadow (DeepBeat/SiamAF) are dispatched through
+`sensor_biomarkers/optional.py` to the same functions the standalone providers use. `GET /v1/providers`
+reports each family's readiness under the aggregate provider's `capability.families`
+(`state` ∈ `ready|disabled|artifact_unavailable|runtime_unavailable|adapter_broken`, with `reason`).
 
 ## 5. Persistence and lifecycle (SQL)
 
