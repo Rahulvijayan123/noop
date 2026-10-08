@@ -101,8 +101,34 @@ column (so an old database simply keeps it in `summary`). Keys (sorted on the wi
 `use`/`reason` are informational (the producer's view). A consumer always re-runs the policy itself; the
 policy only lowers.
 
-Compatibility: every field above is additive. An older phone ignores them and keeps decoding as before; it
-already never received the candidate decode document, and the gait windows it receives are the same bytes.
+### Older phones (the `authority` capability)
+
+A phone built before this policy (for example the installed build from `dab2124f3`) cannot be trusted with
+expert rows below production: it builds a PRODUCTION gait config from hard-coded `GaitWindowStore.Pins` for any
+`/gait-windows` row whose `model` digest checks out, ignoring `mode` and `release_mode`, and it adds the
+`hart-windows-1` `g_*` columns to its decoder input. Spec §2.1 forbids that upgrade, and the server is the only
+lever for builds already installed. So both window routes take a capability parameter:
+
+- `authority=<n>` (this build sends `authority=1`, `ServerScoreRepository.windowsAuthorityCapability`): the caller
+  applies `ActivityExpertSelection` itself. Response as documented above. Any other non-numeric value is
+  `400 invalid_authority`.
+- No `authority` (every older build): `/gait-windows` rows keep `day, mode, model_version, hop_s, window_s,
+  gait_threshold, n_*, release_mode, input_revision, result_revision, computed_at, summary, windows, unchanged`
+  but carry no `model`, `identity` or `authority` (no row is production, so this is every full row). The old
+  build's parser then yields `model == nil`, its `syncGaitWindows` stores nothing for its decoder, its
+  `latestModel` gets no new day, and it decodes those days on HART alone; its walking card (`GaitWindowsCache`,
+  which reads only `windows`) is unchanged. `/activity-windows` bodies leave out the `g_*` columns (HART's own
+  windows, features, fine labels and transition columns are unchanged), so the old decoder gets no embedded gait.
+
+Residual cost, not fixable from the server: a day an older phone stored before the server change (with its
+`model`) stays in that phone's on-disk `GaitWindowStore` and keeps feeding its decode of that day until the phone
+is updated or the store is cleared. Result revisions are the same in both shapes, so an older phone that already
+holds a day at revision R keeps its stored copy (`unchanged`); after updating, the new build re-reads any day it
+does not hold in its own store with the capability. Proven by `gait_windows_route_test.ts` ("a phone without the
+authority capability…"), `activity_windows_route_test.ts` ("the embedded gait columns go only to…"), the
+full-chain `activity_authority_sql_test.ts`, and `ActivityPhoneAuthorityTests.testTheWindowRoutesDeclareTheAuthorityCapability`.
+
+Compatibility otherwise: every field above is additive; nothing an older phone needs for display is removed.
 Deploy order: apply `20261008100000` before deploying the `scores` function (the route selects the new
 columns).
 
@@ -195,7 +221,12 @@ channel speaks) is unchanged.
 the child's measured `loaded` map (artifact sha256s read from the bytes it loaded, the package code digest,
 thread settings), the version labels, and the request. A child whose ping carries no `loaded` map (or whose
 `loaded_digest` does not check out) gets no cache key, so nothing is cached. The ElderNet stage's in-memory
-response cache uses the same key. HART `loaded` keys: `schema, code_sha256, manifest_sha256,
+response cache uses the same key. A key carries a stamp (`ActivityPythonService.CacheStamp`: the child's spawn
+generation and loaded digest when the key was built); an answer is stored only when `answerMatches(stamp,
+replyDigest:)`: the same process answered (a respawn mid-request loads whatever is on disk then), it still reports
+that identity, and HART's reply repeats that `loaded_digest` (serve.py sends it on every infer; ElderNet's infer
+reply carries none, so the generation and the ping identity decide). Otherwise the answer is used for the job and
+not kept. HART `loaded` keys: `schema, code_sha256, manifest_sha256,
 checkpoint_sha256, config_sha256, threads, env.*` (+ transition and gait artifacts when loaded); ElderNet:
 `weights_digest, upstream_digest, calibration_sha256`; Inertia/ActiNet: `bundle_sha256,
 encoder_config_sha256, checkpoint_sha256`.
@@ -223,8 +254,8 @@ Heartbeat: `meta.lanes[activity].identity` = `expert_policy`, `selection_digest`
 
 | Interface | Change | Compatibility |
 |---|---|---|
-| `/scores/gait-windows` | + `release_mode`, `input_revision`, `identity`, `authority` | additive; old phones ignore |
-| `/scores/activity-windows` | + `input_revision`, `release_mode`, `embedded_gait_release_mode` | additive |
+| `/scores/gait-windows` | + `release_mode`, `input_revision`, `identity`, `authority`; + `authority` query capability | with the capability: additive. Without it: no `model`/`identity`/`authority` (older phones keep the walking card, lose the evidence they must not have) |
+| `/scores/activity-windows` | + `input_revision`, `release_mode`, `embedded_gait_release_mode`; + `authority` capability | without the capability the `g_*` columns are left out |
 | Expert row payloads | + `summary.authority` | old functions store it verbatim; new trigger copies it |
 | New RPCs | `publish_activity_candidate_day`, `prune_activity_candidate_days` | an older DB rejects the call; the worker's savepoint absorbs it (counted `candidate_day_failures`) |
 | Env | `FRWHOOP_ACTIVITY_THREADS` (HART child threads, 1…16, default 1); `ACTIVITY_GAIT_EXPERT` now cleared for the HART child | new |
@@ -287,9 +318,9 @@ psql "$RO_URL" -Atc "select count(*) from activity_gait_windows_days where relea
 psql "$RO_URL" -Atc "select day, policy, selection_digest, input_revision, withheld_reason,
   jsonb_object_keys(arms) from activity_candidate_days where user_id='<owner>' order by computed_at desc limit 8"
 # Route responses (owner credential)
-curl -s -H "authorization: Bearer $INSTALL_TOKEN" "$SUPABASE_URL/functions/v1/scores/gait-windows?days=<day>" \
+curl -s -H "authorization: Bearer $INSTALL_TOKEN" "$SUPABASE_URL/functions/v1/scores/gait-windows?days=<day>&authority=1" \
   | jq '.days[] | {day, mode, release_mode, input_revision, identity, authority}'
-curl -s -H "authorization: Bearer $INSTALL_TOKEN" "$SUPABASE_URL/functions/v1/scores/activity-windows?days=<day>" \
+curl -s -H "authorization: Bearer $INSTALL_TOKEN" "$SUPABASE_URL/functions/v1/scores/activity-windows?days=<day>&authority=1" \
   | jq '.days[] | {day, input_revision, release_mode, embedded_gait_release_mode}'
 # Child processes, their threads and RSS (one per enabled stage; no ACTIVITY_GAIT_EXPERT on HART)
 ps -o pid,rss,nlwp,args -C python3 | grep activity_context
@@ -348,9 +379,13 @@ There is no experimental preview on the phone (no UI decodes a candidate arm), s
 (`GaitWindowsCache`, `WalkingInsightsSection`, `DayActivityDetailViews`) shows ElderNet gait quality from the
 route's newest row; it is quality reporting, not activity decoding, and is unchanged (see "Requests to parent").
 
-`Repository+ActivityPersonalProfile.swift` (not owned here) still gates gait windows on
-`activityBaseDecoderConfig.gaitQuality`, which is now always nil, so the personal-profile fit runs without ElderNet
-(as it effectively did at the base, where the decoder refused the unrecorded windows).
+`Repository+ActivityPersonalProfile.swift`: the personal-profile fit replays HART and the strap streams alone. Its
+former ElderNet branches were gated on `activityBaseDecoderConfig.gaitQuality`, which is now always nil, and were
+removed (round 3); the fit fingerprint keeps its `g0` text, so fits made since the policy landed are not redone.
+
+The window fetches send the release-authority capability (`authority=1`, `ServerScoreRepository.windowsURL`), so
+the server sends this build the gait `model` and the embedded gait columns it withholds from older builds (see
+"Older phones").
 
 ### Stored fields and migration
 

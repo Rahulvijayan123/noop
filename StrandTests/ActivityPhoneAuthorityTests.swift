@@ -283,6 +283,24 @@ final class ActivityPhoneAuthorityTests: XCTestCase {
 
     // MARK: Route parsing
 
+    /// This build applies the release policy itself, so it declares the capability on both window routes; a request
+    /// without it gets the legacy shape (no gait model, no embedded gait columns), which an older build cannot turn
+    /// into decoder evidence.
+    func testTheWindowRoutesDeclareTheAuthorityCapability() throws {
+        let endpoint = try XCTUnwrap(URL(string: "https://example.test/functions/v1/scores"))
+        for route in ["gait-windows", "activity-windows"] {
+            let url = try XCTUnwrap(ServerScoreRepository.windowsURL(
+                endpoint: endpoint, route: route, days: ["2026-10-04", "2026-10-05"], deviceId: "whoop-1",
+                known: ["2026-10-04": "40"]))
+            XCTAssertTrue(url.path.hasSuffix("/scores/\(route)"), url.path)
+            let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+            XCTAssertEqual(items.first { $0.name == "authority" }?.value, "1", route)
+            XCTAssertEqual(items.first { $0.name == "days" }?.value, "2026-10-04,2026-10-05")
+            XCTAssertEqual(items.first { $0.name == "known" }?.value, "2026-10-04:40")
+            XCTAssertEqual(items.first { $0.name == "deviceId" }?.value, "whoop-1")
+        }
+    }
+
     func testGaitRouteParsingOldAndNewServer() throws {
         let m = model()
         let modelObject: [String: Any] = try {

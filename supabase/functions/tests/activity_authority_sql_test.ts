@@ -71,8 +71,13 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
                 'reason','model_not_pinned','input_revision',j.input_revision::text)),
             'windows',null,'withheld_reason','model_not_pinned','candidate_document',null));
         end $$;`);
-      const rows = await readGaitWindows({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
+      const legacy = await readGaitWindows({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
         known: new Map() });
+      assert.equal(legacy.length, 1);
+      assert.equal((legacy[0] as any).model, undefined, 'a phone without the capability gets no decoder model');
+      assert.equal((legacy[0] as any).release_mode, 'shadow');
+      const rows = await readGaitWindows({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
+        known: new Map(), authorityAware: true });
       assert.equal(rows.length, 1);
       const row: any = rows[0];
       assert.equal(row.mode, 'candidate');

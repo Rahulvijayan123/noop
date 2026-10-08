@@ -559,6 +559,45 @@ final class ActivityElderNetStageTests: XCTestCase {
         }
     }
 
+    /// An answer from a process that reports another identity than the one the key was built from is used for the
+    /// job but never stored under that key.
+    func testAnAnswerFromAnotherIdentityIsUsedButNotCached() throws {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("activity-cache-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let cache = try XCTUnwrap(ActivityLocalCache(path: directory.path))
+        let hart = try hartService(["--infer-loaded-digest", String(repeating: "0", count: 64)])
+        _ = try hart.ping()
+        XCTAssertNotNil(hart.cacheStamp)
+        for _ in 0..<2 {
+            var stats = ActivityLane.Stats()
+            let inferred = try ActivityLane.inferChunks(requests(), service: hart, inertia: nil, versions: versions(hart),
+                                                        cache: cache, stats: &stats, renew: { true })
+            XCTAssertEqual(stats.windowsInferred, 3, "the answers are used")
+            XCTAssertEqual(stats.windowsReused, 0, "but never kept under the key")
+            XCTAssertFalse(inferred.windows.isEmpty)
+        }
+    }
+
+    /// A respawn between building a key and receiving the answer: the stamp no longer names the process that
+    /// answered, so the answer is not stored (HART's file cache and ElderNet's response cache use the same check).
+    func testARespawnBetweenTheKeyAndTheAnswerIsNotCached() throws {
+        let hart = try hartService()
+        _ = try hart.ping()
+        let stamp = try XCTUnwrap(hart.cacheStamp)
+        XCTAssertTrue(hart.answerMatches(stamp, replyDigest: stamp.loadedDigest))
+        XCTAssertTrue(hart.answerMatches(stamp, replyDigest: nil))
+        XCTAssertFalse(hart.answerMatches(stamp, replyDigest: String(repeating: "0", count: 64)))
+        hart.shutdown()
+        let answer = try hart.infer(run: requests()[0])
+        XCTAssertTrue(answer.ok)
+        XCTAssertEqual(answer.loadedDigest, stamp.loadedDigest, "the respawned child loaded the same bytes")
+        XCTAssertFalse(hart.answerMatches(stamp, replyDigest: answer.loadedDigest),
+                       "but it is another process, not yet asked what it loaded")
+        _ = try hart.ping()
+        XCTAssertNotEqual(hart.cacheStamp, stamp, "a new stamp names the new process")
+    }
+
     /// Changed checkpoint bytes under the same version labels: the measured identity moves, so no answer computed
     /// with the old bytes is reused.
     func testChangedCheckpointBytesUnderTheSameLabelsAreNotReused() throws {

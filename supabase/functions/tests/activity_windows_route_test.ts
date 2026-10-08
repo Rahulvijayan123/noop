@@ -14,7 +14,10 @@ const LOCAL_DEVICE = 'whoop-MGB0214654';
 const cfg = { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon', allowLegacyEnrollment: true };
 
 const DOC = { format: 'hart-windows-1', t0: 1791158400, labels: ['stationary', 'unknown'], features: [],
-  feature_scale: [], s: [0], e: [4], l: [0], p: [[1000, 0]], b: [0], f: [null] };
+  feature_scale: [], s: [0], e: [4], l: [0], p: [[1000, 0]], b: [0], f: [null],
+  // HART-embedded ElderNet columns (no release of their own) and transition-expert columns.
+  g_schema: 'gait-expert-1', g_v: 'eldernet-437a38b', g_s: [0], g_e: [10], g_p: [970], g_f: [1], g_q: [null],
+  t_schema: 'transition-1', t_v: 'tr-1', t_pv: 'p-1', t: [[1000, 0, 0, 0, 0]] };
 
 function fakeRest(rows: Array<{ day: string; result_revision: number }>, reads: string[]) {
   const rest = makeMemRest() as any;
@@ -99,4 +102,17 @@ Deno.test('activity windows: every row says its input revision and release (HART
     assertEquals(byDay[day].release_mode, 'production', day);
     assertEquals(byDay[day].embedded_gait_release_mode, 'shadow', day);
   }
+});
+
+Deno.test('activity windows: the embedded gait columns go only to a phone with the authority capability', async () => {
+  const rows = [{ day: '2026-10-05', result_revision: 12 }];
+  const legacy = await handleScoresRequest(get('days=2026-10-05'), { rest: fakeRest(rows, []), cfg });
+  const [old] = (await legacy.json()).days;
+  assertEquals(Object.keys(old.windows).filter((k) => k.startsWith('g_')), [], 'an older phone gets no embedded gait');
+  assertEquals(old.windows.t_schema, 'transition-1', 'everything else is unchanged');
+  assertEquals(old.windows.p, DOC.p);
+  const aware = await handleScoresRequest(get('days=2026-10-05&authority=1'), { rest: fakeRest(rows, []), cfg });
+  const [now] = (await aware.json()).days;
+  assertEquals(now.windows, DOC);
+  assertEquals(now.embedded_gait_release_mode, 'shadow');
 });

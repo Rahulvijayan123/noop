@@ -255,6 +255,8 @@ final class ActivityPythonService {
     private var pendingIds: Set<String> = []
     private var failures: [String: String] = [:]
     private var restartCount = 0
+    /// Every spawn of a child, never reset: an answer is named by the process that gave it.
+    private var spawnGeneration = 0
     private var lastRestartAt: Date?
     private(set) var lastPingStatus: PingStatus?
     /// Set by a ping answered by the running process, cleared by every (re)start.
@@ -339,6 +341,27 @@ final class ActivityPythonService {
     /// `loadedIdentity` when it checks out (`loadedDigest`), else nil: what answer caches may be keyed by.
     var cacheIdentity: [String: String]? {
         loadedDigest == nil ? nil : loadedIdentity
+    }
+
+    /// What an answer cache key was built from: the running process and the digest of what it measured it loaded.
+    struct CacheStamp: Equatable {
+        var generation: Int
+        var loadedDigest: String
+    }
+
+    /// The stamp to key an answer by now (nil when the child reports no identity that checks out: no caching).
+    var cacheStamp: CacheStamp? {
+        guard let digest = loadedDigest else { return nil }
+        lock.lock(); defer { lock.unlock() }
+        return CacheStamp(generation: spawnGeneration, loadedDigest: digest)
+    }
+
+    /// Whether an answer may be stored under a key built at `stamp`: the same process answered (no respawn in
+    /// between, which would have loaded whatever is on disk now), it still reports the same identity, and the reply's
+    /// own `loaded_digest`, when it carries one, is that identity. Otherwise the answer is used but not kept.
+    func answerMatches(_ stamp: CacheStamp, replyDigest: String?) -> Bool {
+        guard replyDigest == nil || replyDigest == stamp.loadedDigest else { return false }
+        return cacheStamp == stamp
     }
 
     /// True once this child process has answered a ping (a respawn clears it).
@@ -428,6 +451,7 @@ final class ActivityPythonService {
         self.rawLines = [:]
         self.failures = [:]
         self.restartCount += 1
+        self.spawnGeneration += 1
         self.lastRestartAt = Date()
         self.lastPingStatus = nil
         self.identityProbed = false

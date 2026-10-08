@@ -73,8 +73,8 @@ extension Repository {
         return record
     }
 
-    /// The strap's streams over one calibration run (with lead-in) in decoder-input form, with the HART and
-    /// ElderNet windows the phone holds for it. nil when the strap recorded nothing there.
+    /// The strap's streams over one calibration run (with lead-in) in decoder-input form, with the HART windows the
+    /// phone holds for it. nil when the strap recorded nothing there.
     private func calibrationTrackInput(_ session: CalibrationSessionSpan,
                                        config: ActivityDecoderConfig) async -> ActivityContextTrackInput? {
         guard let signals = await stretchSignals(from: session.from, to: session.to),
@@ -90,10 +90,8 @@ extension Repository {
             input.encoderVersion = encoder.encoderVersion
             input.transitionWindows = encoder.transitions
         }
-        if let gait = config.gaitQuality,
-           let windows = GaitWindowStore.shared.trackInput(from: session.from, to: session.to, model: gait.model) {
-            input.gaitQuality = windows
-        }
+        // No ElderNet windows: the base config carries no expert evidence (which stored expert rows may shape a
+        // decode is decided per day by `ActivityPhoneEvidence`), so a fit replays HART and the strap streams alone.
         return input
     }
 
@@ -113,7 +111,7 @@ extension Repository {
         }
     }
 
-    /// What a fit would read: the labels (id and edit time), how many HART and ElderNet windows cover each run,
+    /// What a fit would read: the labels (id and edit time), how many HART windows cover each run,
     /// the base decoder's tag and the profile version. Equal fingerprints mean a refit would repeat the last one.
     nonisolated static func personalProfileFingerprint(_ sessions: [CalibrationSessionSpan],
                                                        config: ActivityDecoderConfig) -> String {
@@ -124,11 +122,9 @@ extension Repository {
                 text += "\(label.id.uuidString)@\(Int(label.updatedAt.timeIntervalSince1970)),"
             }
             let hart = ActivityEncoderWindowStore.shared.windows(from: session.from, to: session.to)?.windows.count ?? 0
-            var gait = 0
-            if let model = config.gaitQuality?.model {
-                gait = GaitWindowStore.shared.trackInput(from: session.from, to: session.to, model: model)?.windows.count ?? 0
-            }
-            text += "h\(hart)g\(gait)"
+            // ElderNet windows never enter a fit (see `calibrationTrackInput`); the constant `g0` keeps the
+            // fingerprints of fits made since then unchanged.
+            text += "h\(hart)g0"
         }
         var h: UInt64 = 0xcbf29ce484222325
         for byte in text.utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
