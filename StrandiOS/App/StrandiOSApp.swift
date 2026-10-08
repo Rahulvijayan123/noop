@@ -701,6 +701,17 @@ enum DemoScreens {
         // `--demo-kit-only <ids>` for a few sections.
         case "kitcharts": return AnyView(KitChartsGallery())
         case "kitcomponents": return AnyView(KitComponentsGallery())
+        // The Health, Stress, Trends and Insights area's other screens, for screenshots.
+        case "hub":      return AnyView(InsightsHubView())
+        case "labbook":  return AnyView(LabBookView())
+        case "rhythm":   return AnyView(RhythmHost())
+        case "fused":    return AnyView(FusedRecordHost())
+        case "hydration": return AnyView(HydrationView())
+        case "coupled":  return AnyView(CoupledView())
+        case "intelligence": return AnyView(IntelligenceView())
+        case "weeklydigest": return AnyView(WeeklyDigestView())
+        case "rhythmdemo": return AnyView(RhythmDemoScreen())
+        case "labmarker": return AnyView(LabMarkerDemoScreen())
         default:         return nil
         }
     }
