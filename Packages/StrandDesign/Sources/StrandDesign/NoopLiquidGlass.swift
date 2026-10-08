@@ -327,53 +327,41 @@ public struct NoopGlassTabItem: Identifiable {
     }
 }
 
-/// The bottom navigation as a floating capsule of Liquid Glass. The selected tab sits on a lens of
-/// brighter glass that slides between items. Tapping the selected tab calls `onReselect`, which is how
-/// the shell keeps its pop-to-root / scroll-to-top convention.
+/// The bottom navigation as a floating capsule of Liquid Glass, and a slider: the selected tab sits on a glass
+/// lens, and dragging that lens along the bar slides through the tabs (Today, Monitor, Events, Sleep, Sana).
+/// Tapping a tab selects it; tapping the selected tab calls `onReselect`, which is how the shell keeps its
+/// pop-to-root / scroll-to-top convention.
 public struct NoopGlassTabBar: View {
     private let items: [NoopGlassTabItem]
     @Binding private var selection: Int
     private let onReselect: (Int) -> Void
-    @Namespace private var selectionSpace
     @Environment(\.liquidGlass) private var level
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private let showsScrubber: Bool
-
-    /// `scrubber` adds a glass slider row above the bar: drag its thumb along the bar to move between tabs.
-    public init(items: [NoopGlassTabItem], selection: Binding<Int>, scrubber: Bool = false,
-                onReselect: @escaping (Int) -> Void) {
+    public init(items: [NoopGlassTabItem], selection: Binding<Int>, onReselect: @escaping (Int) -> Void) {
         self.items = items
         self._selection = selection
-        self.showsScrubber = scrubber
         self.onReselect = onReselect
     }
 
     public var body: some View {
-        VStack(spacing: 8) {
-            if showsScrubber, items.count > 1 { scrubber }
-            HStack(spacing: 0) {
-                ForEach(items) { item in
-                    tabButton(item)
-                }
-            }
-            .padding(4)
+        bar
             .background {
                 LiquidGlassControlBackground(shape: Capsule(style: .continuous), level: level)
             }
             .shadow(color: .black.opacity(scheme == .dark ? 0.32 : 0.12), radius: 18, x: 0, y: 8)
-        }
-        .padding(.horizontal, 20)
-        .padding(.bottom, 4)
-        .accessibilityElement(children: .contain)
+            .padding(.horizontal, 20)
+            .padding(.bottom, 4)
+            .accessibilityElement(children: .contain)
     }
 
-    /// The tab slider: one stop per tab, its thumb one tab wide so it rests right over the selected tab.
-    private var scrubber: some View {
+    /// The lens is the slider's thumb: one tab wide, one stop per tab.
+    private var bar: some View {
         let position = Binding<Double>(
             get: { Double(items.firstIndex { $0.tag == selection } ?? 0) },
             set: { index in
+                guard !items.isEmpty else { return }
                 let tag = items[min(items.count - 1, max(0, Int(index.rounded())))].tag
                 guard tag != selection else { return }
                 withAnimation(reduceMotion ? nil : .spring(response: 0.38, dampingFraction: 0.78)) { selection = tag }
@@ -381,18 +369,24 @@ public struct NoopGlassTabBar: View {
         )
         return NoopGlassSlider(
             value: position,
-            in: 0...Double(items.count - 1),
+            in: 0...Double(max(1, items.count - 1)),
             step: 1,
-            thumbWidth: .fraction(1 / CGFloat(items.count)),
+            thumbWidth: .fraction(1 / CGFloat(max(1, items.count))),
             edgeInset: 4,
+            showsTrack: false,
             showsFill: false,
-            showsTicks: true,
-            label: "Switch tab",
+            label: "Tabs",
             valueText: { "\(Int($0.rounded()) + 1) of \(items.count)" },
             identifier: "tab.slider"
-        )
-        .frame(height: 34)
-        .shadow(color: .black.opacity((scheme == .dark ? 0.24 : 0.08) * level.shadowScale), radius: 10, x: 0, y: 4)
+        ) {
+            HStack(spacing: 0) {
+                ForEach(items) { item in
+                    tabButton(item)
+                }
+            }
+            .padding(4)
+        }
+        .frame(height: 62)
     }
 
     private func tabButton(_ item: NoopGlassTabItem) -> some View {
@@ -418,26 +412,11 @@ public struct NoopGlassTabBar: View {
             .foregroundStyle(selected ? StrandPalette.accent : StrandPalette.textPrimary)
             .frame(maxWidth: .infinity)
             .frame(height: 54)
-            .background {
-                if selected {
-                    selectionLens
-                        .matchedGeometryEffect(id: "selection", in: selectionSpace)
-                }
-            }
             .contentShape(Capsule(style: .continuous))
         }
         .buttonStyle(GlassTabPressStyle())
         .accessibilityAddTraits(selected ? .isSelected : [])
         .accessibilityIdentifier(item.identifier)
-    }
-
-    /// The selected item's brighter glass: more body, a stronger rim.
-    private var selectionLens: some View {
-        let shape = Capsule(style: .continuous)
-        return ZStack {
-            shape.fill(Color.white.opacity(scheme == .dark ? 0.10 + 0.06 * level.amount : 0.55))
-            LiquidGlassHighlights(shape: shape, level: LiquidGlassLevel(percent: Int(min(1, level.amount + 0.25) * 100)))
-        }
     }
 }
 

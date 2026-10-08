@@ -3,16 +3,19 @@ import SwiftUI
 // MARK: - Glass slider
 //
 // A slider drawn with the app's own Liquid Glass helpers (`LiquidGlassControlBackground`, `LiquidGlassSwitch`):
-// a glass track and a glass thumb that refracts what is under it and swells while it is held, the way the
-// platform's iOS 26 slider behaves. It draws the same on every supported iOS because the glass is the app's
-// (AemiSDR), not the platform's. At 0% glass the thumb is a plain raised capsule on a flat track.
+// a glass thumb that refracts what is under it and swells while it is held, the way the platform's iOS 26
+// slider behaves, optionally on a glass track. It draws the same on every supported iOS because the glass is
+// the app's (AemiSDR), not the platform's. At 0% glass the thumb is a plain raised capsule.
 //
 // With `step` the thumb follows the finger freely and the value snaps to the nearest stop as it passes (with a
 // selection tick); on release the thumb settles onto the stop. `thumbWidth: .fraction(1 / n)` over `n` stops
-// makes the thumb one stop wide, so at rest it sits exactly over its stop (the glass tab bar uses this to
-// line the thumb up with a tab).
+// makes the thumb one stop wide, so at rest it sits exactly over its stop.
+//
+// The slider can also carry `content` drawn above the thumb. The glass tab bar uses this: its tabs are the
+// content, the selected tab's lens is the thumb, and dragging the lens along the bar slides through the tabs.
+// Taps still reach the content (the tab buttons); only a drag past a few points moves the thumb.
 
-public struct NoopGlassSlider: View {
+public struct NoopGlassSlider<Content: View>: View {
     public enum ThumbWidth {
         case fixed(CGFloat)
         /// A fraction of the track's usable width (its width less the edge inset on both sides).
@@ -24,40 +27,52 @@ public struct NoopGlassSlider: View {
     private let step: Double?
     private let thumbWidth: ThumbWidth
     private let edgeInset: CGFloat
+    private let showsTrack: Bool
     private let showsFill: Bool
     private let showsTicks: Bool
     private let label: LocalizedStringKey
     private let valueText: (Double) -> String
     private let identifier: String?
+    private let content: Content?
 
     @State private var dragFraction: CGFloat?
+    @State private var dragOrigin: CGFloat?
     @Environment(\.liquidGlass) private var level
     @Environment(\.colorScheme) private var scheme
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
 
+    /// - Parameters:
+    ///   - edgeInset: the gap between the thumb and the track edge, on all four sides.
+    ///   - showsTrack: draws the glass track; off when the slider sits on a surface that is already glass.
+    ///   - content: drawn above the thumb; when present the slider does not take over its accessibility, and a
+    ///     touch only becomes a drag after it has moved a few points.
     public init(
         value: Binding<Double>,
         in range: ClosedRange<Double> = 0...1,
         step: Double? = nil,
         thumbWidth: ThumbWidth = .fixed(44),
         edgeInset: CGFloat = 2,
+        showsTrack: Bool = true,
         showsFill: Bool = true,
         showsTicks: Bool = false,
         label: LocalizedStringKey,
         valueText: @escaping (Double) -> String = { String(Int($0.rounded())) },
-        identifier: String? = nil
+        identifier: String? = nil,
+        @ViewBuilder content: () -> Content
     ) {
         self._value = value
         self.range = range
         self.step = step
         self.thumbWidth = thumbWidth
         self.edgeInset = edgeInset
+        self.showsTrack = showsTrack
         self.showsFill = showsFill
         self.showsTicks = showsTicks
         self.label = label
         self.valueText = valueText
         self.identifier = identifier
+        self.content = content()
     }
 
     // MARK: Value maths
@@ -99,12 +114,14 @@ public struct NoopGlassSlider: View {
             let pressed = dragFraction != nil
 
             ZStack(alignment: .leading) {
-                track(height: height)
-                if showsFill {
-                    Capsule(style: .continuous)
-                        .fill(StrandPalette.accent.opacity(0.30))
-                        .frame(width: thumbX + thumbW / 2, height: height)
-                        .allowsHitTesting(false)
+                if showsTrack {
+                    track(height: height)
+                    if showsFill {
+                        Capsule(style: .continuous)
+                            .fill(StrandPalette.accent.opacity(0.30))
+                            .frame(width: thumbX + thumbW / 2, height: height)
+                            .allowsHitTesting(false)
+                    }
                 }
                 if showsTicks, stopCount > 1 {
                     ForEach(0..<stopCount, id: \.self) { i in
@@ -116,26 +133,40 @@ public struct NoopGlassSlider: View {
                     .allowsHitTesting(false)
                 }
                 thumb(pressed: pressed)
-                    .frame(width: thumbW, height: max(0, height - 4))
-                    .scaleEffect(pressed && !reduceMotion ? 1.08 : 1)
+                    .frame(width: thumbW, height: max(0, height - 2 * edgeInset))
+                    .scaleEffect(pressed && !reduceMotion ? 1.06 : 1)
                     .offset(x: thumbX, y: 0)
                     .animation(reduceMotion ? nil : StrandMotion.interactive, value: pressed)
                     .allowsHitTesting(false)
+                if let content {
+                    content
+                        .frame(width: width, height: height)
+                }
             }
             .frame(width: width, height: height, alignment: .leading)
             .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 0)
+            .highPriorityGesture(
+                DragGesture(minimumDistance: content == nil ? 0 : 8)
                     .onChanged { g in
-                        let f = travel > 0 ? CGFloat(min(1, max(0, (g.location.x - edgeInset - thumbW / 2) / travel))) : 0
-                        dragFraction = f
-                        let next = snapped(range.lowerBound + Double(f) * span)
+                        let f: CGFloat
+                        if content == nil {
+                            // On a bare slider a touch picks the spot under the finger.
+                            f = travel > 0 ? (g.location.x - edgeInset - thumbW / 2) / travel : 0
+                        } else {
+                            // Over content the thumb is grabbed where it is and moves with the finger.
+                            if dragOrigin == nil { dragOrigin = fraction(of: value) }
+                            f = (dragOrigin ?? 0) + (travel > 0 ? g.translation.width / travel : 0)
+                        }
+                        let clamped = min(1, max(0, f))
+                        dragFraction = clamped
+                        let next = snapped(range.lowerBound + Double(clamped) * span)
                         if next != value {
                             value = next
                             StrandHaptic.selection.play()
                         }
                     }
                     .onEnded { _ in
+                        dragOrigin = nil
                         withAnimation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.8)) {
                             dragFraction = nil
                         }
@@ -144,18 +175,16 @@ public struct NoopGlassSlider: View {
         }
         .opacity(isEnabled ? 1 : 0.5)
         .animation(reduceMotion ? nil : .spring(response: 0.34, dampingFraction: 0.8), value: value)
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel(label)
-        .accessibilityValue(valueText(value))
-        .accessibilityAdjustableAction { direction in
-            let delta = step ?? max(span / 10, .leastNonzeroMagnitude)
-            switch direction {
-            case .increment: value = snapped(value + delta)
-            case .decrement: value = snapped(value - delta)
-            @unknown default: break
-            }
-        }
-        .accessibilityIdentifier(identifier ?? "")
+        .modifier(SliderAccessibility(
+            isStandalone: content == nil, label: label, valueText: valueText(value), identifier: identifier,
+            adjust: { direction in
+                let delta = step ?? max(span / 10, .leastNonzeroMagnitude)
+                switch direction {
+                case .increment: value = snapped(value + delta)
+                case .decrement: value = snapped(value - delta)
+                @unknown default: break
+                }
+            }))
     }
 
     // MARK: Parts
@@ -185,6 +214,48 @@ public struct NoopGlassSlider: View {
             shape.fill(Color.white)
                 .overlay { shape.strokeBorder(StrandPalette.hairline, lineWidth: 0.5) }
                 .shadow(color: .black.opacity(0.18), radius: 3, x: 0, y: 1)
+        }
+    }
+}
+
+extension NoopGlassSlider where Content == EmptyView {
+    public init(
+        value: Binding<Double>,
+        in range: ClosedRange<Double> = 0...1,
+        step: Double? = nil,
+        thumbWidth: ThumbWidth = .fixed(44),
+        edgeInset: CGFloat = 2,
+        showsFill: Bool = true,
+        showsTicks: Bool = false,
+        label: LocalizedStringKey,
+        valueText: @escaping (Double) -> String = { String(Int($0.rounded())) },
+        identifier: String? = nil
+    ) {
+        self.init(value: value, in: range, step: step, thumbWidth: thumbWidth, edgeInset: edgeInset,
+                  showsTrack: true, showsFill: showsFill, showsTicks: showsTicks, label: label,
+                  valueText: valueText, identifier: identifier) { EmptyView() }
+    }
+}
+
+/// A bare slider is one accessibility element with an adjust action. A slider that carries content leaves that
+/// content (the tab buttons) as the elements.
+private struct SliderAccessibility: ViewModifier {
+    let isStandalone: Bool
+    let label: LocalizedStringKey
+    let valueText: String
+    let identifier: String?
+    let adjust: (AccessibilityAdjustmentDirection) -> Void
+
+    func body(content: Content) -> some View {
+        if isStandalone {
+            content
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(label)
+                .accessibilityValue(valueText)
+                .accessibilityAdjustableAction(adjust)
+                .accessibilityIdentifier(identifier ?? "")
+        } else {
+            content.accessibilityElement(children: .contain)
         }
     }
 }

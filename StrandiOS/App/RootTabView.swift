@@ -330,7 +330,7 @@ struct RootTabView: View {
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
                 if showsGlassTabBar {
-                    NoopGlassTabBar(items: glassTabItems, selection: $selectedTab, scrubber: true, onReselect: reselectTab)
+                    NoopGlassTabBar(items: glassTabItems, selection: $selectedTab, onReselect: reselectTab)
                         .transition(.move(edge: .bottom).combined(with: .opacity))
                 }
             }
