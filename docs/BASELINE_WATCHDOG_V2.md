@@ -409,7 +409,7 @@ What each step showed:
 **On the VPS** (frwhoop-worker-2, 4 vCPU 2.0 GHz, unit limits CPUQuota 100 %, 2 threads):
 - Self-test with the real models: TimesFM 6.05 s per window, UniTS 0.36 s per window, peak RSS 2.34 GB. Both separate a planted +20 bpm shift (TimesFM HR score 2.0–3.6 vs ≤ 0.37; UniTS 2.4–3.2 vs ≤ 0.05).
 - The first job on the owner's strap ran the UniTS prompt-tune (400 windows × 2 epochs, 480 s, loss 0.57 → 0.50) and published per-window scores; it is calibrating.
-- Throughput at one core is about 10 users per core-minute of new data. Scaling beyond ~100 active users needs more cores, or a cheaper TimesFM path (bf16 or a shorter context).
+- Capacity at one core: steady state is ≈ 6–9 s of CPU per active user-hour (about one usable window per hour at 6 s, plus weekly UniTS training of ~8 min amortised to ~3 s/h), so one core sustains a few hundred users. Onboarding is the bottleneck: a 30 h backfill plus the first prompt-tunes take ≈ 10–20 min per new user. Beyond that, add cores or a cheaper TimesFM path (bf16, shorter context).
 
 ---
 
