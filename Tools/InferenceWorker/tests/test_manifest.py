@@ -4,12 +4,16 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 
 import pytest
 
-from conftest import MANIFEST_PATH
+from conftest import MANIFEST_PATH, REPO_PACKAGE_ROOT
 from frwhoop_inference.artifacts import (
     CHECK_STATUSES,
+    SOURCE_KINDS,
+    STAGED_ENTRY_STATUSES,
+    artifact_source,
     default_manifest_path,
     load_manifest,
     manifest_summary,
@@ -253,3 +257,93 @@ def test_sha256_file_matches_hashlib(tmp_path):
     path = tmp_path / "x.bin"
     path.write_bytes(b"abc" * 1000)
     assert sha256_file(str(path)) == hashlib.sha256(b"abc" * 1000).hexdigest()
+
+
+# --------------------------------------------------------------------------
+# Machine-readable artifact sources (docs/model-integration/provisioning.md)
+# --------------------------------------------------------------------------
+
+
+def test_every_artifact_declares_a_machine_readable_source(manifest_entries):
+    for entry in manifest_entries:
+        for artifact in entry["artifacts"]:
+            source = artifact.get("source")
+            assert isinstance(source, dict), f"{entry['id']}/{artifact['name']} has no source"
+            assert source["kind"] in SOURCE_KINDS
+            if source["kind"] == "none":
+                assert source.get("reason")
+
+
+def test_every_staged_artifact_can_be_produced_and_verified(manifest_entries):
+    """What deploy-prep stages has a real source and a pinned digest and size."""
+    staged = 0
+    for entry in manifest_entries:
+        if entry["status"] not in STAGED_ENTRY_STATUSES or not entry["wired"]:
+            continue
+        names = {a["name"] for a in entry["artifacts"]}
+        for artifact in entry["artifacts"]:
+            source = artifact["source"]
+            if source["kind"] == "installed_package":
+                assert source["package"] and source["version"] == entry["revision"]
+                assert artifact["verify_at_startup"] is False
+                continue
+            if not artifact["verify_at_startup"]:
+                continue
+            staged += 1
+            assert len(artifact["sha256"]) == 64 and isinstance(artifact["size_bytes"], int)
+            if source["kind"] == "url":
+                assert artifact["url"].startswith("https://")
+            elif source["kind"] == "wheel_resource":
+                assert source["package"] and source["resource"]
+                assert entry["revision"] == f"{source['package']}=={source['version']}"
+            elif source["kind"] == "zip_member":
+                assert source["artifact"] in names and source["member"]
+            else:
+                pytest.fail(f"{entry['id']}/{artifact['name']}: a staged artifact cannot be {source['kind']}")
+    assert staged == 7
+
+
+def test_the_sleepecg_artifacts_come_from_the_wheel_not_from_a_url(manifest_entries):
+    entry = {e["id"]: e for e in manifest_entries}["sleepecg_wrn_gru_mesa"]
+    sources = {a["name"]: a["source"] for a in entry["artifacts"]}
+    assert sources["wrn-gru-mesa.zip"] == {"kind": "wheel_resource", "package": "sleepecg",
+                                           "version": "0.5.9",
+                                           "resource": "classifiers/wrn-gru-mesa.zip"}
+    assert sources["classifier.keras"] == {"kind": "zip_member", "artifact": "wrn-gru-mesa.zip",
+                                           "member": "classifier.keras"}
+
+
+def test_a_manifest_without_sources_still_reads():
+    assert artifact_source({"url": "https://example.invalid/w"}) == {"kind": "url"}
+    assert artifact_source({"url": "bundled in a wheel"})["kind"] == "none"
+    assert artifact_source({})["kind"] == "none"
+
+
+def test_manifest_summary_exposes_the_source():
+    state = verify_manifest(load_manifest(MANIFEST_PATH), "/nonexistent", manifest_path=MANIFEST_PATH)
+    rows = {(row["id"], a["name"]): a for row in manifest_summary(state) for a in row["artifacts"]}
+    assert rows[("sleepecg_wrn_gru_mesa", "classifier.keras")]["source"]["kind"] == "zip_member"
+    assert rows[("deepbeat", "deepbeat.h5")]["source"] == {"kind": "url"}
+
+
+def test_the_per_model_staging_scripts_write_the_manifest_paths(manifest_entries):
+    """Their output directory can serve as a --mirror for the provisioner."""
+    import importlib.util
+
+    def load(name):
+        spec = importlib.util.spec_from_file_location(
+            name, os.path.join(REPO_PACKAGE_ROOT, "scripts", f"{name}.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    paths = {(e["id"], a["name"]): a["path"] for e in manifest_entries for a in e["artifacts"]}
+    deepbeat, siamaf, paradigma = load("provision_deepbeat"), load("provision_siamaf"), load("provision_paradigma")
+    assert paths[("deepbeat", deepbeat.FILENAME)] == deepbeat.RELPATH
+    assert paths[("siamaf", siamaf.FILENAME)] == siamaf.RELPATH
+    for name, pinned in paradigma.ASSETS.items():
+        assert paths[("paradigma", name)] == f"paradigma/{paradigma.UPSTREAM_COMMIT}/{name}"
+    digests = {(e["id"], a["name"]): a["sha256"] for e in manifest_entries for a in e["artifacts"]}
+    assert digests[("deepbeat", deepbeat.FILENAME)] == deepbeat.EXPECTED_SHA256
+    assert digests[("siamaf", siamaf.FILENAME)] == siamaf.EXPECTED_SHA256
+    assert all(digests[("paradigma", n)] == p["sha256"] for n, p in paradigma.ASSETS.items())
