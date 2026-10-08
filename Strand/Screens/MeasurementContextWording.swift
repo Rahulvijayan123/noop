@@ -464,6 +464,34 @@ enum PhysiologyContextWording {
         "posture_stratum": String(localized: "matched by likely position"),
         "posture_regimes_pooled": String(localized: "lying and upright readings are combined"),
         "posture_mix_differs_from_history": String(localized: "your position differed from earlier days"),
+        "context_stratum": String(localized: "matched by likely sitting, lying or standing"),
+        // Previous strap (D4-09): a borrowed reference always says where it came from.
+        "predecessor_regime": String(localized: "partly based on your previous strap, provisional"),
+        "predecessor_regime_only": String(localized: "based only on your previous strap so far"),
+        "pooled_toward_predecessor": String(localized: "blended with your previous strap while this one builds history"),
+        "predecessor_regime_incompatible": String(localized: "your previous strap's data is not comparable"),
+        "predecessor_family_differs": String(localized: "your previous strap is a different model"),
+        "predecessor_family_unknown": String(localized: "your previous strap's model is unknown"),
+        "predecessor_source_differs": String(localized: "your previous device measured differently"),
+        "predecessor_firmware_differs": String(localized: "your previous strap ran different firmware"),
+        "predecessor_firmware_unknown": String(localized: "your previous strap's firmware is unknown"),
+        "predecessor_signal_quality_differs": String(localized: "your previous strap's signal quality differed"),
+        "predecessor_signal_quality_unknown": String(localized: "your previous strap's signal quality is unknown"),
+        "predecessor_regime_insufficient": String(localized: "too little comparable data from your previous strap"),
+        "predecessor_regime_stale": String(localized: "your previous strap's data is too old"),
+        // Likely position (PostureEvidence)
+        "posture_likelihood_not_confirmed": String(localized: "the position is a likelihood, not confirmed"),
+        "sitting_standing_not_separated": String(localized: "sitting and standing cannot be told apart from the wrist"),
+        "in_bed_from_sleep_detector": String(localized: "in bed according to the sleep detector"),
+        "posture_gravity_insufficient": String(localized: "too little arm orientation data to judge position"),
+        "posture_evidence_ambiguous": String(localized: "the position evidence was unclear"),
+        "posture_partly_in_bed": String(localized: "partly in bed"),
+        "context_no_posture_claim": String(localized: "no position estimate covered enough of it"),
+        "context_confidence_below_floor": String(localized: "the position estimate was not confident enough"),
+        "context_decoder_posture_reads_heart_rate":
+            String(localized: "the position estimate came from an older model that reads heart rate"),
+        "context_postures_mixed": String(localized: "your position changed during it"),
+        "context_conflicts_with_forearm_gravity": String(localized: "the position estimate and arm orientation disagreed"),
         "degraded_validity_included": String(localized: "includes a signal usable with limitations"),
         "relative_use_only": String(localized: "for relative comparison only"),
         "no_history": String(localized: "no earlier data"),
@@ -531,6 +559,9 @@ enum PhysiologyContextWording {
         // Declared target-dependent gates (shown in Diagnostics, never as a reason in the normal flow)
         "hr_plausible_band", "rr_kernel_range", "ectopic_rejection", "sleep_detector_hr_confirmation",
         "wear_from_heart_rate_presence", "decoder_transition_events", "wear_signal_optical_quality",
+        // Posture evidence bookkeeping: which heart-rate dependent evidence was left out
+        "in_bed_window_not_used_heart_rate_target", "posture_stratum_heart_rate_dependent_not_used",
+        "context_in_bed_window_not_used",
         // Statistical internals added with the review repairs
         "autocorrelation_assumed_conservative", "frozen_created_after_day_ignored", "scale_floor_default",
         // Join and engine
@@ -617,6 +648,50 @@ enum PhysiologyContextWording {
         case "vigorous_activity": return String(localized: "Vigorous activity")
         default: return capitalizedFirst(humanized(label))
         }
+    }
+
+    /// The context stratum of a stable-awake measurement (pc-posture-2), as a likelihood; nil when unknown.
+    static func likelyPosition(_ stratum: PhysiologyContext.ContextStratum) -> String? {
+        switch stratum {
+        case .seated: return String(localized: "Likely sitting")
+        case .recumbentAwake: return String(localized: "Likely lying down, awake")
+        case .uprightStationary: return String(localized: "Likely standing still")
+        case .unknown: return nil
+        }
+    }
+
+    /// What decided the context stratum, in words ("the activity model and arm orientation").
+    static func positionBasis(_ basis: [String]) -> String? {
+        let model = basis.contains(PhysiologyContext.PostureEvidence.basisDecoderPosture)
+        let arm = basis.contains("forearm_gravity")
+        switch (model, arm) {
+        case (true, true): return String(localized: "From the activity model, and arm orientation agrees")
+        case (true, false): return String(localized: "From the activity model")
+        case (false, true): return String(localized: "From arm orientation")
+        case (false, false): return nil
+        }
+    }
+
+    /// The "Likely position" row of a measurement: value and note, or nil when the envelope has no context stratum
+    /// (written before it existed). A learned sit/stand claim is still a likelihood, never a measured height.
+    static func positionRow(_ p: PhysiologyContext.PostureContext,
+                            locale: Locale = .current) -> (value: String, note: String?)? {
+        guard let stratum = p.context else { return nil }
+        var notes: [String] = []
+        let learned: PhysiologyContext.ReasonCode = PhysiologyContext.PostureEvidence.sittingStandingNotSeparatedByWrist
+        let reasons = (p.contextReasons ?? []).filter { $0 != learned }
+        if let name = likelyPosition(stratum) {
+            if let basis = positionBasis(p.contextBasis ?? []) { notes.append(basis) }
+            if let c = p.contextConfidence, c.isFinite {
+                notes.append(String(localized: "Confidence \(percent(c, locale: locale))"))
+            }
+            if (p.contextReasons ?? []).contains(learned) {
+                notes.append(String(localized: "Sitting and standing come from a learned estimate, not a measurement"))
+            }
+            if let r = reasonList(reasons) { notes.append(r) }
+            return (name, notes.isEmpty ? nil : notes.joined(separator: " \u{00B7} "))
+        }
+        return (String(localized: "Unknown"), reasonList(reasons))
     }
 
     /// Posture classes: shown as likelihoods ("Likely standing"), never as a confirmed posture.
@@ -776,11 +851,26 @@ enum PhysiologyContextWording {
         }
     }
 
+    /// For a reference that borrows the previous strap's history (D4-09): where it comes from and that it is
+    /// provisional. Nil for a reference built from this strap alone.
+    static func predecessorNote(_ c: PhysiologyContext.ReferenceComparison) -> String? {
+        guard c.predecessorScope != nil else { return nil }
+        if c.reasons.contains(PhysiologyContext.ContextReferences.predecessorRegimeOnly) || c.pooledContribution >= 1 {
+            return String(localized: "From your previous strap only, provisional until this strap has its own history")
+        }
+        return String(localized: "Partly from your previous strap, provisional until this strap has its own history")
+    }
+
     /// "+6 ms vs your 28-day reference", or why there is no difference.
     static func referenceLine(_ c: PhysiologyContext.ReferenceComparison, units: String,
                               locale: Locale = .current) -> String {
         if let diff = c.signedDifference, c.status == .ready || c.status == .provisional {
-            return String(localized: "\(signedDifference(diff, units: units, locale: locale)) vs \(referenceName(c))")
+            let line = String(localized: "\(signedDifference(diff, units: units, locale: locale)) vs \(referenceName(c))")
+            guard c.predecessorScope != nil else { return line }
+            let from = c.pooledContribution >= 1
+                || c.reasons.contains(PhysiologyContext.ContextReferences.predecessorRegimeOnly)
+                ? String(localized: "from your previous strap") : String(localized: "partly from your previous strap")
+            return String(localized: "\(line) (\(from), provisional)")
         }
         switch c.status {
         case .insufficient: return String(localized: "Not enough comparable days for a reference yet")
@@ -865,7 +955,16 @@ enum PhysiologyContextWording {
         case "hrv_rmssd.stable_awake_5min": return String(localized: "HRV, stable awake measurements")
         case "heart_rate.stable_awake_5min": return String(localized: "Heart rate, stable awake measurements")
         case "coverage.motion_observed_s": return String(localized: "Motion data coverage")
+        case "coverage.optical_valid_share": return String(localized: "Optical signal quality coverage")
         default:
+            // Context strata (D4-09): `<parent>.ctx_<stratum>`, e.g. "HRV, stable awake measurements, likely sitting".
+            if let range = key.range(of: ".ctx_") {
+                let parent = series(String(key[..<range.lowerBound]))
+                let raw = String(key[range.upperBound...])
+                let stratum = PhysiologyContext.ContextStratum(rawValue: raw).flatMap(likelyPosition)
+                    ?? humanized(raw)
+                return String(localized: "\(parent), \(stratum.prefix(1).lowercased() + stratum.dropFirst())")
+            }
             if key.hasPrefix("hr_response.") { return String(localized: "Heart rate response to activity") }
             if key.hasPrefix("functional.") {
                 let rest = humanized(String(key.dropFirst("functional.".count)))
