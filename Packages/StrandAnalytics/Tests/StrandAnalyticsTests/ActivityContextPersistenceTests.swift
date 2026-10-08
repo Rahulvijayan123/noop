@@ -16,14 +16,93 @@ final class ActivityContextPersistenceTests: XCTestCase {
             posture: .uprightStationary, locomotion: .briskWalking, armBehavior: .activeGesturing,
             sleep: .awake, wear: .onWrist, intensity: 0.62, stepTicks: 610, cadenceSpm: 121.5,
             hrSamples: 298, hrMean: 112.4, hrMin: 98, hrMax: 131, hrSlope: 3.25,
-            rmssd: 31.5, rrBeats: 540, respRateBpm: 17.2, respBreaths: 83)
+            rmssd: 31.5, rrBeats: 540, rrDiffSqSumMs2: 535_491.25, rrDiffCount: 539, respRateBpm: 17.2, respBreaths: 83,
+            inBed: false, uncertainty: 0.27, experts: ["encoder", "hart_fine"], transitionCount: 3,
+            absorbedClasses: [.lightActivity, .unknown], absorbedSeconds: 14, precededByGapS: 4, settlingSeconds: 0,
+            detail: .stairs, detailConfidence: 0.66, precedingClass: .sittingDesk, settledFrom: nil)
+    }
+
+    /// A still row with every settled statistic, after a walk.
+    private func settledInterval() -> ActivityContextInterval {
+        ActivityContextInterval(
+            start: t0 + 300, end: t0 + 900, activityClass: .sitting, confidence: 0.7, sleep: .awake, wear: .onWrist,
+            intensity: 0.18, hrSamples: 600, hrMean: 74.2, hrMin: 66, hrMax: 101, rmssd: 41.3, rrBeats: 640,
+            rrDiffSqSumMs2: 1_091_602.5, rrDiffCount: 639, inBed: false, uncertainty: 0.4, experts: [],
+            transitionCount: 0, absorbedClasses: [], absorbedSeconds: 0, precededByGapS: 0, settlingSeconds: 120,
+            detail: nil, precedingClass: .walking, settledFrom: t0 + 420, hrMeanSettled: 69.8, hrSamplesSettled: 480,
+            rmssdSettled: 45.9, rrDiffSqSumMs2Settled: 1_071_123.75, rrDiffCountSettled: 508)
     }
 
     func testEveryFieldSurvivesTheRowRoundTrip() {
         let original = fullInterval()
         XCTAssertEqual(ActivityContextInterval(row: original.storeRow), original)
+        XCTAssertEqual(ActivityContextInterval(row: settledInterval().storeRow), settledInterval())
+        var ride = settledInterval()
+        ride.detail = .inVehicle; ride.detailConfidence = 0.8; ride.hrMeanSettled = nil; ride.hrSamplesSettled = nil
+        XCTAssertEqual(ActivityContextInterval(row: ride.storeRow), ride)
         let bare = ActivityContextInterval(start: t0, end: t0 + 60, activityClass: .unknown, confidence: 0.1)
-        XCTAssertEqual(ActivityContextInterval(row: bare.storeRow), bare)
+        XCTAssertEqual(ActivityContextInterval(row: bare.storeRow), bare, "not recorded stays not recorded (NULL)")
+    }
+
+    func testListColumnsKeepEmptyApartFromNotRecorded() {
+        let row = fullInterval().storeRow
+        XCTAssertEqual(row.experts, "encoder,hart_fine")
+        XCTAssertEqual(row.absorbedClasses, "light_activity,unknown")
+        XCTAssertEqual(row.detail, "stairs")
+        XCTAssertEqual(row.precedingClass, "sitting_desk")
+        XCTAssertEqual(settledInterval().storeRow.experts, "", "recorded: no expert spoke")
+        XCTAssertEqual(settledInterval().storeRow.absorbedClasses, "")
+        XCTAssertNil(ActivityContextInterval(start: t0, end: t0 + 60, activityClass: .unknown, confidence: 0.1).storeRow.experts)
+        // A code from a newer build: an absorbed class reads as unknown (the time is still accounted for), a
+        // detail or preceding class as not recorded.
+        var newer = row
+        newer.absorbedClasses = "kayaking,sitting"; newer.detail = "on_a_boat"; newer.precedingClass = "rowing"
+        let back = ActivityContextInterval(row: newer)
+        XCTAssertEqual(back.absorbedClasses, [.unknown, .sitting])
+        XCTAssertNil(back.detail)
+        XCTAssertNil(back.precedingClass)
+    }
+
+    func testTransitionRowsCarryTheEventsOnsetAndSourceAndReadBackAsTheSameEvents() {
+        let events = [
+            ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.62, ts: t0 + 100, onsetTs: t0 + 94,
+                                    source: ActivityTransitionEvent.sourceTransitionExpert),
+            ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: t0 + 400, onsetTs: t0 + 397,
+                                    source: ActivityTransitionEvent.sourceDecoder),
+            ActivityTransitionEvent(kind: .standToSitLike, probability: 0.3, ts: t0 + 500),
+        ]
+        let rows = ActivityContextPersistence.transitionRows(events, from: t0, to: t0 + 1_000, decoderVersion: "hsmm-1.8")
+        XCTAssertEqual(rows.map(\.onsetTs), [t0 + 94, t0 + 397, nil])
+        XCTAssertEqual(rows.map(\.source), ["transition_expert", "hsmm", nil])
+        XCTAssertEqual(ActivityContextPersistence.events(rows), events)
+        var newer = rows
+        newer.append(ActivityContextTransitionRow(ts: t0 + 600, kind: "cartwheel", probability: 0.9, decoderVersion: "hsmm-9"))
+        XCTAssertEqual(ActivityContextPersistence.events(newer), events, "a kind this build does not know is left out")
+    }
+
+    func testTheDaysHRVWindowsSeeThePreviousDaysLastMinutesOfEvents() {
+        let dayStart = t0 + 86_400
+        let previous = [
+            ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: dayStart - 3_600),
+            ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.7, ts: dayStart - 90),
+            ActivityTransitionEvent(kind: .walkStop, probability: 0.9, ts: dayStart - 30),
+        ]
+        let own = [ActivityTransitionEvent(kind: .standToSitLike, probability: 0.6, ts: dayStart + 400)]
+        let merged = ActivityContextPersistence.hrvEvents(day: own, previous: previous, dayStart: dayStart)
+        XCTAssertGreaterThanOrEqual(ActivityContextPersistence.hrvEventLookbackS, 120)
+        XCTAssertEqual(merged.map(\.ts), [dayStart - 90, dayStart - 30, dayStart + 400],
+                       "the tail inside the lookback, then the day's own")
+        XCTAssertEqual(ActivityContextPersistence.hrvEvents(day: own, previous: [], dayStart: dayStart), own)
+        // The day's first window: a walk ended 30 s before midnight, so it is still recovering, not steady.
+        let beats = stride(from: dayStart - 600, to: dayStart + 600, by: 1).map { RRInterval(ts: $0, rrMs: 1_000 + ($0 % 2) * 40) }
+        let first = HRVWindowBuilder.build(kind: .canonical5m, dayStart: dayStart, dayEnd: dayStart + 300, rr: beats,
+                                           transitionEvents: merged).first
+        let blind = HRVWindowBuilder.build(kind: .canonical5m, dayStart: dayStart, dayEnd: dayStart + 300, rr: beats,
+                                           transitionEvents: own).first
+        XCTAssertEqual(first?.secondsSinceTransition, 30)
+        XCTAssertNotEqual(first?.phase, .steadyState, "30 s after the walk ended is still recovery")
+        XCTAssertNil(blind?.secondsSinceTransition, "without the tail the window cannot see what came just before it")
+        XCTAssertEqual(blind?.phase, .steadyState)
     }
 
     func testEveryClassAndContextCodeHasAStablePersistedForm() {
@@ -59,43 +138,48 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertEqual(iv.confidence, 0.7)
     }
 
-    /// `iv` as the store keeps it today: the ctx-int-2 context fields `ActivityContextIntervalRow` has no columns for
-    /// (yet) not recorded (nil), which is exactly how a row reads back.
-    static func rowFieldsOnly(_ iv: ActivityContextInterval) -> ActivityContextInterval {
-        var out = iv
-        out.inBed = nil; out.uncertainty = nil; out.experts = nil; out.transitionCount = nil
-        out.absorbedClasses = nil; out.absorbedSeconds = nil; out.precededByGapS = nil; out.settlingSeconds = nil
-        return out
-    }
-
     func testADecodedDayRoundTripsThroughTheStoreAndTheLookupAgrees() async throws {
         var sim = ActivitySim(start: t0)
         sim.desk(600); sim.walk(180); sim.desk(600); sim.run(120); sim.still(300)
         let input = sim.trackInput()
         let track = ActivityContextTrackBuilder.build(input)
         let document = ActivityContextDayDocument(track: track, input: input, generatedAt: t0 + 5_000)
-        let intervals = ActivityContextIntervalBuilder.build(document: document, hr: input.hr, steps: input.steps)
+        // Beat-to-beat data over the whole span (the sim has none), so still rows carry RMSSD and settled RMSSD.
+        let beats = stride(from: t0, to: t0 + 1_900, by: 1).map { RRInterval(ts: $0, rrMs: 900 + ($0 % 3) * 30) }
+        let intervals = ActivityContextIntervalBuilder.build(document: document, hr: input.hr, steps: input.steps, rr: beats)
         XCTAssertFalse(intervals.isEmpty)
+        // Every context field is set somewhere on the day, so the comparison below exercises each column.
+        XCTAssertTrue(intervals.allSatisfy { $0.transitionCount != nil && $0.uncertainty != nil && $0.settlingSeconds != nil
+            && $0.inBed != nil && $0.experts != nil && $0.absorbedClasses != nil && $0.absorbedSeconds != nil })
+        XCTAssertTrue(intervals.contains { $0.precedingClass != nil })
+        XCTAssertTrue(intervals.contains { $0.settledFrom != nil && $0.hrMeanSettled != nil && $0.rmssdSettled != nil },
+                      "a desk stretch after the walk has settled statistics")
+        XCTAssertTrue(intervals.contains { ($0.settlingSeconds ?? 0) > 0 })
 
         let store = try await WhoopStore.inMemory()
         let ledger = ActivityContextPersistence.dayRow(day: "2025-10-09", document: document,
                                                       intervalCount: intervals.count, computedAt: t0 + 6_000)
-        try await store.replaceActivityContext(deviceId: dev, day: ledger, intervals: intervals.map(\.storeRow))
+        let transitions = ActivityContextPersistence.transitionRows(document.events, from: document.dayStart,
+                                                                     to: document.dayEnd, decoderVersion: document.versions.decoder)
+        try await store.replaceActivityContext(deviceId: dev, day: ledger, intervals: intervals.map(\.storeRow),
+                                               transitions: transitions)
 
+        // Every context field the builder produced reads back identical: nothing is defaulted on the way.
         let rows = try await store.activityContextIntervals(deviceId: dev, from: document.dayStart, to: document.dayEnd)
-        // The ctx-int-2 context fields (in-bed, uncertainty, experts, transitions, absorbed fragments, gap, settling)
-        // have no store columns until the WhoopStore row carries them: they read back as not recorded (nil), never as
-        // a measured 0 / false, and everything the row does carry round-trips exactly.
-        func stored(_ iv: ActivityContextInterval?) -> ActivityContextInterval? { iv.map(Self.rowFieldsOnly) }
-        XCTAssertTrue(intervals.allSatisfy { $0.transitionCount != nil && $0.uncertainty != nil && $0.settlingSeconds != nil })
-        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)), intervals.map(Self.rowFieldsOnly))
+        XCTAssertEqual(rows.map(ActivityContextInterval.init(row:)), intervals)
+        let events = try await store.activityContextTransitions(deviceId: dev, from: document.dayStart, to: document.dayEnd)
+        XCTAssertFalse(events.isEmpty, "the walk and the run start and stop")
+        XCTAssertEqual(events, transitions)
+        XCTAssertTrue(events.allSatisfy { $0.source != nil }, "every event says what flagged it")
+        XCTAssertTrue(events.contains { $0.onsetTs != nil })
+        XCTAssertEqual(ActivityContextPersistence.events(events).count, events.count)
 
         let live = ActivityContextLookup(intervals: intervals)
         let storedLookup = ActivityContextLookup(rows: rows)
         for ts in stride(from: t0 - 30, to: t0 + 1_900, by: 7) {
-            XCTAssertEqual(stored(storedLookup.interval(at: ts)), stored(live.interval(at: ts)), "t0+\(ts - t0)")
+            XCTAssertEqual(storedLookup.interval(at: ts), live.interval(at: ts), "t0+\(ts - t0)")
             let fromStore = try await store.activityContextInterval(deviceId: dev, at: ts)
-            XCTAssertEqual(stored(fromStore.map(ActivityContextInterval.init(row:))), stored(live.interval(at: ts)), "t0+\(ts - t0)")
+            XCTAssertEqual(fromStore.map(ActivityContextInterval.init(row:)), live.interval(at: ts), "t0+\(ts - t0)")
         }
 
         // The per-day class totals the database computes equal the in-memory composition.

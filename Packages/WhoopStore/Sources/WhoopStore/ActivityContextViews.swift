@@ -15,7 +15,10 @@ import Foundation
 /// sample — the sample's own device's when it has one, else whichever device's does — and the sample's own
 /// id when no ledger covers it. The same day's `decoderVersion` rides along as `ctxDecoderVersion`, and
 /// `ctxProvisional` is 1 while that context can still change (the day was live or its sleep unsettled when
-/// it was decoded, or the interval reaches past where decoding had data), 0 once it is final.
+/// it was decoded, or the interval reaches past where decoding had data), 0 once it is final. `ctxInBed`,
+/// `ctxUncertainty` and `ctxDetail` carry the interval's in-bed flag, the decoder's overall uncertainty and the
+/// finer reading its class folds away (`in_vehicle` on a sitting row, so a drive never groups as seated rest);
+/// NULL where the interval did not record them.
 ///
 /// Every view keeps the source table's columns under their own names (minus the `synced` upload flag) and
 /// adds the same `ctx*` columns, so
@@ -61,7 +64,7 @@ public enum ActivityContextViews {
     public static let contextColumns: [String] = [
         "ctxStartTs", "ctxEndTs", "ctxClass", "ctxConfidence", "ctxRunnerUp", "ctxEvidenceQuality",
         "ctxPosture", "ctxLocomotion", "ctxArmBehavior", "ctxSleep", "ctxWear", "ctxIntensity",
-        "ctxDeviceId", "ctxDecoderVersion", "ctxProvisional",
+        "ctxDeviceId", "ctxDecoderVersion", "ctxProvisional", "ctxInBed", "ctxUncertainty", "ctxDetail",
     ]
 
     private static let contextProjection = """
@@ -73,7 +76,8 @@ public enum ActivityContextViews {
         CASE WHEN c.startTs IS NULL THEN NULL ELSE d.decoderVersion END AS ctxDecoderVersion, \
         CASE WHEN c.startTs IS NULL THEN NULL \
              WHEN d.finality = 'final' AND c.endTs <= COALESCE(d.dataThrough, d.dayStart) THEN 0 \
-             ELSE 1 END AS ctxProvisional
+             ELSE 1 END AS ctxProvisional, \
+        c.inBed AS ctxInBed, c.uncertainty AS ctxUncertainty, c.detail AS ctxDetail
         """
 
     /// The device whose ledger covers `x.ts`: the sample's own when it has one, else any (the newest day

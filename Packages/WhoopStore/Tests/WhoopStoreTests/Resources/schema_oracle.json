@@ -430,6 +430,66 @@
           "affinity": "INTEGER",
           "notNull": false,
           "default": null
+        },
+        {
+          "name": "absorbedClasses",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "detail",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "detailConfidence",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "precedingClass",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "settledFromTs",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrMeanSettled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "hrSamplesSettled",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rmssdSettled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrDiffSqSumMs2Settled",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "rrDiffCountSettled",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
         }
       ],
       "primaryKey": [

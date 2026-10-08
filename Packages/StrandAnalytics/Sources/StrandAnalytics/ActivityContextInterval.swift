@@ -130,8 +130,37 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
     /// `PositionChanges.minimumProbability` or more (weaker postural readings are mostly shifting in a chair or
     /// in bed). Rest statistics over those seconds still carry the recovery. 0 for movement rows.
     public var settlingSeconds: Int?
+    /// A finer reading the class folds away, held by most of the row's seconds (`ActivityClassification.detail`):
+    /// `in_vehicle` on a `sitting` row (riding in a vehicle is seated, but the wrist reads vibration, and heart rate
+    /// and beat timing are not those of seated rest), `stairs` on a walking row, `postural_transition` on a light
+    /// activity row. nil when no detail held the row (or not recorded). A vehicle row is never merged with, or
+    /// absorbed into, a plain row of the same class, and never gets a rest statistic (RMSSD, breathing, settled
+    /// heart rate).
+    public var detail: ActivityDetail?
+    /// Seconds-weighted mean head mass behind `detail` over the seconds that carried it; nil without a detail.
+    public var detailConfidence: Double?
+    /// The class of the row before this one when the two touch (at most `Config.mergeGapS` apart); nil for the
+    /// first row of a build, after a longer gap, or when not recorded. A sitting row after walking says so here.
+    public var precedingClass: ActivityClass?
+    /// First second of the row after its settling (`settlingSeconds`): the end of the last settling window that
+    /// reaches into the row, or `start` when nothing settles it. `[settledFrom, end)` is the part rest statistics
+    /// should be read from. nil for movement rows (settling does not apply) and when not recorded.
+    public var settledFrom: Int?
+    /// Heart rate over `[settledFrom, end)` only (the post-transition transient left out), and its samples. nil
+    /// unless settling applies to the row (`settledFrom > start`) and at least `Config.minSettledS` remain; nil
+    /// for an in-vehicle row (not rest). With no settling the whole-row `hrMean` is already settled.
+    public var hrMeanSettled: Double?
+    public var hrSamplesSettled: Int?
+    /// RMSSD over the clean beats in `[settledFrom, end)`, with its successive-difference components (for the
+    /// same recombination `rrDiffSqSumMs2` / `rrDiffCount` allow). Same conditions as `hrMeanSettled`, plus the
+    /// row's own variability gate (wear, motion, not in a vehicle) and enough beats.
+    public var rmssdSettled: Double?
+    public var rrDiffSqSumMs2Settled: Double?
+    public var rrDiffCountSettled: Int?
 
     public var durationSeconds: Int { end - start }
+    /// Whether the row is a ride in a vehicle (`detail == .inVehicle`).
+    public var isInVehicle: Bool { detail == .inVehicle }
 
     public init(start: Int, end: Int, activityClass: ActivityClass, confidence: Double,
                 runnerUp: ActivityClass? = nil, runnerUpConfidence: Double = 0, evidenceQuality: Double = 0,
@@ -145,7 +174,10 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
                 respRateBpm: Double? = nil, respBreaths: Int = 0, gait: ActivityGaitSummary? = nil,
                 inBed: Bool? = nil, uncertainty: Double? = nil, experts: [String]? = nil, transitionCount: Int? = nil,
                 absorbedClasses: [ActivityClass]? = nil, absorbedSeconds: Int? = nil, precededByGapS: Int? = nil,
-                settlingSeconds: Int? = nil) {
+                settlingSeconds: Int? = nil, detail: ActivityDetail? = nil, detailConfidence: Double? = nil,
+                precedingClass: ActivityClass? = nil, settledFrom: Int? = nil,
+                hrMeanSettled: Double? = nil, hrSamplesSettled: Int? = nil, rmssdSettled: Double? = nil,
+                rrDiffSqSumMs2Settled: Double? = nil, rrDiffCountSettled: Int? = nil) {
         self.start = start; self.end = end
         self.activityClass = activityClass; self.confidence = confidence
         self.runnerUp = runnerUp; self.runnerUpConfidence = runnerUpConfidence
@@ -163,6 +195,11 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         self.transitionCount = transitionCount
         self.absorbedClasses = absorbedClasses; self.absorbedSeconds = absorbedSeconds
         self.precededByGapS = precededByGapS; self.settlingSeconds = settlingSeconds
+        self.detail = detail; self.detailConfidence = detailConfidence
+        self.precedingClass = precedingClass; self.settledFrom = settledFrom
+        self.hrMeanSettled = hrMeanSettled; self.hrSamplesSettled = hrSamplesSettled
+        self.rmssdSettled = rmssdSettled
+        self.rrDiffSqSumMs2Settled = rrDiffSqSumMs2Settled; self.rrDiffCountSettled = rrDiffCountSettled
     }
 
     public init(from decoder: Decoder) throws {
@@ -202,6 +239,16 @@ public struct ActivityContextInterval: Equatable, Codable, Sendable {
         absorbedSeconds = try c.decodeIfPresent(Int.self, forKey: .absorbedSeconds)
         precededByGapS = try c.decodeIfPresent(Int.self, forKey: .precededByGapS)
         settlingSeconds = try c.decodeIfPresent(Int.self, forKey: .settlingSeconds)
+        // A detail code from a newer build is dropped (not recorded) rather than failing the whole document.
+        detail = (try? c.decodeIfPresent(ActivityDetail.self, forKey: .detail)) ?? nil
+        detailConfidence = try c.decodeIfPresent(Double.self, forKey: .detailConfidence)
+        precedingClass = try c.decodeIfPresent(ActivityClass.self, forKey: .precedingClass)
+        settledFrom = try c.decodeIfPresent(Int.self, forKey: .settledFrom)
+        hrMeanSettled = try c.decodeIfPresent(Double.self, forKey: .hrMeanSettled)
+        hrSamplesSettled = try c.decodeIfPresent(Int.self, forKey: .hrSamplesSettled)
+        rmssdSettled = try c.decodeIfPresent(Double.self, forKey: .rmssdSettled)
+        rrDiffSqSumMs2Settled = try c.decodeIfPresent(Double.self, forKey: .rrDiffSqSumMs2Settled)
+        rrDiffCountSettled = try c.decodeIfPresent(Int.self, forKey: .rrDiffCountSettled)
     }
 
     /// Whether `ts` falls inside the interval.
@@ -251,6 +298,8 @@ public enum ActivityContextIntervalBuilder {
         /// settling (`ActivityContextInterval.settlingSeconds`): heart rate and blood pressure take one to two
         /// minutes to settle after an orthostatic change or light exertion.
         public var settlingS = 120
+        /// Shortest settled remainder (`[settledFrom, end)`) that gets settled heart rate / RMSSD.
+        public var minSettledS = 60
         public init() {}
     }
 
@@ -305,6 +354,9 @@ public enum ActivityContextIntervalBuilder {
         var sleep: SleepContextState
         var wear: WearContextState
         var inBed: Bool
+        /// A ride in a vehicle (`ActivityDetail.inVehicle`): seated, but not seated rest, so never one situation
+        /// with a plain row of the same class.
+        var inVehicle: Bool
         var seconds = 0.0
         var confidenceSum = 0.0, qualitySum = 0.0, uncertaintySum = 0.0
         var runnerUpMass: [ActivityClass: Double] = [:]
@@ -316,12 +368,16 @@ public enum ActivityContextIntervalBuilder {
         var experts: [String] = []
         /// Seconds per class the fold absorbed.
         var absorbed: [ActivityClass: Double] = [:]
+        /// Seconds, and head mass x seconds, per detail the runs carried.
+        var detailSeconds: [ActivityDetail: Double] = [:]
+        var detailMass: [ActivityDetail: Double] = [:]
         /// The runs behind the stretch, so a split part re-derives its summary from its own seconds (D3-13).
         var members: [Member] = []
 
         init(run: ActivityContextRun, classification k: ActivityClassification) {
             start = run.start; end = run.end
             activityClass = k.activityClass; sleep = run.sleep; wear = run.wear; inBed = run.inBed
+            inVehicle = k.detail == .inVehicle
             add(Member(run: run, classification: k, absorbedAs: nil))
         }
 
@@ -329,6 +385,7 @@ public enum ActivityContextIntervalBuilder {
         private init(empty like: Accumulation, start: Int, end: Int) {
             self.start = start; self.end = end
             activityClass = like.activityClass; sleep = like.sleep; wear = like.wear; inBed = like.inBed
+            inVehicle = like.inVehicle
         }
 
         var duration: Int { end - start }
@@ -354,6 +411,10 @@ public enum ActivityContextIntervalBuilder {
             }
             if !m.run.experts.isEmpty { experts = ActivityContextRun.union(experts, m.run.experts) }
             if let c = m.absorbedAs { absorbed[c, default: 0] += w }
+            if let d = k.detail {
+                detailSeconds[d, default: 0] += w
+                detailMass[d, default: 0] += k.detailConfidence * w
+            }
             members.append(m)
             if extendBounds {
                 end = max(end, m.run.end)
@@ -377,7 +438,23 @@ public enum ActivityContextIntervalBuilder {
 
         func sameSituation(_ other: Accumulation) -> Bool {
             activityClass == other.activityClass && sleep == other.sleep && wear == other.wear
-                && inBed == other.inBed
+                && inBed == other.inBed && inVehicle == other.inVehicle
+        }
+
+        /// The row's detail: in a vehicle for a vehicle stretch; otherwise the detail most of its seconds carried
+        /// (at least half), else none. Ties go to the code order.
+        var detail: (ActivityDetail, Double)? {
+            let w = max(seconds, 1e-9)
+            let chosen: ActivityDetail?
+            if inVehicle {
+                chosen = .inVehicle
+            } else {
+                chosen = detailSeconds.filter { $0.key != .inVehicle && 2 * $0.value >= w }
+                    .max { $0.value < $1.value || ($0.value == $1.value && $0.key.rawValue > $1.key.rawValue) }?.key
+            }
+            guard let chosen else { return nil }
+            let carried = detailSeconds[chosen] ?? 0
+            return (chosen, carried > 0 ? Self.round((detailMass[chosen] ?? 0) / carried, 1000) : 0)
         }
 
         /// The accumulation over `[from, to)` only: the shared class, with intensity, confidence, posture and the
@@ -400,6 +477,7 @@ public enum ActivityContextIntervalBuilder {
                 m.max { $0.value < $1.value || ($0.value == $1.value && tieBreak($0.key, $1.key)) }?.key
             }
             let absorbedOrder = absorbed.sorted { $0.value != $1.value ? $0.value > $1.value : $0.key.rawValue < $1.key.rawValue }
+            let detail = self.detail
             return ActivityContextInterval(
                 start: start, end: end, activityClass: activityClass,
                 confidence: Self.round(confidenceSum / w, 1000),
@@ -414,7 +492,8 @@ public enum ActivityContextIntervalBuilder {
                 gait: gait.flatMap { $0.isEmpty ? nil : $0.summary },
                 inBed: inBed, uncertainty: Self.round(uncertaintySum / w, 1000), experts: experts,
                 absorbedClasses: absorbedOrder.map(\.key),
-                absorbedSeconds: Int(absorbedOrder.reduce(0) { $0 + $1.value }.rounded()))
+                absorbedSeconds: Int(absorbedOrder.reduce(0) { $0 + $1.value }.rounded()),
+                detail: detail?.0, detailConfidence: detail?.1)
         }
 
         static func round(_ x: Double, _ scale: Double) -> Double { (x * scale).rounded() / scale }
@@ -426,6 +505,8 @@ public enum ActivityContextIntervalBuilder {
         let starts: [Int]
         let ends: [Int]
         let movement: [Bool]
+        let classes: [ActivityClass]
+        let mergeGapS: Int
         /// Event detection seconds, sorted (every kind, for `transitionCount`).
         let eventTs: [Int]
         /// Seconds settling starts from, sorted: the end of each movement row, each change of position flagged at
@@ -436,6 +517,8 @@ public enum ActivityContextIntervalBuilder {
         init(_ shaped: [Accumulation], events: [ActivityTransitionEvent], config: Config) {
             starts = shaped.map(\.start); ends = shaped.map(\.end)
             movement = shaped.map { $0.activityClass.isMovement }
+            classes = shaped.map(\.activityClass)
+            mergeGapS = config.mergeGapS
             eventTs = events.map(\.ts).sorted()
             // Weak postural readings (under the display threshold) are mostly shifting in a chair or in bed: anchoring
             // on them would mark most of a still row as settling. Walk / run stops always count (the movement-row
@@ -451,16 +534,21 @@ public enum ActivityContextIntervalBuilder {
 
         func fill(_ iv: inout ActivityContextInterval, index i: Int) {
             iv.precededByGapS = i > 0 ? max(0, starts[i] - ends[i - 1]) : nil
+            iv.precedingClass = i > 0 && starts[i] - ends[i - 1] <= mergeGapS ? classes[i - 1] : nil
             let lo = iv.start, hi = iv.end
             iv.transitionCount = eventTs.reduce(0) { $0 + ($1 >= lo && $1 < hi ? 1 : 0) }
-            guard !movement[i], settlingS > 0 else { iv.settlingSeconds = 0; return }
-            // Union of [a, a + settlingS) over the anchors at or before the row's end, clipped to the row.
-            var covered = 0, reach = iv.start
+            guard !movement[i] else { iv.settlingSeconds = 0; iv.settledFrom = nil; return }
+            guard settlingS > 0 else { iv.settlingSeconds = 0; iv.settledFrom = iv.start; return }
+            // Union of [a, a + settlingS) over the anchors at or before the row's end, clipped to the row; the
+            // settled part starts where the last of them ends.
+            var covered = 0, reach = iv.start, settled = iv.start
             for a in anchors where a < iv.end && a + settlingS > iv.start {
                 let lo = max(reach, max(a, iv.start)), hi = min(iv.end, a + settlingS)
                 if hi > lo { covered += hi - lo; reach = hi }
+                settled = max(settled, hi)
             }
             iv.settlingSeconds = covered
+            iv.settledFrom = settled
         }
     }
 
@@ -506,7 +594,8 @@ public enum ActivityContextIntervalBuilder {
     ///
     /// What a fragment may be:
     /// - never gait, cycling or vigorous effort (behaviour worth its own row), off the wrist (absorbing would
-    ///   assert a wear nobody measured), or in another wear / sleep / in-bed context;
+    ///   assert a wear nobody measured), in another wear / sleep / in-bed context, or a ride in a vehicle inside a
+    ///   row that is not one;
     /// - a light-activity blip or a no-claim (`unknown`) reading on the wrist, under `foldFragmentS` (a reach,
     ///   the burst of a stand-up and sit-down, a few seconds the decoder could not read);
     /// - inside a still stretch (sitting, standing, still, lying awake), a still-family reading under `stillDwellS`:
@@ -527,6 +616,8 @@ public enum ActivityContextIntervalBuilder {
             guard f.start - lastEnd <= config.mergeGapS else { return nil }
             if j > i, prev.sameSituation(f) { return j }
             guard f.wear == prev.wear, f.sleep == prev.sleep, f.inBed == prev.inBed else { return nil }
+            // A ride in a vehicle is never folded into a plain row: its heart rate and beat timing are not rest.
+            guard !f.inVehicle || prev.inVehicle else { return nil }
             let c = f.activityClass
             let limit: Int
             if c.isGait || c == .offWrist || c == .cycling || c == .vigorousActivity {
@@ -598,6 +689,15 @@ public enum ActivityContextIntervalBuilder {
             iv.hrMean = (Double(sum) / Double(slice.count) * 10).rounded() / 10
             iv.hrMin = lo; iv.hrMax = hi
 
+            if let from = settledStart(iv, config: config) {
+                let a = lowerBound(from)
+                if to > a {
+                    let settled = samples[a..<to]
+                    iv.hrMeanSettled = (Double(settled.reduce(0) { $0 + $1.bpm }) / Double(settled.count) * 10).rounded() / 10
+                    iv.hrSamplesSettled = settled.count
+                }
+            }
+
             let span = slice.last!.ts - slice.first!.ts
             guard slice.count >= config.hrSlopeMinSamples, span >= config.hrSlopeMinSpanS else { return }
             let t0 = Double(slice.first!.ts)
@@ -612,6 +712,15 @@ public enum ActivityContextIntervalBuilder {
             let slope = (n * sxy - sx * sy) / denom
             iv.hrSlope = (min(config.hrSlopeClip, max(-config.hrSlopeClip, slope)) * 100).rounded() / 100
         }
+    }
+
+    /// Where the row's settled statistics start: `settledFrom` when settling applies to the row (it is after it),
+    /// the remainder is at least `minSettledS` long and the row is not a ride in a vehicle (never rest). nil
+    /// otherwise: a row nothing settles is read whole, and one with too short a remainder has no settled value.
+    static func settledStart(_ iv: ActivityContextInterval, config: Config) -> Int? {
+        guard !iv.isInVehicle, let from = iv.settledFrom, from > iv.start,
+              iv.end - from >= max(1, config.minSettledS) else { return nil }
+        return from
     }
 
     /// `ticks` is the per-second step delta, time ordered, zeros dropped.
@@ -642,8 +751,10 @@ public enum ActivityContextIntervalBuilder {
     /// `nil` intensity (no motion stream for the interval) does not exclude — absence of a motion reading
     /// is not evidence of motion, the same convention `HRVAnalyzer.beatAccurateFraction` uses for a short
     /// series.
+    /// A ride in a vehicle is excluded too: the wrist reads the vehicle's vibration and the wearer is not at
+    /// seated rest, so its RMSSD / breathing must not be reported as a seated reading (D9-03).
     private static func variabilityAllowed(_ iv: ActivityContextInterval, config: Config) -> Bool {
-        guard iv.wear != .offWrist else { return false }
+        guard iv.wear != .offWrist, !iv.isInVehicle else { return false }
         if let intensity = iv.intensity, intensity > config.maxVariabilityIntensity { return false }
         return true
     }
@@ -660,6 +771,12 @@ public enum ActivityContextIntervalBuilder {
                 iv.rrBeats = r.beats
                 iv.rrDiffSqSumMs2 = r.sumSq
                 iv.rrDiffCount = r.diffCount
+            }
+            if let from = settledStart(iv, config: config),
+               let r = rmssd(Array(beats[lowerBound(beats, from)..<b]), minBeats: config.minRmssdBeats) {
+                iv.rmssdSettled = (r.value * 10).rounded() / 10
+                iv.rrDiffSqSumMs2Settled = r.sumSq
+                iv.rrDiffCountSettled = r.diffCount
             }
         }
         if let e = breathing.estimate(from: iv.start, to: iv.end, currentFrom: iv.start,

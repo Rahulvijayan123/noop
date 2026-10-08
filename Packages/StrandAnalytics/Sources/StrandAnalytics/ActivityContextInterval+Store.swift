@@ -16,12 +16,26 @@ extension ActivityContextInterval {
             stepTicks: stepTicks, cadenceSpm: cadenceSpm, hrSamples: hrSamples, hrMean: hrMean,
             hrMin: hrMin, hrMax: hrMax, hrSlope: hrSlope, rmssd: rmssd, rrBeats: rrBeats,
             rrDiffSqSumMs2: rrDiffSqSumMs2, rrDiffCount: rrDiffCount,
-            respRateBpm: respRateBpm, respBreaths: respBreaths)
+            respRateBpm: respRateBpm, respBreaths: respBreaths,
+            inBed: inBed, uncertainty: uncertainty, experts: experts.map(Self.joined),
+            transitionCount: transitionCount, absorbedSeconds: absorbedSeconds, precededByGapS: precededByGapS,
+            settlingSeconds: settlingSeconds, absorbedClasses: absorbedClasses.map { Self.joined($0.map(\.rawValue)) },
+            detail: detail?.rawValue, detailConfidence: detailConfidence, precedingClass: precedingClass?.rawValue,
+            settledFromTs: settledFrom, hrMeanSettled: hrMeanSettled, hrSamplesSettled: hrSamplesSettled,
+            rmssdSettled: rmssdSettled, rrDiffSqSumMs2Settled: rrDiffSqSumMs2Settled,
+            rrDiffCountSettled: rrDiffCountSettled)
+    }
+
+    /// A list column: codes joined by commas, "" for an empty list (recorded: none), NULL for nil (not recorded).
+    static func joined(_ codes: [String]) -> String { codes.joined(separator: ",") }
+    static func split(_ text: String) -> [String] {
+        text.isEmpty ? [] : text.split(separator: ",", omittingEmptySubsequences: false).map(String.init)
     }
 
     /// Rebuilds an interval from a stored row. A code this build does not recognise (a row written by a
     /// newer taxonomy) reads as `unknown` rather than dropping the row, so older builds still account for
-    /// the time even when they cannot name it.
+    /// the time even when they cannot name it (an absorbed fragment's class likewise; an unknown detail or
+    /// preceding class reads as not recorded). A NULL context column reads as nil: not recorded.
     public init(row: ActivityContextIntervalRow) {
         self.init(
             start: row.startTs, end: row.endTs,
@@ -38,7 +52,17 @@ extension ActivityContextInterval {
             hrSamples: row.hrSamples, hrMean: row.hrMean, hrMin: row.hrMin, hrMax: row.hrMax,
             hrSlope: row.hrSlope, rmssd: row.rmssd, rrBeats: row.rrBeats,
             rrDiffSqSumMs2: row.rrDiffSqSumMs2, rrDiffCount: row.rrDiffCount,
-            respRateBpm: row.respRateBpm, respBreaths: row.respBreaths)
+            respRateBpm: row.respRateBpm, respBreaths: row.respBreaths,
+            inBed: row.inBed, uncertainty: row.uncertainty, experts: row.experts.map(Self.split),
+            transitionCount: row.transitionCount,
+            absorbedClasses: row.absorbedClasses.map { Self.split($0).map { ActivityClass(rawValue: $0) ?? .unknown } },
+            absorbedSeconds: row.absorbedSeconds, precededByGapS: row.precededByGapS,
+            settlingSeconds: row.settlingSeconds,
+            detail: row.detail.flatMap(ActivityDetail.init(rawValue:)), detailConfidence: row.detailConfidence,
+            precedingClass: row.precedingClass.flatMap(ActivityClass.init(rawValue:)),
+            settledFrom: row.settledFromTs, hrMeanSettled: row.hrMeanSettled, hrSamplesSettled: row.hrSamplesSettled,
+            rmssdSettled: row.rmssdSettled, rrDiffSqSumMs2Settled: row.rrDiffSqSumMs2Settled,
+            rrDiffCountSettled: row.rrDiffCountSettled)
     }
 }
 
@@ -100,7 +124,37 @@ public enum ActivityContextPersistence {
         return best.values
             .sorted { ($0.ts, $0.kind.rawValue) < ($1.ts, $1.kind.rawValue) }
             .map { ActivityContextTransitionRow(ts: $0.ts, kind: $0.kind.rawValue, probability: $0.probability,
-                                                decoderVersion: decoderVersion) }
+                                                onsetTs: $0.onsetTs, source: $0.source, decoderVersion: decoderVersion) }
+    }
+
+    /// Stored transition rows back as the decoder's events, oldest first. A kind this build does not know (a row
+    /// written by a newer decoder) is left out: it cannot be told apart as postural or locomotion.
+    public static func events(_ rows: [ActivityContextTransitionRow]) -> [ActivityTransitionEvent] {
+        rows.compactMap { r in
+            ActivityTransitionKind(rawValue: r.kind).map {
+                ActivityTransitionEvent(kind: $0, probability: r.probability, ts: r.ts, onsetTs: r.onsetTs, source: r.source)
+            }
+        }.sorted { ($0.ts, $0.kind.rawValue) < ($1.ts, $1.kind.rawValue) }
+    }
+
+    /// How far before a day's start the canonical HRV windows need the previous day's events, so the day's first
+    /// windows still see a change of position or the end of a walk just before midnight (`HRVWindowBuilder`'s
+    /// recovery guard, plus its detection lag).
+    public static var hrvEventLookbackS: Int {
+        let c = HRVWindowBuilder.Config()
+        return max(120, c.recoveryGuardS + c.eventDetectionLagS)
+    }
+
+    /// The events the day's HRV windows are built with: the day's own, plus those of `previous` (the previous
+    /// day's, from its stored rows or its document) flagged in the `lookbackS` before `dayStart`. A second flagged
+    /// by both keeps the day's own reading.
+    public static func hrvEvents(day: [ActivityTransitionEvent], previous: [ActivityTransitionEvent], dayStart: Int,
+                                 lookbackS: Int = hrvEventLookbackS) -> [ActivityTransitionEvent] {
+        let own = Set(day.map { "\($0.ts)|\($0.kind.rawValue)" })
+        let tail = previous.filter {
+            $0.ts >= dayStart - lookbackS && $0.ts < dayStart && !own.contains("\($0.ts)|\($0.kind.rawValue)")
+        }
+        return tail.sorted { ($0.ts, $0.kind.rawValue) < ($1.ts, $1.kind.rawValue) } + day
     }
 
     /// The part of `intervals` that belongs to `[from, to)`: whole intervals inside it, the crossing ones cut to

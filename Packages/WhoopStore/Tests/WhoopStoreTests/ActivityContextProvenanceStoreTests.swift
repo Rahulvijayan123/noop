@@ -110,12 +110,30 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
         row.absorbedSeconds = 9
         row.precededByGapS = 45
         row.settlingSeconds = 60
+        row.absorbedClasses = "sitting,light_activity"
+        row.detail = "in_vehicle"
+        row.detailConfidence = 0.74
+        row.precedingClass = "walking"
+        row.settledFromTs = day0 + 220
+        row.hrMeanSettled = 61.5
+        row.hrSamplesSettled = 178
+        row.rmssdSettled = 48.2
+        row.rrDiffSqSumMs2Settled = 395_123.25
+        row.rrDiffCountSettled = 170
         try await store.replaceActivityContext(deviceId: dev, day: ledger(day0), intervals: [row, interval(day0 + 400, 60)])
         let back = try await store.activityContextIntervals(deviceId: dev, from: day0, to: day0 + 86_400)
         XCTAssertEqual(back.first, row)
+        let at = try await store.activityContextInterval(deviceId: dev, at: day0 + 150)
+        XCTAssertEqual(at, row, "the as-of read carries the same columns")
         XCTAssertNil(back.last?.inBed, "a row the builder did not fill reads as not recorded")
         XCTAssertNil(back.last?.transitionCount, "not recorded is not the same as no transitions")
         XCTAssertNil(back.last?.absorbedSeconds)
+        XCTAssertNil(back.last?.absorbedClasses)
+        XCTAssertNil(back.last?.detail)
+        XCTAssertNil(back.last?.precedingClass)
+        XCTAssertNil(back.last?.settledFromTs)
+        XCTAssertNil(back.last?.hrMeanSettled)
+        XCTAssertNil(back.last?.rmssdSettled)
         var none = interval(day0 + 500, 60)
         none.transitionCount = 0
         none.absorbedSeconds = 0
@@ -280,6 +298,29 @@ final class ActivityContextProvenanceStoreTests: XCTestCase {
         XCTAssertEqual(got.map { $0["ctxProvisional"] as Int? }, [0, 1, 1, nil])
         XCTAssertEqual(got.map { $0["ctxDecoderVersion"] as String? }, ["hsmm-1.9", "hsmm-1.9", "hsmm-1.9", nil],
                        "a sample with no covering interval carries no context at all")
+    }
+
+    func testViewsCarryTheIntervalsInBedUncertaintyAndDetail() async throws {
+        let store = try await WhoopStore.inMemory()
+        var drive = interval(day0, 600)
+        drive.detail = "in_vehicle"
+        drive.uncertainty = 0.42
+        drive.inBed = false
+        var bed = interval(day0 + 600, 600, "lying_down")
+        bed.inBed = true
+        bed.uncertainty = 0.18
+        let legacy = interval(day0 + 1_200, 600)
+        try await store.replaceActivityContext(deviceId: dev, day: ledger(day0), intervals: [drive, bed, legacy])
+        for ts in [day0 + 10, day0 + 700, day0 + 1_300, day0 + 5_000] {
+            try await exec(store, "INSERT INTO hrSample (deviceId, ts, bpm) VALUES (?, ?, 60)", [dev, ts])
+        }
+        let got = try await rows(store, "SELECT ctxClass, ctxDetail, ctxInBed, ctxUncertainty FROM hrSampleCtx "
+                                     + "WHERE deviceId = ? ORDER BY ts", [dev])
+        XCTAssertEqual(got.map { $0["ctxClass"] as String? }, ["sitting", "lying_down", "sitting", nil])
+        XCTAssertEqual(got.map { $0["ctxDetail"] as String? }, ["in_vehicle", nil, nil, nil],
+                       "a drive never groups with plain sitting")
+        XCTAssertEqual(got.map { $0["ctxInBed"] as Int? }, [0, 1, nil, nil])
+        XCTAssertEqual(got.map { $0["ctxUncertainty"] as Double? }, [0.42, 0.18, nil, nil])
     }
 
     func testTheOwnerJoinedViewAgreesWithABruteForceLookupAcrossTwoIds() async throws {

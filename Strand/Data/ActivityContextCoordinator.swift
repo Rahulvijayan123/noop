@@ -254,6 +254,15 @@ final class ActivityContextCoordinator {
         let streams = loaded.streams
         let beats = await repo.rrIntervals(from: streams.start, to: streams.end, limit: 250_000)
         let document = loaded.document, hr = streams.hr, steps = streams.stepCounter, gravity = streams.gravity
+        // The previous day's last minutes of events, as stored with that day, so the day's first HRV windows see a
+        // change of position or the end of a walk just before midnight (the recovery lookback). Empty when that
+        // day is not stored yet: those windows then see no event before the day, as before.
+        var tail: [ActivityContextTransitionRow] = []
+        for id in ids {
+            tail += (try? await store.activityContextTransitions(
+                deviceId: id, from: day.start - ActivityContextPersistence.hrvEventLookbackS, to: day.start)) ?? []
+        }
+        let previousEvents = ActivityContextPersistence.events(tail)
         let (built, hrvWindows) = await Task.detached(priority: .utility) {
             let intervals = ActivityContextIntervalBuilder.build(document: document, hr: hr, steps: steps, rr: beats)
             // Fed by exactly the same live beat-to-beat R-R and the strap's always-on 1 Hz motion stream the
@@ -268,7 +277,9 @@ final class ActivityContextCoordinator {
             // diagnostic line today; no score or baseline reads them yet.
             let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: document.dayStart, dayEnd: document.dayEnd,
                                                  rr: beats, gravity: gravity, activity: lookup,
-                                                 transitionEvents: document.events,
+                                                 transitionEvents: ActivityContextPersistence.hrvEvents(
+                                                    day: document.events, previous: previousEvents,
+                                                    dayStart: document.dayStart),
                                                  epochWearSignal: [])
             return (intervals, windows)
         }.value
