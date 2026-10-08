@@ -57,7 +57,7 @@ struct RecoveryDetailsView: View {
         let cal = Calendar.current
         for e in scoped where e.recovery?.timeToRecover != nil {
             let day = cal.startOfDay(for: e.date)
-            if let held = out[day], held.id == event.id || held.date > e.date { continue }
+            if let held = out[day], held.id == event.id || (e.id != event.id && held.date > e.date) { continue }
             out[day] = e
         }
         return out
