@@ -36,6 +36,7 @@ from .optional import (
     OPTIONAL_FAMILY_ADAPTERS,
     compute_optional_families,
     optional_family_capabilities,
+    optional_loaded_identity,
 )
 
 PROVIDER_ID = "sensor.biomarkers.v1"
@@ -246,6 +247,10 @@ class SensorBiomarkersProvider:
             }
         families.update(optional_family_capabilities(self._adapters))
         return {family: families[family] for family in FAMILY_ORDER if family in families}
+
+    def loaded_identity(self) -> dict[str, str]:
+        """Checkpoint digests the optional families verified (the descriptive core loads none)."""
+        return optional_loaded_identity(self._adapters)
 
     def capability(self) -> dict[str, Any]:
         return {

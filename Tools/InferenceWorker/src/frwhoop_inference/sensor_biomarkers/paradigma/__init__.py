@@ -42,13 +42,14 @@ from .provider import (
     ParadigmaProvider,
     adapter_state,
     compute_family_documents,
+    loaded_identity,
 )
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...providers import Provider
 
 __all__ = ["make_providers", "ParadigmaProvider", "UPSTREAM_COMMIT", "ADAPTER_NAME",
-           "FAMILIES", "adapter_state", "compute_family_documents"]
+           "FAMILIES", "adapter_state", "compute_family_documents", "loaded_identity"]
 
 
 def make_providers() -> list["Provider"]:

@@ -217,6 +217,20 @@ def artifact_state() -> tuple[bool, str | None, dict[str, str]]:
     return ok, reason, dict(sha256s)
 
 
+def loaded_identity() -> dict[str, str]:
+    """sha256 of each pinned asset this process verified, keyed ``<asset>.sha256``.
+
+    Only while the families can run (flag on, every asset verified): those are exactly the bytes
+    the runner will unpickle. Empty otherwise, so nothing claims weights that cannot load.
+    """
+    if not _env_flag(ENABLE_FLAG):
+        return {}
+    ok, _, sha256s = artifact_state()
+    if not ok:
+        return {}
+    return {f"{name}.sha256": digest for name, digest in sorted(sha256s.items())}
+
+
 def adapter_state() -> dict[str, Any]:
     """Whether tremor/arm_swing can run here: flag, then artifacts, then runtime.
 

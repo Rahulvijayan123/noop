@@ -866,6 +866,24 @@ class _InferJobs:
             readiness[provider.provider_id] = [bool(ready), reason]
         return readiness
 
+    def loaded_identity(self) -> dict[str, dict[str, str]]:
+        """Per provider, what it reports it loaded in THIS process (after ``warm``).
+
+        A provider without ``loaded_identity()`` is left out; one whose report raises carries
+        ``{"error": ...}`` so a broken report is visible rather than silently absent."""
+        out: dict[str, dict[str, str]] = {}
+        for provider in self.registry.all():
+            report = getattr(provider, "loaded_identity", None)
+            if not callable(report):
+                continue
+            try:
+                loaded = {str(k): str(v) for k, v in dict(report() or {}).items()}
+            except Exception as exc:  # noqa: BLE001 - reported, never fatal
+                loaded = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+            if loaded:
+                out[provider.provider_id] = loaded
+        return out
+
     def run(self, kind: str, payload: Mapping[str, Any]) -> Any:
         if kind != LANE_INFER:
             raise ValueError(f"infer worker cannot run {kind!r} jobs")
@@ -962,6 +980,8 @@ def worker_main(fd: int) -> int:
         "math_threads": {name: os.environ.get(name) for name in MATH_THREAD_ENV},
         "framework_threads": _cap_framework_threads(threads),
     }
+    if isinstance(jobs, _InferJobs):
+        hello["loaded"] = jobs.loaded_identity()
     send_frame(sock, ("hello", hello))
     while True:
         try:

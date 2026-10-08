@@ -318,6 +318,26 @@ def compute_optional_families(
     return docs
 
 
+def optional_loaded_identity(modules: Mapping[str, Any]) -> dict[str, str]:
+    """What the ready optional adapters verified they would load, keyed ``<adapter>.<key>``.
+
+    ``loaded_identity()`` is optional in the adapter interface: an adapter without it reports
+    nothing, and one that raises reports ``<adapter>.error`` instead of breaking the health route.
+    """
+    out: dict[str, str] = {}
+    for name in sorted(set(OPTIONAL_FAMILY_ADAPTERS.values())):
+        adapter = load_adapter(name, modules.get(name, DEFAULT_ADAPTER_MODULES[name]))
+        report = None if adapter.broken else getattr(adapter.module, "loaded_identity", None)
+        if not callable(report):
+            continue
+        try:
+            for key, value in sorted(dict(report()).items()):
+                out[f"{name}.{key}"] = str(value)
+        except Exception as exc:  # noqa: BLE001 - a broken report is itself the identity
+            out[f"{name}.error"] = _describe(exc)
+    return out
+
+
 def optional_family_capabilities(modules: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     """Per-family readiness for ``/v1/providers``: one adapter state per optional family."""
     out: dict[str, dict[str, Any]] = {}

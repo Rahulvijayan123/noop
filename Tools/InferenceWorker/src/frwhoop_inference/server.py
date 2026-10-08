@@ -977,6 +977,12 @@ class InferenceServer(BoundedThreadingMixIn, HTTPServer):
                 "compute": self.sleep_features_compute}
 
     def _on_infer_hello(self, hello: Mapping[str, Any]) -> None:
+        # What the warm worker measured it loaded; /healthz reports it ahead of this process's
+        # own (unloaded) copy of each provider. A respawned worker replaces the report.
+        loaded = hello.get("loaded")
+        if isinstance(loaded, Mapping):
+            self.app.worker_loaded_identity = {str(k): v for k, v in loaded.items()
+                                               if isinstance(v, Mapping)}
         reported = hello.get("readiness") or {}
         if self.app.adopt_worker_readiness(reported):
             ready = sorted(pid for pid, state in self.app.provider_states.items() if state.ready)

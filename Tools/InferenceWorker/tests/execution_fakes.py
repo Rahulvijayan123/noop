@@ -125,3 +125,12 @@ def crashing_compute(request, budget_ms: int = 3000):
 
 def raising_compute(request, budget_ms: int = 3000):
     raise ValueError("feature module exploded")
+
+
+class LoadedIdentityProvider(HrvProductionProvider):
+    """Reports a measured loaded identity naming the process that measured it."""
+
+    provider_id = "loaded.runs.v1"
+
+    def loaded_identity(self):
+        return {"checkpoint_sha256": "ab" * 32, "measured_in_pid": str(os.getpid())}

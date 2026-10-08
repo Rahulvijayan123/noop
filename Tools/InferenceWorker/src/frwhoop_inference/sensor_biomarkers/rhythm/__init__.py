@@ -25,7 +25,8 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from .provider import ADAPTER_NAME, FAMILIES, adapter_state, compute_family_documents
+from .provider import (ADAPTER_NAME, FAMILIES, adapter_state, compute_family_documents,
+                       loaded_identity)
 
 if TYPE_CHECKING:  # pragma: no cover
     from ...providers import Provider
@@ -44,4 +45,5 @@ def make_providers() -> list["Provider"]:
 
 
 __all__ = ["make_providers", "DEEPBEAT_REVISION", "SIAMAF_REVISION", "FAMILY",
-           "ADAPTER_NAME", "FAMILIES", "adapter_state", "compute_family_documents"]
+           "ADAPTER_NAME", "FAMILIES", "adapter_state", "compute_family_documents",
+           "loaded_identity"]

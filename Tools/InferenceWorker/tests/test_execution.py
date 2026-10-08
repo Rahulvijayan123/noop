@@ -25,6 +25,7 @@ from conftest import MANIFEST_PATH, hrv_body
 from execution_fakes import (
     PROBE_FILE_ENV,
     CrashingProvider,
+    LoadedIdentityProvider,
     ProbeProvider,
     SlowProvider,
     SpinningProvider,
@@ -381,6 +382,24 @@ def test_worker_reported_readiness_is_adopted_once(bounded):
     assert server.server.app.adopt_worker_readiness({"production.runs.v1": [False, "x"]}) is False
     status, _, body = server.post("/v1/infer", _infer_body())
     assert status == 200 and body["status"] == "ok"
+
+
+def test_healthz_reports_what_the_warm_worker_loaded(bounded):
+    # Checkpoints load in the worker process, so /healthz must show the worker's own report, not
+    # what the HTTP process's unloaded copy of the provider would say.
+    server = bounded([LoadedIdentityProvider()], timeout_ms=5_000)
+    assert server.wait_ready()
+    deadline = time.monotonic() + 10
+    while True:
+        entry = server.health()["identity"]["providers"]["loaded.runs.v1"]
+        if entry.get("loaded_source") == "worker":
+            break
+        assert time.monotonic() < deadline, entry
+        time.sleep(0.05)
+    workers = set(server.server.lanes["infer"].worker_pids())
+    assert entry["loaded"]["checkpoint_sha256"] == "ab" * 32
+    assert int(entry["loaded"]["measured_in_pid"]) in workers
+    assert int(entry["loaded"]["measured_in_pid"]) != os.getpid()
 
 
 # -- /v1/sleep-features -----------------------------------------------------

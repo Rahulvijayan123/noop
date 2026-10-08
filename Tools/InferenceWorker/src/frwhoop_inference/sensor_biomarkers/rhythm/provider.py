@@ -54,7 +54,7 @@ from ..optional import (
     make_state,
     state_documents,
 )
-from ._common import artifact_root, flag_enabled, parse_ppg_payload
+from ._common import artifact_root, cached_sha256, flag_enabled, parse_ppg_payload
 from .deepbeat import ARTIFACT_RELPATH as DEEPBEAT_RELPATH
 from .deepbeat import INPUT_RATE_HZ as DEEPBEAT_INPUT_RATE_HZ
 from .deepbeat import PROVIDER_REVISION as DEEPBEAT_REVISION
@@ -173,6 +173,31 @@ def _state_from_models(models: Mapping[str, dict]) -> dict[str, Any]:
                           detail_code="artifact_mismatch" if mismatch else "artifact_missing",
                           flags=flags, models=summary)
     return make_state(ADAPTER_NAME, STATE_READY, flags=flags, models=summary)
+
+
+def loaded_identity(*, model_root: str | None = None, deepbeat_enabled: bool | None = None,
+                    siamaf_enabled: bool | None = None,
+                    model_adapters: Mapping[str, Callable[[str], Any]] | None = None
+                    ) -> dict[str, str]:
+    """sha256 of each enabled, verified rhythm checkpoint, keyed ``<model>.sha256``.
+
+    The digest is measured from the bytes (cached by size and mtime), never copied from the pin;
+    a model loads only after the same check. Disabled or unverified models report nothing.
+    """
+    models = _models(model_root=model_root, deepbeat_enabled=deepbeat_enabled,
+                     siamaf_enabled=siamaf_enabled, model_adapters=model_adapters)
+    out: dict[str, str] = {}
+    for name, m in sorted(models.items()):
+        adapter = m["adapter"]
+        if not (m["enabled"] and m["ready"]) or adapter is None:
+            continue
+        digest = getattr(adapter, "loaded_sha256", None)
+        path = getattr(adapter, "checkpoint_path", None)
+        if not digest and path:
+            digest = cached_sha256(path)
+        if digest:
+            out[f"{name}.sha256"] = str(digest).lower()
+    return out
 
 
 def adapter_state(*, model_root: str | None = None, deepbeat_enabled: bool | None = None,
@@ -411,6 +436,11 @@ class RhythmProvider:
         if missing:
             return False, "artifact_unavailable: " + "; ".join(missing)
         return True, None
+
+    def loaded_identity(self) -> dict[str, str]:
+        """The verified checkpoint digests of the enabled models (``/healthz`` identity)."""
+        return loaded_identity(model_root=self._model_root, deepbeat_enabled=self._deepbeat_enabled,
+                               siamaf_enabled=self._siamaf_enabled)
 
     def capability(self) -> dict[str, Any]:
         deep, siam = _enabled_flags(deepbeat=self._deepbeat_enabled,
