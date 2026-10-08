@@ -218,12 +218,15 @@ suppressed.
    - Each channel's directional window score gets an empirical p against the same user's own unflagged windows of the same bucket, with a conservative peaks-over-threshold tail: the 95 % upper bound of the exponential scale.
    - Channels are combined by Bonferroni over observed channels, which is valid under any dependence.
    - Nothing is flagged until a bucket has 96 reference windows.
-   - A window joins the reference only once ≥ 1 h old and unflagged.
-8. **Candidates.**
-   - A model flags a window at combined p < 1e-3.
-   - A run of consecutive flagged windows (either model) is one candidate, with a stable key across jobs and beyond the 12 h recent memory.
-   - Severity is "strong" when both models flag and min p < 1e-4.
-   - Publish is fenced, and candidates missing from a re-score are retracted.
+8. **Reference growth (quarantined, no silent drift).** A window joins the reference only once ≥ 6 h old, unflagged, and with no window of either model flagged within 6 h. The slowly-building onset of an event that is flagged later never becomes "normal". The reference is a ring of the last 1,400 windows per bucket. Weeks-long drift is Layer 1's job (frozen anchor, drift and trend tests, §2), not the models'.
+9. **Flag rules** (per model, α = 1e-3):
+   - **window:** one 30-minute window with p < 1e-3;
+   - **sustained:** the mean of the last 4 windows (2 h, same bucket, ≤ 1 gap) per channel, calibrated against contiguous rolling 4-window means of the same reference (reference rows carry their window start). Overlapping means carry ~n/4 independent values, so body p and tail bound use n_eff = n/4 with an 80 % bound; Bonferroni over channels; p < 1e-3. It catches 2-hour moderate shifts (fever ramp, HRV collapse) where no single window is extreme.
+10. **Candidates.**
+    - A run of consecutive flagged windows (either model, either rule) is one candidate, with a stable key across jobs and beyond the 18 h recent memory.
+    - Severity is "strong" when both models flag and min p < 1e-4. `context.rules` and `context.evidence_from` record why and since when.
+    - Publish is fenced, and candidates missing from a re-score are retracted.
+    - Each window is scored once, when complete. A thin reference backfills ≤ 30 h once per scorer generation (UniTS prompt).
 
 ### Calibration under the null (40 references per cell, 5 channels; `tests/test_core.py` + simulation)
 
@@ -235,6 +238,17 @@ suppressed.
 | 1400 | 0.04 × 10⁻³ | 1.90 × 10⁻³ | 0.83 × 10⁻³ |
 
 Values are the rate of p < 1e-3 (nominal 1 × 10⁻³). The first implementation re-calibrated min-p on the reference, which gave 4–16 × nominal with 96 windows. It ranked −min p, a bounded statistic, so even a 6 SD window could not go below p ≈ 1/(n+1). It was replaced.
+
+**Operating point under dependence.** Window scores are autocorrelated, so the choice was made on a grid: AR(1) window scores, φ 0 / 0.5 / 0.8, references 120–1400 windows, 5 channels, 10–12 references per cell. Power is per window at α = 1e-3.
+
+| Rule / calibration | Null rate at 1e-3 (worst cell) | Power | Chosen |
+|---|---|---|---|
+| Window, i.i.d. p, 95 % tail bound | 4.1e-4 | +4 SD window: 0.25–0.36 | ✓ |
+| Window, + lag-1 effective n | ≈ 0 | 0–0.04 (φ ≥ 0.5) | ✗ (in the replay, SpO₂ dips 6/9 → 0/9) |
+| Window, 50 % tail bound | 1.3e-2 (n = 120, φ = 0.8) | 0.5–0.7 | ✗ (anti-conservative) |
+| Sustained, i.i.d. | 1.7e-3 (n = 200, φ = 0.5) | +1.5 SD × 4: 0.005–0.066 | ✗ |
+| Sustained, n_eff = n/4, 80 % bound | 9e-4 | 0.002–0.059 | ✓ |
+| Sustained, lag-1 effective n | 0 | 0 | ✗ |
 
 ### Deploy (2026-10-08)
 
@@ -344,14 +358,74 @@ The owner's own WHOOP 5/MG phone history: 7.5 days, 2,143 five-minute ticks, 3.4
   - signal good 43.4 %, degraded 12.8 %, poor 17.9 %, unknown 25.9 %;
   - motion still 10.7 %, moving 1.7 %, artifact 0.7 %, unknown 86.9 % (dynAccel exists only in the last 24 h of that export).
 
-Model results on real data and the TimesFM / UniTS contribution analysis: see §5 once deployed.
+### Server models: TimesFM 3.0 + UniTS x128 (real models, `Tools/AnomalyService/tools/replay.py`)
+
+**Method.** The replay drives the service's own `score_frame`, with both real models, the per-user calibration and candidate formation, tick by tick (every 30 min). Each run starts from an empty state, so warm-up and UniTS prompt-tuning happen as on the VPS (production budget 400 × 2).
+- The synthetic data are the model prototype's generator: 3 users × 24 days (14 history + 10 test), with walking, exercise, recovery, sleep, off-wrist and injected artifacts.
+- The test days carry 4 event types × 3 per user.
+- An event counts as detected if a candidate overlaps it (end slack 1 h).
+- A candidate in the history period, or not overlapping any event in the test period, is false.
+
+**Final configuration** (release `fcd7cad23`):
+
+| Event (9 each) | Detected | TimesFM flagged | UniTS flagged | Both | Median delay (range) |
+|---|---|---|---|---|---|
+| Resting tachycardia (+25 bpm, 60 min) | 8/9 | 7 | 5 | 4 | 61 min (47–84) |
+| SpO₂ desaturation cluster (sleep, 90 min) | 8/9 | 3 | 6 | 1 | 69 min (61–98) |
+| Fever-like (6 h ramp + 2 h plateau) | 9/9 | 7 | 7 | 5 | 285 min (126–313) |
+| HRV collapse overnight (4 h) | 8/9 | 8 | 3 | 3 | 68 min (52–144) |
+| **All** | **33/36** | 25 | 21 | 13 | |
+
+- **False candidates:** 1 in 30 test user-days and 1 in 39 history user-days (0.03 per user-day, about 1 per month). Neither was "strong". A candidate is not an alert: the phone's five checks decide, and a single-group candidate with only server corroboration is held (§4).
+- **Model contribution:**
+  - TimesFM alone would catch 25/36; it is stronger on HRV collapse (8 vs 3).
+  - UniTS alone would catch 21/36; it is stronger on SpO₂ (6 vs 3).
+  - The union catches 33/36: 12 events were flagged only by TimesFM, 8 only by UniTS, 13 by both.
+- **Delay:** includes the 30-min window, the 5-min settle and the 30-min replay tick. On the VPS the trigger is ~10 min after each scoring completion.
+- **The 3 misses** came closest at p ≈ 1–2 × 10⁻³ (one tachycardia, one HRV collapse, one SpO₂ cluster).
+- **UniTS budget:** 1000 × 3 (prototype) was not better than 400 × 2 (10/36 vs 16/36 in the same intermediate configuration), so the VPS uses 400 × 2.
+
+**How the configuration was reached.** Each step was found by this replay, not by the unit tests:
+
+| Configuration | Detected | False (69 user-days) |
+|---|---|---|
+| 1. Re-score at watermark, reference grows only while thin | 29/36 | 1 |
+| 2. Score once, unaligned watermark (bug: most windows never scored) | 0/36 | 0 |
+| 3. Score once, reference grows with every unflagged window ≥ 1 h old | 17/36 | 0 |
+| 4. + quarantine, sustained rule, lag-1 n_eff on everything | 16/36 | 0 |
+| 5. **+ operating point from the dependence grid (§5)** | **33/36** | **2** |
+
+What each step showed:
+- Step 1 froze the reference on early history; a long-lived user would never adapt.
+- Step 2 was a real bug, found and fixed.
+- Step 3: the onsets of slow events became "normal" (silent drift), and fever fell to 1/9.
+- Step 4: over-conservative; SpO₂ fell to 0/9.
+
+**Real data (owner, read-only export of 18 days, HR on 8 of them).**
+- Windows: 147 usable (TimesFM) and 148 (UniTS); withheld 130 for activity, 94 for low HR coverage, 24 for unknown context, 17 off-wrist.
+- Both models are still **calibrating**: no bucket reached 96 quarantined reference windows in 8 days, so there are 0 candidates. The models need about 1–2 weeks of a person's nights and about 2–3 weeks of awake rest before they can flag anything.
+- Held-out check on the reference collected (first 60 % as reference, last 40 % scored, no injected events): 0 of 109 windows at p < 0.05 (min 0.10), and 0 of 58 sustained 2 h spans at p < 1e-3 (min 2.5e-3).
+
+**On the VPS** (frwhoop-worker-2, 4 vCPU 2.0 GHz, unit limits CPUQuota 100 %, 2 threads):
+- Self-test with the real models: TimesFM 6.05 s per window, UniTS 0.36 s per window, peak RSS 2.34 GB. Both separate a planted +20 bpm shift (TimesFM HR score 2.0–3.6 vs ≤ 0.37; UniTS 2.4–3.2 vs ≤ 0.05).
+- The first job on the owner's strap ran the UniTS prompt-tune (400 windows × 2 epochs, 480 s, loss 0.57 → 0.50) and published per-window scores; it is calibrating.
+- Throughput at one core is about 10 users per core-minute of new data. Scaling beyond ~100 active users needs more cores, or a cheaper TimesFM path (bf16 or a shorter context).
 
 ---
 
 ## 9. Limitations
 
-- **No clinical validation.** Every result is synthetic or from one person over ≤ 34 days. Thresholds are engineering choices with literature anchors (Apple HR notifications 10 min; SpO₂ 88% oxygen threshold; Plews ln-RMSSD; PhysiologyContext CUSUM), not validated operating points.
-- **Wrist posture is weak.** The lying and standing strata will mostly be empty.
-- **WHOOP SpO₂** is a strap estimate during sleep, with ±3–4% error.
+- **No clinical validation.** Every result is synthetic or from one person over ≤ 34 days. Thresholds are engineering choices with literature anchors (Apple HR notifications 10 min; SpO₂ 88 % oxygen threshold; Plews ln-RMSSD; PhysiologyContext CUSUM), not validated operating points. The synthetic events (3 users, 36 events) are the prototype's generator: read detection rates as relative, not as field sensitivity.
+- **Model warm-up is long.** The server models need 96 quarantined reference windows per context (about 1–2 weeks of sleep, 2–3 weeks of awake rest). Until then they abstain ("calibrating") and only the on-device detectors run.
+- **Wrist posture is weak.** The lying and standing strata will mostly be empty; real data so far only fill "seated".
+- **WHOOP SpO₂** is a strap estimate during sleep, with ±3–4 % error.
 - **Personal deviations** alone (beat stream only) never alert without a second sensing path or the server models. If the VPS is down, only safety extremes can notify.
+- **The phone cannot read server candidates yet.** The `scores` route `/anomaly-candidates` is built and tested (30 route tests) but was not deployed: the deploy was blocked by this session's permissions. Deployed v19 equals this branch minus that route, so deploying it rolls nothing back:
+  `supabase functions deploy scores --project-ref sgoyxzcagqyxexmsidtk --use-api` from this worktree.
+- **Staged rollout:** the VPS service runs for the owner's account only (`FRWHOOP_ANOMALY_USERS`). It connects as the same database role as the worker (no least-privilege role yet).
 - **TimesFM 3.0 weights** are under the TimesFM Non-Commercial License v1.0. The owner accepted the production-use risk; the weights must stay on the private VPS.
+- **Not yet on the baseline standard:**
+  - the worker's `DayScoring.loadBaselines` (raw-ms HRV, last 120 rows);
+  - WeeklyDigest and ComparisonEngine;
+  - the Kotlin/Android twins.
+- **App tests:** StrandTests run 3084 tests, with 3 failing tests in files this branch does not touch (activity calibration ×2, a Coach wording test). They fail on main too; main's test target did not compile before three small fixes on this branch.
