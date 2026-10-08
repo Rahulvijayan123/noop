@@ -56,6 +56,39 @@ struct SensorBiomarkerLane {
     var reconcileIntervalSeconds: TimeInterval = 60
     /// Download seam for tests: the B2 storage's `download` is the production default.
     var downloadObject: ((String) throws -> Data)? = nil
+    /// How the lane waits out a busy answer's `Retry-After` within the lease; tests replace it.
+    var sleep: (TimeInterval) -> Void = { Thread.sleep(forTimeInterval: $0) }
+    /// Sidecar answers already received for a job that a busy answer deferred, so the job resumes
+    /// where it stopped instead of re-sending every earlier hour (the scoring lane shares the slot).
+    var answered = AnsweredRequests()
+
+    /// The stages each request of one job already got, keyed by the request body's sha256. Bodies
+    /// are deterministic for a job's input, so a resumed job sends only what is still unanswered.
+    /// Holds one job at a time (bounded); a busy answer itself is never stored.
+    struct AnsweredRequests {
+        static let maxRequests = 256
+        private(set) var jobKey: String?
+        private(set) var stagesByBody: [String: [String: SensorBiomarkerFamilyStage]] = [:]
+
+        static func key(_ job: SensorBiomarkerJob) -> String {
+            [job.userId, job.deviceId, job.day, job.analysisVersion, job.fingerprint, String(job.inputRevision)]
+                .joined(separator: "|")
+        }
+
+        mutating func begin(_ job: SensorBiomarkerJob) {
+            let key = Self.key(job)
+            if jobKey != key { jobKey = key; stagesByBody = [:] }
+        }
+
+        func stages(body: String) -> [String: SensorBiomarkerFamilyStage]? { stagesByBody[body] }
+
+        mutating func store(body: String, stages: [String: SensorBiomarkerFamilyStage]) {
+            guard stagesByBody.count < Self.maxRequests else { return }
+            stagesByBody[body] = stages
+        }
+
+        mutating func clear() { jobKey = nil; stagesByBody = [:] }
+    }
 
     /// Family keys CONTRACTS.md §2 fixes for v1 (mirrors the SQL family-set check).
     static let familyKeys: Set<String> = [
@@ -101,6 +134,8 @@ struct SensorBiomarkerLane {
         /// PPG record-seconds expected / emitted across published days (input coverage).
         var ppgExpectedSeconds = 0
         var ppgEligibleSeconds = 0
+        /// PPG objects a day skipped because their verified bytes could not be read under their schema.
+        var ppgObjectsSkipped = 0
         var lastError: String?
         var lastErrorKind: String?
         var lastActivityAt: Date?
@@ -121,6 +156,7 @@ struct SensorBiomarkerLane {
                 "families_without_input": familiesWithoutInput,
                 "placement_read_errors": placementReadErrors,
                 "ppg_expected_seconds": ppgExpectedSeconds, "ppg_eligible_seconds": ppgEligibleSeconds,
+                "ppg_objects_skipped": ppgObjectsSkipped,
             ]
         }
     }
@@ -162,13 +198,24 @@ struct SensorBiomarkerLane {
 
     /// Seconds a busy job waits before it can be claimed again (its lease is shortened to this).
     static let busyRetrySeconds = 30
+    /// A busy request is retried this many times within the lease, waiting the answer's
+    /// `Retry-After` (capped below) each time, before the job is deferred.
+    static let busyRetriesPerRequest = 2
+    static let maxBusyWaitSeconds = 10
 
     /// A sidecar busy answer (HTTP 429 `busy`, docs/model-integration/README.md) is admission
     /// backpressure, not a result. The one place that recognises it, so the typed
     /// `InferenceClientError.busy` can replace these generic checks at merge.
     static func isSidecarBusy(_ error: Error) -> Bool {
+        if let typed = error as? InferenceClientError, typed.isBusy { return true }
         if case InferenceClientError.non200(429, _) = error { return true }
         return String(describing: error).hasPrefix("inference_busy")
+    }
+
+    /// The wait before retrying a busy request: its `Retry-After`, else the client default, capped.
+    static func busyWaitSeconds(_ error: Error) -> Int {
+        let asked = (error as? InferenceClientError)?.retryAfterSeconds ?? InferenceClient.defaultBusyRetryAfterSeconds
+        return min(max(asked, 1), maxBusyWaitSeconds)
     }
 
     /// What the lane measured about itself for the heartbeat (`meta.lanes[].identity`).
@@ -416,14 +463,17 @@ struct SensorBiomarkerLane {
         }
         do {
             let published = try process(job: job, started: Date())
+            answered.clear()
             return published ? .completed : .superseded
         } catch let e as PostgresClient.Error where e.kind == .connectionLost {
             stats.failuresUnsettled += 1
             throw e  // the lease expires and the queue hands the job out again
         } catch SensorBiomarkerError.busy {
+            // The answers this job already got stay in `answered` for its next claim.
             deferBusy(job: job)
             return .deferred
         } catch {
+            answered.clear()
             let kind = (error as? PostgresClient.Error)?.kind ?? .other
             if kind == .serialization || kind == .stale {
                 // A concurrent writer won the race; the queue owns the newer revision. Never record
@@ -447,7 +497,33 @@ struct SensorBiomarkerLane {
 
     /// Full job processing. Returns true when the fenced publish committed.
     /// Internal so a scratch database can drive it directly with a manually-claimed token.
+    /// One sidecar request. A busy answer is retried `busyRetriesPerRequest` times after its
+    /// `Retry-After` (capped), renewing the lease each time; still busy, the job is deferred with what it
+    /// already got kept in `answered`. A busy answer is never a result and never a failure.
+    mutating func inferWithinLease(job: SensorBiomarkerJob, body: Data) throws -> InferenceResponse {
+        var retries = 0
+        while true {
+            do {
+                return try inference.infer(body: body, metric: "sensor_biomarkers")
+            } catch {
+                guard Self.isSidecarBusy(error) else {
+                    stats.sidecarFailures += 1
+                    throw error  // transport/timeout: bounded retry via settleFailure
+                }
+                stats.sidecarBusy += 1
+                guard retries < Self.busyRetriesPerRequest else { throw SensorBiomarkerError.busy }
+                retries += 1
+                sleep(TimeInterval(Self.busyWaitSeconds(error)))
+                guard try renewLease(job: job) else {
+                    throw PostgresClient.Error(message: "sensor lease lost while the sidecar was busy",
+                                               sqlstate: "55000", kind: .stale)
+                }
+            }
+        }
+    }
+
     mutating func process(job: SensorBiomarkerJob, started: Date) throws -> Bool {
+        answered.begin(job)
         guard let dayBounds = Self.utcDayBounds(job.day) else {
             throw SensorBiomarkerError.deterministic("invalid_job_day \(job.day)")
         }
@@ -476,6 +552,7 @@ struct SensorBiomarkerLane {
         var imuRecords: [Npb1ImuDecoder.Record] = []
         var ppgInputs: [SensorBiomarkerInputs.PpgWaveformInput] = []
         var ppgObjectsByFormat: [String: Int] = [:]
+        var ppgObjectsSkipped: [String: Int] = [:]
         for object in resolved.all {
             guard try renewLease(job: job) else {
                 throw PostgresClient.Error(message: "sensor lease lost during download", sqlstate: "55000", kind: .stale)
@@ -497,7 +574,19 @@ struct SensorBiomarkerLane {
             case SensorBiomarkerInputs.kindRawImuSession:
                 imuRecords.append(contentsOf: try SensorBiomarkerInputs.decodeImuObject(wire: wire, object: object))
             case SensorBiomarkerInputs.kindPpgWaveformSample:
-                let records = try SensorBiomarkerInputs.decodePpgObject(wire: wire, object: object)
+                let records: [SensorBiomarkerInputs.PpgCodec.Record]
+                do {
+                    records = try SensorBiomarkerInputs.decodePpgObject(wire: wire, object: object)
+                } catch let error as SensorBiomarkerInputs.LoadError {
+                    // Verified bytes that cannot be read under their recorded schema are a bad object,
+                    // not a bad day: it is skipped and counted, and the rest of the day (IMU families
+                    // included) still runs. A digest mismatch stays a retryable failure.
+                    guard let reason = Self.skippedPpgObjectReason(error) else { throw error }
+                    ppgObjectsSkipped[reason, default: 0] += 1
+                    stats.ppgObjectsSkipped += 1
+                    note("sensor: skipped PPG object \(object.id): \(reason)")
+                    continue
+                }
                 if let format = records.first?.format { ppgObjectsByFormat[String(format), default: 0] += 1 }
                 ppgInputs.append(contentsOf: records.map(SensorBiomarkerInputs.PpgWaveformInput.init(wireRecord:)))
             default:
@@ -535,23 +624,20 @@ struct SensorBiomarkerLane {
                     throw PostgresClient.Error(message: "sensor lease lost before inference", sqlstate: "55000", kind: .stale)
                 }
                 let body = try Self.inferenceBody(job: job, built: built)
-                let response: InferenceResponse
-                do {
-                    response = try inference.infer(body: body, metric: "sensor_biomarkers")
-                } catch {
-                    if Self.isSidecarBusy(error) {
-                        stats.sidecarBusy += 1
-                        throw SensorBiomarkerError.busy  // deferred: nothing of this job is kept
-                    }
-                    stats.sidecarFailures += 1
-                    throw error  // transport/timeout: bounded retry via settleFailure
+                let bodyKey = sha256Hex(body)
+                let stages: [String: SensorBiomarkerFamilyStage]
+                if let earlier = answered.stages(body: bodyKey) {
+                    stages = earlier  // answered before a busy deferral; not sent again
+                } else {
+                    let response = try inferWithinLease(job: job, body: body)
+                    stats.sidecarRequests += 1
+                    stages = try Self.parseEnvelope(response, families: built.input.families)
+                    answered.store(body: bodyKey, stages: stages)
                 }
-                stats.sidecarRequests += 1
                 requestCount += 1
                 imuSegmentsSent += built.input.imu?.segments.count ?? 0
                 ppgSegmentsSent += built.input.ppg?.segments.count ?? 0
                 sentFamilies.formUnion(built.input.families)
-                let stages = try Self.parseEnvelope(response, families: built.input.families)
                 for (family, stage) in stages {
                     stagesByFamily[family, default: []].append(stage)
                 }
@@ -596,6 +682,7 @@ struct SensorBiomarkerLane {
                                             inputRevision: inputRevision, families: familiesDoc,
                                             inputCoverage: Self.inputCoverageDocument(
                                                 coverage, ppg: ppgReconstruction, objectsByFormat: ppgObjectsByFormat,
+                                                objectsSkipped: ppgObjectsSkipped,
                                                 withoutInput: withoutInput, requests: requestCount))
         if published {
             stats.ppgExpectedSeconds += coverage.ppg.expectedSeconds
@@ -636,14 +723,15 @@ struct SensorBiomarkerLane {
 
     /// The `input_coverage` member of the day document: what the day's input actually was.
     static func inputCoverageDocument(_ coverage: DayCoverage, ppg: SensorBiomarkerInputs.PpgReconstruction,
-                                      objectsByFormat: [String: Int], withoutInput: [String: String],
-                                      requests: Int) -> JSONValue {
+                                      objectsByFormat: [String: Int], objectsSkipped: [String: Int] = [:],
+                                      withoutInput: [String: String], requests: Int) -> JSONValue {
         var ppgDoc = coverage.ppg.jsonObject()
         ppgDoc["conflicting_duplicate_seconds"] = ppg.conflictingDuplicateSeconds.count
         ppgDoc["superseded_duplicate_seconds"] = ppg.supersededDuplicateSeconds
         ppgDoc["detected_delta_counts"] = Dictionary(uniqueKeysWithValues: ppg.detectedDeltaCounts.map { (String($0.key), $0.value) })
         ppgDoc["seconds_by_format"] = Dictionary(uniqueKeysWithValues: ppg.secondsByFormat.map { (String($0.key), $0.value) })
         ppgDoc["objects_by_format"] = objectsByFormat
+        ppgDoc["objects_skipped"] = objectsSkipped
         ppgDoc["grid"] = ppg.grid.rawValue
         ppgDoc["samples_per_second"] = ppg.grid.samplesPerRecord
         ppgDoc["packet_timing_verified"] = false
@@ -653,6 +741,15 @@ struct SensorBiomarkerLane {
             "families_without_input": withoutInput,
             "requests": requests,
         ] as [String: Any])
+    }
+
+    /// The coverage reason for a PPG object the day skips, or nil when the error must fail the job.
+    static func skippedPpgObjectReason(_ error: SensorBiomarkerInputs.LoadError) -> String? {
+        switch error {
+        case .formatMismatch: return "ppg_object_format_mismatch"
+        case .decodeFailure: return "ppg_object_undecodable"
+        case .digestMismatch, .unsupportedKind: return nil
+        }
     }
 
     static let placementPresentSQL = "select (to_regclass('public.placement_intervals') is not null)::text as present"
@@ -994,9 +1091,12 @@ struct SensorBiomarkerFamilyStage {
         }
         // A family reporting per-configuration blocks carries top-level values only for one known
         // configuration (the sidecar's own rule). Across requests that means one known identity for
-        // the whole day; otherwise the top level is never pooled across identities or runs.
+        // the whole day; otherwise the top level is never pooled across identities. A day whose only
+        // identity is "unknown" (every real v26 day) gets the gain-independent measurements of the
+        // merged unknown block at the top level, as the sidecar does for one request; never amplitude.
         let identities = configurationIdentities(stages)
-        let poolsTopLevel = identities == nil || (identities!.count == 1 && !identities!.contains(Self.unknownIdentity))
+        let unknownOnly = identities == [Self.unknownIdentity]
+        let poolsTopLevel = identities == nil || (identities!.count == 1 && !unknownOnly)
         if !poolsTopLevel { keys = [] }
         for key in keys {
             if isAdditiveMeasurement(key) || isMaximumMeasurement(key) {
@@ -1052,6 +1152,17 @@ struct SensorBiomarkerFamilyStage {
         if !poolsTopLevel {
             extra["pooled_across_configurations"] = .bool(false)
             extra["distributions"] = nil
+            if unknownOnly, case .array(let blocks)? = extra["configurations"],
+               let unknown = blocks.lazy.compactMap({ value -> [String: JSONValue]? in
+                   if case .object(let block) = value, (block["configuration"]?.stringValue ?? Self.unknownIdentity)
+                       == Self.unknownIdentity { return block }
+                   return nil }).first {
+                if case .object(let measurements)? = unknown["measurements"] {
+                    mergedMeasurements = measurements.filter { Self.gainIndependentPulseKeys.contains($0.key) }
+                }
+                if case .array(let distributions)? = unknown["distributions"] { extra["distributions"] = .array(distributions) }
+                extra["top_level_scope"] = .string("gain_independent_pooled_across_unidentified_runs")
+            }
         }
         if status != "ok", let reason { extra["reason"] = .string(reason) }
         return SensorBiomarkerFamilyStage(family: family, status: status, releaseTier: first.releaseTier,
@@ -1061,6 +1172,14 @@ struct SensorBiomarkerFamilyStage {
     }
 
     static let unknownIdentity = "unknown"
+    /// Pulse measurements that do not depend on gain or drive (the sidecar's `GAIN_INDEPENDENT_KEYS`).
+    /// The only ones an unidentified configuration may report, and so the only ones pooled across its runs.
+    static let gainIndependentPulseKeys: Set<String> = [
+        "pulse_upstroke_median_ms", "pulse_upstroke_iqr_ms",
+        "pulse_width50_median_ms", "pulse_width50_iqr_ms",
+        "pulse_normalized_area_median", "pulse_normalized_area_iqr",
+        "pulse_accepted_count", "pulse_rejected_count",
+    ]
     /// Bounds on what the day merge keeps of per-request blocks.
     static let maxMergedRuns = 2_048
     static let maxMergedScoreValues = 20_000
@@ -1098,6 +1217,24 @@ struct SensorBiomarkerFamilyStage {
             extra["runs"] = .array(Array(runs.prefix(maxMergedRuns)))
             if runs.count > maxMergedRuns { extra["runs_truncated"] = .bool(true) }
         }
+        // Per-run amplitudes of unidentified configurations: one entry per run from every request,
+        // never pooled (bounded like `runs`).
+        let amplitudeBlocks = stages.compactMap { stage -> [String: JSONValue]? in
+            if case .object(let block)? = stage.extra["run_amplitudes"] { return block }
+            return nil
+        }
+        if amplitudeBlocks.count > 1 {
+            var merged = amplitudeBlocks[0]
+            let listed = amplitudeBlocks.flatMap { block -> [JSONValue] in
+                if case .array(let list)? = block["listed"] { return list }
+                return []
+            }
+            let dropped = amplitudeBlocks.reduce(0) { $0 + ($1["listed_truncated"]?.intValue ?? 0) }
+            merged["runs"] = .int(amplitudeBlocks.reduce(0) { $0 + ($1["runs"]?.intValue ?? 0) })
+            merged["listed"] = .array(Array(listed.prefix(maxMergedRuns)))
+            merged["listed_truncated"] = .int(dropped + max(0, listed.count - maxMergedRuns))
+            extra["run_amplitudes"] = .object(merged)
+        }
         let scoreMaps = stages.compactMap { stage -> [String: JSONValue]? in
             if case .object(let map)? = stage.extra["raw_scores"] { return map }
             return nil
@@ -1126,23 +1263,42 @@ struct SensorBiomarkerFamilyStage {
     }
 
     /// Merge `configurations` blocks across requests. Blocks with the same known identity combine:
-    /// `segments`/`accepted`/`eligible_seconds`/`rejected.*` sum, `distributions` pool per key when the
-    /// edges agree, quantile measurements are re-derived from the pooled bins and count measurements
-    /// sum. An "unknown" identity is never comparable to anything, so those blocks stay separate.
+    /// `runs`/`segments`/`accepted`/`observed_seconds`/`eligible_seconds`/`rejected.*` sum,
+    /// `distributions` pool per key when the edges agree, quantile measurements are re-derived from the
+    /// pooled bins and count measurements sum. "unknown" blocks combine the same way into one block,
+    /// because the contract pools an unidentified configuration's gain-independent features with
+    /// exposure weights (every accepted pulse counts once); its amplitude is never pooled, so any
+    /// amplitude member is dropped from that block.
     static func mergeConfigurationBlocks(_ blocks: [JSONValue]) -> [JSONValue] {
         var order: [String] = []
         var groups: [String: [[String: JSONValue]]] = [:]
-        var separate: [(Int, JSONValue)] = []
-        for (index, block) in blocks.enumerated() {
-            guard case .object(let fields) = block,
-                  let identity = fields["configuration"]?.stringValue, identity != Self.unknownIdentity else {
-                separate.append((index, block)); continue
-            }
+        var unknown: [[String: JSONValue]] = []
+        var malformed: [JSONValue] = []
+        for block in blocks {
+            guard case .object(let fields) = block else { malformed.append(block); continue }
+            let identity = fields["configuration"]?.stringValue ?? Self.unknownIdentity
+            if identity == Self.unknownIdentity { unknown.append(fields); continue }
             if groups[identity] == nil { order.append(identity) }
             groups[identity, default: []].append(fields)
         }
         var out: [JSONValue] = order.map { .object(mergeConfigurationGroup(groups[$0]!)) }
-        out.append(contentsOf: separate.map(\.1))
+        if !unknown.isEmpty { out.append(.object(withoutAmplitude(mergeConfigurationGroup(unknown)))) }
+        out.append(contentsOf: malformed)
+        return out
+    }
+
+    /// An unidentified-configuration block with every gain-dependent member removed.
+    static func withoutAmplitude(_ block: [String: JSONValue]) -> [String: JSONValue] {
+        var out = block
+        if case .object(let measurements)? = block["measurements"] {
+            out["measurements"] = .object(measurements.filter { gainIndependentPulseKeys.contains($0.key) })
+        }
+        if case .array(let distributions)? = block["distributions"] {
+            out["distributions"] = .array(distributions.filter { value in
+                guard case .object(let d) = value, let key = d["key"]?.stringValue else { return false }
+                return gainIndependentPulseKeys.contains(key)
+            })
+        }
         return out
     }
 
@@ -1150,8 +1306,8 @@ struct SensorBiomarkerFamilyStage {
         guard group.count > 1 else { return group[0] }
         var merged = group[0]
         func sum(_ key: String) -> Double { group.reduce(0) { $0 + ($1[key]?.doubleValue ?? 0) } }
-        for key in ["segments", "accepted"] where merged[key] != nil { merged[key] = .int(Int(sum(key))) }
-        if merged["eligible_seconds"] != nil { merged["eligible_seconds"] = .double(sum("eligible_seconds")) }
+        for key in ["runs", "segments", "accepted"] where merged[key] != nil { merged[key] = .int(Int(sum(key))) }
+        for key in ["observed_seconds", "eligible_seconds"] where merged[key] != nil { merged[key] = .double(sum(key)) }
         var rejected: [String: Int] = [:]
         for block in group {
             if case .object(let counts)? = block["rejected"] {
