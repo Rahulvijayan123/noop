@@ -1,4 +1,5 @@
 import XCTest
+import WhoopProtocol
 @testable import StrandAnalytics
 
 /// D9-07: the wearer's stretch corrections overlay the decoder's intervals at read time.
@@ -102,6 +103,51 @@ final class ActivityContextCorrectionsTests: XCTestCase {
         }
     }
 
+    func testANewerConfirmationWithdrawsAnOlderCorrection() {
+        // Review fix: "not wearing" over [0, 400), then later (a different stretch key, after the day was
+        // re-derived) "that was right" over [200, 600). The newer answer wins where they overlap.
+        let older = feedback(t0, t0 + 400, .notWearing, at: 0)
+        let newer = feedback(t0 + 200, t0 + 600, nil, verdict: .correct, at: 60)
+        for order in [[older, newer], [newer, older]] {
+            let out = ActivityContextCorrections.applying(order, to: [sitting(t0, t0 + 600)])
+            XCTAssertEqual(out.map(\.start), [t0, t0 + 200], "\(out.map(\.start))")
+            XCTAssertEqual(out.map(\.activityClass), [.offWrist, .sitting])
+            XCTAssertEqual(out.map(\.provenance), [ActivityContextProvenance.userCorrection, nil])
+            XCTAssertEqual(out[1].confidence, 0.6, "the decoder's own reading stands")
+        }
+        // An older confirmation does not withdraw a newer correction.
+        let out = ActivityContextCorrections.applying([feedback(t0, t0 + 600, nil, verdict: .correct, at: 0),
+                                                       feedback(t0, t0 + 600, .standing, at: 60)],
+                                                      to: [sitting(t0, t0 + 600)])
+        XCTAssertEqual(out.map(\.activityClass), [.standing])
+    }
+
+    func testNotWearingOverADecodedSleepIsNotSleep() throws {
+        // Review fix: the off-wrist piece kept the decoder's sleep state, in-bed flag, steps and events.
+        var night = sitting(t0, t0 + 600)
+        night.activityClass = .sleeping; night.sleep = .asleep; night.inBed = true
+        let out = ActivityContextCorrections.applying([feedback(t0 + 100, t0 + 400, .notWearing)], to: [night])
+        let off = try XCTUnwrap(ActivityContextLookup(intervals: out).interval(at: t0 + 200))
+        XCTAssertEqual(off.activityClass, .offWrist)
+        XCTAssertEqual(off.sleep, .unknown, "not worn is not asleep")
+        XCTAssertNil(off.inBed)
+        XCTAssertEqual(off.stepTicks, 0)
+        XCTAssertEqual(off.transitionCount, 0)
+        XCTAssertEqual(off.settlingSeconds, 0)
+        XCTAssertEqual(off.absorbedSeconds, 0)
+        let after = try XCTUnwrap(ActivityContextLookup(intervals: out).interval(at: t0 + 500))
+        XCTAssertEqual(after.sleep, .asleep, "the seconds the wearer did not answer for keep the decoder's reading")
+        XCTAssertEqual(after.inBed, true)
+        // And an HRV window over the off-wrist seconds is neither asleep nor eligible.
+        let rr = (0..<375).map { RRInterval(ts: t0 + 100 + $0 * 4 / 5, rrMs: 800) }
+        let w = try XCTUnwrap(HRVWindowBuilder.build(kind: .canonical5m, dayStart: t0 + 100, dayEnd: t0 + 400, rr: rr,
+                                                      activity: ActivityContextLookup(intervals: out),
+                                                      transitionEvents: []).first)
+        XCTAssertNotEqual(w.asleep, true)
+        XCTAssertEqual(w.wear, .offWrist)
+        XCTAssertFalse(w.eligibleForBaseline)
+    }
+
     func testCorrectionsAcrossSeveralRowsSplitEachAtItsBounds() {
         let rows = [sitting(t0, t0 + 300), sitting(t0 + 300, t0 + 600), sitting(t0 + 900, t0 + 1_200)]
         let out = ActivityContextCorrections.applying([feedback(t0 + 200, t0 + 1_000, .standing)], to: rows)
@@ -120,7 +166,10 @@ final class ActivityContextCorrectionsTests: XCTestCase {
                      feedback(t0, t0 + 600, .typing), feedback(t0, t0 + 600, .other),
                      feedback(t0 + 5_000, t0 + 6_000, .notWearing)]
         XCTAssertEqual(ActivityContextCorrections.applying(inert, to: rows), sorted)
-        XCTAssertEqual(ActivityContextCorrections.corrections(from: inert).count, 1, "only the out-of-range one applies")
+        // The confirmation is an answer too (it can withdraw an older correction, see below); the out-of-range
+        // correction is the other. Neither changes these rows.
+        let answers = ActivityContextCorrections.corrections(from: inert)
+        XCTAssertEqual(answers.map(\.correction), [nil, .notWearing])
     }
 
     func testProvenanceRoundTripsAndIsAbsentFromDecoderJSON() throws {

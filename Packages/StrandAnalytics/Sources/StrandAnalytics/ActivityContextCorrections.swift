@@ -12,9 +12,12 @@ import Foundation
 //     day, a new decoder version or a deleted answer all take effect at once, and the store keeps what the model
 //     actually said (the labels the corrections are meant to tune it against).
 //   - Intervals are split at a correction's bounds; only the seconds the wearer answered for change.
-//   - Where two corrections overlap, the more recently answered one wins (`updatedAt`, then input order).
+//   - Where two answers overlap, the more recently answered one wins (`updatedAt`, then input order). A `correct`
+//     verdict is an answer too: where it is the latest, the decoder's reading stands and an older correction of
+//     the same seconds (a different stretch key, say after the day was re-derived) no longer applies.
 //   - A correction only asserts what it names. `notWearing` makes the seconds off-wrist (`wear == .offWrist`,
-//     class `offWrist`) and clears their physiology, so nothing measured then can enter a baseline. A class
+//     class `offWrist`, sleep unknown, not in bed) and clears their physiology, steps and decoder events, so
+//     nothing measured then can enter a baseline or a sleep or step rollup. A class
 //     correction (`StretchCorrection.activityClass`: asleep, lying down, sitting, standing, walking, …) sets that
 //     class, the heads `StretchCorrection.partialHeads` names (nil where the wearer said nothing), the sleep state
 //     the answer implies (asleep for `asleep`, awake otherwise) and on-wrist wear. A correction with no
@@ -35,26 +38,36 @@ public enum ActivityContextProvenance {
     public static let userCorrection = "user_correction"
 }
 
-/// One user-asserted span: "over `[start, end)` I was actually `correction`".
+/// One user-asserted span: "over `[start, end)` I was actually `correction`", or, with `correction == nil`,
+/// "the decoder's label was right".
 public struct ActivityContextCorrection: Equatable, Sendable {
     /// Unix seconds, inclusive.
     public var start: Int
     /// Unix seconds, exclusive.
     public var end: Int
-    public var correction: StretchCorrection
-    /// When the wearer gave the answer; the later of two overlapping corrections wins.
+    /// nil: the wearer confirmed the decoder (a `correct` verdict). Where that answer is the latest, the decoder's
+    /// reading stands.
+    public var correction: StretchCorrection?
+    /// When the wearer gave the answer; the later of two overlapping answers wins.
     public var answeredAt: Date
 
-    public init(start: Int, end: Int, correction: StretchCorrection, answeredAt: Date = .distantPast) {
+    public init(start: Int, end: Int, correction: StretchCorrection?, answeredAt: Date = .distantPast) {
         self.start = start; self.end = end; self.correction = correction; self.answeredAt = answeredAt
     }
 
-    /// The correction a stored verdict asserts, or nil when it asserts none the overlay applies: a `correct`
-    /// verdict, a wrong verdict without a corrected label, an empty span, or a label with no one-to-one class.
+    /// The answer a stored verdict gives the overlay: a confirmation for a `correct` verdict, a correction for a
+    /// wrong verdict whose corrected label the overlay applies. nil for an empty span, a wrong verdict without a
+    /// corrected label, or a label with no one-to-one class (those assert nothing the overlay can act on, so they
+    /// neither apply nor withdraw an older correction).
     public init?(feedback f: StretchFeedback) {
-        guard f.verdict == .incorrect, let label = f.correctedLabel, f.endTs > f.startTs,
-              ActivityContextCorrections.applies(label) else { return nil }
-        self.init(start: f.startTs, end: f.endTs, correction: label, answeredAt: f.updatedAt)
+        guard f.endTs > f.startTs else { return nil }
+        switch f.verdict {
+        case .correct:
+            self.init(start: f.startTs, end: f.endTs, correction: nil, answeredAt: f.updatedAt)
+        case .incorrect:
+            guard let label = f.correctedLabel, ActivityContextCorrections.applies(label) else { return nil }
+            self.init(start: f.startTs, end: f.endTs, correction: label, answeredAt: f.updatedAt)
+        }
     }
 }
 
@@ -65,7 +78,7 @@ public enum ActivityContextCorrections {
         correction == .notWearing || correction.activityClass != nil
     }
 
-    /// The corrections a set of stored verdicts asserts, in the order given.
+    /// The answers (corrections and confirmations) a set of stored verdicts gives, in the order given.
     public static func corrections(from feedback: [StretchFeedback]) -> [ActivityContextCorrection] {
         feedback.compactMap(ActivityContextCorrection.init(feedback:))
     }
@@ -80,7 +93,9 @@ public enum ActivityContextCorrections {
     /// input comes back unchanged.
     public static func apply(_ corrections: [ActivityContextCorrection],
                              to intervals: [ActivityContextInterval]) -> [ActivityContextInterval] {
-        let segments = resolve(corrections.filter { $0.end > $0.start && applies($0.correction) })
+        // Confirmations take part in precedence, then drop out: where one wins, the decoder's row stands.
+        let segments = resolve(corrections.filter { $0.end > $0.start && ($0.correction.map(applies) ?? true) })
+            .compactMap { s in s.correction.map { (start: s.start, end: s.end, correction: $0) } }
         let sorted = intervals.sorted { $0.start < $1.start }
         guard !segments.isEmpty else { return sorted }
         var out: [ActivityContextInterval] = []
@@ -111,15 +126,15 @@ public enum ActivityContextCorrections {
 
     // MARK: Precedence
 
-    /// Disjoint, time-ordered spans, each carrying the correction that wins there (latest answer, then the later
-    /// one in input order).
-    static func resolve(_ corrections: [ActivityContextCorrection]) -> [(start: Int, end: Int, correction: StretchCorrection)] {
+    /// Disjoint, time-ordered spans, each carrying the answer that wins there (latest answer, then the later one in
+    /// input order); a nil correction is a winning confirmation.
+    static func resolve(_ corrections: [ActivityContextCorrection]) -> [(start: Int, end: Int, correction: StretchCorrection?)] {
         guard !corrections.isEmpty else { return [] }
         let ranked = corrections.enumerated().sorted {
             ($0.element.answeredAt, $0.offset) < ($1.element.answeredAt, $1.offset)
         }.map(\.element)
         let bounds = Set(corrections.flatMap { [$0.start, $0.end] }).sorted()
-        var out: [(start: Int, end: Int, correction: StretchCorrection)] = []
+        var out: [(start: Int, end: Int, correction: StretchCorrection?)] = []
         for k in 0..<(bounds.count - 1) {
             let a = bounds[k], b = bounds[k + 1]
             guard let winner = ranked.last(where: { $0.start <= a && b <= $0.end }) else { continue }
@@ -171,6 +186,14 @@ public enum ActivityContextCorrections {
             piece.activityClass = .offWrist
             piece.wear = .offWrist
             piece.posture = nil; piece.locomotion = nil; piece.armBehavior = nil
+            // Not worn is not asleep or in bed, takes no steps, and the decoder's events there were noise (review
+            // fix: a "not wearing" answer over a decoded sleep kept `sleep == .asleep` and counted as sleep).
+            piece.sleep = .unknown; piece.inBed = nil
+            piece.stepTicks = 0
+            piece.transitionCount = piece.transitionCount.map { _ in 0 }
+            piece.settlingSeconds = piece.settlingSeconds.map { _ in 0 }
+            piece.absorbedClasses = piece.absorbedClasses.map { _ in [] }
+            piece.absorbedSeconds = piece.absorbedSeconds.map { _ in 0 }
             // Nothing measured off the wrist is physiology.
             piece.hrSamples = 0; piece.hrMean = nil; piece.hrMin = nil; piece.hrMax = nil; piece.hrSlope = nil
             piece.rmssd = nil; piece.rrBeats = 0; piece.rrDiffSqSumMs2 = 0; piece.rrDiffCount = 0
