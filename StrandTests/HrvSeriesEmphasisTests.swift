@@ -43,4 +43,26 @@ final class HrvSeriesEmphasisTests: XCTestCase {
                        "2 faded readings left out of the line and latest value because you were moving, "
                        + "activity was unclear, or there were few clean beats.")
     }
+
+    func testPendingContextKeepsTheReadingInTheLineAndAsLatest() {
+        let pending = point(2, 61, weak: false, reasons: [.contextPending])
+        let points = [point(0, 60, weak: false), point(1, 62, weak: false), pending]
+        XCTAssertEqual(HrvSeriesEmphasis.emphasis(of: pending), .full)
+        XCTAssertEqual(HrvSeriesEmphasis.lineRuns(points, slotSeconds: 900).map(\.count), [3])
+        XCTAssertEqual(HrvSeriesEmphasis.latestSupported(points)?.rmssd, 61)
+        XCTAssertNil(HrvSeriesEmphasis.weakNote(points))
+        XCTAssertEqual(HrvSeriesEmphasis.pendingNote(points),
+                       "Activity context is not available yet for the latest readings.")
+        XCTAssertEqual(HrvSeriesEmphasis.pendingNote([pending]),
+                       "Activity context is not available yet for these readings.")
+        XCTAssertNil(HrvSeriesEmphasis.pendingNote([point(0, 60, weak: false)]))
+    }
+
+    func testAPendingOnlyFlagFromTheServerNeverFadesAReading() {
+        let json: [String: Any] = ["slot_s": t0, "weak": true, "reasons": ["context_pending"]]
+        XCTAssertEqual(HrvSlotQuality(json: json)?.weak, false, "pending alone is not a weakness")
+        let moving: [String: Any] = ["slot_s": t0, "weak": true, "reasons": ["movement", "context_pending"]]
+        XCTAssertEqual(HrvSlotQuality(json: moving)?.weak, true)
+        XCTAssertEqual(HrvSlotQuality(json: moving)?.reasons, [.movement, .contextPending])
+    }
 }

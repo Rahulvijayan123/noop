@@ -725,6 +725,9 @@ public struct HrvSlotQuality: Equatable, Sendable {
         case unknownContext = "unknown_context"
         /// The clean beats cover less than a third of the slot.
         case sparseBeats = "sparse_beats"
+        /// The activity lane has not published this slot yet. Not a weakness of the reading: it never makes a
+        /// point weak on its own (review R10).
+        case contextPending = "context_pending"
     }
 
     public let weak: Bool
@@ -743,8 +746,10 @@ public struct HrvSlotQuality: Equatable, Sendable {
     /// Parse one `hrv_series.context` entry; nil when it is malformed.
     init?(json: [String: Any]) {
         guard let weak = json["weak"] as? Bool else { return nil }
-        self.weak = weak
-        self.reasons = ((json["reasons"] as? [Any]) ?? []).compactMap { ($0 as? String).flatMap(Reason.init(rawValue:)) }
+        let reasons = ((json["reasons"] as? [Any]) ?? []).compactMap { ($0 as? String).flatMap(Reason.init(rawValue:)) }
+        // A slot flagged only because its context is not published yet is a normal reading, whatever the flag says.
+        self.weak = weak && !(reasons == [.contextPending])
+        self.reasons = reasons
         self.movingShare = (json["moving_share"] as? NSNumber)?.doubleValue
         self.unknownShare = (json["unknown_share"] as? NSNumber)?.doubleValue
         self.cleanCoverage = (json["clean_coverage"] as? NSNumber)?.doubleValue

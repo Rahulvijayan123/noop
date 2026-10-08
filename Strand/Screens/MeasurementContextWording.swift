@@ -492,6 +492,10 @@ enum PhysiologyContextWording {
             String(localized: "the position estimate came from an older model that reads heart rate"),
         "context_postures_mixed": String(localized: "your position changed during it"),
         "context_conflicts_with_forearm_gravity": String(localized: "the position estimate and arm orientation disagreed"),
+        "context_in_vehicle_not_used": String(localized: "time in a vehicle is not counted as seated rest"),
+        "sit_stand_from_learned_posture_claim":
+            String(localized: "sitting or standing comes from a learned estimate, not a measurement"),
+        "no_validated_definition": String(localized: "there is no validated way to measure this yet"),
         "degraded_validity_included": String(localized: "includes a signal usable with limitations"),
         "relative_use_only": String(localized: "for relative comparison only"),
         "no_history": String(localized: "no earlier data"),
@@ -678,15 +682,11 @@ enum PhysiologyContextWording {
                             locale: Locale = .current) -> (value: String, note: String?)? {
         guard let stratum = p.context else { return nil }
         var notes: [String] = []
-        let learned: PhysiologyContext.ReasonCode = PhysiologyContext.PostureEvidence.sittingStandingNotSeparatedByWrist
-        let reasons = (p.contextReasons ?? []).filter { $0 != learned }
+        let reasons = p.contextReasons ?? []
         if let name = likelyPosition(stratum) {
             if let basis = positionBasis(p.contextBasis ?? []) { notes.append(basis) }
             if let c = p.contextConfidence, c.isFinite {
                 notes.append(String(localized: "Confidence \(percent(c, locale: locale))"))
-            }
-            if (p.contextReasons ?? []).contains(learned) {
-                notes.append(String(localized: "Sitting and standing come from a learned estimate, not a measurement"))
             }
             if let r = reasonList(reasons) { notes.append(r) }
             return (name, notes.isEmpty ? nil : notes.joined(separator: " \u{00B7} "))
