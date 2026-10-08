@@ -1,4 +1,5 @@
 import SwiftUI
+import Charts
 import Foundation
 import StrandDesign
 import StrandAnalytics
@@ -34,25 +35,16 @@ struct InsightsHubView: View {
     @EnvironmentObject private var repo: Repository
     @StateObject private var model = InsightsHubViewModel()
 
-    /// The currently-selected outcome for the ranked feed (Charge / HRV / Rest / RHR).
+    /// The currently-selected outcome for the ranked feed (Charge / HRV / Rest / Resting HR).
     @State private var outcome: InsightsHubViewModel.Outcome = .recovery
 
     var body: some View {
-        ScreenScaffold(title: "Insights",
-                       subtitle: "Patterns in your own data: association, not cause.",
-                       // PERF (scroll): lazy column — byte-identical layout (LazyVStack == eager VStack
-                       // alignment/spacing/header). The content is one inner eager VStack, so the staggered
-                       // mover reveal is unchanged; this only defers building that stack until it scrolls in.
-                       lazy: true) {
-            if !model.loaded {
-                ComingSoon(what: "Reading your journal and outcomes…")
-            } else {
-                VStack(alignment: .leading, spacing: NoopMetrics.sectionSpacing) {
-                    moversSection
-                    doseSection
-                    methodNote
-                }
-            }
+        ScreenScaffold(title: "What moves you", titleDisplay: .navigationBar, isLoading: !model.loaded) {
+            moversSection
+            doseSection
+            AboutDisclosure("How to read this", paragraphs: [
+                String(localized: "Everything here is a pattern in your own logged days: an association with an effect size and confidence, never a cause or a diagnosis. Population patterns are shown as \u{201C}typical\u{201D} and are always overridden by your own data once you have enough of it. Approximations, not WHOOP\u{2019}s scores; not a medical device."),
+            ])
         }
         .task(id: repo.refreshSeq) { await model.load(repo: repo) }
         .onChangeCompat(of: outcome) { model.rankFor($0) }
@@ -62,157 +54,68 @@ struct InsightsHubView: View {
 
     private var moversSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            // Header and the 4-segment outcome control each get their own row — one HStack
-            // crushed the pill control on narrow widths and truncated the segment labels.
-            SectionHeader("What moves your \(outcome.outcomeName.lowercased())",
-                          overline: "Ranked · your data")
-            SegmentedPillControl(InsightsHubViewModel.Outcome.allCases, selection: $outcome) { $0.label }
+            SectionHeader("What moves your \(outcome.outcomeName.lowercased())")
+            SegmentedPillControl(InsightsHubViewModel.Outcome.allCases, selection: $outcome,
+                                 fillsAvailableWidth: true) { $0.label }
                 .accessibilityLabel("Outcome metric")
-                .frame(maxWidth: .infinity, alignment: .leading)
 
-            if model.ranked.isEmpty {
-                NoopCard {
-                    Text(String(localized: "Not enough overlap between your journal answers and \(outcome.outcomeName.lowercased()) yet. Keep logging. Each behaviour needs days both with and without it before NOOP can read its effect."))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+            if model.loaded && model.ranked.isEmpty {
+                ComingSoon(what: "Log behaviours in your journal. After a few days with and without each one, Nara ranks how it moves your charge, HRV and rest.")
             } else {
-                ForEach(model.ranked.indices, id: \.self) { i in
-                    moverCard(model.ranked[i])
-                        .staggeredAppear(index: i)
+                NoopListSection {
+                    ForEach(Array(model.ranked.enumerated()), id: \.offset) { index, ranked in
+                        if index > 0 { NoopListDivider() }
+                        InsightsDetailLink {
+                            MoverDetailPage(ranked: ranked, outcome: outcome)
+                        } label: {
+                            moverRow(ranked)
+                        }
+                    }
                 }
             }
         }
     }
 
-    /// One ranked, lag-aware mover row: behaviour → effect on the outcome, with the
-    /// best lead/lag, with/without means, effect-size word, and a confidence pill.
-    private func moverCard(_ r: RankedEffect) -> some View {
+    /// One ranked, lag-aware mover: the behaviour, its signed effect on the outcome in the outcome's
+    /// units, when it shows up and how sure the read is.
+    private func moverRow(_ r: RankedEffect) -> some View {
         let e = r.effect
-        // Sign-aware tint: did this behaviour move the outcome the GOOD way?
         let movedGood: Bool? = e.delta == 0 ? nil : ((e.delta > 0) == outcome.higherIsBetter)
-        let tint: StrandTone = {
-            guard let good = movedGood else { return .neutral }
-            if e.significant { return good ? .positive : .critical }
-            return good ? .positive : .warning
-        }()
-        let tintColor = toneColor(tint)
-        let deltaText: String = {
-            let arrow = e.delta > 0 ? "↑" : (e.delta < 0 ? "↓" : "→")
-            if let pct = e.pctChange { return "\(arrow) \(Int(abs(pct).rounded()))%" }
-            return "\(arrow) \(String(format: "%.1f", abs(e.delta)))"
-        }()
-
-        return NoopCard(tint: outcome.domain.color) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                // Header: behaviour name + lead/lag chip + confidence pill.
-                HStack(alignment: .firstTextBaseline) {
-                    HStack(spacing: 8) {
-                        Circle().fill(tintColor).frame(width: 8, height: 8)
-                        Text(r.behavior)
-                            .font(StrandFont.headline)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .lineLimit(1)
-                    }
-                    Spacer(minLength: 8)
-                    StatePill(LocalizedStringKey(r.leadLagText), tone: .accent, showsDot: false)
-                    ScoreStatePill(Self.scoreState(r.confidence))
-                }
-
-                // The engine's sign-aware sentence (includes the lead/lag clause).
-                Text(r.sentence())
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-
-                // With / without means as uniform StatTiles.
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 168), spacing: NoopMetrics.gap)],
-                          alignment: .leading, spacing: NoopMetrics.gap) {
-                    StatTile(label: "With",
-                             value: outcome.format(e.meanWith),
-                             caption: "n = \(e.nWith)",
-                             accent: tintColor,
-                             delta: deltaText,
-                             deltaColor: tintColor)
-                    StatTile(label: "Without",
-                             value: outcome.format(e.meanWithout),
-                             caption: "n = \(e.nWithout)",
-                             accent: StrandPalette.textPrimary)
-                }
-
-                Divider().overlay(StrandPalette.hairline)
-
-                // Effect-size footer: Cohen's d + magnitude word.
-                HStack {
-                    Text("Effect size").strandOverline()
-                    Spacer()
-                    HStack(spacing: 6) {
-                        Text(String(format: "d = %.2f", e.cohensD))
-                            .font(StrandFont.captionNumber)
-                            .foregroundStyle(tintColor)
-                        Text(Self.effectMagnitudeWord(e.cohensD))
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                }
-            }
-        }
-        .accessibilityElement(children: .combine)
-        // One whole-string key; the args are complete sentences, never concatenated tails.
-        .accessibilityLabel(String(localized: "\(r.sentence()) Cohen's d \(String(format: "%.2f", e.cohensD)). \(Self.scoreState(r.confidence).accessibilityWord)"))
+        let tone: StrandTone = movedGood.map { $0 ? .positive : .warning } ?? .neutral
+        return NoopListRow(icon: nil, title: LocalizedStringKey(r.behavior),
+                           subtitle: "\(r.leadLagText) · \(Self.confidenceWord(r.confidence))",
+                           value: outcome.signedDelta(e.delta), valueTone: tone)
+            .accessibilityElement(children: .ignore)
+            // One whole-string key; the args are complete sentences, never concatenated tails.
+            .accessibilityLabel(String(localized: "\(r.sentence()) Cohen's d \(String(format: "%.2f", e.cohensD)). \(Self.scoreState(r.confidence).accessibilityWord)"))
     }
 
     // MARK: - Alcohol / caffeine dose-response
 
     private var doseSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Dose-response", overline: "Personal curve · prior-shrunk")
-            if model.doseCards.isEmpty {
-                NoopCard {
-                    Text(String(localized: "Log alcohol or late caffeine with an amount and NOOP fits a personal dose curve: how much each extra unit tends to move your numbers. Until then it shows typical patterns, clearly labelled as not yet yours."))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+            SectionHeader("Dose-response")
+            if model.loaded && model.doseCards.isEmpty {
+                ComingSoon(what: "Log alcohol or late caffeine with an amount and Nara fits a personal dose curve.")
             } else {
-                ForEach(Array(model.doseCards.enumerated()), id: \.element.id) { index, card in
+                ForEach(model.doseCards) { card in
                     DoseResponseCardView(card: card)
-                        .staggeredAppear(index: index)
                 }
-            }
-        }
-    }
-
-    // MARK: - Method / honesty note
-
-    private var methodNote: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("How to read this").strandOverline()
-                Text(String(localized: "Everything here is a pattern in your own logged days: an association with an effect size and confidence, never a cause or a diagnosis. Population patterns are shown as \u{201C}typical\u{201D} and are always overridden by your own data once you have enough of it. Approximations, not WHOOP\u{2019}s scores; not a medical device."))
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     // MARK: - Helpers
 
-    private func toneColor(_ tone: StrandTone) -> Color {
-        switch tone {
-        case .neutral:  return StrandPalette.textSecondary
-        case .accent:   return StrandPalette.accent
-        case .positive: return StrandPalette.statusPositive
-        case .warning:  return StrandPalette.statusWarning
-        case .critical: return StrandPalette.statusCritical
+    static func confidenceWord(_ c: ScoreConfidence) -> String {
+        switch c {
+        case .solid:       return String(localized: "Solid")
+        case .building:    return String(localized: "Building")
+        case .calibrating: return String(localized: "Calibrating")
         }
     }
 
-    /// Map the engine's ScoreConfidence tier to the design-system ScoreState pill.
+    /// Map the engine's ScoreConfidence tier to the design-system ScoreState (VoiceOver wording).
     static func scoreState(_ c: ScoreConfidence) -> ScoreState {
         switch c {
         case .solid:       return .solid
@@ -244,11 +147,58 @@ private extension ScoreState {
     }
 }
 
+// MARK: - One mover, in detail
+
+/// A behaviour's effect on the selected outcome, one tap below its row: the engine's sentence, the
+/// outcome with and without it on one axis, the effect size, and how sure the read is.
+private struct MoverDetailPage: View {
+    let ranked: RankedEffect
+    let outcome: InsightsHubViewModel.Outcome
+
+    var body: some View {
+        let e = ranked.effect
+        let movedGood = e.delta == 0 ? nil : ((e.delta > 0) == outcome.higherIsBetter)
+        let color = movedGood.map { $0 ? StrandPalette.statusPositive : StrandPalette.statusWarning }
+            ?? StrandPalette.textSecondary
+        ScreenScaffold(title: LocalizedStringKey(ranked.behavior), titleDisplay: .navigationBar) {
+            ValueReadout(ReadoutContent(dateLine: ranked.leadLagText,
+                                        value: outcome.signedDelta(e.delta, includeUnit: false),
+                                        unit: outcome.unit,
+                                        context: "\(outcome.outcomeName) · \(InsightsHubView.confidenceWord(ranked.confidence))"))
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    Text(ranked.sentence())
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    InsightsComparisonBars(bars: [
+                        .init(id: "with", label: String(localized: "With"), value: e.meanWith,
+                              valueText: outcome.format(e.meanWith), detail: "n = \(e.nWith)", color: color),
+                        .init(id: "without", label: String(localized: "Without"), value: e.meanWithout,
+                              valueText: outcome.format(e.meanWithout), detail: "n = \(e.nWithout)",
+                              color: StrandPalette.textTertiary),
+                    ], domain: outcome.axis(e.meanWith, e.meanWithout))
+                }
+            }
+            StatGrid([
+                StatItem(String(localized: "Effect size"), value: String(format: "%.2f", e.cohensD),
+                         detail: InsightsHubView.effectMagnitudeWord(e.cohensD)),
+                StatItem(String(localized: "Days logged"), value: "\(e.nWith + e.nWithout)",
+                         detail: "\(e.nWith) · \(e.nWithout)"),
+            ])
+            AboutDisclosure(paragraphs: [
+                String(localized: "Effect size is Cohen's d: the difference between the two groups in units of their spread. Around 0.2 is small, 0.5 moderate and 0.8 large."),
+                String(localized: "Everything here is a pattern in your own logged days: an association with an effect size and confidence, never a cause or a diagnosis. Population patterns are shown as \u{201C}typical\u{201D} and are always overridden by your own data once you have enough of it. Approximations, not WHOOP\u{2019}s scores; not a medical device."),
+            ])
+        }
+    }
+}
+
 // MARK: - Dose-response card
 //
 // The headline alcohol/caffeine surface: the prior-shrunk curve, the per-unit read,
-// the confidence pill, the honesty banner, and an evening "damage forecast" preview
-// driven by a tiny dose stepper. The forecast is a what-if on the user's own latest
+// the confidence pill, the honesty note, and an evening "damage forecast" preview
+// driven by a dose picker (or a tap on the curve). The forecast is a what-if on the user's own latest
 // Charge — "a 2nd drink tonight tends to line up with about −7 on tomorrow's Charge
 // for you" — never a recommendation to drink or abstain.
 
@@ -259,31 +209,41 @@ private struct DoseResponseCardView: View {
     /// starting point so the headline reads as a 2nd-drink forecast out of the box.
     @State private var previewDose: Int = 2
 
-    private var domain: DomainTheme { card.outcomeName == "HRV" ? .rest : .charge }
+    private var accent: Color { card.outcomeName == "HRV" ? StrandPalette.metricPurple : StrandPalette.chargeColor }
 
     var body: some View {
         let r = card.response
-        NoopCard(tint: domain.color) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                header(r)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                    Image(systemName: card.symbol)
+                        .font(StrandFont.icon(.inline))
+                        .foregroundStyle(accent)
+                        .accessibilityHidden(true)
+                    Text(card.title)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer(minLength: NoopMetrics.space2)
+                    InsightsConfidencePill(confidence: r.confidence)
+                }
 
                 // The engine's honest read sentence (prior / yours / contradicts-prior).
                 Text(r.sentence())
-                    .font(StrandFont.body)
+                    .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // The prior-shrunk curve (dose on x, modelled outcome Δ on y).
-                DoseCurveChart(points: r.curve, accent: domain.color,
-                               unitLabel: card.unitLabel, outcomeName: card.outcomeName)
-                    .frame(height: 132)
+                // The prior-shrunk curve: each dose on x, the modelled change on y in the outcome's unit.
+                // A tap on a dose sets the forecast below.
+                DoseCurveChart(card: card, accent: accent, selectedDose: $previewDose)
                     .accessibilityLabel(curveAccessibilityLabel(r))
 
                 if r.priorDominated {
-                    honestyBanner(String(localized: "Based mostly on typical patterns, not yet yours. Log a few more \(card.unitLabel.lowercased()) days and this becomes yours."),
-                        tone: .neutral)
+                    InlineNotice(String(localized: "Based mostly on typical patterns, not yet yours. Log a few more \(card.unitLabel.lowercased()) days and this becomes yours."),
+                                 placement: .inCard)
                 } else if r.contradictsPrior {
-                    honestyBanner(String(localized: "In your data so far, this doesn\u{2019}t move your \(card.outcomeName) the way it typically does."), tone: .positive)
+                    InlineNotice(String(localized: "In your data so far, this doesn\u{2019}t move your \(card.outcomeName) the way it typically does."),
+                                 tone: .positive, placement: .inCard)
                 }
 
                 if card.timingProxy {
@@ -293,29 +253,10 @@ private struct DoseResponseCardView: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
 
-                Divider().overlay(StrandPalette.hairline)
+                Rectangle().fill(StrandPalette.hairline).frame(height: NoopMetrics.hairlineWidth)
 
                 damageForecast(r)
             }
-        }
-    }
-
-    // MARK: Header
-
-    private func header(_ r: DoseResponse) -> some View {
-        HStack(alignment: .firstTextBaseline) {
-            HStack(spacing: 8) {
-                Image(systemName: card.symbol)
-                    .font(.system(size: 14, weight: .semibold))
-                    .foregroundStyle(domain.color)
-                    .frame(width: 20)
-                    .accessibilityHidden(true)
-                Text(card.title)
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-            }
-            Spacer(minLength: 8)
-            ScoreStatePill(InsightsHubView.scoreState(r.confidence))
         }
     }
 
@@ -329,31 +270,24 @@ private struct DoseResponseCardView: View {
         let projected = card.latestOutcome.map { max(0, min(card.outcomeCeiling, $0 + delta)) }
         let stepLabel = previewDose <= 1 ? String(localized: "no extra") : card.stepLabel(previewDose)
 
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            // Overline and the dose stepper each get their own row — sharing one HStack
-            // compressed the 0/1/2/3+ stepper and truncated its segments on narrow widths.
-            Text(card.forecastOverline).strandOverline()
-                .frame(maxWidth: .infinity, alignment: .leading)
-            SegmentedPillControl(card.doseChoices, selection: $previewDose) { card.doseChoiceLabel($0) }
-                .accessibilityLabel("Preview dose")
-                .frame(maxWidth: .infinity, alignment: .leading)
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            Text(card.forecastOverline)
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
+            SegmentedPillControl(card.doseChoices, selection: $previewDose, fillsAvailableWidth: true) {
+                card.doseChoiceLabel($0)
+            }
+            .accessibilityLabel("Preview dose")
 
             Text(forecastSentence(delta: delta, projected: projected, stepLabel: stepLabel))
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .fixedSize(horizontal: false, vertical: true)
 
-            LazyVGrid(columns: [GridItem(.adaptive(minimum: 150), spacing: NoopMetrics.gap)],
-                      alignment: .leading, spacing: NoopMetrics.gap) {
-                StatTile(label: "Per extra \(card.unitNoun)",
-                         value: signed(r.perUnit, suffix: card.outcomeSuffix),
-                         caption: r.priorDominated ? String(localized: "typical") : String(localized: "your data"),
-                         accent: r.perUnit < 0 ? StrandPalette.statusCritical : StrandPalette.statusPositive)
-                StatTile(label: "Tomorrow\u{2019}s \(card.outcomeName)",
-                         value: projected.map { "\(Int($0.rounded()))\(card.outcomeSuffix)" } ?? "—",
-                         caption: projected != nil ? String(localized: "projected · \(stepLabel)") : String(localized: "needs a recent day"),
-                         accent: domain.color)
-            }
+            InsightsValueRow(label: String(localized: "Per extra \(card.unitNoun)"),
+                             value: signed(r.perUnit, suffix: card.outcomeSuffix))
+            InsightsValueRow(label: String(localized: "Tomorrow\u{2019}s \(card.outcomeName)"),
+                             value: projected.map { "\(Int($0.rounded()))\(card.outcomeSuffix)" } ?? "—")
         }
     }
 
@@ -375,23 +309,6 @@ private struct DoseResponseCardView: View {
             : String(localized: "A \(stepLabel) tonight tends to line up with about \(magText) higher on tomorrow\u{2019}s \(card.outcomeName.lowercased()) for you, based on \(card.response.nUser) of your \(card.unitLabel.lowercased()) days.")
     }
 
-    // MARK: Bits
-
-    private func honestyBanner(_ text: String, tone: StrandTone) -> some View {
-        HStack(alignment: .top, spacing: NoopMetrics.space2) {
-            Image(systemName: "info.circle.fill")
-                .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(tone == .neutral ? StrandPalette.textTertiary : StrandPalette.statusPositive)
-            Text(text)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
-        }
-        .padding(NoopMetrics.space3)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(NoopPanelSurface(cornerRadius: 8))
-    }
-
     private func signed(_ v: Double, suffix: String) -> String {
         let mag = abs(v)
         let rounded = (mag * 10).rounded() / 10
@@ -411,71 +328,77 @@ private struct DoseResponseCardView: View {
 
 // MARK: - Dose curve chart
 //
-// A compact line+area chart of the prior-shrunk curve: dose on x (0…max), the modelled
-// outcome DELTA on y. Drawn with the house Path idiom (no extra dependency) so it sits
-// in the design system. Zero-line is marked; the line is tinted to the domain colour.
+// The prior-shrunk curve on Swift Charts: each dose a labelled category on x (the dose picker's own
+// labels), the modelled outcome CHANGE on y in the outcome's unit, a dashed zero rule, straight segments
+// between the doses. A curve that is still mostly the population prior is drawn dashed with hollow
+// points and named "Typical" in its legend (estimates are hollow, never a different hue). A tap on a
+// dose selects it for the forecast.
 
 private struct DoseCurveChart: View {
-    let points: [DoseCurvePoint]
+    let card: InsightsHubViewModel.DoseCard
     let accent: Color
-    let unitLabel: String
-    let outcomeName: String
+    @Binding var selectedDose: Int
 
     var body: some View {
-        GeometryReader { geo in
-            let w = geo.size.width
-            let h = geo.size.height
-            let deltas = points.map(\.outcomeDelta)
-            let maxAbs = max(1.0, (deltas.map(abs).max() ?? 1.0))
-            // Symmetric y range around zero so the sign reads honestly.
-            let yFor: (Double) -> CGFloat = { d in
-                let t = (d / maxAbs + 1) / 2          // 0 (most negative) … 1 (most positive)
-                return h - CGFloat(t) * h
+        let points = card.response.curve
+        let typical = card.response.priorDominated
+        let maxAbs = max(1.0, points.map { abs($0.outcomeDelta) }.max() ?? 1.0)
+        let unit = card.outcomeName == "HRV" ? "ms" : "%"
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            Chart {
+                RuleMark(y: .value("Zero", 0))
+                    .foregroundStyle(NaraChartStyle.referenceColor)
+                    .lineStyle(NaraChartStyle.reference)
+                ForEach(points, id: \.dose) { point in
+                    LineMark(x: .value("Dose", card.doseChoiceLabel(point.dose)),
+                             y: .value("Change", point.outcomeDelta))
+                        .foregroundStyle(accent)
+                        .lineStyle(typical ? NaraChartStyle.estimateLine : NaraChartStyle.line)
+                        .interpolationMethod(.linear)
+                    PointMark(x: .value("Dose", card.doseChoiceLabel(point.dose)),
+                              y: .value("Change", point.outcomeDelta))
+                        .symbol {
+                            Circle()
+                                .strokeBorder(accent, lineWidth: NaraChartStyle.estimateStroke)
+                                .background(Circle().fill(typical ? StrandPalette.surfaceRaised : accent))
+                                .frame(width: point.dose == selectedDose ? 10 : 7,
+                                       height: point.dose == selectedDose ? 10 : 7)
+                        }
+                }
             }
-            let n = max(1, points.count - 1)
-            let xFor: (Int) -> CGFloat = { i in CGFloat(i) / CGFloat(n) * w }
-            let zeroY = yFor(0)
-
-            ZStack(alignment: .topLeading) {
-                // Zero baseline.
-                Path { p in
-                    p.move(to: CGPoint(x: 0, y: zeroY))
-                    p.addLine(to: CGPoint(x: w, y: zeroY))
+            .chartYScale(domain: -maxAbs * 1.15 ... maxAbs * 1.15)
+            .chartXAxis {
+                AxisMarks { _ in
+                    AxisValueLabel().font(NaraChartStyle.axisFont).foregroundStyle(NaraChartStyle.axisColor)
                 }
-                .stroke(StrandPalette.hairlineStrong, style: StrokeStyle(lineWidth: 1, dash: [3, 3]))
-
-                // Filled area between the curve and the zero line.
-                Path { p in
-                    guard !points.isEmpty else { return }
-                    p.move(to: CGPoint(x: xFor(0), y: zeroY))
-                    for (i, pt) in points.enumerated() {
-                        p.addLine(to: CGPoint(x: xFor(i), y: yFor(pt.outcomeDelta)))
-                    }
-                    p.addLine(to: CGPoint(x: xFor(points.count - 1), y: zeroY))
-                    p.closeSubpath()
+            }
+            .chartYAxis {
+                AxisMarks(position: .leading, values: .automatic(desiredCount: 4)) { _ in
+                    AxisGridLine(stroke: NaraChartStyle.grid).foregroundStyle(NaraChartStyle.gridColor)
+                    AxisValueLabel().font(NaraChartStyle.axisFont).foregroundStyle(NaraChartStyle.axisColor)
                 }
-                .fill(LinearGradient(colors: [accent.opacity(0.22), accent.opacity(0.03)],
-                                     startPoint: .top, endPoint: .bottom))
-
-                // The curve line.
-                Path { p in
-                    for (i, pt) in points.enumerated() {
-                        let point = CGPoint(x: xFor(i), y: yFor(pt.outcomeDelta))
-                        if i == 0 { p.move(to: point) } else { p.addLine(to: point) }
-                    }
+            }
+            .chartYAxisLabel(position: .top, alignment: .leading) {
+                Text("Δ \(unit)").font(NaraChartStyle.unitFont).foregroundStyle(StrandPalette.textSecondary)
+            }
+            .chartOverlay { proxy in
+                GeometryReader { geo in
+                    Rectangle().fill(.clear).contentShape(Rectangle())
+                        .onTapGesture { location in
+                            let plot = proxy.plotRectCompat(in: geo)
+                            let x = location.x - plot.minX
+                            if let label: String = proxy.value(atX: x),
+                               let dose = card.doseChoices.first(where: { card.doseChoiceLabel($0) == label }) {
+                                selectedDose = dose
+                            }
+                        }
                 }
-                .stroke(accent, style: StrokeStyle(lineWidth: 2.5, lineCap: .round, lineJoin: .round))
-
-                // Dose markers.
-                ForEach(points.indices, id: \.self) { i in
-                    Circle()
-                        .fill(accent)
-                        .frame(width: 5, height: 5)
-                        .position(x: xFor(i), y: yFor(points[i].outcomeDelta))
-                }
+            }
+            .frame(height: NoopMetrics.chartHeightSecondary)
+            if typical {
+                ChartLegend([ChartLegendItem(.estimate(accent), String(localized: "Typical"))])
             }
         }
-        .accessibilityElement()
     }
 }
 
@@ -499,7 +422,7 @@ final class InsightsHubViewModel: ObservableObject {
             case .recovery: return String(localized: "Charge")
             case .hrv:      return "HRV"
             case .sleep:    return String(localized: "Rest")
-            case .rhr:      return "RHR"
+            case .rhr:      return String(localized: "Resting HR")
             }
         }
         /// metricSeries key.
@@ -530,9 +453,31 @@ final class InsightsHubViewModel: ObservableObject {
         }
         func format(_ v: Double) -> String {
             switch self {
-            case .recovery, .sleep: return "\(Int(v.rounded()))%"
+            case .recovery, .sleep: return "\(Int(v.rounded())) %"
             case .hrv:              return "\(Int(v.rounded())) ms"
             case .rhr:              return "\(Int(v.rounded())) bpm"
+            }
+        }
+        /// The outcome's unit (a Charge or Rest change is in points of its 0–100 score).
+        var unit: String {
+            switch self {
+            case .recovery, .sleep: return "%"
+            case .hrv:              return "ms"
+            case .rhr:              return "bpm"
+            }
+        }
+        /// A change in the outcome, signed, in its own units ("−8 %", "+4 ms").
+        func signedDelta(_ d: Double, includeUnit: Bool = true) -> String {
+            let sign = d > 0 ? "+" : (d < 0 ? "−" : "")
+            let magnitude = abs(d) >= 10 || self != .hrv && self != .rhr
+                ? "\(Int(abs(d).rounded()))" : String(format: "%.1f", abs(d))
+            return includeUnit ? "\(sign)\(magnitude) \(unit)" : "\(sign)\(magnitude)"
+        }
+        /// The comparison axis: the fixed 0–100 score scale, or zero to a little above the larger value.
+        func axis(_ a: Double, _ b: Double) -> ClosedRange<Double> {
+            switch self {
+            case .recovery, .sleep: return 0...100
+            case .hrv, .rhr:        return 0...max(1, max(a, b) * 1.15)
             }
         }
     }

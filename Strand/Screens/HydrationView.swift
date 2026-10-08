@@ -4,16 +4,12 @@ import StrandAnalytics
 
 // MARK: - Hydration detail (MVP, opt-in, local-only)
 //
-// Liquid finish: water in a vessel is the literal metaphor, so the hero is the canonical `LiquidVessel`
-// tinted the action blue, filling to today's fraction of goal with the litre figure counting up over it.
-// The day total sits in a filling `LiquidTube` (the same horizontal vessel Today's grid uses), the three
-// quick-log buttons (Sip / Cup / Bottle) stay in the secondary NoopButton style, and the 7-day mini bars
-// remain. Frosted `card {}` surfaces (rounded 22 + resting hairline), the day-of-sky backdrop, and
-// `LiquidPressStyle` on the tappable drink rows line the screen up with the liquid Today + batch-1 tabs.
-// BYTE-PARITY twin of the Android `HydrationScreen`: the day total + history come from the local-only
-// `HydrationStore` series (additive day total), and the goal is the pure `HydrationGoal` engine (profile
-// sex + today's Effort bump). Per-tap rows aren't separately persisted on either platform — the day total
-// is the source of truth, so the screen shows the honest day figure.
+// Hydration has a real goal, so its glance is a goal ring: today's litres against the goal. Below it the
+// quick-log buttons (Sip / Cup / Bottle / a custom size), today's logged drinks (tap to edit, trash to
+// delete), and the last seven days as bars with the goal rule. BYTE-PARITY twin of the Android
+// `HydrationScreen` for the data: the day total + history come from the local-only `HydrationStore`
+// series (additive day total), and the goal is the pure `HydrationGoal` engine (profile sex + today's
+// Effort bump).
 struct HydrationView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var profile: ProfileStore
@@ -23,9 +19,9 @@ struct HydrationView: View {
     @State private var totalML: Double = 0
     @State private var history: [(day: String, value: Double)] = []
     @State private var reloadTick = 0
-    /// The animated fill the hero vessel + tube drive to on appear and after each log, so the liquid
-    /// rises smoothly rather than snapping (the Today HeroScoreCell idiom).
-    @State private var heroFraction: Double = 0
+    @State private var loaded = false
+    /// The day under the finger on the week chart.
+    @State private var selectedDay: Date?
     /// #798 - today's individual logged drinks (for swipe-to-delete + tap-to-edit), and the entry being
     /// edited in the amount sheet (nil when the sheet is closed).
     @State private var entries: [HydrationEntry] = []
@@ -37,41 +33,23 @@ struct HydrationView: View {
     @AppStorage(HydrationStore.customSizeKey) private var customSizeML = HydrationGoal.cupML
     @State private var showCustomSizeSheet = false
 
-    /// "Card transparency" (0–100, default 100): fades the hydration cards in lockstep with the frosted
-    /// cards; content stays readable. Mirrors Kotlin `NoopPrefs.cardOpacityPercent`.
-    @AppStorage(CardAppearancePrefs.opacityKey) private var cardOpacityPercent = CardAppearancePrefs.defaultPercent
-    private var cardOpacity: Double { max(0, min(1, Double(cardOpacityPercent) / 100)) }
-
     private var goalML: Int { repo.hydrationGoalML(profileSex: profile.sex) }
     private var fraction: Double { HydrationGoal.fraction(totalML: totalML, goalML: goalML) }
     private var percent: Int { min(100, Int((fraction * 100).rounded(.towardZero))) }
 
+    private func litres(_ ml: Double) -> String { String(format: "%.1f", HydrationGoal.litres(fromML: ml)) }
+
     var body: some View {
-        ScreenScaffold(title: "Hydration",
-                       subtitle: "Your fluid intake today, on \(Platform.deviceNounPhrase) only.",
-                       onRefresh: { await reload() },
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Hydration sits in one atmosphere.
-                       topBackground: liquidScaffoldSky()) {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                ringSection
-                logSection
-                entriesSection
-                historySection
-                todayTotalSection
-                Text("A simple goal that adjusts to your effort. General wellness guidance, not medical advice.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            // Rise the hero vessel + tube to the current fill on appear, and re-draw when a log moves it.
-            // macOS-13-safe single-param onChange.
-            .onChangeCompat(of: fraction) { newFraction in
-                withAnimation(.easeOut(duration: 0.9)) { heroFraction = newFraction }
-            }
-            .onAppear {
-                withAnimation(.easeOut(duration: 0.9)) { heroFraction = fraction }
-            }
+        ScreenScaffold(title: "Hydration", titleDisplay: .navigationBar, isLoading: !loaded,
+                       onRefresh: { await reload() }) {
+            ringSection
+            logSection
+            entriesSection
+            historySection
+            AboutDisclosure(paragraphs: [
+                String(localized: "A simple goal that adjusts to your effort. General wellness guidance, not medical advice."),
+                String(localized: "Your fluid intake today, on \(Platform.deviceNounPhrase) only."),
+            ])
         }
         .task(id: reloadTick) { await reload() }
         // #798 - edit a logged drink's amount.
@@ -90,55 +68,39 @@ struct HydrationView: View {
         }
     }
 
-    // MARK: - Hero (the vessel: water filling toward the goal, in litres)
+    // MARK: - Goal ring (today's litres toward the goal)
 
     private var ringSection: some View {
-        card {
-            VStack(spacing: NoopMetrics.cardInnerSpacing) {
-                // The signature liquid gauge, filling the "of goal" fraction in the action blue. Water in
-                // a vessel is the literal metaphor here, so it replaces the old flat progress ring. The
-                // litre figure counts up over it; the vessel fills to the SAME animated `heroFraction`
-                // driven on appear / after a log, so the fill and the number roll-up land together.
-                ZStack {
-                    LiquidVessel(value: heroFraction, tint: StrandPalette.accent, animated: true)
-                        .frame(width: 184, height: 184)
-                    VStack(spacing: 2) {
-                        CountUpText(value: HydrationGoal.litres(fromML: totalML),
-                                    format: { String(format: "%.1f", $0) },
-                                    font: StrandFont.rounded(40, weight: .semibold),
-                                    color: StrandPalette.textPrimary)
-                            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                        Text(String(localized: "of \(String(format: "%.1f", HydrationGoal.litres(fromML: Double(goalML)))) L"))
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textSecondary)
+        NoopCard {
+            HStack(spacing: NoopMetrics.space5) {
+                ScoreRing(fraction: fraction, value: litres(totalML),
+                          caption: String(localized: "of \(litres(Double(goalML))) L"),
+                          color: StrandPalette.metricCyan, diameter: 132, isLoading: !loaded)
+                VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+                    Text("Today").strandLabel()
+                    HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space1) {
+                        Text("\(Int(totalML))")
+                            .font(StrandFont.number(28))
+                            .foregroundStyle(StrandPalette.textPrimary)
+                        Text("ml").font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     }
-                    .allowsHitTesting(false)   // taps fall through to the vessel → splash
+                    Text("\(percent)% of today's goal")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
                 }
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Hydration today")
-                .accessibilityValue("\(String(format: "%.1f", HydrationGoal.litres(fromML: totalML))) of \(String(format: "%.1f", HydrationGoal.litres(fromML: Double(goalML)))) litres")
-
-                Text("\(percent)% of today's goal")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                Spacer(minLength: 0)
             }
-            .frame(maxWidth: .infinity)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Hydration today")
+            .accessibilityValue("\(litres(totalML)) of \(litres(Double(goalML))) litres")
         }
-    }
-
-    // MARK: - Frosted card helper (matches LiquidTodayView.card: rounded 22 + resting hairline)
-
-    private func card<V: View>(padding: CGFloat = 16, @ViewBuilder _ content: () -> V) -> some View {
-        content()
-            .padding(padding)
-            .frame(maxWidth: .infinity, alignment: .leading)
-            .background(NoopPanelSurface(cornerRadius: 22, surfaceOpacity: cardOpacity))
     }
 
     // MARK: - Quick log (Sip / Cup / Bottle, secondary style)
 
     private var logSection: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Log a drink")
             HStack(spacing: NoopMetrics.gap) {
                 logButton("Sip", systemImage: "drop", ml: HydrationGoal.sipML)
                 logButton("Cup", systemImage: "cup.and.saucer.fill", ml: HydrationGoal.cupML)
@@ -153,57 +115,51 @@ struct HydrationView: View {
                 .accessibilityLabel("Log custom \(customSizeML) millilitres")
                 Button { showCustomSizeSheet = true } label: {
                     Image(systemName: "pencil")
-                        .font(.system(size: 15, weight: .semibold))
+                        .font(StrandFont.icon(.row))
                         .foregroundStyle(StrandPalette.accent)
-                        .frame(width: 44, height: 44)
-                        .background(RoundedRectangle(cornerRadius: NoopMetrics.cardRadius, style: .continuous)
-                            .fill(StrandPalette.surfaceInset))
+                        .frame(width: NoopMetrics.controlHeight, height: NoopMetrics.controlHeight)
+                        .background(NoopInsetSurface())
                         .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Set custom container size")
             }
-            Text("Sip \(HydrationGoal.sipML) ml · Cup \(HydrationGoal.cupML) ml · Bottle \(HydrationGoal.bottleML) ml")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
         }
     }
 
-    /// One quick-add button using the secondary (no-gold) NoopButton style. Logs the amount and refreshes.
+    /// One quick-add button: the container and its size, so no separate key is needed.
     private func logButton(_ title: LocalizedStringKey, systemImage: String, ml: Int) -> some View {
-        NoopButton(title, systemImage: systemImage, kind: .secondary, fullWidth: true) {
+        Button {
             Task { await add(ml: ml) }
+        } label: {
+            VStack(spacing: NoopMetrics.spaceHalf) {
+                Label(title, systemImage: systemImage)
+                    .font(StrandFont.subhead.weight(.medium))
+                Text("\(ml) ml")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textSecondary)
+            }
+            .frame(maxWidth: .infinity)
         }
+        .buttonStyle(NoopButtonStyle(.secondary))
         .accessibilityLabel("Log \(title)")
     }
 
-    // MARK: - Today's logged drinks (#798) - swipe to delete, tap to edit
+    // MARK: - Today's logged drinks (#798) - tap to edit, trash to delete
 
     @ViewBuilder private var entriesSection: some View {
         // Also shown when the only water today came from Apple Health (#949) — otherwise the ring would
         // count drinks the screen never accounts for, and the day would look like it appeared from nowhere.
         if !entries.isEmpty || importedML > 0 {
-            card(padding: 18) {
-                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                    Text("Today's drinks").strandOverline()
+            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                SectionHeader("Today's drinks")
+                NoopListSection {
                     if importedML > 0 { importedRow }
-                    // #842 — render rows in a plain VStack inside the page ScrollView. The previous nested,
-                    // scroll-disabled List with a hardcoded `count * 44 + 8` height clipped every row past
-                    // the third (real rows are taller than 44pt) and couldn't be scrolled to. Tap a row to
-                    // edit; the trailing trash deletes (a VStack row can't host native swipe-to-delete).
-                    VStack(spacing: 0) {
-                        ForEach(Array(entries.enumerated()), id: \.element.id) { idx, entry in
-                            entryRow(entry)
-                                .padding(.vertical, 6)
-                            if idx < entries.count - 1 {
-                                Divider().opacity(0.4)
-                            }
-                        }
-                    }
-                    if !entries.isEmpty {
-                        Text("Tap a drink to edit it, or use the trash to delete.")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
+                    // #842 — rows in a plain VStack inside the page ScrollView (no nested List): tap a row to
+                    // edit; the trailing trash deletes.
+                    ForEach(Array(entries.enumerated()), id: \.element.id) { idx, entry in
+                        if idx > 0 || importedML > 0 { NoopListDivider() }
+                        entryRow(entry)
                     }
                 }
             }
@@ -212,64 +168,38 @@ struct HydrationView: View {
 
     /// Water Apple Health already had, from a hydration app or a smart bottle (#949).
     ///
-    /// Deliberately not tappable and with no trash: NOOP does not own these drinks, and "deleting" one
+    /// Deliberately not tappable and with no trash: Nara does not own these drinks, and "deleting" one
     /// here would be a lie — the next sync re-reads the same day from Health and the figure would come
     /// straight back. Removing it for real means removing it in the app that logged it.
-    @ViewBuilder private var importedRow: some View {
-        HStack(spacing: 10) {
-            Image(systemName: "heart.text.square")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(StrandPalette.textSecondary)
-                .accessibilityHidden(true)
-            Text("From Apple Health")
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-            Spacer(minLength: 8)
-            Text("\(Int(importedML.rounded())) ml")
-                .font(StrandFont.subhead.weight(.semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .monospacedDigit()
-        }
-        .padding(.vertical, 6)
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("\(Int(importedML.rounded())) millilitres from Apple Health. Edit it in the app that logged it.")
-        if !entries.isEmpty { Divider().opacity(0.4) }
+    private var importedRow: some View {
+        NoopListRow(icon: "heart.text.square", title: "From Apple Health",
+                    value: "\(Int(importedML.rounded())) ml", showsChevron: false)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("\(Int(importedML.rounded())) millilitres from Apple Health. Edit it in the app that logged it.")
     }
 
     /// One logged-drink row: the time it was logged + its amount (tap to edit) with a trailing trash.
     private func entryRow(_ entry: HydrationEntry) -> some View {
-        HStack(spacing: 10) {
+        HStack(spacing: 0) {
             Button { editingEntry = entry } label: {
-                HStack(spacing: 10) {
-                    Image(systemName: "drop.fill")
-                        .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                        .accessibilityHidden(true)
-                    Text(Self.entryTimeFmt.string(from: entry.loggedAt))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                    Spacer(minLength: 8)
-                    Text("\(entry.amountMl) ml")
-                        .font(StrandFont.subhead.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .monospacedDigit()
-                }
-                .contentShape(Rectangle())
+                NoopListRow(icon: "drop.fill", iconColor: StrandPalette.metricCyan,
+                            title: LocalizedStringKey(Self.entryTimeFmt.string(from: entry.loggedAt)),
+                            value: "\(entry.amountMl) ml", showsChevron: false)
             }
-            // Liquid tap response: the same physical settle-inward every tappable liquid row gets.
-            .buttonStyle(LiquidPressStyle())
+            .buttonStyle(.plain)
             .accessibilityLabel("Logged \(entry.amountMl) millilitres at \(Self.entryTimeFmt.string(from: entry.loggedAt))")
             .accessibilityHint("Tap to edit the amount")
             Button(role: .destructive) {
                 Task { await deleteEntry(entry) }
             } label: {
                 Image(systemName: "trash")
-                    .font(.system(size: 13, weight: .semibold))
+                    .font(StrandFont.icon(.inline))
                     .foregroundStyle(StrandPalette.textTertiary)
-                    .frame(width: 36, height: 36)
+                    .frame(width: NoopMetrics.minimumHitTarget, height: NoopMetrics.minimumHitTarget)
                     .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
+            .padding(.trailing, NoopMetrics.space2)
             .accessibilityLabel("Delete the \(entry.amountMl) millilitre drink logged at \(Self.entryTimeFmt.string(from: entry.loggedAt))")
         }
     }
@@ -278,112 +208,44 @@ struct HydrationView: View {
     /// let`, which would have frozen the reader's choice at first use until the app relaunched.
     private static var entryTimeFmt: DateFormatter { AppClock.hourMinuteFormatter() }
 
-    // MARK: - 7-day mini history (flat bars, today on the right)
+    // MARK: - The last 7 days (daily totals against the goal)
+
+    private var historyPoints: [DailyPoint] {
+        history.compactMap { DailyPoint(key: $0.day, value: HydrationGoal.litres(fromML: $0.value)) }
+    }
 
     private var historySection: some View {
-        card(padding: 18) {
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                Text("Last 7 days").strandOverline()
-                historyBars
-            }
-        }
-    }
-
-    @ViewBuilder private var historyBars: some View {
-        if history.isEmpty {
-            Text("No history yet.")
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-        } else {
-            // Scale the bars to the LARGER of the goal and the biggest day, so an over-goal day doesn't clip.
-            let ceiling = max(Double(max(goalML, 1)), history.map(\.value).max() ?? 0, 1)
-            let lastIndex = history.count - 1
-            HStack(alignment: .bottom, spacing: 10) {
-                ForEach(Array(history.enumerated()), id: \.element.day) { idx, bar in
-                    VStack(spacing: 6) {
-                        ZStack(alignment: .bottom) {
-                            RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                .fill(StrandPalette.textPrimary.opacity(0.10))
-                                .frame(height: 96)
-                            let frac = min(1.0, max(0.0, bar.value / ceiling))
-                            if frac > 0 {
-                                RoundedRectangle(cornerRadius: 6, style: .continuous)
-                                    .fill(idx == lastIndex ? StrandPalette.accent
-                                                           : StrandPalette.accent.opacity(0.45))
-                                    .frame(height: max(3, 96 * CGFloat(frac)))
-                            }
-                        }
-                        Text(weekdayInitial(bar.day))
-                            .font(StrandFont.overline)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                    }
-                    .frame(maxWidth: .infinity)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("\(weekdayInitial(bar.day)): \(String(format: "%.1f", HydrationGoal.litres(fromML: bar.value))) litres")
-                }
-            }
-        }
-    }
-
-    // MARK: - Today's total (the honest day figure; per-tap rows aren't persisted)
-
-    private var todayTotalSection: some View {
-        card(padding: 18) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                Text("Today").strandOverline()
-                if totalML <= 0 {
-                    Text("No drinks logged yet. Tap Sip, Cup or Bottle to start.")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                } else {
-                    HStack(spacing: 10) {
-                        Image(systemName: "drop.fill")
-                            .font(.system(size: 15, weight: .semibold))
-                            .foregroundStyle(StrandPalette.accent)
-                            .accessibilityHidden(true)
-                        Text("Logged today")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Spacer(minLength: 8)
-                        Text("\(Int(totalML)) ml")
-                            .font(StrandFont.headline.weight(.semibold))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .monospacedDigit()
-                    }
-                    // Progress toward goal as the liquid tube (the same horizontal vessel Today's Key
-                    // Metrics use), filling to the animated `heroFraction` so it rises with the hero.
-                    LiquidTube(frac: heroFraction, tint: StrandPalette.accent, height: 8, animated: false)
-                        .accessibilityLabel("Progress toward today's goal")
-                        .accessibilityValue("\(percent) percent")
+        let points = historyPoints
+        let window = ChartAxis.window(.week, firstDataDay: points.first?.day)
+        let goal = HydrationGoal.litres(fromML: Double(goalML))
+        let shown = selectedDay.flatMap { ChartSelection.point(for: $0, in: points) }
+        let inWindow = points.filter { window.contains($0.day) }
+        let avg = inWindow.isEmpty ? nil : inWindow.map(\.value).reduce(0, +) / Double(inWindow.count)
+        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Last 7 days")
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    InsightsCardReadout(
+                        value: (selectedDay == nil ? avg : shown?.value).map { String(format: "%.1f", $0) },
+                        unit: "L",
+                        context: selectedDay.map { ReadoutContent.dateLine($0, period: .day) }
+                            ?? String(localized: "Average · \(ChartRange.week.accessibilityName)"))
+                    DailyBarChart.totals(points, color: StrandPalette.metricCyan,
+                                         goal: ChartReference(goal, label: String(localized: "Goal")),
+                                         bin: .day,
+                                         state: !loaded ? .loading
+                                             : (points.isEmpty ? .empty(String(localized: "No history yet.")) : .ready),
+                                         window: window, xStyle: .weekday,
+                                         y: ChartValueAxis(unit: "L", domain: .fitted(minSpan: 1, includeZero: true),
+                                                           format: ChartValueAxis.decimals(1)),
+                                         selection: $selectedDay, height: NoopMetrics.chartHeightSecondary,
+                                         accessibilityTitle: String(localized: "Hydration"))
                 }
             }
         }
     }
 
     // MARK: - Data
-
-    /// The single-letter weekday for a yyyy-MM-dd key (M T W T F S S), or "·" when unparseable. Mirrors
-    /// the Android `weekdayInitial` (EEE → first letter, US locale).
-    // #perf: fixed-locale formatters, hoisted to static so the history-bar ForEach doesn't allocate two
-    // DateFormatters per bar per render (label + a11y both call this). Locale is pinned (en_US_POSIX /
-    // en_US), so caching is behaviour-identical — no dependence on the device locale.
-    private static let dayKeyParser: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.dateFormat = "yyyy-MM-dd"
-        return f
-    }()
-    private static let weekdayAbbrev: DateFormatter = {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US")
-        f.dateFormat = "EEE"
-        return f
-    }()
-    private func weekdayInitial(_ dayKey: String) -> String {
-        guard let date = Self.dayKeyParser.date(from: dayKey) else { return "·" }
-        return String(Self.weekdayAbbrev.string(from: date).prefix(1))
-    }
 
     /// Log `ml` (additive day total + a per-entry row, #798) and refresh.
     private func add(ml: Int) async {
@@ -412,6 +274,7 @@ struct HydrationView: View {
         // #949: `totalML` already includes this; read it separately so the drinks card can name where
         // the difference came from instead of leaving an unexplained gap between the ring and the list.
         importedML = await repo.hydrationImportedTotal(day: Repository.localDayKey(Date()))
+        loaded = true
     }
 }
 
@@ -454,7 +317,7 @@ private struct HydrationAmountSheet: View {
                     .foregroundStyle(StrandPalette.textSecondary)
                 Spacer()
                 Text("\(ml) ml")
-                    .font(StrandFont.rounded(28, weight: .semibold))
+                    .font(StrandFont.number(28))
                     .foregroundStyle(StrandPalette.textPrimary)
                     .monospacedDigit()
             }

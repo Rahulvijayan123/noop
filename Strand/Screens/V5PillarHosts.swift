@@ -11,8 +11,8 @@ import WhoopProtocol
 // already holds, run the pure engine, and hand the result down. Self-contained: each takes the
 // Repository / AppModel via the environment, exactly like every other screen.
 //
-// Mounted as reachable nav destinations by RootView (macOS sidebar) + RootTabView (iOS More list)
-// and reachable via NavRouter deep-links from the Health / Devices&Sources hubs.
+// Mounted as reachable nav destinations by RootView (macOS sidebar) + RootTabView (iOS pillar sheets),
+// pushed from Health's Records rows, and reachable via NavRouter deep-links.
 
 // MARK: - Fused record host ("Your Data, Fused")
 
@@ -26,16 +26,8 @@ struct FusedRecordHost: View {
     @State private var loaded = false
 
     var body: some View {
-        Group {
-            if loaded {
-                FusedRecordView(record: record)
-            } else {
-                ScreenScaffold(title: "Your Data, Fused",
-                               subtitle: "Building your best-sourced record…") {
-                    ComingSoon(what: "Reading your sources…", symbol: "square.stack.3d.up")
-                }
-            }
-        }
+        // One layout while loading and after: the record screen redacts its own rows until it lands.
+        FusedRecordView(record: record, isLoading: !loaded)
         .task(id: repo.refreshSeq) {
             record = await model.buildTodayFusedRecord()
             loaded = true

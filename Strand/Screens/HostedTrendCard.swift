@@ -69,12 +69,13 @@ enum HostedTrendData {
 
 /// One Trends metric trend, rendered as a Today host card (#today-hosted-cards).
 ///
-/// Draws the same `ChartCard` + `TrendChart` pair the Trends tab draws, from the same resolved points,
-/// so the hosted copy cannot become a second chart of the same numbers.
+/// A miniature of the metric's own chart, from the same resolved points the Trends page draws: HRV and
+/// resting HR as a line with gaps, Effort as score bars, in the kit's compact form with the scrub off (the
+/// card is a link to the metric's detail page, so a drag must not compete with the tap).
 ///
 /// What it does NOT carry is the range selector. A home-screen card has nowhere to put one and no place
 /// to persist a per-card choice, so each takes a fixed trailing month and keeps the tab's widening
-/// fallback for a wearer whose history is shorter than that. The Trends tab stays where the window is
+/// fallback for a wearer whose history is shorter than that. The Trends page stays where the window is
 /// chosen. Twin of the Kotlin `TrendHostCard`.
 struct HostedTrendCard: View {
     let card: HostedCard
@@ -86,55 +87,77 @@ struct HostedTrendCard: View {
     var body: some View {
         switch card {
         case .trendHRV:
-            chart(title: "Heart rate variability", unit: "ms",
-                  colour: StrandPalette.metricPurple, fallback: 20...120, value: { $0.avgHrv },
-                  fmt: { "\(Int($0.rounded()))" })
+            chart(title: "Heart rate variability", spoken: String(localized: "Heart rate variability"), unit: "ms", colour: StrandPalette.metricPurple,
+                  value: { $0.avgHrv }, minSpan: 20, fmt: { "\(Int($0.rounded()))" })
         case .trendRestingHR:
-            chart(title: "Resting heart rate", unit: "bpm",
-                  colour: StrandPalette.metricRose, fallback: 40...90, value: { $0.restingHr.map(Double.init) },
-                  fmt: { "\(Int($0.rounded()))" })
+            chart(title: "Resting heart rate", spoken: String(localized: "Resting heart rate"), unit: "bpm", colour: StrandPalette.metricRose,
+                  value: { $0.restingHr.map(Double.init) }, minSpan: 10, fmt: { "\(Int($0.rounded()))" })
         case .trendEffort:
-            // Plotted on the stored 0-100 axis so the line's shape is scale-independent; only the
-            // printed numbers follow the Effort-scale toggle, converted inside `fmt`, exactly as the
-            // Trends tab does it (#268).
-            chart(title: "Effort", unit: "/ \(UnitFormatter.effortScaleMax(effortScale))",
-                  colour: StrandPalette.effortColor, fallback: 0...100, value: { $0.strain },
-                  fmt: { UnitFormatter.effortDisplay($0, scale: effortScale) })
+            // Bars on the user's Effort scale (#268): the stored 0-100 value converted for the bars, the
+            // axis and the average alike, so none of them disagree.
+            chart(title: "Effort", spoken: String(localized: "Effort"), unit: "/ \(UnitFormatter.effortScaleMax(effortScale))",
+                  colour: StrandPalette.effortColor,
+                  value: { d in d.strain.map { UnitFormatter.effortValue($0, scale: effortScale) } },
+                  minSpan: 0, bars: true,
+                  fmt: { effortScale == .whoop ? String(format: "%.1f", $0) : "\(Int($0.rounded()))" })
         default:
             EmptyView()
         }
     }
 
     @ViewBuilder
-    private func chart(title: LocalizedStringKey, unit: String, colour: Color,
-                       fallback: ClosedRange<Double>,
-                       value: @escaping (DailyMetric) -> Double?,
+    private func chart(title: LocalizedStringKey, spoken: String, unit: String, colour: Color,
+                       value: @escaping (DailyMetric) -> Double?, minSpan: Double, bars: Bool = false,
                        fmt: @escaping (Double) -> String) -> some View {
         let resolved = HostedTrendData.resolve(days: days, selected: .month, value: value)
-        let pts = resolved.points
-        let avg = pts.isEmpty ? nil : pts.map(\.value).reduce(0, +) / Double(pts.count)
-        // The unit rides with the average. The Trends tab carries it in a footer of min/mean/max, which
-        // a home-screen card has no room for, so without this the number would appear bare.
-        let trailing = avg.map { "\(fmt($0)) \(unit)" }
-        ChartCard(title: title, subtitle: nil, trailing: trailing,
-                  height: NoopMetrics.chartHeight, tint: colour) {
-            TrendChart(points: pts,
-                       gradient: Gradient(colors: [colour.opacity(0.35), colour]),
-                       valueRange: HostedTrendData.valueRange(pts, fallback: fallback),
-                       showsArea: true,
-                       // Hover OFF. The card sits inside a NavigationLink, so a scrubbing gesture here
-                       // would compete with the tap that opens the metric — the same conflict that
-                       // keeps the tap-to-log card out of the navigation map. The Trends tab keeps the
-                       // scrub; the Today host mirrors only the display, as the hosted Stages card does.
-                       showsHover: false)
+        let range = resolved.effective.chartRange
+        let points = resolved.points.map { DailyPoint($0, dayIsUTC: true) }
+        let window = ChartAxis.window(range, firstDataDay: points.first?.day)
+        let avg = points.isEmpty ? nil : points.map(\.value).reduce(0, +) / Double(points.count)
+        // The average is labelled as one, with its window, so it never reads as today's value.
+        let trailing = avg.map { String(localized: "\(range.days ?? points.count)-day avg \(fmt($0)) \(unit)") }
+        let state: ChartState = points.isEmpty ? .empty(String(localized: "No history yet")) : .ready
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text(title)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .lineLimit(1)
+                    Spacer(minLength: NoopMetrics.space2)
+                    if let trailing {
+                        Text(trailing)
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .lineLimit(1)
+                            .minimumScaleFactor(0.8)
+                    }
+                }
+                Group {
+                    if bars {
+                        let top = UnitFormatter.effortValue(100, scale: effortScale)
+                        DailyBarChart.scores(points, ramp: { StrandPalette.effortTint(fraction: $0 / top) },
+                                             scale: 0...top, meanLine: nil, state: state, window: window,
+                                             xStyle: range.axisStyle, selection: .constant(nil),
+                                             height: NoopMetrics.chartHeightCompact,
+                                             accessibilityTitle: String(localized: "Effort"))
+                    } else {
+                        DailyLineChart(series: [.init(id: "trend", name: spoken,
+                                                      color: colour, points: points)],
+                                       state: state, window: window, xStyle: range.axisStyle,
+                                       y: ChartValueAxis(unit: unit, domain: .fitted(minSpan: minSpan)),
+                                       selection: .constant(nil), height: NoopMetrics.chartHeightCompact,
+                                       accessibilityTitle: spoken)
+                    }
+                }
+                .naraChartCompact()
+                .naraChartScrubDisabled()
+            }
         }
         .accessibilityElement(children: .combine)
         // The average goes into the spoken label, not just the visible corner. `children: .combine`
         // merges what the card renders, and overriding that with the bare title, as this first did,
-        // silently drops the one number on the card: VoiceOver announced "Heart rate variability" and
-        // nothing else. Composed rather than interpolated into a localized string, so it needs no new
-        // catalog entry for what is a title the app already has plus a formatted value.
+        // silently drops the one number on the card.
         .accessibilityLabel(trailing.map { Text(title) + Text(verbatim: ", \($0)") } ?? Text(title))
     }
-
 }

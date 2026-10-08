@@ -2,7 +2,7 @@ import SwiftUI
 import StrandDesign
 import StrandAnalytics
 
-/// Intelligence — NOOP's own recovery/strain/sleep scores, computed on-device from raw strap data
+/// Intelligence — Nara's own recovery/strain/sleep scores, computed on-device from raw strap data
 /// using the WHOOP model shape. Makes the app independent of WHOOP's cloud for live-collected days.
 ///
 /// i18n: the By-Day core labels (Effort/Charge/Rest/HRV/RHR) and the Charge-model "Effort" heading are
@@ -17,7 +17,7 @@ struct IntelligenceView: View {
     // `@EnvironmentObject var live` in the `IntelSyncingNote` leaf below (mirrors the Today/Sleep
     // leaf-scoping pattern), so a tick refreshes only that note.
 
-    @State private var range: IntelRange = .month
+    @State private var range: ChartRange = .month
 
     // Effort display scale (#268) — routes every Effort value/label on this screen. Display-only.
     @AppStorage(UnitPrefs.effortScaleKey) private var effortScaleRaw = EffortScale.hundred.rawValue
@@ -27,17 +27,10 @@ struct IntelligenceView: View {
         // `lazy` so the trailing By-Day `ForEach` renders day cards on demand. With an 800+ day
         // imported history, an eager VStack built every card up-front on the main thread and froze
         // the app when ALL was tapped (#345); LazyVStack only materialises what's on screen.
-        ScreenScaffold(title: "Intelligence",
-                       subtitle: "NOOP scores your charge, effort and rest itself: on-device, no cloud.",
-                       lazy: true,
-                       // Liquid finish: the same full-bleed day-of-sky backdrop Today + the other liquid
-                       // tabs carry, so Intelligence sits in one atmosphere. Static + non-interactive; the
-                       // frosted cards below sit on the opaque canvas and stay legible.
-                       topBackground: liquidScaffoldSky()) {
+        ScreenScaffold(title: "Intelligence", titleDisplay: .navigationBar, lazy: true) {
             if let f = forecast { forecastCard(f) }
-            explainerCard
             if intelligence.computing {
-                NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
+                NoopCard {
                     HStack(spacing: NoopMetrics.rowSpacing) {
                         ProgressView().controlSize(.small)
                         Text("Crunching your raw streams…").font(StrandFont.subhead)
@@ -45,7 +38,7 @@ struct IntelligenceView: View {
                     }
                 }
             } else if let note = intelligence.note {
-                NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
+                NoopCard {
                     HStack(alignment: .top, spacing: NoopMetrics.rowSpacing) {
                         Image(systemName: "moon.zzz.fill").foregroundStyle(StrandPalette.chargeColor)
                             .accessibilityHidden(true)
@@ -64,33 +57,25 @@ struct IntelligenceView: View {
                     symbol: "brain.head.profile"
                 )
             } else {
-                // Header row: section label left, range control right. Narrows the per-day
+                // The section title with the day count, then the one range control. Narrows the per-day
                 // list to a recent window (lexicographic yyyy-MM-dd compare == chronological).
-                HStack(alignment: .center) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Recent").strandOverline()
-                        Text("By Day").font(StrandFont.title2).foregroundStyle(StrandPalette.textPrimary)
-                    }
-                    Spacer()
-                    SegmentedPillControl(IntelRange.allCases, selection: $range) { $0.label }
-                }
                 // Whole-phrase variants per count so translators never see a stitched plural.
-                Text(filtered.count == 1 ? "1 day" : "\(filtered.count) days")
-                    .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                    .frame(maxWidth: .infinity, alignment: .leading)
+                SectionHeader("By day", trailing: filtered.count == 1 ? String(localized: "1 day")
+                                                                       : String(localized: "\(filtered.count) days"))
+                RangeControl(selection: $range)
                 if filtered.isEmpty {
-                    NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
+                    NoopCard {
                         Text("No scored days in this window. Widen the range or import more history.")
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 } else {
-                    ForEach(Array(filtered.enumerated()), id: \.element.id) { index, day in
+                    ForEach(filtered) { day in
                         dayCard(day)
-                            .staggeredAppear(index: index)
                     }
                 }
             }
+            explainerCard
         }
         .task { if intelligence.results.isEmpty { await intelligence.analyzeRecent() } }
         .toolbar {
@@ -103,7 +88,7 @@ struct IntelligenceView: View {
         }
     }
 
-    /// The day list narrowed to the selected window. `nil` cutoff (ALL) shows everything.
+    /// The day list narrowed to the selected window. `nil` cutoff (All) shows everything.
     private var filtered: [IntelligenceEngine.Computed] {
         guard let n = range.days else { return intelligence.results }
         let date = Calendar.current.date(byAdding: .day, value: -(n - 1), to: Date()) ?? Date()
@@ -138,50 +123,31 @@ struct IntelligenceView: View {
                                            plannedSleepHours: plannedHours)
     }
 
-    /// The forecast hero — tomorrow-morning Charge as the canonical liquid `LiquidVessel` gauge in the
-    /// Charge tint, with the estimate counting up over it (the SAME hero language Sleep + Today use), on a
-    /// frosted Charge-tinted card, with the plain-English estimate read-out beneath. A real forecast number,
-    /// so it earns a liquid gauge. The number, ± band and copy are unchanged.
+    /// The forecast: tomorrow-morning Charge in the one score ring (its band colour), with the ± band and
+    /// the plain-English read beside it. An estimate, said as one.
     private func forecastCard(_ f: RecoveryForecast) -> some View {
-        let frac = min(max(f.charge / 100.0, 0), 1)
-        return VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Tomorrow's Charge", overline: "Evening forecast", trailing: String(localized: "Estimate"))
-            NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
-                VStack(spacing: 14) {
-                    // The signature liquid gauge: a filling vessel tinted to the forecast Charge, with the
-                    // 0–100 estimate counting up over it and the ± band + state word beneath (Sleep's
-                    // restHero idiom). Live so the fill actually flows on the hero surface.
-                    ZStack {
-                        LiquidVessel(value: frac, tint: StrandPalette.recoveryColor(f.charge), animated: true)
-                            .frame(width: 184, height: 184)
-                        VStack(spacing: 0) {
-                            CountUpText(
-                                value: f.charge,
-                                format: { "\(Int($0.rounded()))" },
-                                font: StrandFont.rounded(52),
-                                color: StrandPalette.textPrimary
-                            )
-                            .shadow(color: .black.opacity(0.5), radius: 6, y: 1)
-                            Text("± \(Int(f.band.rounded())) · \(StrandPalette.recoveryState(f.charge))")
-                                .font(StrandFont.captionNumber)
-                                .foregroundStyle(StrandPalette.textSecondary)
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Tomorrow's Charge", trailing: String(localized: "Estimate"))
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    HStack(spacing: NoopMetrics.space5) {
+                        ScoreRing(fraction: f.charge / 100, value: "\(Int(f.charge.rounded()))",
+                                  caption: "± \(Int(f.band.rounded()))",
+                                  color: InsightsScoreBands.charge.band(for: f.charge).color, diameter: 112)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel("Tomorrow's Charge estimate \(Int(f.charge.rounded())) plus or minus \(Int(f.band.rounded()))")
+                        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+                            Text(StrandPalette.recoveryState(f.charge))
+                                .font(StrandFont.headline)
+                                .foregroundStyle(StrandPalette.textPrimary)
+                            Text("You'll likely wake around \(Int(f.charge.rounded())) ± \(Int(f.band.rounded())) Charge if you sleep about \(sleepHoursLabel(f.plannedSleepHours)) tonight.")
+                                .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
                         }
-                        .allowsHitTesting(false)   // taps fall through to the vessel → splash
                     }
-                    .padding(.top, 4)
-                    .padding(.bottom, 6)
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Tomorrow's Charge estimate \(Int(f.charge.rounded())) plus or minus \(Int(f.band.rounded()))")
-                    VStack(alignment: .leading, spacing: 10) {
-                        Text("You'll likely wake around \(Int(f.charge.rounded())) ± \(Int(f.band.rounded())) Charge if you sleep about \(sleepHoursLabel(f.plannedSleepHours)) tonight.")
-                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                        Text("Estimate from today's effort, your typical sleep and your \(f.nights)-night recovery baseline, not a measurement. Your real Charge is scored from tomorrow's HRV when you wake.")
-                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
+                    Text("Estimate from today's effort, your typical sleep and your \(f.nights)-night recovery baseline, not a measurement. Your real Charge is scored from tomorrow's HRV when you wake.")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }
@@ -195,69 +161,27 @@ struct IntelligenceView: View {
         return m == 0 ? "\(h)h" : "\(h)h \(m)m"
     }
 
+    /// How the scores are built, collapsed at the foot of the page: the Charge model's five weighted
+    /// inputs as proportional bars, and the Effort scale.
     private var explainerCard: some View {
-        NoopCard(padding: 20, tint: StrandPalette.chargeColor) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
-                HStack(spacing: NoopMetrics.rowSpacing) {
-                    Image(systemName: "brain.head.profile").foregroundStyle(StrandPalette.chargeColor)
-                        .accessibilityHidden(true)
-                    Text("How this works").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                }
-                Text("Charge weighs your HRV against your personal baseline (~55%), resting heart rate (~20%), rest quality (~15%), respiration (~5%) and skin-temperature deviation (~5%). Effort is a 0-\(UnitFormatter.effortScaleMax(effortScale)) cardiovascular load from time in heart-rate zones. Rest is staged from movement and heart rate. Everything is computed here from the strap's raw data. It works for any day NOOP collected raw streams.")
-                    .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                // The Charge model made concrete — the five weighted inputs, each its own metric accent.
-                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                    Text("Charge model").strandOverline()
-                    weightRow(String(localized: "Heart-rate variability"), "~55%", fraction: 0.55, color: StrandPalette.metricPurple)
-                    weightRow(String(localized: "Resting heart rate"), "~20%", fraction: 0.20, color: StrandPalette.metricRose)
-                    weightRow(String(localized: "Rest quality"), "~15%", fraction: 0.15, color: StrandPalette.metricCyan)
-                    weightRow(String(localized: "Respiration"), "~5%", fraction: 0.05, color: StrandPalette.accent)
-                    weightRow(String(localized: "Skin-temperature deviation"), "~5%", fraction: 0.05, color: StrandPalette.metricAmber)
-                    HStack {
-                        Text(String(localized: "Effort")).font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
-                        Spacer()
-                        Text("0-\(UnitFormatter.effortScaleMax(effortScale)) scale")
-                            .font(StrandFont.captionNumber).foregroundStyle(StrandPalette.effortColor)
-                    }
-                    .padding(.top, 2)
-                }
-                .padding(.top, 2)
-            }
+        AboutDisclosure("How this works") {
+            AboutParagraphs([
+                String(localized: "Charge weighs your HRV against your personal baseline (~55%), resting heart rate (~20%), rest quality (~15%), respiration (~5%) and skin-temperature deviation (~5%). Effort is a 0-\(UnitFormatter.effortScaleMax(effortScale)) cardiovascular load from time in heart-rate zones. Rest is staged from movement and heart rate. Everything is computed here from the strap's raw data. It works for any day Nara collected raw streams."),
+            ])
+            InsightsComparisonBars(bars: [
+                .init(id: "hrv", label: String(localized: "Heart-rate variability"), value: 0.55, valueText: "~55%", detail: "", color: StrandPalette.metricPurple),
+                .init(id: "rhr", label: String(localized: "Resting heart rate"), value: 0.20, valueText: "~20%", detail: "", color: StrandPalette.metricRose),
+                .init(id: "rest", label: String(localized: "Rest quality"), value: 0.15, valueText: "~15%", detail: "", color: StrandPalette.restColor),
+                .init(id: "resp", label: String(localized: "Respiration"), value: 0.05, valueText: "~5%", detail: "", color: StrandPalette.metricCyan),
+                .init(id: "skin", label: String(localized: "Skin-temperature deviation"), value: 0.05, valueText: "~5%", detail: "", color: StrandPalette.metricAmber),
+            ], domain: 0...0.55)
         }
-    }
-
-    /// One weighted-input row: label + percent + a thin proportional meter on the inset well, tinted
-    /// to the input's own metric accent. Presentation of the Charge model — no per-day data.
-    private func weightRow(_ label: String, _ percent: String, fraction: Double, color: Color) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            HStack {
-                Text(label).font(StrandFont.subhead).foregroundStyle(StrandPalette.textPrimary)
-                Spacer()
-                Text(percent).font(StrandFont.captionNumber).foregroundStyle(color)
-            }
-            // The horizontal liquid tube — the same vessel Today's Key Metrics + Sleep's stage bars use —
-            // tinted to the input's accent. The Charge weights span 0…0.55, so the tube reads each input's
-            // share of the model. Static (posed): a still fill line, no live canvas per row.
-            LiquidTube(frac: min(1, max(0, fraction / 0.55)), tint: color, height: 8, animated: false)
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(label): \(percent) of Charge")
     }
 
     private func dayCard(_ d: IntelligenceEngine.Computed) -> some View {
-        NoopCard(padding: 18, tint: StrandPalette.chargeColor) {
+        NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                 HStack {
-                    // A small liquid vessel filled to the day's Charge (a real 0–100 metric, so it earns a
-                    // gauge) leads the row — the same leading-gauge idiom Today + Insights use. Static
-                    // (posed) so each day row costs a single cached frame, not a live canvas. Only shown
-                    // once the night has a Charge to fill it; a calibrating night leads with the date alone.
-                    if let r = d.recovery {
-                        LiquidVessel(value: min(1, max(0, r / 100)), tint: StrandPalette.recoveryColor(r), animated: false)
-                            .frame(width: 24, height: 24)
-                            .accessibilityHidden(true)
-                    }
                     Text(d.day).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                     Spacer()
                     // A3: the existing per-day Charge confidence as a small dot + tier tag pill
@@ -276,22 +200,11 @@ struct IntelligenceView: View {
                                 tint: d.source == .computed ? StrandPalette.chargeColor : StrandPalette.accent)
                 }
                 HStack(spacing: 0) {
-                    stat(String(localized: "Charge"), d.recovery.map { "\(Int($0.rounded()))%" } ?? "—",
-                         d.recovery.map { StrandPalette.recoveryColor($0) } ?? StrandPalette.textSecondary)
-                    stat(String(localized: "Effort"), d.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—",
-                         d.strain.map { StrandPalette.strainColor($0) } ?? StrandPalette.textSecondary)
-                    stat(String(localized: "Rest"), d.sleepMin.map { "\(Int($0 / 60))h \(Int($0.truncatingRemainder(dividingBy: 60)))m" } ?? "—", StrandPalette.restColor)
-                    stat(String(localized: "HRV"), d.hrv.map { "\(Int($0.rounded()))" } ?? "—", StrandPalette.metricPurple)
-                    stat(String(localized: "RHR"), d.rhr.map { "\($0)" } ?? "—", StrandPalette.metricRose)
-                }
-                // Effort load meter (0–100) as a filling LiquidTube — the horizontal liquid vessel Today's
-                // Key Metrics + Sleep's stage bars use — tinted along the strain ramp so it reads as
-                // at-a-glance cardio load. Static (posed) so each day row costs a cached frame, not a live
-                // canvas; a real metric, so it earns a liquid accent.
-                if let s = d.strain {
-                    LiquidTube(frac: min(1, max(0, s / 100)), tint: StrandPalette.strainColor(s),
-                               height: 8, animated: false)
-                        .accessibilityHidden(true)
+                    stat(String(localized: "Charge"), d.recovery.map { "\(Int($0.rounded())) %" } ?? "—")
+                    stat(String(localized: "Effort"), d.strain.map { UnitFormatter.effortDisplay($0, scale: effortScale) } ?? "—")
+                    stat(String(localized: "Rest"), d.sleepMin.map { "\(Int($0 / 60))h \(Int($0.truncatingRemainder(dividingBy: 60)))m" } ?? "—")
+                    stat(String(localized: "HRV"), d.hrv.map { "\(Int($0.rounded()))" } ?? "—")
+                    stat(String(localized: "RHR"), d.rhr.map { "\($0)" } ?? "—")
                 }
                 // A1: "What shaped it" , one row per engine-supplied Charge driver. Gated on a non-empty
                 // list so a cold-start / calibrating night (no real contributions to attribute) shows
@@ -307,7 +220,7 @@ struct IntelligenceView: View {
         }
     }
 
-    private func stat(_ label: String, _ value: String, _ color: Color) -> some View {
+    private func stat(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             // `lineLimit` + `minimumScaleFactor` so a long label shrinks instead of running into its
             // neighbour. The five stats share the width as equal columns with NO gap between them
@@ -327,7 +240,7 @@ struct IntelligenceView: View {
                 .foregroundStyle(StrandPalette.textTertiary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.7)
-            Text(value).font(StrandFont.number(20)).foregroundStyle(color).lineLimit(1).minimumScaleFactor(0.6)
+            Text(value).font(StrandFont.number(20)).foregroundStyle(StrandPalette.textPrimary).lineLimit(1).minimumScaleFactor(0.6)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -341,24 +254,5 @@ private struct IntelSyncingNote: View {
     @EnvironmentObject private var live: LiveState
     var body: some View {
         if live.backfilling { SyncingHistoryNote(chunks: live.syncChunksThisSession) }
-    }
-}
-
-/// Recent-window options for the By Day list. `days == nil` means show everything.
-private enum IntelRange: Int, CaseIterable, Hashable {
-    case week = 7, month = 30, quarter = 90, half = 180, year = 365, all = 0
-
-    /// Trailing days the window spans; `nil` for ALL.
-    var days: Int? { self == .all ? nil : rawValue }
-
-    var label: String {
-        switch self {
-        case .week: return String(localized: "W")
-        case .month: return String(localized: "M")
-        case .quarter: return String(localized: "3M")
-        case .half: return String(localized: "6M")
-        case .year: return String(localized: "1Y")
-        case .all: return String(localized: "ALL")
-        }
     }
 }

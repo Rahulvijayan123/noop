@@ -734,6 +734,17 @@ enum DemoScreens {
         case "applehealthspo2": return AnyView(AppleHealthSeriesDemoScreen(key: "spo2"))
         case "applehealthsleep": return AnyView(AppleHealthSeriesDemoScreen(key: "asleep_min"))
         case "devicedetail": return AnyView(DeviceDetailDemoScreen())
+        // The Health, Stress, Trends and Insights area's other screens, for screenshots.
+        case "hub":      return AnyView(InsightsHubView())
+        case "labbook":  return AnyView(LabBookView())
+        case "rhythm":   return AnyView(RhythmHost())
+        case "fused":    return AnyView(FusedRecordHost())
+        case "hydration": return AnyView(HydrationView())
+        case "coupled":  return AnyView(CoupledView())
+        case "intelligence": return AnyView(IntelligenceView())
+        case "weeklydigest": return AnyView(WeeklyDigestView())
+        case "rhythmdemo": return AnyView(RhythmDemoScreen())
+        case "labmarker": return AnyView(LabMarkerDemoScreen())
         default:         return nil
         }
     }
