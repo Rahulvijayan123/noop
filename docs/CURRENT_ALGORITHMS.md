@@ -746,7 +746,7 @@ The `*Ctx` views, `activityContextDayClass` and the default range read are causa
 
 **A final day that returns to provisional.** `updateActivityContextDayStatus` deletes the day's retrospective rows and clears `retrospectiveVersion`. Writing retrospective rows for a provisional day throws.
 
-**Not wired yet.** The app does not write retrospective rows yet. `ActivityContextCoordinator` writes causal intervals only and does not pass `Candidate.retrospectiveVersion`, so the table stays empty and `.historical` reads return causal rows.
+**Who writes and reads them.** `ActivityContextCoordinator` runs the smoother when it derives a final day and writes the rows through `replaceActivityContext(..., retrospective:)`, stamping `retrospectiveVersion`; it passes `Candidate.retrospectiveVersion`, so a final day without the current smoother's rows is derived once more and then left alone. If the store refuses the smoothed rows, the causal rows are saved alone and the refusal is logged. The only `.historical` reader is the coach's activity look-back (`CoachTools`, up to 168 h). Every live or baseline consumer (stress detector, daytime stress and its baseline, HRV-window lookup, Watchdog, physiology context) reads `.causal`.
 
 ### 9h. Context-conditioned baselines (physiology context)
 
