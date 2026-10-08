@@ -523,9 +523,12 @@ enum ContextInputs {
         guard let ts = Int(r["ts"] ?? ""), let kind = nonEmpty(r["kind"]),
               let revision = Int(r["revision"] ?? "") else { return nil }
         let p = Double(r["probability"] ?? "").flatMap(finite).map { min(1, max(0, $0)) } ?? 0
+        // An onset after the detection second is not a back-date; it is dropped rather than trusted.
+        let onset = Int(r["onset_ts"] ?? "").flatMap { $0 <= ts ? $0 : nil }
         return PC.TransitionEventInput(ts: ts, kind: kind, probability: p, revision: revision,
                                        availableAt: Int(r["at"] ?? ""), decoderVersion: nonEmpty(r["decoder_version"]),
-                                       algorithmVersion: nonEmpty(r["algorithm_version"]))
+                                       algorithmVersion: nonEmpty(r["algorithm_version"]), onsetTs: onset,
+                                       source: nonEmpty(r["source"]))
     }
 
     /// Scope of a placement record (review RC-17): `device` when the row names the device, `account` for the

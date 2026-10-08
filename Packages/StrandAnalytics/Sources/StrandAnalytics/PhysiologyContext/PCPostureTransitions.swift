@@ -252,8 +252,9 @@ extension PhysiologyContext {
         public static func isPostural(_ kind: String) -> Bool { posturalKinds.contains(kind) }
         public static func isLocomotion(_ kind: String) -> Bool { locomotionKinds.contains(kind) }
 
-        /// Events usable by a document: valid kind text, inside the read window, available at the cutoff (causal),
-        /// de-duplicated on (ts, kind) keeping the highest revision, sorted by (ts, kind).
+        /// Events usable by a document: valid kind text, inside the read window, available at the cutoff (causal,
+        /// on the detection second `ts`), de-duplicated on (ts, kind) keeping the highest revision, sorted by
+        /// (`changeTs`, ts, kind): every window and "since" measure below places an event at its onset.
         public static func prepare(_ events: [TransitionEventInput], causalCutoff: Int?) -> [TransitionEventInput] {
             var best: [String: TransitionEventInput] = [:]
             for e in events where !e.kind.isEmpty {
@@ -264,10 +265,11 @@ extension PhysiologyContext {
                 if let cur = best[key], (cur.revision, cur.probability) >= (e.revision, e.probability) { continue }
                 best[key] = e
             }
-            return best.values.sorted { ($0.ts, $0.kind) < ($1.ts, $1.kind) }
+            return best.values.sorted { ($0.changeTs, $0.ts, $0.kind) < ($1.changeTs, $1.ts, $1.kind) }
         }
 
-        /// Events inside `interval`; nil when no decoder document covers it and no event falls in it.
+        /// Events whose change began inside `interval` (`changeTs`); nil when no decoder document covers it and no
+        /// event falls in it.
         public static func summary(_ events: [TransitionEventInput], over interval: Interval,
                                    coverage: ResolvedTrack) -> TransitionEventSummary? {
             guard interval.isValid else { return nil }
@@ -277,7 +279,7 @@ extension PhysiologyContext {
             var postural = 0, locomotion = 0, other = 0
             var maxP: Double? = nil
             var i = lowerBound(events, interval.start)
-            while i < events.count, events[i].ts < interval.end {
+            while i < events.count, events[i].changeTs < interval.end {
                 let e = events[i]
                 i += 1
                 counts[e.kind, default: 0] += 1
@@ -297,7 +299,7 @@ extension PhysiologyContext {
                 kinds: counts.keys.sorted().map { Diagnostic($0, Double(counts[$0]!)) })
         }
 
-        /// The last postural and locomotion events strictly before `ts`.
+        /// The last postural and locomotion events whose change began strictly before `ts`.
         public static func last(before ts: Int, in events: [TransitionEventInput])
             -> (postural: TransitionEventInput?, locomotion: TransitionEventInput?) {
             var postural: TransitionEventInput? = nil, locomotion: TransitionEventInput? = nil
@@ -317,16 +319,16 @@ extension PhysiologyContext {
             activity.transitionEvents = summary(events, over: support, coverage: coverage)
             preceding.transitionEvents = summary(events, over: preceding.lookback, coverage: coverage)
             let (p, l) = last(before: support.start, in: events)
-            preceding.secondsSinceLastPosturalTransition = p.map { support.start - $0.ts }
+            preceding.secondsSinceLastPosturalTransition = p.map { support.start - $0.changeTs }
             preceding.lastPosturalTransitionKind = p?.kind
-            preceding.secondsSinceLastLocomotionTransition = l.map { support.start - $0.ts }
+            preceding.secondsSinceLastLocomotionTransition = l.map { support.start - $0.changeTs }
         }
 
         static func lowerBound(_ events: [TransitionEventInput], _ ts: Int) -> Int {
             var lo = 0, hi = events.count
             while lo < hi {
                 let mid = (lo + hi) / 2
-                if events[mid].ts < ts { lo = mid + 1 } else { hi = mid }
+                if events[mid].changeTs < ts { lo = mid + 1 } else { hi = mid }
             }
             return lo
         }

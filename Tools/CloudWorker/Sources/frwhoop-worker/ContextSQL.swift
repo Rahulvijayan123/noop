@@ -256,9 +256,11 @@ enum ContextSQL {
 
     /// Decoder transition events (`document.events`) flagged in the read window `[$3, $4)`, from the same chosen
     /// document of each UTC day as `activityRuns` (the `activity_context_transitions` view reads every document).
+    /// `onset_ts` (the decoder's causal back-date) and `source` are "" on documents decoded before they existed.
     static let activityTransitions = chosenActivityDocuments + """
         select (x.value ->> 'ts')::bigint::text as ts, coalesce(x.value ->> 'kind', '') as kind,
                coalesce(x.value ->> 'probability', '') as probability,
+               coalesce(x.value ->> 'onset_ts', '') as onset_ts, coalesce(x.value ->> 'source', '') as source,
                c.algorithm_version, c.decoder_version, c.result_revision::text as revision,
                ceil(extract(epoch from c.computed_at))::bigint::text as at
           from chosen c

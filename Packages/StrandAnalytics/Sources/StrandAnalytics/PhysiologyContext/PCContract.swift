@@ -450,11 +450,26 @@ extension PhysiologyContext {
         public var availableAt: Int?
         public var decoderVersion: String?
         public var algorithmVersion: String?
+        /// The decoder's causal back-date of the change (`events[].onset_ts`, `ActivityTransitionEvent.onsetTs`):
+        /// where its posterior began to rise, at most `ActivityTransitionEvent.maxOnsetLeadS` before `ts`. nil on
+        /// documents decoded before it was recorded. Optional and decoded if present, so older inputs decode.
+        public var onsetTs: Int? = nil
+        /// Which detector flagged the event (`hsmm` | `transition_expert`); nil when the document does not say.
+        public var source: String? = nil
         public init(ts: Int, kind: String, probability: Double, revision: Int, availableAt: Int? = nil,
-                    decoderVersion: String? = nil, algorithmVersion: String? = nil) {
+                    decoderVersion: String? = nil, algorithmVersion: String? = nil, onsetTs: Int? = nil,
+                    source: String? = nil) {
             self.ts = ts; self.kind = kind; self.probability = min(1, max(0, probability.isFinite ? probability : 0))
             self.revision = revision; self.availableAt = availableAt; self.decoderVersion = decoderVersion
-            self.algorithmVersion = algorithmVersion
+            self.algorithmVersion = algorithmVersion; self.onsetTs = onsetTs; self.source = source
+        }
+
+        /// The second the change began, which the settling and "since the last transition" measures use:
+        /// `onsetTs` when recorded (kept within `[ts - maxOnsetLeadS, ts]`), else `ts`. Causal availability is
+        /// still decided on `ts`: the event is not known before it was flagged.
+        public var changeTs: Int {
+            guard let onset = onsetTs else { return ts }
+            return max(ts - ActivityTransitionEvent.maxOnsetLeadS, min(ts, onset))
         }
     }
 
