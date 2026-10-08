@@ -11,6 +11,10 @@ import Charts
 ///
 /// The latest value is held on to the end of the window (today) when the reading is recent enough for the
 /// cadence; an older reading's step ends at the reading, so a stale estimate is not drawn as current.
+/// Likewise the value held from the last reading BEFORE the window is drawn from the window's start when it
+/// was still current (it joins the first reading inside the window, or is held to today), so a window does
+/// not start blank, and a window with no reading of its own still shows the estimate that held through it.
+/// Pass the whole history for that.
 ///
 /// ```swift
 /// StepLineChart(points: weekly, color: StrandPalette.chargeColor,
@@ -22,7 +26,10 @@ import Charts
 public struct StepLineChart: View {
     struct Step: Identifiable {
         let id: String
+        /// The local day of the reading (the window's first day for a value held from before it).
         let day: Date
+        /// Where the step's vertex is drawn: the middle of its reading's day, or the window's leading edge.
+        let x: Date
         let value: Double
         let run: String
     }
@@ -65,24 +72,12 @@ public struct StepLineChart: View {
                 window: ClosedRange<Date>, xStyle: ChartAxisStyle, y: ChartValueAxis,
                 selection: Binding<Date?>, height: CGFloat = NoopMetrics.chartHeightPrimary,
                 accessibilityTitle: String, calendar: Calendar = .current) {
-        let windowed = points.filter { $0.value.isFinite }.inWindow(window)
-        let runs = ChartGaps.runs(windowed.map(\.day), series: windowed.map(\.series), cadence: cadence, calendar: calendar)
-        var steps = zip(windowed, runs).map { point, run in
-            Step(id: "\(point.day.timeIntervalSince1970)", day: point.day, value: point.value, run: run)
-        }
-        var estimateRuns: [String: Bool] = [:]
-        for (point, run) in zip(windowed, runs) {
-            estimateRuns[run] = (estimateRuns[run] ?? true) && point.isEstimate
-        }
-        if holdsLatest, let last = steps.last {
-            let today = calendar.startOfDay(for: window.upperBound.addingTimeInterval(-1))
-            let age = ChartDay.daysBetween(last.day, today, calendar: calendar)
-            if age > 0, age <= ChartGaps.maxGapDays(cadence) {
-                steps.append(Step(id: "held", day: today, value: last.value, run: last.run))
-            }
-        }
+        let layout = Self.layout(points, window: window, cadence: cadence, holdsLatest: holdsLatest, calendar: calendar)
+        let windowed = layout.windowed
+        let steps = layout.steps
+        let estimateRuns = layout.estimateRuns
         let references = reference.map { [$0] } ?? []
-        let yLayout = y.layout(for: windowed.map(\.value) + references.map(\.value))
+        let yLayout = y.layout(for: steps.map(\.value) + windowed.map(\.value) + references.map(\.value))
 
         self.steps = steps
         self.readings = windowed.map { Reading(day: $0.day, value: $0.value, isEstimate: $0.isEstimate) }
@@ -91,7 +86,7 @@ public struct StepLineChart: View {
         self.references = references
         self.referenceAnchors = NaraReferenceLabelPlacement.anchors(
             for: references,
-            marks: steps.map { .init(x: ChartDay.center(of: $0.day, calendar: calendar), low: $0.value, high: $0.value) },
+            marks: steps.map { .init(x: $0.x, low: $0.value, high: $0.value) },
             window: window, domain: yLayout.domain)
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = yLayout
@@ -127,6 +122,50 @@ public struct StepLineChart: View {
         }
     }
 
+    /// The steps for `points` in `window` (pure): every reading in the window on its local day, the value
+    /// held from the last reading before the window when it was still current, and the latest value held to
+    /// today when `holdsLatest` and it is recent enough for the cadence.
+    static func layout(_ points: [DailyPoint], window: ClosedRange<Date>, cadence: ChartCadence, holdsLatest: Bool,
+                       calendar: Calendar)
+        -> (steps: [Step], windowed: [DailyPoint], estimateRuns: [String: Bool]) {
+        let all = points.normalisedDays(calendar)
+        let windowed = all.inWindow(window)
+        let prior = all.last { $0.day < window.lowerBound }
+        let sequence = (prior.map { [$0] } ?? []) + windowed
+        let runs = ChartGaps.runs(sequence.map(\.day), series: sequence.map(\.series), cadence: cadence, calendar: calendar)
+        let today = calendar.startOfDay(for: window.upperBound.addingTimeInterval(-1))
+        let limit = ChartGaps.maxGapDays(cadence)
+
+        var steps: [Step] = []
+        var estimateRuns: [String: Bool] = [:]
+        for (index, (point, run)) in zip(sequence, runs).enumerated() {
+            if prior != nil && index == 0 {
+                // Held into the window: drawn from its leading edge when it joins the first reading inside
+                // it, or (with nothing inside) when it is recent enough to be held to today.
+                let joins = runs.count > 1 && runs[1] == run
+                let heldToToday = windowed.isEmpty && holdsLatest
+                    && ChartDay.daysBetween(point.day, today, calendar: calendar) <= limit
+                guard joins || heldToToday else { continue }
+                steps.append(Step(id: "seed", day: calendar.startOfDay(for: window.lowerBound), x: window.lowerBound,
+                                  value: point.value, run: run))
+                estimateRuns[run] = (estimateRuns[run] ?? true) && point.isEstimate
+                continue
+            }
+            steps.append(Step(id: "\(point.day.timeIntervalSince1970)", day: point.day,
+                              x: ChartDay.center(of: point.day, calendar: calendar), value: point.value, run: run))
+            estimateRuns[run] = (estimateRuns[run] ?? true) && point.isEstimate
+        }
+        let latest = windowed.last ?? (steps.isEmpty ? nil : prior)
+        if holdsLatest, let latest, let last = steps.last {
+            let age = ChartDay.daysBetween(latest.day, today, calendar: calendar)
+            if age > 0, age <= limit, last.day < today {
+                steps.append(Step(id: "held", day: today, x: ChartDay.center(of: today, calendar: calendar),
+                                  value: last.value, run: last.run))
+            }
+        }
+        return (steps, windowed, estimateRuns)
+    }
+
     public var body: some View {
         NaraChartFrame(state: state, height: height, legend: legend, accessibilityTitle: accessibilityTitle) {
             chart
@@ -139,7 +178,7 @@ public struct StepLineChart: View {
             NaraReferenceMarks(references: references)
             SelectionRule(selected, unit: .day)
             ForEach(steps) { step in
-                LineMark(x: .value("Day", step.day, unit: .day),
+                LineMark(x: .value("Day", step.x),
                          y: .value("Value", step.value),
                          series: .value("Run", step.run))
                     .interpolationMethod(.stepEnd)
@@ -156,7 +195,7 @@ public struct StepLineChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: .day, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,

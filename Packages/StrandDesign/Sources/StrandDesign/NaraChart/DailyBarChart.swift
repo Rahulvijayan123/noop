@@ -13,6 +13,12 @@ import Charts
 /// bar with a solid cap and the legend says "Estimate"; a week or month is drawn that way when at least
 /// half of its days are estimates (one estimated day does not make a month of measurements an estimate).
 ///
+/// Summed weeks and months (`aggregation: .sum`) that the data or the window does not fully cover (the
+/// current week so far, a first week that began mid-week, an oldest bin cut by the history the page loaded)
+/// are drawn light without a cap and named "Partial week" / "Partial month" in the legend, so a total of
+/// four days never reads as a missed weekly goal (`partialBins`). Pass the whole history to a binned chart:
+/// the window is widened to whole bins, so its oldest bin uses the days just before the range.
+///
 /// ```swift
 /// DailyBarChart.scores(charge, bands: bands, window: window, xStyle: range.axisStyle,
 ///                      selection: $selected, accessibilityTitle: "Charge")
@@ -44,6 +50,7 @@ public struct DailyBarChart: View {
         let day: Date
         let value: Double
         let isEstimate: Bool
+        let isPartial: Bool
         let color: Color
         var id: Date { day }
     }
@@ -77,8 +84,9 @@ public struct DailyBarChart: View {
     @Environment(\.naraChartCompact) private var compact
 
     /// - Parameters:
-    ///   - points: one value per day; points outside `window` are ignored (pass the whole history if that
-    ///     is simpler: the trailing mean then has context before the window starts).
+    ///   - points: one value per day (two on one day are combined like a bin). Daily bars draw the days
+    ///     inside `window`; binned bars draw every bin that overlaps it, whole, so pass the whole history (the
+    ///     oldest bin then has its days before the window, and the trailing mean has its context).
     ///   - bin: `.day`, `.weekOfYear` or `.month`; `ChartRange.totalsBin` picks the house rule.
     ///   - aggregation: how a week or month of days becomes one bar.
     ///   - meanLine: draw the trailing mean of this many bins as a dashed line (7 for scores); not drawn
@@ -92,10 +100,13 @@ public struct DailyBarChart: View {
                 y: ChartValueAxis, selection: Binding<Date?>,
                 height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                 calendar: Calendar = .current) {
+        let range = window
         let window = bin == .day ? window : ChartAxis.snap(window, to: bin, calendar: calendar)
         let sorted = points.filter { $0.value.isFinite }.sorted { $0.day < $1.day }
         let binnedAll = Self.bin(sorted, by: bin, aggregation: aggregation, calendar: calendar)
         let binned = binnedAll.inWindow(window)
+        let partial = aggregation == .sum
+            ? Self.partialBins(sorted, by: bin, window: range, calendar: calendar) : []
 
         // Fewer than three bars draw no mean line: a line through one or two values is not a trend.
         var meanPoints: [MeanPoint] = []
@@ -117,7 +128,15 @@ public struct DailyBarChart: View {
             yLayout = axis.layout(domain: 0...yLayout.domain.upperBound)
         }
 
-        self.bars = binned.map { Bar(day: $0.day, value: $0.value, isEstimate: $0.isEstimate, color: fill.color(for: $0.value)) }
+        let bandFormat = y.format
+        self.bars = binned.map { point in
+            // A band colour is chosen for the value as printed, so a weekly mean of 33.6 that the axis and
+            // readout print as "34" is drawn in 34's band, not in the band below it.
+            let shade: Double
+            if case .bands = fill { shade = Self.displayed(point.value, format: bandFormat) } else { shade = point.value }
+            return Bar(day: point.day, value: point.value, isEstimate: point.isEstimate,
+                       isPartial: partial.contains(point.day), color: fill.color(for: shade))
+        }
         self.mean = meanPoints
         let references = reference.map { [$0] } ?? []
         self.references = references
@@ -163,11 +182,15 @@ public struct DailyBarChart: View {
                 automatic.append(ChartLegendItem(.line(NaraChartStyle.meanLineColor, dashed: true),
                                                  Self.meanLabel(count: count, unit: bin)))
             }
+            // Band and ramp colours vary bar to bar, so their estimate and partial glyphs are neutral.
+            let color: Color
+            if case .single(let single) = fill { color = single } else { color = StrandPalette.textSecondary }
             if binned.contains(where: \.isEstimate) {
-                // Band and ramp colours vary bar to bar, so their estimate glyph is neutral.
-                let color: Color
-                if case .single(let single) = fill { color = single } else { color = StrandPalette.textSecondary }
                 automatic.append(ChartLegendItem(.estimateBar(color), String(localized: "Estimate", bundle: .module)))
+            }
+            if self.bars.contains(where: \.isPartial) {
+                automatic.append(ChartLegendItem(.swatch(color.opacity(NaraChartStyle.estimateFillOpacity)),
+                                                 Self.partialLabel(unit: bin)))
             }
             self.legend = automatic
         }
@@ -227,12 +250,14 @@ public struct DailyBarChart: View {
 
     /// `points` combined into one point per calendar `unit` (day, week, month), dated at the unit's start,
     /// ascending. `.mean` averages the days that have a value; `.sum` totals them. A bin is an estimate when
-    /// at least half of its values are. Non-finite values are ignored.
+    /// at least half of its values are. Non-finite values are ignored. Each point counts on its local day
+    /// (`DailyPoint.localDay(in:)`).
     public static func bin(_ points: [DailyPoint], by unit: Calendar.Component, aggregation: ChartAggregation,
                            calendar: Calendar = .current) -> [DailyPoint] {
         var groups: [Date: (sum: Double, count: Int, estimates: Int, series: String)] = [:]
         for point in points where point.value.isFinite {
-            let start = calendar.dateInterval(of: unit, for: point.day)?.start ?? calendar.startOfDay(for: point.day)
+            let day = point.localDay(in: calendar)
+            let start = calendar.dateInterval(of: unit, for: day)?.start ?? day
             var group = groups[start] ?? (0, 0, 0, point.series)
             group.sum += point.value
             group.count += 1
@@ -242,9 +267,46 @@ public struct DailyBarChart: View {
         return groups.keys.sorted().compactMap { start in
             guard let group = groups[start], group.count > 0 else { return nil }
             let value = aggregation == .sum ? group.sum : group.sum / Double(group.count)
-            return DailyPoint(day: start, value: value, isEstimate: group.estimates * 2 >= group.count,
-                              series: group.series)
+            var point = DailyPoint(day: start, value: value, isEstimate: group.estimates * 2 >= group.count,
+                                   series: group.series)
+            point.zone = calendar.timeZone
+            return point
         }
+    }
+
+    /// The starts of the weeks or months (`unit`) that `points` and `window` do not fully cover: a bin that
+    /// begins before the first point's day (a history that started mid-week, or an oldest bin cut by the
+    /// days the page loaded) or that ends after `window` does (the current week or month, still running).
+    /// A summed bar for such a bin is a part total; the chart draws it as partial, and a page can say
+    /// "so far" in its readout. Empty for `.day`. Pure.
+    public static func partialBins(_ points: [DailyPoint], by unit: Calendar.Component, window: ClosedRange<Date>,
+                                   calendar: Calendar = .current) -> Set<Date> {
+        guard unit != .day else { return [] }
+        let days = points.filter { $0.value.isFinite }.map { $0.localDay(in: calendar) }
+        guard let first = days.min() else { return [] }
+        var partial: Set<Date> = []
+        for day in days {
+            guard let interval = calendar.dateInterval(of: unit, for: day), !partial.contains(interval.start) else { continue }
+            if interval.start < first || interval.end > window.upperBound { partial.insert(interval.start) }
+        }
+        return partial
+    }
+
+    /// The legend's name for a partial bin.
+    static func partialLabel(unit: Calendar.Component) -> String {
+        switch unit {
+        case .month: return String(localized: "Partial month", bundle: .module)
+        case .year: return String(localized: "Partial year", bundle: .module)
+        default: return String(localized: "Partial week", bundle: .module)
+        }
+    }
+
+    /// `value` as `format` prints it, read back as a number (33.6 under a whole-number format is 34), so a
+    /// band is chosen for the number the wearer sees. Whole values and text that does not read back as a
+    /// number are returned unchanged.
+    static func displayed(_ value: Double, format: (Double) -> String) -> Double {
+        guard value.isFinite, value != value.rounded() else { return value }
+        return (try? Double(format(value), format: .number)) ?? value
     }
 
     /// The trailing mean at each point: the average of the points within the last `count` units (the
@@ -310,7 +372,7 @@ public struct DailyBarChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: bin, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,
@@ -332,7 +394,7 @@ public struct DailyBarChart: View {
                     yStart: .value("Base", 0.0),
                     yEnd: .value("Value", bar.value),
                     width: .ratio(NaraChartStyle.barWidthRatio))
-                .foregroundStyle(bar.color.opacity(bar.isEstimate ? NaraChartStyle.estimateFillOpacity : 1))
+                .foregroundStyle(bar.color.opacity(bar.isEstimate || bar.isPartial ? NaraChartStyle.estimateFillOpacity : 1))
                 .cornerRadius(NaraChartStyle.barCornerRadius)
                 .opacity(opacity)
             if bar.isEstimate {

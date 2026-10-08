@@ -414,13 +414,13 @@ the reasoning). `TrendChart`, `OverviewHRChart` and `Hypnogram` are untouched le
 
 | Data | Cadence | Kit chart |
 | --- | --- | --- |
-| A score per day or night (Charge, Rest, Effort, day stress, sleep score) | daily, fixed scale | `DailyBarChart.scores(_:bands:)` or `.scores(_:ramp:)`, `bin: range.totalsBin` |
+| A score per day or night (Charge, Rest, Effort, day stress, sleep score) | daily, fixed scale | `DailyBarChart.scores(_:bands:)` or `.scores(_:ramp:)`, `bin: shown.totalsBin(for: window)` |
 | A daily total or duration (steps, calories, asleep time, zone minutes, sleep debt) | daily | `DailyBarChart.totals(_:color:goal:bin:aggregation:)` |
 | A nightly or daily vital (HRV, resting HR, respiratory rate, average HR, absolute skin temp) | daily | `DailyLineChart(series:typicalBand:baseline:)` |
 | A percentage on a fixed scale (blood oxygen, sleep efficiency) | daily | `DailyLineChart.fixedDomainPoints(_:domain:reference:color:joined:)` |
-| A deviation around zero (skin-temperature deviation) | daily | `DivergingBarChart(points:positive:negative:…)`, `bin: range.totalsBin` |
-| A span per night (bedtime to wake, time in bed as a window) | nightly | `RangeBarChart(items:color:)`, `bin: range.totalsBin` |
-| Parts of a whole per day (sleep stages, HR zones, macros, asleep inside time in bed) | daily | `StackedBarChart(days:categories:highlighted:)`, `bin: range.totalsBin` |
+| A deviation around zero (skin-temperature deviation) | daily | `DivergingBarChart(points:positive:negative:…)`, `bin: shown.totalsBin(for: window)` |
+| A span per night (bedtime to wake, time in bed as a window) | nightly | `RangeBarChart(items:color:)`, `bin: shown.totalsBin(for: window)` |
+| Parts of a whole per day (sleep stages, HR zones, macros, asleep inside time in bed) | daily | `StackedBarChart(days:categories:highlighted:)`, `bin: shown.totalsBin(for: window)` |
 | A level on a named scale (mood 1-5) | logged days | `DotStripChart(points:levels:levelLabels:color:)` |
 | Irregular readings with a smoothed direction (weight, body fat, lean mass, BMI) | sparse | `SparsePointsChart(points:color:)` |
 | An estimate held until the next one (VO2 max, fitness age, vitality, body age) | weekly / sparse | `StepLineChart(points:color:reference:)` |
@@ -436,8 +436,8 @@ Every chart is a `View` with the same tail of parameters, in this order:
 ```swift
 …, legend: [ChartLegendItem]? = nil,          // nil: the automatic legend; []: none
    state: ChartState = .ready,                // .loading / .empty("No readings yet") / .ready
-   window: ClosedRange<Date>,                 // ChartAxis.window(range, firstDataDay: …)
-   xStyle: ChartAxisStyle,                    // range.axisStyle (IntradayChart has no xStyle: always hours)
+   window: ClosedRange<Date>,                 // ChartAxis.window(shown, firstDataDay: …)
+   xStyle: ChartAxisStyle,                    // shown.axisStyle (IntradayChart has no xStyle: always hours)
    y: ChartValueAxis,                         // not on .scores, .fixedDomainPoints, RangeBarChart, DotStripChart
    selection: Binding<Date?>,                 // the page owns it; the ValueReadout reads it
    height: CGFloat = NoopMetrics.chartHeightPrimary,
@@ -451,23 +451,37 @@ What every chart does for you, so screens must not redo it:
   empty draws `EmptyChartMessage` in the same frame; the legend row stays reserved (but empty) until the
   chart is ready. Do not put your own empty text above a chart.
 - **The x window is the range ending today**, not the data's extent, so missing days at the start read as
-  gaps. Points outside `window` are ignored, so passing the whole history is fine (trailing means and
-  sparse trends then use the points before the window as context).
+  gaps. **Pass the whole history.** Daily marks outside `window` are not drawn, but the history is used:
+  binned bars widen the window to whole weeks or months and draw the oldest bin whole (from the days
+  before the range), trailing means and sparse trends use the earlier points as context, and
+  `StepLineChart` draws the value held from the last reading before the window.
+- **One value per day.** Every chart reads a point's day with `DailyPoint.localDay(in:)` (any instant inside
+  the day works, and a point built with `DailyPoint(key:)` keeps its calendar day if the page is drawn in
+  another time zone), and two values on one day become their mean (`StackedBarChart` adds same-day entries;
+  `RangeBarChart` draws a second sleep on the same wake day as a second bar in the column).
 - **Gaps break lines**: wherever the series skips more than its `cadence`, and wherever a point's `series`
-  (method) changes. Fewer than three points draw as points only. Nothing is filled under a line.
+  (method) changes. In `DailyLineChart` a series with fewer than three points in the window draws as points
+  only (each series on its own); `StepLineChart` (held values) and `IntradayChart` (bucket runs) join any
+  two readings of a run. Nothing is filled under a line.
 - **Estimates**: `DailyPoint.isEstimate` draws a hollow point, a dashed run (a run made only of
   estimates), or a light bar with a solid cap; the legend says "Estimate" automatically. A binned bar is an
   estimate when at least half its days are.
 - **References** (`ChartReference`) are rules behind the data with their labels drawn on top, on a card
   plate; a label moves to the leading edge when the newest data would sit under it at the trailing edge.
-- **Long ranges bin**: bar charts take `bin:` (`.day`, `.weekOfYear`, `.month`). Pass `range.totalsBin`
-  (daily at W and M, weekly at 3M, monthly at 6M and longer) so a year is twelve bars, not 365 hairlines.
+- **Long ranges bin**: bar charts take `bin:` (`.day`, `.weekOfYear`, `.month`). Pass
+  `shown.totalsBin(for: window)` (daily at W and M, weekly at 3M, monthly at 6M and Y; All by the span it
+  covers) so a year is twelve bars, not 365 hairlines, and a new user's All of three weeks is 21 daily bars.
+- **Partial bins**: with `aggregation: .sum`, a week or month the data or the window does not fully cover
+  (the running week, a history that began mid-week) is drawn light without a cap and named "Partial week"
+  / "Partial month" in the legend. `DailyBarChart.partialBins(_:by:window:)` tells the readout ("So far").
 - **Scrub**: a sideways drag on iPhone (a vertical swipe still scrolls the page), the pointer on the Mac,
-  a tap pins the nearest x and a second tap clears it; one selection haptic per new x; non-selected bars
-  drop to 35 %; no tooltip (the `ValueReadout` is the tooltip). Selection never animates; a window change
-  animates the marks for 0.25 s (off under Reduce Motion and the quiet-motion gate).
+  a tap pins the bar or point under the finger (anywhere across its day, week or month; the nearest one
+  over a gap) and a second tap clears it; one selection haptic per new x; non-selected bars drop to 35 %;
+  no tooltip (the `ValueReadout` is the tooltip). Selection never animates; a window change animates the
+  marks for 0.25 s (off under Reduce Motion and the quiet-motion gate).
 - **Accessibility**: one VoiceOver element per chart with a one-line summary, an audio graph, and swipe
-  up/down stepping the selection.
+  up/down stepping the selection (through every day or bar; `IntradayChart` steps through about 48
+  moments across the window plus the ends of every run, not through every sample).
 - **Axes**: unit above the value axis, tabular footnote labels in `textTertiary`, a hairline grid, labels
   that never repeat, edge labels pulled inside the plot, month labels starting on their month boundary,
   dense labels dropped rather than overlapped (never the newest).
@@ -482,21 +496,30 @@ let point = DailyPoint(trendPoint, dayIsUTC: true)                    // bridge 
 ChartDay.key(for: date)                                               // back to "2026-10-07"
 ChartDay.day(fromUTCMidnight: utcDate)                                // fix an existing UTC-midnight date
 
-@State private var range: ChartRange = .month                         // W, M, 3M, 6M, Y, All
-let window = ChartAxis.window(range, firstDataDay: points.first?.day) // 7/30/90/180/365 days ending today; All from the first day (≥ 7)
-range.axisStyle                                                       // .weekday, .dayOfMonth, .month, .monthYear
-range.totalsBin                                                       // .day, .day, .weekOfYear, .month, .month, .month
+point.localDay(in: calendar)                                          // the local start of the point's calendar day
+
+@State private var range: ChartRange = .month                         // W, M, 3M, 6M, Y, All (what the user picked)
+let shown = RangeControl.effectiveRange(range, isAvailable: available) // what the control highlights: DRAW this
+let window = ChartAxis.window(shown, firstDataDay: points.first?.day) // 7/30/90/180/365 days ending today; All from the first day (≥ 7)
+shown.axisStyle                                                       // .weekday, .dayOfMonth, .month, .monthYear
+shown.totalsBin(for: window)                                          // .day, .day, .weekOfYear, .month, .month; All by its span
+ChartRange.totalsBin(spanning: window)                                // the span rule: ≤ 62 days daily, ≤ 200 weekly, else monthly
+range.totalsBin                                                       // the fixed rule (All is always .month): prefer totalsBin(for:)
 range.days, range.label, range.accessibilityName                      // 30, "M", "1 month"
 
 RangeControl(selection: $range)                                       // all six
-RangeControl(selection: $range, isAvailable: { unlocked(ExploreRange($0)) })   // only ranges the history fills (+ All)
+RangeControl(selection: $range, isAvailable: available)               // only ranges the history fills (+ All)
+// let available: (ChartRange) -> Bool = { unlocked(ExploreRange($0)) }  — the same closure for both calls
 RangeControl(selection: $range, options: [.week, .month, .quarter], reservesSpaceWhenHidden: true)
 .onChangeCompat(of: range) { _ in selected = nil }                    // the page clears its selection
 ```
 
 - `RangeControl` hides unavailable ranges (no disabled "Y" between "6M" and "All", no "Longer ranges
   unlock…" helper), hides itself when one option is left (`reservesSpaceWhenHidden` keeps its 38 pt), and
-  shows a stored selection that cannot be filled as the largest range that can, without writing it back.
+  shows a stored selection that cannot be filled as the largest range that can, without writing it back
+  (tapping that highlighted segment commits it). Draw `RangeControl.effectiveRange(range, options:,
+  isAvailable:)` with the same arguments as the control, never the raw `range`, so the chart's window, axis
+  and bin always match the highlighted segment.
   `RangeControl.height` is 38. Screens bridge their own range enums at the view boundary. The metric
   detail page's bridge does not exist yet: add it beside `ExploreRange` in `MetricExplorerView.swift`
   (`extension ExploreRange { init(_ r: ChartRange) }` plus `var chartRange: ChartRange?`, nil for 2W/3W) and
@@ -529,25 +552,28 @@ defines none. A value belongs to the first band whose `upperBound` is greater th
 ```swift
 // Scores: fixed 0...100 (or scale: 0...21 / 0...3), bar colour from the scorer's bands, dashed 7-day
 // mean on daily bars (none when binned).
-DailyBarChart.scores(charge, bands: chargeBands, bin: range.totalsBin, unit: "%",
-                     state: chartState, window: window, xStyle: range.axisStyle,
+DailyBarChart.scores(charge, bands: chargeBands, bin: shown.totalsBin(for: window), unit: "%",
+                     state: chartState, window: window, xStyle: shown.axisStyle,
                      selection: $selected, accessibilityTitle: "Charge")
 DailyBarChart.scores(effort, ramp: { StrandPalette.effortTint(fraction: $0 / 100) }, scale: 0...100,
-                     bin: range.totalsBin, window: window, xStyle: range.axisStyle,
+                     bin: shown.totalsBin(for: window), window: window, xStyle: shown.axisStyle,
                      selection: $selected, accessibilityTitle: "Effort")
 
 // Totals: one colour, an optional goal or need rule, bin + aggregation (.mean per day, or .sum per bin).
 DailyBarChart.totals(steps, color: StrandPalette.metricCyan, goal: ChartReference(10_000, label: "Goal 10,000"),
-                     bin: range.totalsBin, aggregation: .mean, window: window, xStyle: range.axisStyle,
+                     bin: shown.totalsBin(for: window), aggregation: .mean, window: window, xStyle: shown.axisStyle,
                      y: ChartValueAxis(unit: "steps", domain: .fitted(minSpan: 2_000, includeZero: true)),
                      selection: $selected, accessibilityTitle: "Steps")
 // The full init: DailyBarChart(points:fill: .single(c) / .bands(b) / .ramp(f), bin:aggregation:meanLine:reference:…)
-// Pure helpers: DailyBarChart.bin(_:by:aggregation:) (what the bars show), DailyBarChart.trailingMean(_:count:unit:)
+// Pure helpers: DailyBarChart.bin(_:by:aggregation:) (what the bars show), DailyBarChart.trailingMean(_:count:unit:),
+// DailyBarChart.partialBins(_:by:window:) (summed bins drawn as partial: the running week, a mid-week start).
+// Band colours are chosen for the value as the axis format prints it (a weekly mean of 33.6 printed "34" is
+// in 34's band); in a readout pass the same rounding: valueColor: { bands.band(for: $0.rounded()).color }.
 
 // Vitals: line + gaps, a fixed personal band or a rolling one, a dashed baseline, a second reference.
 DailyLineChart(series: [.init(id: "hrv", name: "HRV", color: StrandPalette.metricPurple, points: nights)],
                typicalBand: 52...78, baseline: ChartReference(64, label: "Baseline 64"),
-               state: chartState, window: window, xStyle: range.axisStyle,
+               state: chartState, window: window, xStyle: shown.axisStyle,
                y: ChartValueAxis(unit: "ms", domain: .fitted(minSpan: 20)),
                selection: $selected, accessibilityTitle: "Heart rate variability")
 // Also: cadence: .daily / .weekly / .sparse(maxGapDays:) / .adaptive · marks: .pointsAndLine / .pointsOnly /
@@ -558,50 +584,55 @@ DailyLineChart(series: [.init(id: "hrv", name: "HRV", color: StrandPalette.metri
 // Fixed-scale percentages: points only (joined: false), the rule at the trailing edge.
 DailyLineChart.fixedDomainPoints(spo2, domain: 85...100, reference: ChartReference(95, label: "95 %"),
                                  color: StrandPalette.metricCyan, joined: false, window: window,
-                                 xStyle: range.axisStyle, selection: $selected, accessibilityTitle: "Blood oxygen")
+                                 xStyle: shown.axisStyle, selection: $selected, accessibilityTitle: "Blood oxygen")
 DailyLineChart.fixedDomainPoints(efficiency, domain: 50...100, reference: ChartReference(85, label: "85 %"),
                                  color: StrandPalette.restColor, joined: true, window: window,
-                                 xStyle: range.axisStyle, selection: $selected, accessibilityTitle: "Sleep efficiency")
+                                 xStyle: shown.axisStyle, selection: $selected, accessibilityTitle: "Sleep efficiency")
 
 // Deviation: symmetric around zero, both directions named in the legend.
 DivergingBarChart(points: deviations, positive: StrandPalette.metricAmber, negative: StrandPalette.metricCyan,
                   positiveLabel: "Warmer", negativeLabel: "Cooler",
-                  references: [ChartReference(0.5), ChartReference(-0.5)], bin: range.totalsBin,
-                  window: window, xStyle: range.axisStyle,
+                  references: [ChartReference(0.5), ChartReference(-0.5)], bin: shown.totalsBin(for: window),
+                  window: window, xStyle: shown.axisStyle,
                   y: ChartValueAxis(unit: "°C", domain: .symmetric(minMagnitude: 0.5), format: ChartValueAxis.decimals(1)),
                   selection: $selected, accessibilityTitle: "Skin temperature")
 
 // Bedtime to wake: a clock axis from 18:00 the evening before (evening at the top), usual windows as bands.
+// The axis widens above 18:00 for an early bedtime. RangeBarChart.bin(items, by:) returns the bars as drawn
+// (Span: day, start and end as clock offsets) for the readout; RangeBarChart.clockLabel(offset:) prints one.
 RangeBarChart(items: nights.map { .init(day: $0.wakeDay, start: $0.bedtime, end: $0.wake, isEstimate: false) },
               typicalStart: usualBed, typicalEnd: usualWake, color: StrandPalette.restColor,
-              bin: range.totalsBin, window: window, xStyle: range.axisStyle,
+              bin: shown.totalsBin(for: window), window: window, xStyle: shown.axisStyle,
               selection: $selected, accessibilityTitle: "Sleep schedule")
 
 // Parts of a whole: the highlighted category sits at the bottom, the rest at 30 %; normalised shows shares.
+// Binned stacks are the mean day (aggregation: .mean, stages) or the totals (aggregation: .sum, HR zones);
+// StackedBarChart.bin(_:by:aggregation:) is what the bars show.
 StackedBarChart(days: nights.map { .init(day: $0.wakeDay, values: ["deep": $0.deep, "rem": $0.rem, "light": $0.light]) },
                 categories: [.init(id: "deep", name: "Deep", color: StrandPalette.sleepDeep),
                              .init(id: "rem", name: "REM", color: StrandPalette.sleepREM),
                              .init(id: "light", name: "Light", color: StrandPalette.sleepLight)],
-                highlighted: "deep", bin: range.totalsBin, window: window, xStyle: range.axisStyle,
+                highlighted: "deep", bin: shown.totalsBin(for: window), window: window, xStyle: shown.axisStyle,
                 y: .durationMinutes(), selection: $selected, accessibilityTitle: "Deep sleep")
 
 // Levels: one dot per logged day, never joined; each level a labelled row.
 DotStripChart(points: moods, levels: 1...5, levelLabels: [1: "Awful", 2: "Low", 3: "Okay", 4: "Good", 5: "Great"],
-              color: moodColor, window: window, xStyle: range.axisStyle, selection: $selected,
+              color: moodColor, window: window, xStyle: shown.axisStyle, selection: $selected,
               height: NoopMetrics.chartHeightSecondary, accessibilityTitle: "Mood")
 
 // Sparse readings: every reading a point, a faint display-only trend (.rollingMedian(days: 14) default,
 // .rollingMean(days:), .none), not drawn under three readings, broken across `cadence` gaps.
 SparsePointsChart(points: weighIns, color: StrandPalette.metricPurple,
                   references: bmi ? [ChartReference(18.5), ChartReference(25), ChartReference(30)] : [],
-                  window: window, xStyle: range.axisStyle,
+                  window: window, xStyle: shown.axisStyle,
                   y: ChartValueAxis(unit: "kg", domain: .fitted(minSpan: 2), format: ChartValueAxis.decimals(1)),
                   selection: $selected, accessibilityTitle: "Weight")
 
 // Held estimates: a step line with a point per reading, held to today while within the cadence
-// (holdsLatest), broken where the method (DailyPoint.series) changes.
+// (holdsLatest), broken where the method (DailyPoint.series) changes. The value held from the last reading
+// before the window is drawn from the window's start while it was still current, so pass all of history.
 StepLineChart(points: vo2, color: StrandPalette.chargeColor, reference: ChartReference(Double(age), label: "Your age"),
-              window: window, xStyle: range.axisStyle,
+              window: window, xStyle: shown.axisStyle,
               y: ChartValueAxis(unit: "ml/kg/min", domain: .fitted(minSpan: 6)),
               selection: $selected, accessibilityTitle: "VO2 max")
 
@@ -609,7 +640,9 @@ StepLineChart(points: vo2, color: StrandPalette.chargeColor, reference: ChartRef
 // wide enough for its label carries it inside; narrow and hatched bands are named in the legend), value
 // bands (stress Low/Medium/High, HR zones), labelled markers, references, an optional min/max envelope
 // (Sample.low/high). compact: the small-card form (120 pt, no value labels, legend or in-plot labels).
-// live: the now dot on the latest sample and no window animation.
+// live: the now dot on the latest sample and no window animation. Samples ascending, one per time, and a
+// stable array (the chart is rebuilt on every scrub step). A gap is a skipped bucket; samples stamped at
+// their measurement time (a live trace) may jitter by up to half a bucket without breaking the line.
 IntradayChart(samples: buckets.map { .init(time: $0.start, value: $0.bpm) }, bucketSeconds: 300,
               bands: [.init(id: "sleep", start: onset, end: wake, color: StrandPalette.restColor, label: "Asleep"),
                       .init(id: "off", start: offStart, end: offEnd, color: StrandPalette.textTertiary,
@@ -634,17 +667,22 @@ There is no zoom or pan in `IntradayChart`; the Deep Timeline keeps `OverviewHRC
 ValueReadout(.daily(selection: selected, in: nights, nightly: true, unit: "ms", format: fmt,
                     context: selected == nil ? "7-day avg 61 ms" : nil),
              isScrubbing: selected != nil, isLoading: !loaded)
-let weekly = DailyBarChart.bin(steps, by: range.totalsBin, aggregation: .mean)
-ValueReadout(.daily(selection: selected, in: weekly, bin: range.totalsBin, unit: "steps", format: fmt),
+let weekly = DailyBarChart.bin(steps, by: shown.totalsBin(for: window), aggregation: .mean)
+ValueReadout(.daily(selection: selected, in: weekly, bin: shown.totalsBin(for: window), unit: "steps", format: fmt),
              isScrubbing: selected != nil)
 // A score in its band colour:
 ValueReadout(.daily(selection: selected, in: charge, unit: "%", format: fmt,
                     valueColor: { chargeBands.band(for: $0).color }))
 // Intraday: the nearest sample, else the latest, dated "Tue 7 Oct, 14:05".
 ValueReadout(.intraday(selection: selected, in: samples, unit: "bpm", format: fmt))
+// Bedtime to wake: the selected night (or the week's / month's mean night, as the bar shows), else the latest.
+let spans = RangeBarChart.bin(items, by: bin)
+ValueReadout(.range(selection: selected, in: spans, bin: bin))                // "11:20 PM – 7:05 AM", no unit
+// A summed bin still running: say so.
+let partial = DailyBarChart.partialBins(points, by: bin, window: window)  // context: "So far this week"
 // One point you already hold, with the date line for its period (.day, .night, .week, .month, .time):
 ReadoutContent.daily(point, unit: "ms", format: fmt, period: ReadoutContent.Period(bin: .day, nightly: true))
-ChartSelection.point(for: selected, in: points, unit: range.totalsBin)    // the point under the selection
+ChartSelection.point(for: selected, in: points, unit: shown.totalsBin(for: window))    // the point under the selection
 ChartSelection.sample(for: selected, in: samples)                         // the sample under an intraday selection
 ```
 
@@ -654,10 +692,12 @@ App views that still draw their own `Chart` (Coach viz, the Deep Timeline) use t
 
 ```swift
 Chart { … SelectionRule(selected, unit: .day) }                 // the 1 pt rule (unit: nil for raw times)
-    .naraChartAxes(x: window, style: range.axisStyle, y: ChartValueAxis(unit: "ms", domain: .fitted(minSpan: 20)),
+    .naraChartAxes(x: window, style: shown.axisStyle, y: ChartValueAxis(unit: "ms", domain: .fitted(minSpan: 20)),
                    yDomain: 40...100)                           // house axes from a window and an axis
-    .chartScrub(xs: days, selection: $selected)                 // drag / tap / hover, haptic, no animation
-// or .chartOverlay { proxy in ChartScrubLayer(proxy: proxy, xs: days, selection: $selected) }
+    .chartScrub(xs: days, selection: $selected, unit: .day)     // drag / tap / hover, haptic, no animation
+// or .chartOverlay { proxy in ChartScrubLayer(proxy: proxy, xs: days, selection: $selected, unit: .day) }
+// unit: the marks' unit when xs are day / week / month starts (a finger anywhere on a bar selects it);
+// leave it nil for raw times. ChartSelection.nearest(to:in:unit:calendar:) is the rule.
 ChartAxis.layout(window, style: .dayOfMonth)                    // the resolved marks, labels and anchors
 ChartSelection.nearest(to: date, in: xs) / .nearestIndex(to:in:) / .step(from:in:forward:) / .afterTap(current:tapped:)
 someCard.naraChartCompact()                                      // compact form for every kit chart inside
@@ -725,18 +765,20 @@ Every metric or section drill-down has the same anatomy, top to bottom:
 @State private var selected: Date?
 
 // nights: [DailyPoint] built with DailyPoint(key:value:) from the stored keys (local days, never UTC).
-let window = ChartAxis.window(range, firstDataDay: nights.first?.day)
+let available: (ChartRange) -> Bool = { unlocked(ExploreRange($0)) }
+let shown = RangeControl.effectiveRange(range, isAvailable: available)   // what the control highlights
+let window = ChartAxis.window(shown, firstDataDay: nights.first?.day)
 let chartState: ChartState = !loaded ? .loading : (nights.isEmpty ? .empty("No HRV readings yet") : .ready)
 
 ScreenScaffold(title: "Heart rate variability", titleDisplay: .navigationBar, isLoading: !loaded) {
     ValueReadout(.daily(selection: selected, in: nights, nightly: true, unit: "ms", format: fmt,
                         context: selected == nil ? "7-day avg \(fmt(avg7)) ms" : vsTypical(selected)),
                  isScrubbing: selected != nil, isLoading: !loaded)
-    RangeControl(selection: $range, isAvailable: { unlocked(ExploreRange($0)) })
+    RangeControl(selection: $range, isAvailable: available)
     NoopCard {
         DailyLineChart(series: [.init(id: "hrv", name: "HRV", color: StrandPalette.metricPurple, points: nights)],
                        typicalBand: typical, baseline: ChartReference(base, label: "Baseline \(fmt(base))"),
-                       state: chartState, window: window, xStyle: range.axisStyle,
+                       state: chartState, window: window, xStyle: shown.axisStyle,
                        y: ChartValueAxis(unit: "ms", domain: .fitted(minSpan: 20)),
                        selection: $selected, accessibilityTitle: "Heart rate variability")
     }
@@ -747,9 +789,9 @@ ScreenScaffold(title: "Heart rate variability", titleDisplay: .navigationBar, is
 .onChangeCompat(of: range) { _ in selected = nil }
 ```
 
-For a bar chart of daily totals the readout reads the bars: `let bars = DailyBarChart.bin(points, by:
-range.totalsBin, aggregation: .mean)`, then `.daily(selection: selected, in: bars, bin: range.totalsBin, …)`,
-and the chart gets the raw `points` with `bin: range.totalsBin`.
+For a bar chart of daily totals the readout reads the bars: `let bin = shown.totalsBin(for: window)`,
+`let bars = DailyBarChart.bin(points, by: bin, aggregation: .mean)`, then `.daily(selection: selected, in:
+bars, bin: bin, …)`, and the chart gets the raw `points` (the whole history) with the same `bin`.
 
 A card that contains a scrubbable chart is not itself a link; its header row is.
 
@@ -758,8 +800,9 @@ A card that contains a scrubbable chart is not itself a link; its header row is.
 What each kind of data is drawn as, with the kit call. "Line + gaps" is points joined by monotone segments
 that break across missing days, with no area fill. "Band" is the personal typical range, drawn only once it
 is trusted (14 valid nights); pass `typicalBand: nil` until then. Every bar chart takes
-`bin: range.totalsBin` (daily bars at W and M, weekly at 3M, monthly at 6M and longer). Default range is M
-unless noted. "Not in the kit" rows keep the screen's current view until the kit grows one.
+`bin: shown.totalsBin(for: window)` (daily bars at W and M, weekly at 3M, monthly at 6M and Y, All by its
+span), where `shown` is `RangeControl.effectiveRange(range, …)`. Default range is M unless noted. "Not in
+the kit" rows keep the screen's current view until the kit grows one.
 
 | Data | Cadence | Kit chart and key parameters | Readout context / StatGrid |
 | --- | --- | --- | --- |
@@ -784,8 +827,8 @@ unless noted. "Not in the kit" rows keep the screen's current view until the kit
 | Steps, calories, active energy | daily total | `DailyBarChart.totals(_, goal:, bin:, aggregation: .mean)`; on-device days `isEstimate` | "avg 8,420 steps/day" · Average per day, Total, Best day, vs previous |
 | Calories in, protein, carbs, fat | logged days | `DailyBarChart.totals(_, goal: nil, bin:)`; macro mix: `StackedBarChart(normalised: true)` | Average per logged day, Days logged, High, Low |
 | HR zone minutes (Z1-3, Z4-5), strength time | workout days only | `DailyBarChart.totals(_, bin:, aggregation: .sum)` (an absent day is no bar, not a gap) | Total, Average per workout day, Active days, High |
-| HR zones (all) | workout days | `StackedBarChart(categories: Z1…Z5 with StrandPalette.zone1…zone5, bin:)` | Total, Average per workout day, Z4-5 share, Active days |
-| Intensity minutes | daily | `DailyBarChart.totals(_, goal: ChartReference(150, label: "150 min"), bin: range == .week ? .day : .weekOfYear, aggregation: .sum)`; default 3M | This week, Weekly average, Weeks ≥ 150, Best week |
+| HR zones (all) | workout days | `StackedBarChart(categories: Z1…Z5 with StrandPalette.zone1…zone5, bin:, aggregation: .sum)` (the same weekly minutes as the single-zone chart and the Total stat) | Total, Average per workout day, Z4-5 share, Active days |
+| Intensity minutes | daily | `let bin: Calendar.Component = shown == .week ? .day : .weekOfYear`; `DailyBarChart.totals(_, goal: bin == .weekOfYear ? ChartReference(150, label: "150 min") : nil, bin: bin, aggregation: .sum)` (the 150-minute goal is weekly, so daily bars at W get none); the running week draws as partial; default 3M | This week (so far), Weekly average, Weeks ≥ 150, Best week |
 | Weight, body fat, lean mass, BMI | sparse | `SparsePointsChart(points:, color:, …, y: ChartValueAxis(unit: "kg", domain: .fitted(minSpan: 2), format: ChartValueAxis.decimals(1)))`; BMI `references: [18.5, 25, 30]`; default 3M (weight) or 6M | "−1.2 kg since Jul" · Latest, Change, Low, High |
 | VO2 max (measured / estimated), Fitness age, Vitality, Body age | weekly or sparse | `StepLineChart(points:, color:, reference:)`; estimates `isEstimate`, a method change in `DailyPoint.series`; ages with `ChartReference(age, label: "Your age")`; Vitality `y: ChartValueAxis(unit: nil, domain: .fixed(0...100))`; default 6M | Latest, Change over range, High, Readings |
 | Mood | daily 1-5 | `DotStripChart(points:, levels: 1...5, levelLabels:, color:)` (distribution is not in the kit) | Average, Most common, Days logged, vs previous |
@@ -805,13 +848,15 @@ unless noted. "Not in the kit" rows keep the screen's current view until the kit
 - The x window is the selected range ending today, not the data's extent. Daily values sit at the centre
   of their day. Labels adapt to the range and never repeat; the first and last never clip.
 - Daily charts plot each `yyyy-MM-dd` key at the local start of that day; never pass UTC midnights.
-- Lines break across gaps longer than the metric's cadence. Fewer than three points are drawn as points
-  only. No area fill under a line that is not a cumulative quantity. No smoothing that overshoots the
-  data or misplaces a peak (no Catmull-Rom, no midpoint curves); straight or monotone segments only.
+- Lines break across gaps longer than the metric's cadence. A series with fewer than three points is drawn
+  as points only (held steps and intraday runs excepted). No area fill under a line that is not a
+  cumulative quantity. No smoothing that overshoots the data or misplaces a peak (no Catmull-Rom, no
+  midpoint curves); straight or monotone segments only.
 - References (baseline, 95 %, goal, sleep need, "Your age") are labelled at the trailing edge, above
   their rule and in front of the data; the label moves to the leading edge when the newest data would sit
   under it.
-- Long ranges aggregate rather than draw hairlines: every bar chart takes `bin: range.totalsBin`.
+- Long ranges aggregate rather than draw hairlines: every bar chart takes `bin: shown.totalsBin(for: window)`.
+  Summed bins that are not fully covered (the running week) are drawn as partial.
   Points-only series over 90 readings in the window draw smaller dots; line series over 60 draw the line
   alone, keeping the points of estimates and of readings alone between gaps.
 - A legend names only marks that are drawn; it is one row, never wraps, and its row is reserved while the
