@@ -36,7 +36,7 @@ extension PhysiologyContext {
     }
 
     public struct EligibilityConfig: Codable, Equatable, Sendable {
-        public var version = "pc-eligibility-4"
+        public var version = Eligibility.version
         public var motion = MotionEvidenceConfig()
         /// Heart-rate free posture strata (reference stratification only; never a gate).
         public var posture = PostureConfig()

@@ -1149,7 +1149,7 @@ extension PhysiologyContext {
 
     /// Join tunables (owned by the lead, implemented in PCIntervalAlgebra.swift).
     public struct JoinConfig: Codable, Equatable, Sendable {
-        public var version = "pc-join-3"
+        public var version = IntervalAlgebra.version
         /// Seconds of history before a measurement that the preceding-history window inspects.
         public var precedingLookbackS = 1800
         /// A label is "mixed" when a second supported label holds at least this share of the interval.
