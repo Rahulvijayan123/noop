@@ -14,6 +14,8 @@ Four guards run before an entry is accepted:
      (catches claims or numbers that the abstract does not state).
   3. every number in the claim must occur in the abstract (thousands separators aside).
   4. the record is a journal article (esummary pubtype), never a preprint or a retracted publication.
+  5. an entry that can be offered as an explanation has a title the explanation card may show (no forbidden
+     term, nothing that reads as a hint of an illness: literature.ALARMING_TITLE).
 An entry that fails either guard is dropped and listed in verification/manifest.json.
 Abstracts are checked in memory only; they are not written to disk.
 
@@ -38,6 +40,9 @@ import xml.etree.ElementTree as ET
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(HERE / "src"))
+from nara_metric_insight.literature import ALARMING_TITLE, EXCLUDED_TOPICS  # noqa: E402
+from nara_metric_insight.validate import forbidden_term  # noqa: E402
 OUT = HERE / "src" / "nara_metric_insight" / "data" / "literature_seed.json"
 VERIFY_DIR = HERE / "build" / "literature" / "verification"
 EUTILS = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/"
@@ -295,18 +300,8 @@ SPECS: list[dict] = [
         support=["47 community-dwelling adults", "elevated heart rate", "14,179 valid nighttime hours",
                  "greater effects observed as temperature increased"],
     ),
-    dict(
-        id="rhr-hydration-caution", pmid="25924806", expect_author="Hooper", expect_year="2015",
-        metric=["rhr"], topic="hydration", direction="variable",
-        claim=("A Cochrane diagnostic-accuracy review in people aged 65 and over found that heart rate, like several "
-               "other commonly used single signs, was not useful for detecting water-loss dehydration and should not "
-               "be relied on alone."),
-        typical_magnitude=None,
-        evidence_type="systematic_review_meta_analysis",
-        population="people aged 65 and over (3 published studies plus 21 contributed datasets)",
-        keywords=["hydration", "dehydration", "dehydrated", "water", "fluid", "thirst", "drink water"],
-        support=["heart rate", "are not useful, and should not be relied on individually", "65 years and over"],
-    ),
+    # rhr-hydration-caution (PMID 25924806, Hooper 2015) was removed on 2026-10-07: its title ("Clinical symptoms, signs
+    # and tests for ... dehydration") cannot be shown under a person's explanation.
     dict(
         id="rhr-energy-drinks", pmid="37695306", expect_author="Gualberto", expect_year="2024",
         metric=["rhr"], topic="caffeine", direction="variable",
@@ -555,35 +550,22 @@ SPECS: list[dict] = [
     ),
     # ------------------------------------------------------------------ respiratory rate
     dict(
-        id="resp-nightly-normal-range", pmid="34526602", expect_author="Natarajan", expect_year="2021",
-        metric=["resp"], topic="normal_range", direction="variable",
-        claim=("Using respiratory rate derived from wearable heart-rate data during sleep, 90% of values in healthy "
-               "adults fell between 11.8 and 19.2 breaths per minute (mean 15.4); the rate decreased slightly with "
-               "age and was higher in females than males under age 50."),
-        typical_magnitude="90% range 11.8-19.2 breaths/min; mean 15.4 breaths/min",
-        evidence_type="cohort",
-        population=("healthy adults wearing heart-rate-enabled wearable devices (nocturnal data); algorithm checked "
-                    "against sleep-study recordings"),
-        keywords=["breathing rate", "respiratory rate", "normal", "range", "typical", "average",
-                  "breaths per minute", "age", "sex", "night"],
-        support=["90% of respiratory rate values for healthy adults",
-                 "within the range 11.8-19.2 min-1 with a mean value of 15.4 min-1",
-                 "The respiratory rate decreases slightly with age",
-                 "higher in females compared to males for age <50 years"],
-    ),
-    dict(
-        id="resp-night-to-night-stability", pmid="34526602", expect_author="Natarajan", expect_year="2021",
+        id="resp-night-to-night-consistency", pmid="38875674", expect_author="Toften", expect_year="2022",
         metric=["resp"], topic="day_to_day_variability", direction="variable",
-        claim=("Within individuals, the 14-day coefficient of variation of nightly respiratory rate had a 90% range "
-               "of 2.3-9.2% in women and 2.3-9.5% in men aged 20-24, widening to 2.5-16.8% and 2.7-21.7% at ages "
-               "65-69."),
-        typical_magnitude="14-day CV, 90% range: 2.3-9.5% at ages 20-24; 2.5-21.7% at ages 65-69",
+        claim=("In a 3-month home pilot with 6 healthy adults, the nightly average respiratory rate from a bedside "
+               "radar sleep monitor was consistent from night to night. In the validation part of the study, the "
+               "monitor produced a respiratory rate 84% of the time, with a mean absolute error of 0.18 respirations "
+               "per minute against respiratory inductance plethysmography."),
+        typical_magnitude=None,
         evidence_type="cohort",
-        population="healthy adults wearing heart-rate-enabled wearable devices (nocturnal data)",
-        keywords=["night-to-night", "variability", "stable", "consistency", "coefficient of variation",
-                  "fluctuation", "baseline", "breathing rate", "change"],
-        support=["The 90% range for the coefficient of variation", "in a 14 day period for females (males)",
-                 "2.3-9.2% (2.3-9.5%) for ages 20-24 yr", "2.5-16.8% (2.7-21.7%) for ages 65-69 yr"],
+        population=("6 healthy adults using a bedside radar sleep monitor at home for 3 months; 37 healthy adults in "
+                    "full-night validation against respiratory inductance plethysmography"),
+        keywords=["night-to-night", "consistency", "stable", "baseline", "breathing rate", "nightly average",
+                  "variability", "change", "trend"],
+        support=["analyzed for 6 healthy participants in a pilot study",
+                 "used Somnofy at home for 3 months",
+                 "the nightly average was consistent from night to night",
+                 "measured RR 84% of the time, with mean absolute error of 0.18"],
     ),
     dict(
         id="resp-sleep-stages", pmid="27597768", expect_author="Gutierrez", expect_year="2016",
@@ -1087,6 +1069,9 @@ def main() -> int:
                 rf"(?<![a-z\d.,]){re.escape(n.replace(',', ''))}(?!\d|[.,]\d)", plain)]
             if unstated:
                 reasons.append(f"claim numbers not in the abstract: {unstated}")
+            offered = not spec.get("context_only") and spec["topic"] not in EXCLUDED_TOPICS
+            if offered and (forbidden_term(cit["title"] or "") or ALARMING_TITLE.search(cit["title"] or "")):
+                reasons.append(f"the title cannot be shown under an explanation: {cit['title']!r}")
             kinds = [str(k) for k in rec.get("pubtype") or []]
             if "Journal Article" not in kinds or any(bad in k for k in kinds for bad in (
                     "Preprint", "Retracted Publication", "Retraction of Publication")):

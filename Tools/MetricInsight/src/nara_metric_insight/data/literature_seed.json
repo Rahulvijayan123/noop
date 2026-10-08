@@ -2,9 +2,9 @@
   "meta": {
     "name": "nara_literature_seed",
     "schema_version": 1,
-    "built_at": "2026-10-08T01:13:46+00:00",
+    "built_at": "2026-10-08T01:55:36+00:00",
     "builder": "scripts/build_literature_seed.py",
-    "entry_count": 60,
+    "entry_count": 58,
     "citation_source": "NCBI E-utilities esummary.fcgi (db=pubmed, retmode=json). title, journal (esummary 'source'), year (first 4 chars of 'pubdate'), first_author ('sortfirstauthor') and doi (articleids idtype=doi) are copied verbatim.",
     "conventions": {
       "direction": "Change in the listed metric associated with the factor in `topic`. 'variable' means no significant change, a mixed or cyclical pattern, or a measurement/variability fact. For topic long_term_risk the direction is the outcome risk as RHR rises.",
@@ -672,38 +672,6 @@
       "verification_file": "verification/esummary_41462246.json"
     },
     {
-      "id": "rhr-hydration-caution",
-      "metric": [
-        "rhr"
-      ],
-      "topic": "hydration",
-      "claim": "A Cochrane diagnostic-accuracy review in people aged 65 and over found that heart rate, like several other commonly used single signs, was not useful for detecting water-loss dehydration and should not be relied on alone.",
-      "direction": "variable",
-      "typical_magnitude": null,
-      "evidence_type": "systematic_review_meta_analysis",
-      "population": "people aged 65 and over (3 published studies plus 21 contributed datasets)",
-      "context_only": false,
-      "keywords": [
-        "hydration",
-        "dehydration",
-        "dehydrated",
-        "water",
-        "fluid",
-        "thirst",
-        "drink water"
-      ],
-      "citation": {
-        "pmid": "25924806",
-        "doi": "10.1002/14651858.CD009647.pub2",
-        "title": "Clinical symptoms, signs and tests for identification of impending and current water-loss dehydration in older people.",
-        "journal": "Cochrane Database Syst Rev",
-        "year": 2015,
-        "first_author": "Hooper L"
-      },
-      "verified": true,
-      "verification_file": "verification/esummary_25924806.json"
-    },
-    {
       "id": "rhr-energy-drinks",
       "metric": [
         "rhr"
@@ -1255,73 +1223,38 @@
       "verification_file": "verification/esummary_15578234.json"
     },
     {
-      "id": "resp-nightly-normal-range",
-      "metric": [
-        "resp"
-      ],
-      "topic": "normal_range",
-      "claim": "Using respiratory rate derived from wearable heart-rate data during sleep, 90% of values in healthy adults fell between 11.8 and 19.2 breaths per minute (mean 15.4); the rate decreased slightly with age and was higher in females than males under age 50.",
-      "direction": "variable",
-      "typical_magnitude": "90% range 11.8-19.2 breaths/min; mean 15.4 breaths/min",
-      "evidence_type": "cohort",
-      "population": "healthy adults wearing heart-rate-enabled wearable devices (nocturnal data); algorithm checked against sleep-study recordings",
-      "context_only": false,
-      "keywords": [
-        "breathing rate",
-        "respiratory rate",
-        "normal",
-        "range",
-        "typical",
-        "average",
-        "breaths per minute",
-        "age",
-        "sex",
-        "night"
-      ],
-      "citation": {
-        "pmid": "34526602",
-        "doi": "10.1038/s41746-021-00493-6",
-        "title": "Measurement of respiratory rate using wearable devices and applications to COVID-19 detection.",
-        "journal": "NPJ Digit Med",
-        "year": 2021,
-        "first_author": "Natarajan A"
-      },
-      "verified": true,
-      "verification_file": "verification/esummary_34526602.json"
-    },
-    {
-      "id": "resp-night-to-night-stability",
+      "id": "resp-night-to-night-consistency",
       "metric": [
         "resp"
       ],
       "topic": "day_to_day_variability",
-      "claim": "Within individuals, the 14-day coefficient of variation of nightly respiratory rate had a 90% range of 2.3-9.2% in women and 2.3-9.5% in men aged 20-24, widening to 2.5-16.8% and 2.7-21.7% at ages 65-69.",
+      "claim": "In a 3-month home pilot with 6 healthy adults, the nightly average respiratory rate from a bedside radar sleep monitor was consistent from night to night. In the validation part of the study, the monitor produced a respiratory rate 84% of the time, with a mean absolute error of 0.18 respirations per minute against respiratory inductance plethysmography.",
       "direction": "variable",
-      "typical_magnitude": "14-day CV, 90% range: 2.3-9.5% at ages 20-24; 2.5-21.7% at ages 65-69",
+      "typical_magnitude": null,
       "evidence_type": "cohort",
-      "population": "healthy adults wearing heart-rate-enabled wearable devices (nocturnal data)",
+      "population": "6 healthy adults using a bedside radar sleep monitor at home for 3 months; 37 healthy adults in full-night validation against respiratory inductance plethysmography",
       "context_only": false,
       "keywords": [
         "night-to-night",
-        "variability",
-        "stable",
         "consistency",
-        "coefficient of variation",
-        "fluctuation",
+        "stable",
         "baseline",
         "breathing rate",
-        "change"
+        "nightly average",
+        "variability",
+        "change",
+        "trend"
       ],
       "citation": {
-        "pmid": "34526602",
-        "doi": "10.1038/s41746-021-00493-6",
-        "title": "Measurement of respiratory rate using wearable devices and applications to COVID-19 detection.",
-        "journal": "NPJ Digit Med",
-        "year": 2021,
-        "first_author": "Natarajan A"
+        "pmid": "38875674",
+        "doi": "10.2196/36618",
+        "title": "Noncontact Longitudinal Respiratory Rate Measurements in Healthy Adults Using Radar-Based Sleep Monitor (Somnofy): Validation Study.",
+        "journal": "JMIR Biomed Eng",
+        "year": 2022,
+        "first_author": "Toften S"
       },
       "verified": true,
-      "verification_file": "verification/esummary_34526602.json"
+      "verification_file": "verification/esummary_38875674.json"
     },
     {
       "id": "resp-sleep-stages",
