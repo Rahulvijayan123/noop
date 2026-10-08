@@ -17,6 +17,11 @@ runs with zero optional deps (numpy only); the HART path is loaded only when
 the manifest says model_kind=hart and is reported "unavailable" (kind
 model_missing) otherwise.
 
+``ping`` also reports ``loaded`` (loaded.py): the sha256 of the manifest, checkpoint, config and transition
+artifact this process actually loaded, of its own code, and its thread settings, with ``loaded_digest`` over them;
+every infer response repeats ``loaded_digest``, so the worker can tell an answer from a process that loaded other
+bytes. ``--threads`` (default ``$ACTIVITY_THREADS`` or 1) caps torch's intra-op threads; inter-op is always one.
+
 Run:  python -m activity_context.serve --manifest manifest.json --checkpoint ./checkpoint
 """
 
@@ -37,6 +42,7 @@ import numpy as np
 from . import PREPROCESSING_VERSION, __version__
 from .baseline import MOTION_LABELS, classify_window
 from .features import FEATURE_SCHEMA, window_features
+from .loaded import base_loaded, configure_torch_threads, file_sha256, loaded_digest
 from .manifest import Manifest, load_manifest
 from .model_names import FINE_SCHEMA
 from .preprocess import (COLUMNS_BYTES_PER_SECOND, HOP_SAMPLES, MAX_HEAD_SECONDS,
@@ -90,6 +96,12 @@ class ServeContext:
     gait: Any = None
     gait_status: str = "gait_absent"
     gait_error: Optional[str] = None
+    # What was actually loaded (loaded.py), measured at start-up; ``loaded_digest`` is its digest.
+    loaded: Dict[str, str] = None  # type: ignore[assignment]
+    loaded_digest: str = ""
+    manifest_sha256: Optional[str] = None
+    transition_sha256: Optional[str] = None
+    threads: int = 1
 
 
 GAIT_EXPERTS = ("eldernet",)
@@ -97,7 +109,8 @@ GAIT_EXPERTS = ("eldernet",)
 
 def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
                   timeout: float = DEFAULT_TIMEOUT_SECONDS,
-                  gait_expert: Optional[str] = None, gait_runtime: Any = None) -> ServeContext:
+                  gait_expert: Optional[str] = None, gait_runtime: Any = None,
+                  threads: int = 1) -> ServeContext:
     # An explicitly requested manifest that is missing or unreadable is a
     # CONFIGURATION ERROR, never a silent baseline fallback: a misconfigured
     # model dir must fail loudly (model_missing) instead of publishing
@@ -113,12 +126,14 @@ def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
         manifest.model_kind = "baseline"
     ctx = ServeContext(manifest=manifest,
                        checkpoint_dir=checkpoint_dir or ".",
-                       timeout=timeout)
+                       timeout=timeout, threads=max(1, int(threads)))
+    ctx.manifest_sha256 = file_sha256(manifest_path) if manifest_path else None
     if manifest.model_kind == "hart":
         try:
             from .model import HARTModel
             if not checkpoint_dir or not os.path.isdir(checkpoint_dir):
                 raise FileNotFoundError(checkpoint_dir or ".")
+            configure_torch_threads(ctx.threads)
             ctx.model = HARTModel(manifest, checkpoint_dir)
             ctx.model_status = "hart_loaded"
         except Exception as exc:
@@ -126,7 +141,35 @@ def build_context(manifest_path: Optional[str], checkpoint_dir: Optional[str],
             ctx.model_error = f"{type(exc).__name__}: {exc}"
     _load_transition(ctx, manifest, checkpoint_dir)
     _load_gait(ctx, gait_expert, gait_runtime)
+    if ctx.model is not None or ctx.gait is not None:
+        # Loading sets torch to one thread; the configured cap is applied last so it is the one in force.
+        configure_torch_threads(ctx.threads)
+    ctx.loaded = loaded_identity(ctx)
+    ctx.loaded_digest = loaded_digest(ctx.loaded)
     return ctx
+
+
+def loaded_identity(ctx: ServeContext) -> Dict[str, str]:
+    """The ``loaded`` map (loaded.py): only what this process actually holds, each digest measured from its bytes."""
+    out = base_loaded(ctx.threads if (ctx.model is not None or ctx.gait is not None) else None)
+    out["model_kind"] = "hart" if ctx.model is not None else "baseline"
+    out["model_version"] = ctx.manifest.model_version
+    out["preprocessing_version"] = ctx.manifest.preprocessing_version
+    out["manifest_sha256"] = ctx.manifest_sha256 or "default"
+    if ctx.model is not None:
+        out["checkpoint_sha256"] = ctx.model.checkpoint_sha256
+        if ctx.model.config_sha256:
+            out["config_sha256"] = ctx.model.config_sha256
+    if ctx.transition is not None and ctx.transition_sha256:
+        out["transition_sha256"] = ctx.transition_sha256
+        out["transition_version"] = str(ctx.transition_version)
+    if ctx.gait is not None:
+        digest = getattr(ctx.gait, "weights_digest", None)
+        if digest:
+            out["gait_weights_digest"] = digest
+        from .eldernet import MODEL_VERSION as GAIT_MODEL_VERSION
+        out["gait_model_version"] = GAIT_MODEL_VERSION
+    return out
 
 
 def _load_gait(ctx: ServeContext, expert: Optional[str], runtime: Any = None) -> None:
@@ -166,6 +209,7 @@ def _load_transition(ctx: ServeContext, manifest: Manifest, checkpoint_dir: Opti
         art = section.get("artifact") or os.path.join(checkpoint_dir or ".", "transition.json.gz")
         if not os.path.isfile(art):
             raise FileNotFoundError(art)
+        ctx.transition_sha256 = file_sha256(art)
         ctx.transition = TransitionModel.load(art)
         ctx.transition_version = ctx.transition.model_version
         ctx.transition_status = "transition_loaded"
@@ -350,6 +394,8 @@ def handle_ping(ctx: ServeContext) -> Dict[str, Any]:
         "fine_schema": FINE_SCHEMA if getattr(ctx.model, "fine_names", None) else None,
         "gait_status": ctx.gait_status,
         "gait_error": ctx.gait_error,
+        "loaded": ctx.loaded,
+        "loaded_digest": ctx.loaded_digest,
     }
     if ctx.gait is not None:
         from .eldernet import MODEL_VERSION as GAIT_MODEL_VERSION, WIRE_SCHEMA as GAIT_SCHEMA
@@ -417,6 +463,7 @@ def handle_infer(ctx: ServeContext, req: Dict[str, Any]) -> Dict[str, Any]:
         "calibration_version": ctx.manifest.calibration_version,
         "windows": windows,
         "manifest": ctx.manifest.to_dict(),
+        "loaded_digest": ctx.loaded_digest,
         "duration_ms": int((time.monotonic() - t0) * 1000),
     }
     if ctx.transition is not None:
@@ -531,6 +578,14 @@ def serve_forever(ctx: ServeContext) -> int:
     return 0
 
 
+def _env_threads() -> int:
+    raw = os.environ.get("ACTIVITY_THREADS", "").strip()
+    try:
+        return max(1, int(raw)) if raw else 1
+    except ValueError:
+        return 1
+
+
 def main(argv: Optional[List[str]] = None) -> int:
     ap = argparse.ArgumentParser(description="Nara activity-context serve process (C10)")
     ap.add_argument("--manifest", default=None, help="path to manifest.json")
@@ -539,10 +594,14 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="per-request timeout in seconds")
     ap.add_argument("--gait-expert", choices=GAIT_EXPERTS, default=os.environ.get("ACTIVITY_GAIT_EXPERT") or None,
                     help="opt-in gait expert (eldernet: Oxford academic-use weights via ELDERNET_WEIGHTS_DIR / "
-                         "ELDERNET_UPSTREAM_DIR); default off")
+                         "ELDERNET_UPSTREAM_DIR); default off. The worker never enables it: its ElderNet runs as "
+                         "its own service (one route per model)")
+    ap.add_argument("--threads", type=int, default=_env_threads(),
+                    help="torch intra-op threads (default $ACTIVITY_THREADS or 1); inter-op is always 1")
     args = ap.parse_args(argv)
     try:
-        ctx = build_context(args.manifest, args.checkpoint, args.timeout, gait_expert=args.gait_expert)
+        ctx = build_context(args.manifest, args.checkpoint, args.timeout, gait_expert=args.gait_expert,
+                            threads=args.threads)
     except Exception as exc:
         # Configuration error (e.g. an explicitly requested manifest that is
         # missing): exit with a single JSON diagnostic line so the parent

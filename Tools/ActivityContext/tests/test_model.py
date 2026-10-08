@@ -68,9 +68,9 @@ def test_verify_on_load_matches_the_checkpoint_kind():
     fine = _is_fine_tuned()
     # a fine-tuned directory must carry its own manifest; the fixture pins the pretrained digest
     assert fine == (_manifest_path(CHECKPOINT) != os.path.join(FIXTURES, "manifest.hart.example.json"))
-    mdl, _torch = _load_model_and_verify(CHECKPOINT, len(man.class_map), man.seed, manifest=man)
+    mdl, _torch, measured = _load_model_and_verify(CHECKPOINT, len(man.class_map), man.seed, manifest=man)
     assert _file_sha256(os.path.join(CHECKPOINT, "model.safetensors")) == \
-        man.checkpoint["files"]["model.safetensors"]["sha256"]
+        man.checkpoint["files"]["model.safetensors"]["sha256"] == measured
     new = set(mdl.state_dict()) - set(load_file(os.path.join(CHECKPOINT, "model.safetensors")))
     assert new == (set() if fine else EXPECTED_NEW_HEAD_TENSORS)
 

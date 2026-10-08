@@ -22,6 +22,7 @@ are refused unless ``allow_offline`` (offline replay tooling only; reported tier
 from __future__ import annotations
 
 import os
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple
@@ -29,6 +30,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 
 from .. import __version__
+from ..loaded import base_loaded, code_sha256, configure_torch_threads, loaded_digest
 from ..preprocess import (MAX_HEAD_SECONDS, MAX_RUN_SECONDS, MAX_TAIL_SECONDS, PreprocessError,
                           decode_columns_b64, validate_request_units)
 from . import (ACTINET_ENCODER_PREFIX, ALLOWED_HOP_S, ENCODER_CONFIG_SCHEMA, PREPROCESSING_VERSION, STANDIN_PREFIX,
@@ -64,10 +66,30 @@ class InertiaRuntime:
     max_batch: int = DEFAULT_MAX_BATCH
     max_output_bytes: int = MAX_OUTPUT_BYTES
     load_seconds: float = 0.0
+    threads: Optional[int] = None
 
     @property
     def available(self) -> bool:
         return self.error is None and self.encoder is not None and self.bundle is not None
+
+    def loaded(self) -> Dict[str, str]:
+        """Only what this process holds (loaded.py): the bundle digest (over its verified files and manifest), the
+        encoder checkpoint verified before load and its config digest. A bundle whose encoder is not the one its
+        heads were trained on never loads (``check_consistency``), so an encoder without matching heads reports no
+        bundle here."""
+        out = base_loaded(self.threads if self.available else None)
+        if not self.available:
+            return out
+        info = self.info
+        out["bundle_sha256"] = self.bundle.bundle_sha256
+        out["bundle_id"] = self.bundle.bundle_id
+        out["encoder_id"] = info.encoder_id
+        out["encoder_kind"] = info.wire_kind
+        out["encoder_config_sha256"] = info.config_sha256
+        if info.checkpoint_sha256:
+            out["checkpoint_sha256"] = info.checkpoint_sha256
+        out["evidence_tier_max"] = str(self.evidence_tier_max)
+        return out
 
     @property
     def info(self) -> Optional[EncoderInfo]:
@@ -151,6 +173,7 @@ def build_runtime(bundle_dir: Optional[str], *, encoder_config: Optional[str] = 
                   allow_offline: bool = False) -> InertiaRuntime:
     """Load the bundle and its encoder once. ``encoder`` injects a pre-built encoder (tests)."""
     t0 = time.perf_counter()
+    code_sha256()  # hashed once now, so a ping (under the request timeout) never pays for it
     bundle: Optional[HeadBundle] = None
     enc: Optional[Encoder] = None
     try:
@@ -172,8 +195,11 @@ def build_runtime(bundle_dir: Optional[str], *, encoder_config: Optional[str] = 
             raise InertiaUnavailable("model_missing", f"{enc.info.encoder_id} is a stand-in (not a pinned Inertia-1 "
                                      f"checkpoint); it runs only with --allow-standin-shadow")
         status = "standin_shadow" if standin else "inertia_loaded"
+        if "torch" in sys.modules:
+            # The encoder runs on torch (a numpy stand-in never imports it): one inter-op thread, `threads` intra-op.
+            configure_torch_threads(threads)
         return InertiaRuntime(encoder=enc, bundle=bundle, status=status, max_batch=max_batch,
-                              load_seconds=time.perf_counter() - t0)
+                              load_seconds=time.perf_counter() - t0, threads=threads)
     except InertiaUnavailable as exc:
         return InertiaRuntime(encoder=enc, bundle=bundle, status="inertia_unavailable", error=exc,
                               max_batch=max_batch, load_seconds=time.perf_counter() - t0)
@@ -306,6 +332,7 @@ def handle_infer(rt: InertiaRuntime, req: Dict[str, Any]) -> Dict[str, Any]:
 
 def handle_ping(rt: InertiaRuntime) -> Dict[str, Any]:
     info = rt.info if rt.available else None
+    loaded = rt.loaded()
     return {
         "ok": True, "model_available": rt.available, "model_status": rt.status,
         "model_error": str(rt.error) if rt.error is not None else None,
@@ -317,6 +344,7 @@ def handle_ping(rt: InertiaRuntime) -> Dict[str, Any]:
         "preprocessing_version": PREPROCESSING_VERSION,
         "evidence_tier_max": rt.evidence_tier_max if rt.available else None,
         "package_version": __version__,
+        "loaded": loaded, "loaded_digest": loaded_digest(loaded),
     }
 
 

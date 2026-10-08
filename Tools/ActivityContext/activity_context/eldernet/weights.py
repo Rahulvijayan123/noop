@@ -19,7 +19,7 @@ import json
 import os
 import sys
 from dataclasses import dataclass
-from typing import Dict, Mapping, Optional, Sequence
+from typing import Dict, Mapping, Optional, Sequence, Tuple
 
 from . import HEAD_NAMES, UPSTREAM_COMMIT
 
@@ -101,6 +101,13 @@ def verify_file(path: str, wf: WeightFile) -> str:
 def resolve(directory: Optional[str] = None, manifest: Mapping[str, WeightFile] = MANIFEST,
             names: Sequence[str] = HEAD_NAMES) -> Dict[str, str]:
     """name -> verified path. ``directory`` may hold the files flat or as ``weights/<file>``."""
+    return resolve_measured(directory, manifest, names)[0]
+
+
+def resolve_measured(directory: Optional[str] = None, manifest: Mapping[str, WeightFile] = MANIFEST,
+                     names: Sequence[str] = HEAD_NAMES) -> Tuple[Dict[str, str], Dict[str, str]]:
+    """(name -> verified path, name -> sha256 measured from the file): the digests are what a loaded runtime
+    reports as loaded (ping ``loaded``), read from the bytes rather than copied from the pins."""
     d = weights_dir(directory)
     if not d:
         raise WeightsError("model_missing", f"no weights directory: set ${WEIGHTS_DIR_ENV} or pass --weights-dir "
@@ -108,13 +115,14 @@ def resolve(directory: Optional[str] = None, manifest: Mapping[str, WeightFile] 
     if not os.path.isdir(d):
         raise WeightsError("model_missing", f"weights directory {d} does not exist")
     out: Dict[str, str] = {}
+    measured: Dict[str, str] = {}
     for name in names:
         wf = manifest[name]
         flat, nested = os.path.join(d, wf.filename), os.path.join(d, wf.upstream_path)
         path = flat if os.path.isfile(flat) else nested
-        verify_file(path, wf)
+        measured[name] = verify_file(path, wf)
         out[name] = path
-    return out
+    return out, measured
 
 
 def wire_hashes(manifest: Mapping[str, WeightFile] = MANIFEST) -> Dict[str, str]:

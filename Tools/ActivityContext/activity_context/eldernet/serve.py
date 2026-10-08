@@ -125,6 +125,8 @@ def main(argv: Optional[list] = None) -> int:
     ap.add_argument("--calibration", default=None,
                     help="VAL-fitted gait_prob temperature + threshold (nara.eldernet.calibration/1); default none")
     args = ap.parse_args(argv)
+    from ..loaded import configure_torch_threads
+    configure_torch_threads(args.threads)
     rt = build_runtime(args.weights_dir, threads=args.threads, max_batch=args.max_batch,
                        calibration=args.calibration, default_hop_s=args.hop_s, upstream_dir=args.upstream_dir)
     if rt.error is not None:
