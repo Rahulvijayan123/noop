@@ -413,8 +413,10 @@ def test_sleep_features_timeouts_terminate_and_stay_bounded(bounded):
 
 
 def test_sleep_features_busy_while_the_slot_is_held(bounded):
+    # A roomy infer budget: this test is about lane independence, not about a loaded host's
+    # HRV runtime (300 ms was overrun on a saturated test machine).
     server = bounded([HrvProductionProvider()], compute="execution_fakes:sleepy_compute",
-                     env={"FRWHOOP_SLEEP_FEATURES_BUDGET_MS": "1500"})
+                     timeout_ms=10_000, env={"FRWHOOP_SLEEP_FEATURES_BUDGET_MS": "1500"})
     assert server.wait_ready("sleep_features")
     thread = threading.Thread(target=lambda: server.post("/v1/sleep-features", _features_body()))
     thread.start()

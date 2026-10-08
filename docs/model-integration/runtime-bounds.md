@@ -61,7 +61,28 @@ children. Sidecar unit: `CPUQuota=150%`, `CPUWeight=50`, `MemoryHigh=2G`, `Memor
 - HTTP threads 12 against `TasksMax=64`: the parent's threads + 12 handlers + two process trees with
   math threads at 1 stay far below it.
 
-Measured memory (method and numbers): see "Measurements" below.
+### Measurements (2026-10-08, this branch)
+
+Method: `_build-scratch/spec01/runtime/scripts/measure_pool.py` starts the real server
+(`create_server(..., provider_readiness="worker")`), starts both lanes, waits for `hello`, reads
+`/healthz` and measures each process with `ps -o rss` and macOS `footprint`;
+`measure_rss.py` builds the full default registry in one process. Model root: the deploy area's
+provisioned smoke revision `rev-a784abfae6243237` (copied to the runtime scratch dir;
+`manifest.json` sha256 `bfa5e1de...fe08a`, `sleepecg/0.5.9/wrn-gru-mesa.zip` `5622a858...e869`,
+`classifier.keras` `0b392209...6ffd8`). All six default providers reported ready.
+
+| Process | RSS | phys_footprint | threads | warm-up |
+|---|---|---|---|---|
+| parent (HTTP + supervisors) | 46 MB | 59 MB | 18 | 2.2 s build |
+| `infer` worker (full registry warm: torch, keras, sleepecg, neurokit2, yasa) | 281 MB | 424 MB | 4 | 60 s |
+| `sleep_features` worker | 45 MB | 189 MB | 1 | 28 s |
+| total RSS | 373 MB | | | |
+
+A single process building the full registry peaked at 432 MB RSS (`measure_rss.py`). These were
+measured on the shared macOS arm64 build machine while its load average was 300-900 (warm-up times
+are inflated accordingly), not on the Linux Droplet; Linux RSS for the same wheels is expected to be
+of the same order, but that is not measured. With one process per lane the sidecar sits near
+0.4-0.6 GB, well under `MemoryHigh=2G`; a second `infer` process would add about 0.3-0.45 GB.
 
 ## Environment variables (sidecar)
 
@@ -308,6 +329,41 @@ Expected with every metric `off` (the shipped default): `candidate.modes` empty,
    and the stage settles it withheld `attempts_exhausted:lease_expired` at the bound.
 5. With re-assembly off, an item awaiting assembly was re-claimed on every idle drain; it now waits
    5 minutes.
+6. Sidecar: the `terminations` counter missed overruns whose process exited on the first SIGTERM
+   before the supervisor looked (`execution.py`).
+
+## Verification record (round 2)
+
+All runs on this machine, 2026-10-08, against throwaway local state only.
+
+- SQL contract: throwaway cluster from `_build-scratch/spec01/runtime/scripts/pg_bootstrap.sh`
+  (PostgreSQL 18.3 on 127.0.0.1:55531, Supabase role/auth stand-ins, the candidate lane's prerequisite
+  migrations, `20261002090000`, `20261008110000`), then
+  `psql -X -qAt -v ON_ERROR_STOP=1 -f supabase/functions/tests/physiology_candidate_pending_contract.sql`:
+  9/9 steps ok (security, enqueue, fair order, leases, stale revision, attempts, stats, caller
+  isolation, selection modes). The migration re-applies cleanly. Two mutants (no place kept on
+  re-arm; expired lease accepted) each fail the contract at the expected step.
+- Worker (Xcode 26.3 toolchain, `xcrun swift test --filter` with `FRWHOOP_TEST_DB_URL` at that
+  cluster): `CandidatePendingSchedulerTests` 13, `CandidatePendingDatabaseTests` 2 (ran, not skipped),
+  `CandidateStageTests` 46, `InferenceClientTests` 30, `SleepFeatureEnrichmentTests` 17,
+  `DayScoringCandidateInputTests` 26: 134 tests, 0 failures.
+- Worker full suite (same DB URL): 700 tests, 59 skipped, 18 failures (6 test cases), none in this
+  area: `ActivityElderNetStageTests` (3) and `ActivityInertiaStageTests` (2) (activity cache /
+  child args), and `SensorBiomarkerInputsDatabaseTests.testObjectResolutionSQLFindsOnlyVerifiedIndexedDayObjects`,
+  which needs `object_manifests.durability_receipt` from a migration this scratch cluster does not apply.
+- Sidecar full suite (`uv run --frozen pytest -q -o addopts=""`, load average 300-900 throughout):
+  582 passed, 8 failed, 44 skipped in 59 min. Re-run alone: `tests/test_execution.py` 16/16 after the
+  fixes below; `test_worker_envelope_http.py` and `test_committed_fixture_pair_round_trips_over_real_http`
+  pass; `test_full_night_fixture_reproduces_the_committed_response_within_budget` (a 0.75 s wall-clock
+  assertion, features area) failed at 1.30 s, as it did at round 1's baseline; the three
+  `test_provisioning.py` probe tests exceed even a 580 s timeout here (their child builds the full
+  registry, 72 s in-process at this load) and passed in the parent's integration run.
+  Two sidecar fixes from this run: `terminations` is now counted where SIGTERM is sent
+  (`_begin_stop`), because the supervisor often found the process already gone and missed it
+  (`test_repeated_timeouts_never_grow_processes_or_threads`: 3 != 5); and the lane-independence test
+  gets a 10 s infer budget instead of 300 ms (it measured the host, not the lanes).
+- Not verified: `ScoringCandidateAssembler` against a real database (needs the full scoring schema
+  and stream data); anything on the Droplet (no access was used).
 
 ## Requests to parent
 
