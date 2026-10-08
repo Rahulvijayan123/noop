@@ -351,6 +351,11 @@ struct ActivityLane {
     /// `loaded_digest`), the policy version and the last job's selection digest: the heartbeat's
     /// `meta.lanes[].identity`. Empty entries are left out; a child that was never pinged reports nothing.
     var identity: [String: String] {
+        Self.identity(service: service, inertia: inertia, eldernet: eldernet, selectionDigest: stats.lastSelectionDigest)
+    }
+
+    static func identity(service: ActivityPythonService, inertia: InertiaStage?, eldernet: ElderNetStage?,
+                         selectionDigest: String?) -> [String: String] {
         var out = ["expert_policy": ActivityExpertSelection.policy]
         func add(_ name: String, _ service: ActivityPythonService) {
             for (k, v) in service.loadedIdentity { out["\(name).\(k)"] = v }
@@ -359,7 +364,7 @@ struct ActivityLane {
         add("hart", service)
         if let inertia { add("inertia", inertia.service); out["inertia.mode"] = inertia.mode.rawValue }
         if let eldernet { add("eldernet", eldernet.service); out["eldernet.mode"] = eldernet.mode.rawValue }
-        if let d = stats.lastSelectionDigest { out["selection_digest"] = d }
+        if let selectionDigest { out["selection_digest"] = selectionDigest }
         return out
     }
 

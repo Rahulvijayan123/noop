@@ -363,4 +363,36 @@ final class ActivityAuthorityReplayTests: XCTestCase {
                                                                      now: now, encoder: embedded))
         XCTAssertEqual(a.payloadText, b.payloadText)
     }
+
+    // MARK: - Children and heartbeat identity
+
+    /// The HART child runs with its thread caps and without its in-process ElderNet copy (one ElderNet route).
+    func testTheHartChildIsCappedAndRunsNoElderNetCopy() {
+        typealias Config = ActivityPythonService.Config
+        XCTAssertEqual(Config.hartThreads([:]), 1)
+        XCTAssertEqual(Config.hartThreads(["FRWHOOP_ACTIVITY_THREADS": "2"]), 2)
+        XCTAssertEqual(Config.hartThreads(["FRWHOOP_ACTIVITY_THREADS": "99"]), 1, "out of range falls back to 1")
+        let c = Config(pythonBin: "/usr/bin/python3", activityHome: "/x", modelDir: nil, serveArgs: [],
+                       requestTimeoutSeconds: 5, maxRequestBytes: 1, maxResponseLineBytes: 1, restartCap: 1,
+                       restartCooldownSeconds: 1).hartChild(threads: 2)
+        XCTAssertEqual(c.extraEnvironment["ACTIVITY_GAIT_EXPERT"], "")
+        XCTAssertEqual(c.extraEnvironment["ACTIVITY_THREADS"], "2")
+        XCTAssertEqual(c.numericalThreads, 2)
+    }
+
+    /// The heartbeat identity names what each child measured it loaded, the policy and the last selection.
+    func testTheLaneIdentityNamesMeasuredDigestsAndTheSelection() throws {
+        let hart = try hartService()
+        _ = try hart.ping()
+        let stage = try eldernet(.shadow)
+        _ = stage.begin()
+        let id = ActivityLane.identity(service: hart, inertia: nil, eldernet: stage, selectionDigest: "abc")
+        XCTAssertEqual(id["expert_policy"], ActivityExpertSelection.policy)
+        XCTAssertEqual(id["selection_digest"], "abc")
+        XCTAssertEqual(id["hart.loaded_digest"], hart.loadedDigest)
+        XCTAssertNotNil(id["hart.checkpoint_sha256"])
+        XCTAssertEqual(id["eldernet.weights_digest"], try eldernetDigest())
+        XCTAssertEqual(id["eldernet.mode"], "shadow")
+        XCTAssertNil(id["inertia.mode"])
+    }
 }
