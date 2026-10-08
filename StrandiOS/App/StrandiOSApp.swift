@@ -673,6 +673,22 @@ enum DemoScreens {
         // The Heart rate day page (HR graph, Activity context, Through the day). Pair with `--demo-seed
         // --demo-intraday` so there is a day of per-second streams to decode.
         case "heartrateday": return AnyView(FullDayChartView(showsActivityTimeline: true))
+        // Activity area pages (screenshots): the Deep Timeline, Live's connection details, the Heart rate day's
+        // Walking quality / Strap signal pages (pair with --demo-activity-extras), Breathe, the interval timer,
+        // a live session (runs its own session runner) and activity calibration.
+        case "deeptimeline": return AnyView(FullDayChartView())
+        case "liveconnection": return AnyView(LiveConnectionDetailsView(activeIsWhoop: true, activeIsOura: false,
+                                                                      deviceName: "WHOOP", selectedModel: .whoop5mg))
+        case "walkingday": return AnyView(WalkingDayView(dayStart: Calendar.current.startOfDay(for: Date()),
+                                                         reading: nil, loaded: false))
+        case "strapsignal": return AnyView(StrapSignalDayView(dayStart: Calendar.current.startOfDay(for: Date()),
+                                                              reading: nil, loaded: false))
+        case "breathe": return AnyView(BreathingView())
+        case "intervals": return AnyView(IntervalTimerView())
+        case "livesession": return AnyView(LiveSessionView(onClose: {}))
+        case "activitycalibration": return AnyView(ActivityCalibrationView())
+        case "allstretches": return AnyView(HeartRateDayListsDemoHost(page: .stretches))
+        case "checkstretches": return AnyView(HeartRateDayListsDemoHost(page: .check))
         case "compare":  return AnyView(CompareView())
         case "settings": return AnyView(SettingsView())
         case "coach":    return AnyView(CoachDemoHost())
