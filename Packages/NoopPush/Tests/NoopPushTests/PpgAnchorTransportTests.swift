@@ -115,32 +115,47 @@ final class PpgAnchorTransportTests: XCTestCase {
         ]
     }
 
+    /// The same seconds as `phoneRows` the way a 1.3 sender carries them: deltas and burst only.
+    /// This is what an anchor-less object already on the server looks like.
+    static func legacyTwinRows() -> [GoldenRow] {
+        phoneRows().map { row in
+            let r = row.record
+            return GoldenRow(record: .init(rowId: r.rowId, ts: r.ts, burstIndex: r.burstIndex, samples: r.samples),
+                             provenance: row.provenance + "; format 2 twin without the anchor")
+        }
+    }
+
     /// The batch exactly as the phone's object lane builds it: the streaming encoder into an
     /// account-owned directory (the coordinator's wake-budgeted path), protocol 1.5.
-    private func phoneBatch(_ rows: [GoldenRow]) throws -> PushBinaryBatch {
+    private func phoneBatch(_ rows: [GoldenRow], protocolVersion: String = PushProtocol.ppgAnchorVersion) throws -> PushBinaryBatch {
         try PushProtocol.binaryObjectBatch(table: .ppgWaveformSample, sourceId: Self.sourceId,
             deviceId: Self.deviceId, startCursor: nil, rows: rows.map { .ppgWaveform($0.record) },
-            protocolVersion: PushProtocol.ppgAnchorVersion, decodedLimit: 4 * 1_048_576,
+            protocolVersion: protocolVersion, decodedLimit: 4 * 1_048_576,
             payloadDirectory: try directory())
     }
 
     func testGoldenVectorsMatchTheCodecAndTheStreamingPhonePath() throws {
         var vectors: [[String: Any]] = []
-        for (name, rows) in [("phone_real_frames", Self.phoneRows()), ("all_members", Self.allMemberRows())] {
+        for (name, rows, version) in [("phone_real_frames", Self.phoneRows(), PushProtocol.ppgAnchorVersion),
+                                      ("all_members", Self.allMemberRows(), PushProtocol.ppgAnchorVersion),
+                                      ("phone_real_frames_legacy_v2", Self.legacyTwinRows(), PushProtocol.identityObjectVersion)] {
+            let anchored = PushProtocol.hasPPGAnchor(version)
             let packed = try PushBinaryCodec.pack(table: .ppgWaveformSample, rows: rows.map { .ppgWaveform($0.record) },
-                                                  ppgAnchorV3: true)
-            XCTAssertEqual(packed[4], PushBinaryCodec.ppgAnchorFormatVersion)
-            let batch = try phoneBatch(rows)
+                                                  ppgIdentityV2: true, ppgAnchorV3: anchored)
+            XCTAssertEqual(packed[4], anchored ? PushBinaryCodec.ppgAnchorFormatVersion : PushBinaryCodec.ppgIdentityFormatVersion)
+            let batch = try phoneBatch(rows, protocolVersion: version)
             XCTAssertEqual(batch.contentSha256, PushBinaryCodec.sha256Hex(packed),
                            "the streaming phone path and the in-memory packer must emit identical bytes")
             XCTAssertEqual(batch.uncompressedBytes, packed.count)
             let wire = try batch.payload
             XCTAssertEqual(try gunzip(wire, size: packed.count), packed)
             let manifest = PushObjectManifest(batch: batch)
-            XCTAssertEqual(manifest.protocolVersion, "1.5")
+            XCTAssertEqual(manifest.protocolVersion, version)
             let manifestObject = try XCTUnwrap(JSONSerialization.jsonObject(with: manifest.encode()) as? [String: Any])
             vectors.append([
                 "name": name,
+                "protocol_version": version,
+                "schema_version": PushProtocol.schemaVersion(stream: "ppgWaveformSample", protocolVersion: version),
                 "rows": rows.map(json),
                 "decoded_hex": hex(packed),
                 "decoded_sha256": PushBinaryCodec.sha256Hex(packed),

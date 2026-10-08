@@ -31,6 +31,7 @@
         "uncompressedBytes" : 342
       },
       "name" : "phone_real_frames",
+      "protocol_version" : "1.5",
       "rows" : [
         {
           "anchor" : 378307,
@@ -85,6 +86,7 @@
           "ts" : 1780918392
         }
       ],
+      "schema_version" : 3,
       "wire_base64" : "H4sIAAAAAAAAE\/MLcDJkZmRhYGD4sFgtiwGJZmBkBBGHj7IygBgGQJzx68yv3t9uf7r\/+vzb9e\/Wv9z\/Yf+v\/v\/93\/x\/1p+nP6\/\/uP8r7s+Mv7f\/Rf1r+Sf6P+b\/R6hRH1GNbGtHGNnxf97\/I\/8vMTQwXWE2YU5imsC4hUGD4dH\/Zf9LgIY7\/bf4b\/xfD4gtgGwfoMgnqFGfUI180gI2khFk5P\/6L\/\/5GL7\/Z2f4\/Z+Z4d9\/kIL\/\/5kY\/v5nAYqwMfz8zwGU5WL4+p+H4TNQZcUKiFEwmoGRCUT4LGCDu7L278O\/T\/7NZAng\/MJbz23BE8j5ktH2P+9\/yb95wGDo+9fzZ8G\/GYwOTCeZ57MasE5iBACsIGFTVgEAAA==",
       "wire_encoding" : "gzip",
       "wire_sha256" : "d9df5158455651b4ddaf8ef8292d168ff1def17f9d19b8e631d9920cddd62ba7"
@@ -113,6 +115,7 @@
         "uncompressedBytes" : 358
       },
       "name" : "all_members",
+      "protocol_version" : "1.5",
       "rows" : [
         {
           "anchor" : 100000,
@@ -167,9 +170,94 @@
           "ts" : 1800000003
         }
       ],
+      "schema_version" : 3,
       "wire_base64" : "H4sIAAAAAAAAE\/MLcDJkZmRhYGBgZICCS57ZIIrxPxCAGewgYkEbIwMjYww\/YwODAZDPyvD3PymYCWo4I9R0KCDHKGaoXiaYQ1lhZrPDnM3I+L8e6FyQ6QwNpJnOAjWMGeZQiKlTOhjBIWREhoMZGQCwrAnWZgEAAA==",
       "wire_encoding" : "gzip",
       "wire_sha256" : "ff8652d6d3bce91ff079f5dd22c980508de1ef489d0162f9bad85d8799d76957"
+    },
+    {
+      "decoded_hex" : "4e504231020104000000f0a3266a00000000f0a3266a000000000001010000003000000068faccfa8dfb46fc8bfd4cfebafedafe6dff56ffd5fffbff37ff6afce5f9d7f8dffa5efc98fddbfe5afe84fe15ff5cfff1a3266a00000000f1a3266a000000000001010000003000000088ff9effc4ffd2008002d403340362029001b4002800e2ffa6ff74ff56ff42ff38ff33ff2eff33ff38ff42ff4cff56fff2a3266a00000000f2a3266a0000000000010100000030000000ff7ff4ff0e00f7ff0700fbff0300feff01000000ffff0200fdff0400fbff0600f9ff0800f7ff0a00f5ff0c00f3ff0e0078a8266a0000000078a8266a00000000000102000000300000007dfde1fde4fe99045009f40d7f0b380c5109e9013dff0dff19fd6efedafe8efe8cfca0fe98014002c9039f0530059201",
+      "decoded_sha256" : "06bafe8ea7248683f5faa7fc595ddb43388dc4a76b2d805202d2e15a9a96034d",
+      "end_cursor" : {
+        "keySha256" : "95c8d63a183a2431cce7bc1674c751742df57c7fdec79a5c5a135905f00c998b",
+        "rowId" : 1780918392
+      },
+      "manifest" : {
+        "batchId" : "38049639-a23e-5e34-8e9f-ce7b1fb7b4d6",
+        "compressedBytes" : 260,
+        "contentEncoding" : "gzip",
+        "contentSha256" : "06bafe8ea7248683f5faa7fc595ddb43388dc4a76b2d805202d2e15a9a96034d",
+        "deviceId" : "whoop-ppg-golden",
+        "endTs" : 1780918393,
+        "objectId" : "c076f732-3ce1-555a-9a72-aaffb5491290",
+        "protocolVersion" : "1.3",
+        "sampleCount" : 4,
+        "sourceId" : "7d1e2f3a-4b5c-4d6e-8f70-8192a3b4c5d6",
+        "startTs" : 1780917232,
+        "stream" : "ppgWaveformSample",
+        "type" : "binaryObject",
+        "uncompressedBytes" : 306
+      },
+      "name" : "phone_real_frames_legacy_v2",
+      "protocol_version" : "1.3",
+      "rows" : [
+        {
+          "anchor" : null,
+          "burstIndex" : 1,
+          "clockSource" : 0,
+          "frontEndFlags" : null,
+          "provenance" : "real v26 frame burst-1 (WhoopProtocol Whoop5PpgWaveformTests); format 2 twin without the anchor",
+          "recordIndex" : null,
+          "rowId" : 1780917232,
+          "sampleFlags" : 0,
+          "samples_hex" : "68faccfa8dfb46fc8bfd4cfebafedafe6dff56ffd5fffbff37ff6afce5f9d7f8dffa5efc98fddbfe5afe84fe15ff5cff",
+          "subsecQ15" : null,
+          "ts" : 1780917232
+        },
+        {
+          "anchor" : null,
+          "burstIndex" : 1,
+          "clockSource" : 0,
+          "frontEndFlags" : null,
+          "provenance" : "synthetic continuation of burst 1 (base = previous 25th point - 158); format 2 twin without the anchor",
+          "recordIndex" : null,
+          "rowId" : 1780917233,
+          "sampleFlags" : 0,
+          "samples_hex" : "88ff9effc4ffd2008002d403340362029001b4002800e2ffa6ff74ff56ff42ff38ff33ff2eff33ff38ff42ff4cff56ff",
+          "subsecQ15" : null,
+          "ts" : 1780917233
+        },
+        {
+          "anchor" : null,
+          "burstIndex" : 1,
+          "clockSource" : 0,
+          "frontEndFlags" : null,
+          "provenance" : "synthetic burst-1 second with a delta at the +i16 rail; format 2 twin without the anchor",
+          "recordIndex" : null,
+          "rowId" : 1780917234,
+          "sampleFlags" : 1,
+          "samples_hex" : "ff7ff4ff0e00f7ff0700fbff0300feff01000000ffff0200fdff0400fbff0600f9ff0800f7ff0a00f5ff0c00f3ff0e00",
+          "subsecQ15" : null,
+          "ts" : 1780917234
+        },
+        {
+          "anchor" : null,
+          "burstIndex" : 2,
+          "clockSource" : 0,
+          "frontEndFlags" : null,
+          "provenance" : "real v26 frame burst-2 (WhoopProtocol Whoop5PpgWaveformTests); format 2 twin without the anchor",
+          "recordIndex" : null,
+          "rowId" : 1780918392,
+          "sampleFlags" : 0,
+          "samples_hex" : "7dfde1fde4fe99045009f40d7f0b380c5109e9013dff0dff19fd6efedafe8efe8cfca0fe98014002c9039f0530059201",
+          "subsecQ15" : null,
+          "ts" : 1780918392
+        }
+      ],
+      "schema_version" : 2,
+      "wire_base64" : "H4sIAAAAAAAAE\/MLcDJkYmRhYGD4sFgtiwGJZmBkBBIGQJzx68yv3t9uf7r\/+vzb9e\/Wv9z\/Yf+v\/v\/93\/x\/1p+nP6\/\/uP8r7s+Mv7f\/Rf1r+Sf6P+b\/R6gJHzFM6vg\/7\/+R\/5cYGpiuMJswJzFNYNzCoMHw6P+y\/yVAM53+W\/w3\/q8HxBZAtg9Q5BPUhE8YJv2v\/\/Kfj+H7f3aG3\/+ZGf79B4n\/\/8\/E8Pc\/C1CEjeHnfw6gLBfD1\/88DJ+BKitWQEyA0QyMTFCTav8+\/Pvk30yWAM4vvPXcFjyBnC8Zbf\/z\/pf8mwf0a9+\/nj8L\/s1gdGA6yTyf1YB1EiMAvAs0TjIBAAA=",
+      "wire_encoding" : "gzip",
+      "wire_sha256" : "ec74bbad9c9580312fbc6e6f2b05e555fcf80b32560af1f580cd49af2928edba"
     }
   ]
 }

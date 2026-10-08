@@ -24,6 +24,7 @@ import { gunzipSync } from 'node:zlib';
 import {
   INGEST_ENABLED_STREAMS,
   PushProtocolError,
+  advertisedProtocolVersions,
   advertisedStreams,
   capabilitiesBody,
   negotiateProtocol,
@@ -189,7 +190,8 @@ async function authorizeEnrollment(req: Request) {
 async function handleCapabilities(req: Request): Promise<Response> {
   try {
     const user = await authenticateUpload(req);
-    const version = negotiateProtocol(req.headers.get('noop-push-accept-version'));
+    const version = negotiateProtocol(req.headers.get('noop-push-accept-version'),
+      advertisedProtocolVersions({ ppgAnchor: cfg.advertisePpgAnchor === true }));
     if (!version) return json({ type: 'error', protocolVersion: '1.2', code: 'unsupported_version' }, 406);
     const body = capabilitiesBody({
       protocolVersion: version,
