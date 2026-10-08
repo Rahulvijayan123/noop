@@ -980,10 +980,10 @@ struct ActivityLane {
             var versions = ["model": out.versions.model, "preprocessing": out.versions.preprocessing]
             versions["transition"] = out.transitionVersion
             if let gait = service.reportedGaitVersion { versions["gait"] = gait }
-            let cacheKey = cacheable
-                ? ActivityLocalCache.inferenceKey(request: request, identity: service.cacheIdentity ?? [:],
+            let stamp = cacheable ? service.cacheStamp : nil
+            let cacheKey = stamp == nil ? nil
+                : ActivityLocalCache.inferenceKey(request: request, identity: service.cacheIdentity ?? [:],
                                                   versions: versions)
-                : nil
             if let cacheKey, let cached = cache?.inference(key: cacheKey) {
                 out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(cached))
                 out.expertGaitWindows.append(contentsOf: ActivityContextDays.compatibleGaitWindows(cached))
@@ -1009,7 +1009,10 @@ struct ActivityLane {
                 out.windows.append(contentsOf: ActivityContextDays.windowsWithCompatibleFeatures(result))
                 out.expertGaitWindows.append(contentsOf: ActivityContextDays.compatibleGaitWindows(result))
                 stats.windowsInferred += result.windows.count
-                if let cacheKey, result.modelVersion == nil || result.modelVersion == out.versions.model {
+                // Kept only when the process the key names gave this answer (a respawn mid-request, or a reply
+                // from another identity, is used for this job but never stored under the old key).
+                if let cacheKey, let stamp, result.modelVersion == nil || result.modelVersion == out.versions.model,
+                   service.answerMatches(stamp, replyDigest: result.loadedDigest) {
                     cache?.storeInference(result, key: cacheKey)
                 }
             }
@@ -1063,7 +1066,8 @@ struct ActivityLane {
                                     message: "\(String(format: "%.1f", eldernetSpent)) s used of the "
                                         + "\(String(format: "%.1f", eldernet.jobBudgetSeconds)) s per-job budget")
             }
-            let eldernetKey = eldernetReady ? eldernet?.cacheKey(request) : nil
+            let eldernetStamp = eldernetReady ? eldernet?.service.cacheStamp : nil
+            let eldernetKey = eldernetStamp == nil ? nil : eldernet?.cacheKey(request)
             if eldernetReady, let eldernet, out.gaitQuality.stopped == nil, let eldernetKey,
                let cached = eldernet.responses.response(eldernetKey),
                out.gaitQuality.responses.first.map({ $0.model == cached.model }) ?? true {
@@ -1093,7 +1097,11 @@ struct ActivityLane {
                     } else {
                         out.gaitQuality.responses.append(response)
                         stats.eldernetWindows += response.windows.count
-                        if let eldernetKey { eldernet.responses.store(response, key: eldernetKey) }
+                        // The same rule as HART's answers: only the process the key names may fill it.
+                        if let eldernetKey, let eldernetStamp,
+                           eldernet.service.answerMatches(eldernetStamp, replyDigest: nil) {
+                            eldernet.responses.store(response, key: eldernetKey)
+                        }
                     }
                 case .failed(let kind, let message, let stop):
                     out.gaitQuality.failedChunks += 1
