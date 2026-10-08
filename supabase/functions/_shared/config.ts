@@ -21,6 +21,8 @@ export interface PushFunctionConfig {
    */
   allowLegacyEnrollment: boolean;
   asyncObjectVerification?: boolean;
+  /** Advertise protocol 1.5 (anchored PPG objects). Accepting 1.5 does not depend on it. */
+  advertisePpgAnchor?: boolean;
 }
 
 /**
@@ -82,6 +84,7 @@ export function pushConfig(env: Record<string, string | undefined> = Deno.env.to
     allowLegacyFleetUploads: pick('NOOP_ALLOW_LEGACY_FLEET_UPLOADS').toLowerCase() === 'true',
     allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT').toLowerCase() === 'true',
     asyncObjectVerification: pick('NOOP_ASYNC_OBJECT_VERIFICATION') === '1',
+    advertisePpgAnchor: pick('NOOP_PUSH_ADVERTISE_PPG_ANCHOR') === '1',
   };
 }
 

@@ -13,7 +13,7 @@ import {
 import { MAX_OBJECT_LANE_BYTES, MAX_RANGE_MS, expiresAt } from './retention.ts';
 import { createManifestStore, type ManifestStore } from './manifests.ts';
 import { completeDurableObject, reserveManifest, registerDevice, MAX_DECODED_OBJECT_BYTES } from './durability.ts';
-import { PushProtocolError, schemaVersionFor } from './registry.ts';
+import { OBJECT_PROTOCOL_VERSIONS, PushProtocolError, schemaVersionFor } from './registry.ts';
 import type { SupabaseRest } from './rest.ts';
 import type { S3Store } from './s3.ts';
 import type { PushFunctionConfig } from './config.ts';
@@ -50,7 +50,7 @@ export function validateObjectIntent(manifest: any) {
   const m = manifest || {};
   const protocolVersion = m.protocolVersion ?? '1.2';
   const schemaVersion = m.schemaVersion ?? schemaVersionFor(m.stream, protocolVersion);
-  if (!['1.2', '1.3', '1.4'].includes(protocolVersion)) errors.push('protocolVersion');
+  if (!OBJECT_PROTOCOL_VERSIONS.includes(protocolVersion)) errors.push('protocolVersion');
   if (m.type !== 'binaryObject') errors.push('type');
   if (!OBJECT_LANE_STREAMS.has(m.stream)) errors.push('stream');
   if (!isUuid(m.objectId)) errors.push('objectId');

@@ -18,13 +18,20 @@ public enum PushProtocol {
     public static let objectVersion = "1.2"
     public static let identityObjectVersion = "1.3"
     public static let auxiliaryIdentityVersion = "1.4"
+    /// PPG anchor lane: ppgWaveformSample schema 3 (NPB1 format 3) carries the optical anchor, the
+    /// record clock and saturation flags. Every other stream keeps its 1.3 contract: 1.5 is not a
+    /// superset of 1.4, so auxiliary identity and scalar provenance stay exclusive to 1.4.
+    public static let ppgAnchorVersion = "1.5"
     public static func isObjectVersion(_ version: String) -> Bool {
         version == objectVersion || version == identityObjectVersion || version == auxiliaryIdentityVersion
+            || version == ppgAnchorVersion
     }
     public static func hasPPGIdentity(_ version: String) -> Bool {
-        version == identityObjectVersion || version == auxiliaryIdentityVersion
+        version == identityObjectVersion || version == auxiliaryIdentityVersion || version == ppgAnchorVersion
     }
+    public static func hasPPGAnchor(_ version: String) -> Bool { version == ppgAnchorVersion }
     public static func schemaVersion(stream: String, protocolVersion: String) -> Int {
+        if stream == "ppgWaveformSample", hasPPGAnchor(protocolVersion) { return 3 }
         if stream == "ppgWaveformSample", hasPPGIdentity(protocolVersion) { return 2 }
         if protocolVersion == auxiliaryIdentityVersion,
            ["v18AuxSample", "stepSample", "sleepStateSample", "ppgHrSample"].contains(stream) { return 2 }
@@ -33,7 +40,7 @@ public enum PushProtocol {
     /// Receiver manifest ceiling, including the exclusive final second.
     public static let maxObjectWindowSeconds: Int64 = 48 * 60 * 60
     /// Sender-preferred list for capability negotiation (`GET`); see PUSH_PROTOCOL.md.
-    public static let capabilitiesAcceptVersions = "1.4,1.3,1.2,1.1,1.0"
+    public static let capabilitiesAcceptVersions = "1.5,1.4,1.3,1.2,1.1,1.0"
     public static let forbiddenRemoteControlMembers: Set<String> = [
         "command", "commands", "endpoint", "url", "cadence", "schema", "fields",
     ]
@@ -92,7 +99,8 @@ public enum PushProtocol {
         guard maximumDecodedBytes > 0, maximumDecodedBytes <= PushProtocolLimits.maxBodyBytes else { throw PushProtocolException("invalid decoded limit") }
         let decodedLimit = min(maximumDecodedBytes, freshAppend ? freshAppendMaximumDecodedBytes : PushProtocolLimits.maxBodyBytes)
         try validateUUID(sourceId, name: "sourceId")
-        guard [version, binaryVersion, objectVersion, identityObjectVersion, auxiliaryIdentityVersion].contains(protocolVersion),
+        guard [version, binaryVersion, objectVersion, identityObjectVersion, auxiliaryIdentityVersion,
+               ppgAnchorVersion].contains(protocolVersion),
               !table.isScalarExtension || protocolVersion != version else {
             throw PushProtocolException("scalar stream requires negotiated protocol 1.1 or later")
         }
@@ -353,6 +361,7 @@ public enum PushProtocol {
         case .ppgWaveformSample, .v18AuxSample, .rawImuSession:
             selected = try selectBinaryRows(table: table, rows: rows, decodedLimit: decodedLimit,
                                             ppgIdentityV2: hasPPGIdentity(protocolVersion),
+                                            ppgAnchorV3: hasPPGAnchor(protocolVersion),
                                             v18IdentityV2: protocolVersion == auxiliaryIdentityVersion)
         }
 
@@ -364,10 +373,12 @@ public enum PushProtocol {
             var index = 0
             let expected = try selected.reduce(PushBinaryCodec.packedHeaderSize(for: table)) {
                 $0 + (try PushBinaryCodec.packedRowSize($1, ppgIdentityV2: hasPPGIdentity(protocolVersion),
+                    ppgAnchorV3: hasPPGAnchor(protocolVersion),
                     v18IdentityV2: protocolVersion == auxiliaryIdentityVersion))
             }
             let artifact = try PushBinaryStreamEncoder.encode(table: table, rowCount: selected.count,
                 encoding: contentEncoding, ppgIdentityV2: hasPPGIdentity(protocolVersion),
+                ppgAnchorV3: hasPPGAnchor(protocolVersion),
                 v18IdentityV2: protocolVersion == auxiliaryIdentityVersion, directory: payloadDirectory, requireExistingDirectory: true,
                 maxDecodedBytes: decodedLimit, maxWireBytes: decodedLimit + 64 * 1024,
                 expectedDecodedBytes: expected, allowsWork: allowsWork,
@@ -377,7 +388,8 @@ public enum PushProtocol {
             payloadFile = try .init(url: artifact.fileURL, byteCount: artifact.wireBytes, sha256: artifact.wireSha256)
         } else {
             let bytes = try PushBinaryCodec.pack(table: table, rows: selected,
-                ppgIdentityV2: hasPPGIdentity(protocolVersion), v18IdentityV2: protocolVersion == auxiliaryIdentityVersion)
+                ppgIdentityV2: hasPPGIdentity(protocolVersion), ppgAnchorV3: hasPPGAnchor(protocolVersion),
+                v18IdentityV2: protocolVersion == auxiliaryIdentityVersion)
             guard bytes.count <= decodedLimit else { throw PushProtocolException("binary object exceeds the decoded limit") }
             decodedBytes = bytes.count; contentSha256 = PushBinaryCodec.sha256Hex(bytes); decoded = bytes
             payload = isObjectVersion(protocolVersion)
@@ -404,7 +416,8 @@ public enum PushProtocol {
             var hasher = SHA256(), index = 0
             hasher.update(data: Data(try canonicalJsonMap(header).utf8)); hasher.update(data: Data([0x0A]))
             try PushBinaryStreamEncoder.visitDecodedBytes(table: table, rowCount: selected.count,
-                ppgIdentityV2: hasPPGIdentity(protocolVersion), v18IdentityV2: protocolVersion == auxiliaryIdentityVersion,
+                ppgIdentityV2: hasPPGIdentity(protocolVersion), ppgAnchorV3: hasPPGAnchor(protocolVersion),
+                v18IdentityV2: protocolVersion == auxiliaryIdentityVersion,
                 maxDecodedBytes: decodedLimit, allowsWork: allowsWork,
                 nextRow: { guard index < selected.count else { return nil }; defer { index += 1 }; return selected[index] },
                 consume: { hasher.update(bufferPointer: $0) })
@@ -464,7 +477,8 @@ public enum PushProtocol {
     }
 
     private static func selectBinaryRows(table: PushBinaryTable, rows: [PushBinaryRow], decodedLimit: Int,
-                                         ppgIdentityV2: Bool = false, v18IdentityV2: Bool = false) throws -> [PushBinaryRow] {
+                                         ppgIdentityV2: Bool = false, ppgAnchorV3: Bool = false,
+                                         v18IdentityV2: Bool = false) throws -> [PushBinaryRow] {
         var selected: [PushBinaryRow] = []
         var decodedBytes = PushBinaryCodec.packedHeaderSize(for: table)
         guard decodedLimit >= decodedBytes else {
@@ -493,7 +507,8 @@ public enum PushProtocol {
             let (span, overflow) = last.subtractingReportingOverflow(first)
             // Include maxTs + 1, and stop at the FIRST non-fitting row even if later rows fit.
             if overflow || span >= maxWindow { break }
-            let rowSize = try PushBinaryCodec.packedRowSize(row, ppgIdentityV2: ppgIdentityV2, v18IdentityV2: v18IdentityV2)
+            let rowSize = try PushBinaryCodec.packedRowSize(row, ppgIdentityV2: ppgIdentityV2,
+                                                            ppgAnchorV3: ppgAnchorV3, v18IdentityV2: v18IdentityV2)
             if rowSize > decodedLimit - decodedBytes { break }
             selected.append(row)
             decodedBytes += rowSize

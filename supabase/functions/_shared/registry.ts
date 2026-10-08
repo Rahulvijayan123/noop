@@ -11,7 +11,23 @@ import { scalarProvenance } from './scalarProvenance.ts';
 
 export const PUSH_PROTOCOL_VERSIONS = ['1.3', '1.2', '1.1', '1.0'];
 // Receiver support precedes advertisement. Add1.4 above only after the cross-stack golden gate.
+/**
+ * Protocol 1.5 is the PPG anchor lane: ppgWaveformSample schema 3 (NPB1 format 3, see
+ * ppgTransport.ts). Every other stream keeps its 1.3 contract; 1.5 is not a superset of 1.4. It is
+ * accepted whenever a client sends it and advertised only when the operator opts in, so a phone never
+ * starts uploading anchored PPG until the worker that reads it is deployed.
+ */
+export const PPG_ANCHOR_PROTOCOL_VERSION = '1.5';
+/** Versions whose senders use the object lane. Support, not advertisement. */
+export const OBJECT_PROTOCOL_VERSIONS: readonly string[] = Object.freeze(['1.2', '1.3', '1.4', PPG_ANCHOR_PROTOCOL_VERSION]);
+
+/** The negotiation order this receiver offers. 1.5 leads only when its advertisement is enabled. */
+export function advertisedProtocolVersions({ ppgAnchor = false }: { ppgAnchor?: boolean } = {}): string[] {
+  return ppgAnchor ? [PPG_ANCHOR_PROTOCOL_VERSION, ...PUSH_PROTOCOL_VERSIONS] : [...PUSH_PROTOCOL_VERSIONS];
+}
+
 export function schemaVersionFor(stream: string, protocolVersion: string): number {
+  if (stream === 'ppgWaveformSample' && protocolVersion === PPG_ANCHOR_PROTOCOL_VERSION) return 3;
   if (stream === 'ppgWaveformSample' && ['1.3', '1.4'].includes(protocolVersion)) return 2;
   if (protocolVersion === '1.4' && ['v18AuxSample', 'stepSample', 'sleepStateSample', 'ppgHrSample'].includes(stream)) return 2;
   return 1;
@@ -621,7 +637,7 @@ export function windowBounds(header: any) {
 }
 
 export function streamsForVersion(version: string): Set<string> {
-  if (['1.4', '1.3', '1.2'].includes(version)) return ALL_STREAMS;
+  if (OBJECT_PROTOCOL_VERSIONS.includes(version)) return ALL_STREAMS;
   if (version === '1.1') return new Set([...ALL_STREAMS].filter((s) => !PROTOCOL_1_2_ONLY.has(s)));
   if (version === '1.0') return PROTOCOL_1_0_STREAMS;
   return new Set();
@@ -632,12 +648,12 @@ export function advertisedStreams(protocolVersion: string, enabledStreams: Set<s
   return [...enabledStreams].filter((s) => allowed.has(s)).sort();
 }
 
-export function negotiateProtocol(acceptHeader: unknown): string | null {
+export function negotiateProtocol(acceptHeader: unknown, versions: readonly string[] = PUSH_PROTOCOL_VERSIONS): string | null {
   const offered = String(acceptHeader || '')
     .split(',')
     .map((v) => v.trim())
     .filter(Boolean);
-  for (const version of PUSH_PROTOCOL_VERSIONS) {
+  for (const version of versions) {
     if (offered.includes(version)) return version;
   }
   return null;
@@ -671,7 +687,7 @@ export function capabilitiesBody({
     userId: userId || undefined,
     sourceId: sourceId || undefined,
   };
-  if (['1.4', '1.3', '1.2'].includes(protocolVersion) && objectLane) {
+  if (OBJECT_PROTOCOL_VERSIONS.includes(protocolVersion) && objectLane) {
     body.objectLane = {
       ...objectLane,
       streams: advertised.filter((s) => OBJECT_LANE_STREAMS.has(s)),

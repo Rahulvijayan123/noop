@@ -2,10 +2,11 @@ import { createHash } from 'node:crypto';
 import { Decompress } from 'npm:fzstd@0.1.1';
 import type { SupabaseRest } from './rest.ts';
 import type { S3Store } from './s3.ts';
-import { PushProtocolError } from './registry.ts';
+import { PPG_ANCHOR_PROTOCOL_VERSION, PushProtocolError } from './registry.ts';
 import { MAX_OBJECT_LANE_BYTES } from './retention.ts';
 import { ZstdBounds } from './zstdBounds.ts';
 import { AuxiliaryIdentityValidator } from './auxiliaryIdentity.ts';
+import { PpgAnchorValidator } from './ppgTransport.ts';
 import { assertIntakeScope, intakeAdmissionArguments, isIntakeAdmissionError, type IntakeAdmission } from './intakeAdmission.ts';
 
 // Streaming verification bounds output even when the compressed input is small.
@@ -73,6 +74,10 @@ export async function verifyStoredObject(raw: S3Store, row: any, key: string) {
   let uncompressedBytes = 0;
   const auxiliary = row.object_kind === 'v18AuxSample' && row.push_protocol_version === '1.4'
     ? new AuxiliaryIdentityValidator(Number(row.sample_count), Date.parse(row.start_at) / 1000, Date.parse(row.end_at) / 1000) : null;
+  // A schema 3 PPG receipt attests format 3 framing, not only the digest (ppgTransport.ts). The
+  // stream is gzip by registry; a validator that never sees bytes fails closed at finish().
+  const ppgAnchor = row.object_kind === 'ppgWaveformSample' && row.push_protocol_version === PPG_ANCHOR_PROTOCOL_VERSION
+    ? new PpgAnchorValidator(Number(row.sample_count), Date.parse(row.start_at) / 1000, Date.parse(row.end_at) / 1000) : null;
   const countWire = new TransformStream<Uint8Array, Uint8Array>({
     transform(chunk, controller) {
       compressedBytes += chunk.length;
@@ -135,6 +140,7 @@ export async function verifyStoredObject(raw: S3Store, row: any, key: string) {
         row.recovery_max_decoded_bytes ?? MAX_DECODED_OBJECT_BYTES)) mismatch('decoded_size_mismatch');
       contentHash.update(chunk);
       auxiliary?.push(chunk);
+      ppgAnchor?.push(chunk);
     }
   } catch (err) {
     if (sourceReadFailed) throw sourceReadError;
@@ -143,13 +149,14 @@ export async function verifyStoredObject(raw: S3Store, row: any, key: string) {
   }
   if (compressedBytes !== expectedWire) mismatch('size_mismatch');
   if (expectedDecoded != null && uncompressedBytes !== expectedDecoded) mismatch('decoded_size_mismatch');
+  const ppgValidation = ppgAnchor?.finish();
   const wireSha256 = wireHash.digest('hex');
   const contentSha256 = contentHash.digest('hex');
   // Old inline manifests recorded the gzip digest; old binary manifests recorded decoded SHA.
   const scope = row.digest_scope ?? (String(row.format).startsWith('ndjson') ? 'wire' : 'decoded');
   if ((scope === 'wire' ? wireSha256 : contentSha256) !== String(row.sha256).toLowerCase()) mismatch('digest_mismatch');
   return { compressedBytes, uncompressedBytes, wireSha256, contentSha256,
-    auxiliaryValidation: auxiliary?.finish(),
+    auxiliaryValidation: auxiliary?.finish(), ppgValidation,
     ...(response.headers.get('x-amz-version-id') ? { storageVersionId: response.headers.get('x-amz-version-id')! } : {}) };
 }
 

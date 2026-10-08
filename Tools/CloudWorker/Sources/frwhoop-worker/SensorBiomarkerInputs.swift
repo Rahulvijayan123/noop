@@ -14,7 +14,8 @@ import WhoopProtocol
 ///   - NPB1 `rawImuSession` objects (zstd)  → 100 Hz six-axis IMU in g and
 ///     deg/s with absolute timestamps `ts + i/100`;
 ///   - NPB1 `ppgWaveformSample` objects (gzip) → per-second v26 windows of 24
-///     signed i16 deltas with a (nil today on the wire) absolute optical anchor.
+///     signed i16 deltas, with the absolute optical anchor when the object is
+///     NPB1 format 3 (push protocol 1.5; formats 1 and 2 never carried it).
 ///
 /// PPG reconstruction is explicit: absolute = baseCode + cumulative deltas,
 /// via the shared `WhoopProtocol.ppgWaveformAbsolute`, ONLY when the anchor is
@@ -24,14 +25,17 @@ import WhoopProtocol
 /// (`saturated_delta`); a record whose delta count is not 24 is withheld
 /// (`unsupported_native_rate`) and the DETECTED rate is reported, never
 /// assumed; empty slots and dark blocks (drive == 0 when an optical config is
-/// carried) are withheld (`artifact_unavailable`).
+/// carried) are withheld (`artifact_unavailable`). Emitted seconds use the one
+/// grid `ppgGrid` names (docs/model-integration/ppg-transport.md).
 ///
 /// This module also builds the sidecar request input (CONTRACTS §4): for a
 /// given run set it produces time-ordered, non-overlapping, endpoint-owned
-/// segments (<= 5-minute chunks), the `input_revision` (sha256 over the sorted
-/// verified object digests in a documented canonical string form), the
-/// families list passed in by the caller, and the measured serialized size
-/// (every request is kept under the sidecar `MAX_BODY_BYTES`, 8 MiB).
+/// segments (<= 5-minute chunks) that carry their run, configuration and clock
+/// identity, the `input_revision` (sha256 over the sorted verified object
+/// digests in a documented canonical string form), the families whose input a
+/// request actually carries, its measured input coverage and recorded
+/// placement, and the measured serialized size (every request is kept under
+/// the sidecar `MAX_BODY_BYTES`, 8 MiB).
 ///
 /// Everything here is pure and unit-testable: the lane owns the DB query, B2
 /// download and the sidecar HTTP call, and feeds this module its inputs.
@@ -48,8 +52,6 @@ enum SensorBiomarkerInputs {
     static let accelScale = 1.0 / 4096.0
     /// Gyroscope scale, deg/s per i16 LSB (Whoop5RawImu: 2000/32768).
     static let gyroScale = 2000.0 / 32768.0
-    /// PPG v26 native rate: 24 samples per 1-second record (PpgHr.sampleRateHz).
-    static let ppgNativeRateHz = 24
     /// A v26 record carries exactly 24 signed i16 deltas plus one absolute anchor.
     static let ppgDeltasPerRecord = 24
     /// Signed 20-bit optical ADC rails (Whoop5RawOptical.sampleMin/sampleMax).
@@ -93,7 +95,9 @@ enum SensorBiomarkerInputs {
                m.user_id::text as user_id,
                m.device_id::text as device_id,
                extract(epoch from m.start_at)::bigint as start_ts,
-               extract(epoch from m.end_at)::bigint as end_ts
+               extract(epoch from m.end_at)::bigint as end_ts,
+               m.push_protocol_version as push_protocol_version,
+               m.schema_version::text as schema_version
           from public.object_manifests m
          where m.user_id = $1::uuid
            and m.device_id = $2::uuid
@@ -119,6 +123,10 @@ enum SensorBiomarkerInputs {
         let digest: String
         let startTs: Int64?
         let endTs: Int64?
+        /// The push protocol and stream schema the receiver recorded for the object (provenance, and
+        /// the PPG format the bytes must decode as). nil on rows predating those columns.
+        var protocolVersion: String? = nil
+        var schemaVersion: Int? = nil
     }
 
     /// The verified objects of a (user, device, UTC day), partitioned by kind
@@ -219,7 +227,9 @@ enum SensorBiomarkerInputs {
             let startTs = Int64(row["start_ts"] ?? "")
             let endTs = Int64(row["end_ts"] ?? "")
             let object = InputObject(id: id, objectKind: kind, objectKey: key,
-                                     digest: digest, startTs: startTs, endTs: endTs)
+                                     digest: digest, startTs: startTs, endTs: endTs,
+                                     protocolVersion: row["push_protocol_version"].flatMap { $0.isEmpty ? nil : $0 },
+                                     schemaVersion: Int(row["schema_version"] ?? ""))
             if kind == kindRawImuSession { imu.append(object) } else { ppg.append(object) }
         }
         imu.sort { ($0.startTs ?? Int64.max, $0.id) < ($1.startTs ?? Int64.max, $1.id) }
@@ -233,6 +243,7 @@ enum SensorBiomarkerInputs {
         case unsupportedKind(String)
         case digestMismatch(objectId: String, expected: String, actual: String)
         case decodeFailure(objectId: String, kind: String, detail: String)
+        case formatMismatch(objectId: String, schema: Int, format: UInt8)
 
         var description: String {
             switch self {
@@ -241,6 +252,8 @@ enum SensorBiomarkerInputs {
                 return "digest_mismatch: object \(id) expected \(e) got \(a)"
             case .decodeFailure(let id, let k, let d):
                 return "decode_failure: object \(id) (\(k)): \(d)"
+            case .formatMismatch(let id, let schema, let format):
+                return "format_mismatch: object \(id) schema \(schema) carries NPB1 format \(format)"
             }
         }
     }
@@ -275,14 +288,21 @@ enum SensorBiomarkerInputs {
         }
     }
 
-    /// Verify + decode one ppgWaveformSample object into per-second PPG records.
+    /// Verify + decode one ppgWaveformSample object into per-second PPG records. The NPB1 format must
+    /// be the one the receiver's recorded schema names (schema 1/2/3 = format 1/2/3), so bytes can
+    /// never be read under a contract they were not admitted with.
     static func decodePpgObject(wire: Data, object: InputObject) throws -> [PpgCodec.Record] {
         let decoded = try verifiedDecodedData(wire: wire, object: object)
+        let records: [PpgCodec.Record]
         do {
-            return try PpgCodec.unpack(decoded)
+            records = try PpgCodec.unpack(decoded)
         } catch {
             throw LoadError.decodeFailure(objectId: object.id, kind: object.objectKind, detail: "\(error)")
         }
+        if let schema = object.schemaVersion, let format = records.first?.format, Int(format) != schema {
+            throw LoadError.formatMismatch(objectId: object.id, schema: schema, format: format)
+        }
+        return records
     }
 
     /// `input_revision` (CONTRACTS §4): `sha256:` over the SORTED verified
@@ -389,10 +409,13 @@ enum SensorBiomarkerInputs {
         }
     }
 
+    /// Clipped pieces keep the run's id, configuration and clock: a run split across requests is
+    /// still one run.
     static func clip(_ runs: [PpgRun], from: Int64, to: Int64) -> [PpgRun] {
         runs.compactMap { run in
             let start = max(run.start, from), end = min(run.end, to)
-            return start < end ? PpgRun(start: start, end: end, configIdentity: run.configIdentity) : nil
+            return start < end ? PpgRun(start: start, end: end, runId: run.runId, config: run.config,
+                                        clock: run.clock) : nil
         }
     }
 
@@ -428,19 +451,27 @@ enum SensorBiomarkerInputs {
 
     // MARK: - PPG wire codec (kind 1)
 
-    /// One decoded per-second PPG record from an NPB1 `ppgWaveformSample`
-    /// object. The wire layout (mirrors `PushBinaryCodec.packPpgRecords` /
-    /// `unpackPpgRecords`; CloudWorker cannot import NoopPush, so the exact
-    /// layout is re-implemented here like `Npb1ImuDecoder` does for IMU):
-    ///   magic "NPB1" (4 B) | formatVersion 1|2 (1 B) | kind 1 (1 B) | u32 count (4 B)
-    ///   per record: i64 rowId | i64 ts | [v2: u8 hasIndex + optional i64
-    ///   recordIndex] | u8 hasBurst + optional i32 burstIndex | u32 blob length
-    ///   | the 48 bytes of 24 little-endian i16 deltas.
-    /// NOTE: the absolute optical anchor (`baseCode`) is NOT carried on this
-    /// wire — it is a local-DB column on the phone. Every wire record decodes
-    /// with `baseCode == nil`, and the PPG builder withholds those seconds with
-    /// `missing_ppg_anchor` rather than inventing a level. An anchor can be
-    /// attached from a future side channel via `PpgWaveformInput(record:baseCode:)`.
+    /// What a record's `ts` was taken from (NPB1 format 3 `clockSource`). Formats 1 and 2 carry no
+    /// clock member and decode as `.unknown`; nothing infers a source for them.
+    enum PpgClockSource: UInt8, Equatable, Hashable {
+        case unknown = 0
+        /// The strap's per-record unix second from the type-47 header, as the phone banked it.
+        case strapRecordSecond = 1
+
+        var wireName: String { self == .strapRecordSecond ? "strap_record_second" : "unknown" }
+    }
+
+    /// One decoded per-second PPG record from an NPB1 `ppgWaveformSample` object. CloudWorker cannot
+    /// import NoopPush, so the layout is re-implemented here (like `Npb1ImuDecoder` for IMU) and pinned
+    /// against the shared golden `Packages/NoopPush/Tests/NoopPushTests/Resources/ppg_anchor_v3_golden.json`:
+    ///   magic "NPB1" (4 B) | formatVersion 1|2|3 (1 B) | kind 1 (1 B) | u32 count (4 B)
+    ///   per record: i64 rowId | i64 ts | [format >= 2: u8 hasIndex + i64 recordIndex]
+    ///   | u8 hasBurst + i32 burstIndex
+    ///   | [format 3: u8 hasAnchor + u32 anchor | u8 clockSource | u8 hasSubsec + u16 subsecQ15
+    ///      | u8 hasFlags + u8 frontEndFlags | u8 sampleFlags]
+    ///   | u32 blob length | the blob (24 little-endian i16 deltas for a v26 window).
+    /// Formats 1 and 2 never carried the phone's `baseCode`, so their records decode with
+    /// `anchor == nil` and are withheld `missing_ppg_anchor`. Format 3 (push protocol 1.5) carries it.
     struct PpgCodec {
         struct Record: Equatable {
             let rowId: Int64
@@ -448,14 +479,30 @@ enum SensorBiomarkerInputs {
             let recordIndex: Int64?
             let burstIndex: Int32?
             let samples: [Int16]
+            /// The NPB1 format the record arrived in.
+            let format: UInt8
+            let anchor: UInt32?
+            let clockSource: PpgClockSource
+            let subsecQ15: UInt16?
+            let frontEndFlags: UInt8?
+            /// Format 3's encoder flag, verified against the deltas on decode.
+            let deltaAtRail: Bool
 
-            init(rowId: Int64, ts: Int64, recordIndex: Int64? = nil,
-                 burstIndex: Int32? = nil, samples: [Int16]) {
+            init(rowId: Int64, ts: Int64, recordIndex: Int64? = nil, burstIndex: Int32? = nil,
+                 samples: [Int16], format: UInt8 = 1, anchor: UInt32? = nil,
+                 clockSource: PpgClockSource = .unknown, subsecQ15: UInt16? = nil,
+                 frontEndFlags: UInt8? = nil, deltaAtRail: Bool = false) {
                 self.rowId = rowId
                 self.ts = ts
                 self.recordIndex = recordIndex
                 self.burstIndex = burstIndex
                 self.samples = samples
+                self.format = format
+                self.anchor = anchor
+                self.clockSource = clockSource
+                self.subsecQ15 = subsecQ15
+                self.frontEndFlags = frontEndFlags
+                self.deltaAtRail = deltaAtRail
             }
         }
 
@@ -486,6 +533,12 @@ enum SensorBiomarkerInputs {
         static let magicBytes: [UInt8] = [0x4E, 0x50, 0x42, 0x31]  // "NPB1"
         static let kindPpgWaveform: UInt8 = 1
         static let headerBytes = 10   // magic 4 + version 1 + kind 1 + count 4
+        static let anchorFormat: UInt8 = 3
+
+        /// Bit 0 of format 3 `sampleFlags`: a delta at an i16 rail (NoopPush `ppgSampleFlags`).
+        static func deltaAtRail(_ samples: [Int16]) -> Bool {
+            samples.contains { $0 == Int16.max || $0 == Int16.min }
+        }
 
         static func unpack(_ data: Data) throws -> [Record] {
             let bytes = [UInt8](data)
@@ -503,11 +556,16 @@ enum SensorBiomarkerInputs {
             func int64() throws -> Int64 {
                 Int64(bitPattern: try integer(8))
             }
+            func presence(_ row: Int, _ what: String) throws -> Bool {
+                let value = try integer(1)
+                guard value <= 1 else { throw CodecError.invalidRow(row, "invalid \(what) presence byte") }
+                return value == 1
+            }
 
             guard Array(try take(4)) == magicBytes else { throw CodecError.notNpb1 }
             let version = try take(1).first ?? 0
             let kind = try take(1).first ?? 0
-            guard version == 1 || version == 2 else { throw CodecError.unsupportedVersion(version) }
+            guard (1...anchorFormat).contains(version) else { throw CodecError.unsupportedVersion(version) }
             guard kind == kindPpgWaveform else { throw CodecError.unsupportedKind(kind) }
             let count = Int(try integer(4))
             guard count > 0 else { throw CodecError.emptyObject }
@@ -519,18 +577,12 @@ enum SensorBiomarkerInputs {
                 let rowId = try int64()
                 let ts = try int64()
                 var recordIndex: Int64? = nil
-                if version == 2 {
-                    let hasIndex = try integer(1)
-                    guard hasIndex <= 1 else {
-                        throw CodecError.invalidRow(i, "invalid recordIndex presence byte")
+                if version >= 2, try presence(i, "recordIndex") {
+                    let value = try int64()
+                    guard value >= 0, value <= Int64(UInt32.max) else {
+                        throw CodecError.invalidRow(i, "recordIndex out of range")
                     }
-                    if hasIndex == 1 {
-                        let value = try int64()
-                        guard value >= 0, value <= Int64(UInt32.max) else {
-                            throw CodecError.invalidRow(i, "recordIndex out of range")
-                        }
-                        recordIndex = value
-                    }
+                    recordIndex = value
                 }
                 let hasBurst = try integer(1)
                 guard rowId > 0, hasBurst <= 1 else {
@@ -539,6 +591,19 @@ enum SensorBiomarkerInputs {
                 let burstIndex: Int32? = hasBurst == 1
                     ? Int32(bitPattern: UInt32(truncatingIfNeeded: try integer(4)))
                     : nil
+                var anchor: UInt32? = nil, clock = PpgClockSource.unknown
+                var subsec: UInt16? = nil, frontEnd: UInt8? = nil, sampleFlags: UInt64 = 0
+                if version == anchorFormat {
+                    if try presence(i, "anchor") { anchor = UInt32(try integer(4)) }
+                    let source = UInt8(try integer(1))
+                    guard let decoded = PpgClockSource(rawValue: source) else {
+                        throw CodecError.invalidRow(i, "unknown clock source \(source)")
+                    }
+                    clock = decoded
+                    if try presence(i, "subsec") { subsec = UInt16(try integer(2)) }
+                    if try presence(i, "flags") { frontEnd = UInt8(try integer(1)) }
+                    sampleFlags = try integer(1)
+                }
                 let blobLength = Int(try integer(4))
                 guard blobLength >= 0, blobLength <= 4 * 1024 else {
                     throw CodecError.invalidRow(i, "invalid sample blob length \(blobLength)")
@@ -552,8 +617,14 @@ enum SensorBiomarkerInputs {
                     samples[s] = Int16(bitPattern: UInt16(blob[blob.startIndex + s * 2])
                         | (UInt16(blob[blob.startIndex + s * 2 + 1]) << 8))
                 }
+                let atRail = deltaAtRail(samples)
+                if version == anchorFormat, sampleFlags != (atRail ? 1 : 0) {
+                    throw CodecError.invalidRow(i, "sample flags \(sampleFlags) disagree with the deltas")
+                }
                 records.append(Record(rowId: rowId, ts: ts, recordIndex: recordIndex,
-                                      burstIndex: burstIndex, samples: samples))
+                                      burstIndex: burstIndex, samples: samples, format: version,
+                                      anchor: anchor, clockSource: clock, subsecQ15: subsec,
+                                      frontEndFlags: frontEnd, deltaAtRail: atRail))
             }
             guard offset == bytes.count else {
                 throw CodecError.trailingBytes(bytes.count - offset)
@@ -564,9 +635,35 @@ enum SensorBiomarkerInputs {
 
     // MARK: - PPG reconstruction
 
+    /// How anchored v26 records become sample times. The one place to change it
+    /// (docs/model-integration/ppg-transport.md, "Reconstruction and timing evidence").
+    enum PpgGrid: String, Equatable {
+        /// anchor + 24 deltas = 25 distinct consecutive samples per record, on a uniform 1/25 s grid.
+        /// Recorded v26 continuity shows the next record's anchor is the 26th sample, one ordinary
+        /// step after the 25th, not a repeat of it. Nothing is dropped and no point belongs to the
+        /// next record. A documented deviation from the spec text "first 24 at ts + i/24".
+        case uniform25 = "uniform-25hz-v26-continuity"
+        /// The pre-Spec-01 convention: the first 24 of the 25 points at ts + i/24, the 25th handed
+        /// to the next record. Kept so the deviation is a one-line revert; not used in production.
+        case legacy24 = "v26-first24-endpoint-next"
+
+        var samplesPerRecord: Int { self == .uniform25 ? 25 : 24 }
+        var endpoint: String { self == .uniform25 ? "own_record" : "next_record" }
+    }
+
+    /// The grid every request uses.
+    static let ppgGrid: PpgGrid = .uniform25
+    /// Samples per record-second on the emitted grid (`native_rate_hz`, `sample_count_per_second`).
+    static var ppgNativeRateHz: Int { ppgGrid.samplesPerRecord }
+    /// The recorded evidence behind `uniform25`, summarised for every segment's `clock`. Method and
+    /// limits (one corpus, one firmware, no independent check of the strap clock) are in the doc.
+    static let ppgGridEvidence = "frwhoop-v26-corpus fw=50.35.2.0 records=3645 pairs=3528 "
+        + "exact-zero-boundary=1.8% boundary-median=18 delta-median=18 "
+        + "corr(boundary,last)=0.77 corr(boundary,next)=0.84 corr(adjacent)=0.80"
+
     /// Side-channel optical configuration (v20-style source/drive/range/offset).
     /// The v26 wire records never carry it; when a caller supplies it, the
-    /// config identity folds it in (a change breaks pooling) and a drive == 0
+    /// config identity is built from it (a change breaks pooling) and a drive == 0
     /// block is a dark/control block, never a worn pulsatile channel.
     struct PpgOpticalConfig: Equatable, Hashable {
         var sourceA: Int? = nil
@@ -579,6 +676,51 @@ enum SensorBiomarkerInputs {
         var offsetB: Int? = nil
 
         var isDark: Bool { (driveA ?? 0) == 0 || (driveB ?? 0) == 0 }
+        /// Channel (source), drive and gain (range) identified for both channels.
+        var identifiesConfiguration: Bool {
+            [sourceA, driveA, rangeA, sourceB, driveB, rangeB].allSatisfy { $0 != nil }
+        }
+        var identity: String {
+            func part(_ name: String, _ value: Int?) -> String { "\(name)=\(value.map(String.init) ?? "?")" }
+            return [part("srcA", sourceA), part("drvA", driveA), part("srcB", sourceB), part("drvB", driveB),
+                    part("rngA", rangeA), part("offA", offsetA), part("rngB", rangeB), part("offB", offsetB)]
+                .joined(separator: ";")
+        }
+    }
+
+    /// What a run's optical configuration is known to be. `identity` names the configuration only
+    /// (gain, drive, channel, LED), never a burst or record counter, and is "unknown" whenever the
+    /// transport does not identify it: every v26 record, because v26 reports no gain, drive or channel.
+    /// Equal identities mean comparable amplitudes; "unknown" is never equal to anything.
+    struct PpgConfig: Equatable, Hashable {
+        static let unknownIdentity = "unknown"
+
+        let identity: String
+        let known: Bool
+        /// The v26 per-burst counter: part of run identity and descriptive, never configuration.
+        let burstIndex: Int32?
+        /// The raw type-47 header flags byte when the phone kept it (descriptive, verbatim).
+        let frontEndFlags: UInt8?
+        let optical: PpgOpticalConfig?
+
+        init(burstIndex: Int32?, frontEndFlags: UInt8? = nil, optical: PpgOpticalConfig? = nil) {
+            self.burstIndex = burstIndex
+            self.frontEndFlags = frontEndFlags
+            self.optical = optical
+            self.identity = optical?.identity ?? Self.unknownIdentity
+            self.known = optical?.identifiesConfiguration ?? false
+        }
+    }
+
+    /// Where a record's sample times come from. Sample k of a segment is at
+    /// `start_unix + phase_s + k / samples_per_second`; `phase_s` is the header Q15 sub-second phase
+    /// when the record carried it, else unknown (up to one second).
+    struct PpgClock: Equatable, Hashable {
+        let source: PpgClockSource
+        let subsecQ15: UInt16?
+
+        /// A phase only below one second; any other value is carried, never interpreted.
+        var phaseSeconds: Double? { subsecQ15.flatMap { $0 < 32_768 ? Double($0) / 32_768 : nil } }
     }
 
     /// A per-second PPG record as the reconstruction layer consumes it.
@@ -595,9 +737,16 @@ enum SensorBiomarkerInputs {
         /// the second is withheld `missing_ppg_anchor`.
         let baseCode: Int32?
         let config: PpgOpticalConfig?
+        let clockSource: PpgClockSource
+        let subsecQ15: UInt16?
+        let frontEndFlags: UInt8?
+        /// The NPB1 format the record arrived in (0 when it did not come from the wire).
+        let format: UInt8
 
         init(rowId: Int64 = 0, ts: Int64, samples: [Int16], burstIndex: Int32? = nil,
-             recordIndex: Int64? = nil, baseCode: Int32? = nil, config: PpgOpticalConfig? = nil) {
+             recordIndex: Int64? = nil, baseCode: Int32? = nil, config: PpgOpticalConfig? = nil,
+             clockSource: PpgClockSource = .unknown, subsecQ15: UInt16? = nil,
+             frontEndFlags: UInt8? = nil, format: UInt8 = 0) {
             self.rowId = rowId
             self.ts = ts
             self.samples = samples
@@ -605,12 +754,20 @@ enum SensorBiomarkerInputs {
             self.recordIndex = recordIndex
             self.baseCode = baseCode
             self.config = config
+            self.clockSource = clockSource
+            self.subsecQ15 = subsecQ15
+            self.frontEndFlags = frontEndFlags
+            self.format = format
         }
 
-        init(wireRecord: PpgCodec.Record, baseCode: Int32? = nil) {
+        /// A wire record. The u32 anchor saturates into Int32: a code that large is outside the signed
+        /// 20-bit optical domain anyway, so the second is withheld as out of domain, never as missing.
+        init(wireRecord: PpgCodec.Record) {
             self.init(rowId: wireRecord.rowId, ts: wireRecord.ts, samples: wireRecord.samples,
                       burstIndex: wireRecord.burstIndex, recordIndex: wireRecord.recordIndex,
-                      baseCode: baseCode)
+                      baseCode: wireRecord.anchor.map { Int32(clamping: $0) },
+                      clockSource: wireRecord.clockSource, subsecQ15: wireRecord.subsecQ15,
+                      frontEndFlags: wireRecord.frontEndFlags, format: wireRecord.format)
         }
 
         /// From a WhoopProtocol v26 `PpgWaveformSample` (the shape
@@ -619,26 +776,19 @@ enum SensorBiomarkerInputs {
             self.init(rowId: rowId, ts: Int64(whoopSample.ts),
                       samples: whoopSample.samples.map { Int16(clamping: $0) },
                       burstIndex: whoopSample.burstIndex.map { Int32(clamping: $0) },
-                      baseCode: whoopSample.baseCode.map { Int32(clamping: $0) })
+                      baseCode: whoopSample.baseCode.map { Int32(clamping: $0) },
+                      clockSource: .strapRecordSecond)
         }
 
-        /// The opaque configuration identity that must be constant within a
-        /// contiguous PPG run: the per-burst counter plus any side-channel
-        /// optical configuration. A change breaks pooling (CONTRACTS §5:
-        /// split at source/configuration change).
-        var configIdentity: String {
-            var parts = [burstIndex.map { "burst=\($0)" } ?? "burst=?"]
-            if let config {
-                parts.append("srcA=\(config.sourceA.map(String.init) ?? "?")")
-                parts.append("drvA=\(config.driveA.map(String.init) ?? "?")")
-                parts.append("srcB=\(config.sourceB.map(String.init) ?? "?")")
-                parts.append("drvB=\(config.driveB.map(String.init) ?? "?")")
-                parts.append("rngA=\(config.rangeA.map(String.init) ?? "?")")
-                parts.append("offA=\(config.offsetA.map(String.init) ?? "?")")
-                parts.append("rngB=\(config.rangeB.map(String.init) ?? "?")")
-                parts.append("offB=\(config.offsetB.map(String.init) ?? "?")")
-            }
-            return parts.joined(separator: ";")
+        var opticalConfig: PpgConfig {
+            PpgConfig(burstIndex: burstIndex, frontEndFlags: frontEndFlags, optical: config)
+        }
+        var clock: PpgClock { PpgClock(source: clockSource, subsecQ15: subsecQ15) }
+
+        /// How much provenance this observation carries; a richer copy of the same deltas wins a merge.
+        var richness: Int {
+            (baseCode != nil ? 8 : 0) + (clockSource != .unknown ? 4 : 0)
+                + (recordIndex != nil ? 2 : 0) + (subsecQ15 != nil || frontEndFlags != nil ? 1 : 0)
         }
     }
 
@@ -646,9 +796,10 @@ enum SensorBiomarkerInputs {
     /// withheld reason. Withheld seconds are never sent as amplitudes.
     struct PpgSecond: Equatable {
         let ts: Int64
-        let configIdentity: String
+        let config: PpgConfig
+        let clock: PpgClock
         let burstIndex: Int32?
-        /// 24 absolute ADC counts when emitted; empty when withheld.
+        /// `grid.samplesPerRecord` absolute ADC counts when emitted; empty when withheld.
         let samples: [Int32]
         /// nil = emitted; else a CONTRACTS §3 reason.
         let withheldReason: String?
@@ -661,6 +812,10 @@ enum SensorBiomarkerInputs {
         let deltaCount: Int
         /// Drive == 0 dark/control block (when an optical config was carried).
         let darkBlock: Bool
+        /// The NPB1 format the second's record arrived in (0 when not from the wire).
+        let format: UInt8
+
+        var configIdentity: String { config.identity }
     }
 
     /// Reconstruct one record into a second. Order of resolution (fail-closed):
@@ -668,73 +823,53 @@ enum SensorBiomarkerInputs {
     /// `unsupported_native_rate` (detected, never assumed); drive == 0 dark
     /// block → `artifact_unavailable`; missing anchor → `missing_ppg_anchor`;
     /// any i16-rail delta or a reconstruction outside ±2^19 →
-    /// `saturated_delta`; otherwise exactly 24 absolute samples are emitted.
+    /// `saturated_delta`; otherwise the second is emitted on `grid`.
     ///
     /// The anchor + 24 deltas reconstruct to 25 points (sample 0 = baseCode,
-    /// WhoopProtocol.ppgWaveformAbsolute). The 25th point sits at
-    /// `ts + 24/24 = ts + 1`, the grid position the NEXT second's record owns;
-    /// emitting it would put two samples on one grid point. So each second
-    /// emits exactly `points[0..<24]` at `ts + i/24`, matching CONTRACTS
-    /// `sample_count_per_second: 24` with no boundary duplication.
-    static func reconstructSecond(_ record: PpgWaveformInput) -> PpgSecond {
-        let identity = record.configIdentity
+    /// WhoopProtocol.ppgWaveformAbsolute), every one checked against the optical domain. `uniform25`
+    /// emits all 25 at `ts + i/25`; `legacy24` emits `points[0..<24]` at `ts + i/24`.
+    static func reconstructSecond(_ record: PpgWaveformInput, grid: PpgGrid = ppgGrid) -> PpgSecond {
+        let config = record.opticalConfig, clock = record.clock
         let dark = record.config?.isDark ?? false
-        if record.samples.isEmpty {
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonArtifactUnavailable,
-                             saturatedDelta: false, outOfDomain: false,
-                             deltaCount: 0, darkBlock: dark)
+        func second(_ samples: [Int32], _ reason: String?, saturated: Bool = false, outOfDomain: Bool = false,
+                    dark isDark: Bool = false) -> PpgSecond {
+            PpgSecond(ts: record.ts, config: config, clock: clock, burstIndex: record.burstIndex,
+                      samples: samples, withheldReason: reason, saturatedDelta: saturated,
+                      outOfDomain: outOfDomain, deltaCount: record.samples.count, darkBlock: isDark,
+                      format: record.format)
         }
-        if record.samples.count != ppgDeltasPerRecord {
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonUnsupportedNativeRate,
-                             saturatedDelta: false, outOfDomain: false,
-                             deltaCount: record.samples.count, darkBlock: dark)
-        }
-        if dark {
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonArtifactUnavailable,
-                             saturatedDelta: false, outOfDomain: false,
-                             deltaCount: record.samples.count, darkBlock: true)
-        }
-        guard let base = record.baseCode else {
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonMissingPpgAnchor,
-                             saturatedDelta: false, outOfDomain: false,
-                             deltaCount: record.samples.count, darkBlock: false)
-        }
+        if record.samples.isEmpty { return second([], reasonArtifactUnavailable, dark: dark) }
+        if record.samples.count != ppgDeltasPerRecord { return second([], reasonUnsupportedNativeRate, dark: dark) }
+        if dark { return second([], reasonArtifactUnavailable, dark: true) }
+        guard let base = record.baseCode else { return second([], reasonMissingPpgAnchor) }
         let deltas = record.samples.map(Int.init)
         let saturated = deltas.contains { $0 == Int(Int16.min) || $0 == Int(Int16.max) }
         // The shared reconstruction (WhoopProtocol.ppgWaveformAbsolute) — the
         // same math the rest of the repo pins against Kotlin.
         guard let absolute = ppgWaveformAbsolute(baseCode: Int(base), deltas: deltas) else {
             // Unreachable with a non-nil base; fail closed rather than emit.
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonMissingPpgAnchor,
-                             saturatedDelta: false, outOfDomain: false,
-                             deltaCount: record.samples.count, darkBlock: false)
+            return second([], reasonMissingPpgAnchor)
         }
         let outOfDomain = absolute.contains { $0 < opticalSampleMin || $0 > opticalSampleMax }
         if saturated || outOfDomain {
-            return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                             samples: [], withheldReason: reasonSaturatedDelta,
-                             saturatedDelta: saturated, outOfDomain: outOfDomain,
-                             deltaCount: record.samples.count, darkBlock: false)
+            return second([], reasonSaturatedDelta, saturated: saturated, outOfDomain: outOfDomain)
         }
-        let emitted = absolute.prefix(ppgNativeRateHz).map { Int32($0) }
-        return PpgSecond(ts: record.ts, configIdentity: identity, burstIndex: record.burstIndex,
-                         samples: Array(emitted), withheldReason: nil,
-                         saturatedDelta: false, outOfDomain: false,
-                         deltaCount: record.samples.count, darkBlock: false)
+        return second(absolute.prefix(grid.samplesPerRecord).map { Int32($0) }, nil)
     }
 
-    /// A contiguous PPG run over EMITTED seconds, with a single config
-    /// identity. Runs break at missing seconds (a withheld second is a data
-    /// gap — never bridged) and at any config-identity change.
+    /// A contiguous, configuration-compatible PPG run over EMITTED seconds. Runs break at missing
+    /// seconds (a withheld second is a data gap, never bridged), at any configuration or burst change
+    /// and at any clock source or phase change.
     struct PpgRun: Equatable {
         let start: Int64
         let end: Int64
-        let configIdentity: String
+        /// `ppg-<start_unix>` of the run as reconstructed; clipping keeps it, so the pieces of one run
+        /// in consecutive requests share it. Unique within a device-day: runs never overlap.
+        let runId: String
+        let config: PpgConfig
+        let clock: PpgClock
+
+        var configIdentity: String { config.identity }
     }
 
     /// The full PPG reconstruction result for a set of records.
@@ -750,20 +885,28 @@ enum SensorBiomarkerInputs {
         /// Seconds dropped as conflicting duplicates (kept first by rowId
         /// precedence; never averaged).
         let conflictingDuplicateSeconds: [Int64]
-        /// Contiguous runs over emitted seconds, one config identity each.
+        /// Seconds whose copies carried the same deltas and one copy more provenance (an anchored
+        /// 1.5 re-upload of an anchor-less second): the richer copy is kept, nothing conflicts.
+        let supersededDuplicateSeconds: Int
+        /// Contiguous runs over emitted seconds, one configuration and clock each.
         let runs: [PpgRun]
-        /// 24 when every unique record carried 24 deltas; nil otherwise (mixed
-        /// or unknown — never assumed).
+        /// `grid.samplesPerRecord` when every unique record carried 24 deltas; nil otherwise (mixed or
+        /// unknown — never assumed).
         let nativeRateHz: Int?
+        let grid: PpgGrid
+        /// Unique seconds per NPB1 format, so a day shows how much of its PPG could carry an anchor.
+        let secondsByFormat: [UInt8: Int]
     }
 
-    /// Deterministically merge records (from one or more objects) into one
-    /// record per second: identical duplicates collapse, conflicting duplicates
-    /// keep the first by capture precedence `(rowId, recordIndex, burstIndex,
-    /// ts)` and are reported — never averaged.
+    /// Deterministically merge records (from one or more objects) into one record per second.
+    /// Identical observations collapse. Two copies with the same deltas, burst and compatible identity
+    /// where one carries more provenance (an anchored 1.5 copy of an anchor-less 1.3 second) are one
+    /// observation: the richer copy is kept and nothing conflicts. Any other disagreement keeps the
+    /// first by capture precedence `(rowId, recordIndex, burstIndex, ts)` and is reported — never averaged.
     static func mergePpgRecords(_ records: [PpgWaveformInput]) -> (merged: [PpgWaveformInput],
                                                                    identical: Int,
-                                                                   conflicting: [Int64]) {
+                                                                   conflicting: [Int64],
+                                                                   superseded: Int) {
         // Observation identity excludes rowId: the same second re-uploaded in a
         // second object carries the same samples/burst/recordIndex/anchor but a
         // different storage row id, and must still count as an identical
@@ -772,114 +915,319 @@ enum SensorBiomarkerInputs {
         func precedence(_ r: PpgWaveformInput) -> (Int64, Int64, Int32, Int64) {
             (r.rowId, r.recordIndex ?? Int64.max, r.burstIndex ?? Int32.max, r.ts)
         }
-        func observationKey(_ r: PpgWaveformInput) -> String {
-            "ts=\(r.ts);s=\(r.samples);b=\(r.burstIndex ?? -1);ri=\(r.recordIndex ?? -1);base=\(r.baseCode ?? -1);cfg=\(r.configIdentity)"
+        func compatible<T: Equatable>(_ a: T?, _ b: T?) -> Bool { a == nil || b == nil || a == b }
+        func sameObservation(_ a: PpgWaveformInput, _ b: PpgWaveformInput) -> Bool {
+            a.samples == b.samples && a.burstIndex == b.burstIndex && a.config == b.config
+                && compatible(a.recordIndex, b.recordIndex) && compatible(a.baseCode, b.baseCode)
+                && compatible(a.subsecQ15, b.subsecQ15) && compatible(a.frontEndFlags, b.frontEndFlags)
+                && (a.clockSource == b.clockSource || a.clockSource == .unknown || b.clockSource == .unknown)
         }
-        var byTs: [Int64: (record: PpgWaveformInput, identicalCount: Int)] = [:]
+        var byTs: [Int64: PpgWaveformInput] = [:]
         var conflicting: [Int64] = []
-        var identical = 0
+        var identical = 0, superseded = 0
         for record in records {
-            if let existing = byTs[record.ts] {
-                if observationKey(existing.record) == observationKey(record) {
-                    identical += 1
-                } else {
-                    if precedence(record) < precedence(existing.record) {
-                        byTs[record.ts] = (record, 0)
-                    }
-                    if !conflicting.contains(record.ts) {
-                        conflicting.append(record.ts)
-                    }
-                }
+            guard let existing = byTs[record.ts] else { byTs[record.ts] = record; continue }
+            if sameObservation(existing, record), existing.richness == record.richness {
+                identical += 1
+                if precedence(record) < precedence(existing) { byTs[record.ts] = record }
+            } else if sameObservation(existing, record) {
+                superseded += 1
+                if record.richness > existing.richness { byTs[record.ts] = record }
             } else {
-                byTs[record.ts] = (record, 0)
+                if precedence(record) < precedence(existing) { byTs[record.ts] = record }
+                if !conflicting.contains(record.ts) { conflicting.append(record.ts) }
             }
         }
-        let merged = byTs.keys.sorted().map { byTs[$0]!.record }
-        return (merged, identical, conflicting)
+        let merged = byTs.keys.sorted().map { byTs[$0]! }
+        return (merged, identical, conflicting.sorted(), superseded)
     }
 
     /// Reconstruct merged records into seconds, runs and diagnostics.
-    static func reconstructPPG(records: [PpgWaveformInput]) -> PpgReconstruction {
-        let (merged, _, conflicting) = mergePpgRecords(records)
-        let seconds = merged.map { reconstructSecond($0) }
+    static func reconstructPPG(records: [PpgWaveformInput], grid: PpgGrid = ppgGrid) -> PpgReconstruction {
+        let (merged, _, conflicting, superseded) = mergePpgRecords(records)
+        let seconds = merged.map { reconstructSecond($0, grid: grid) }
         var reasonCounts: [String: Int] = [:]
-        for second in seconds {
-            if let reason = second.withheldReason {
-                reasonCounts[reason, default: 0] += 1
-            }
-        }
         var detected: [Int: Int] = [:]
-        for second in seconds { detected[second.deltaCount, default: 0] += 1 }
+        var formats: [UInt8: Int] = [:]
+        for second in seconds {
+            if let reason = second.withheldReason { reasonCounts[reason, default: 0] += 1 }
+            detected[second.deltaCount, default: 0] += 1
+            formats[second.format, default: 0] += 1
+        }
         let allAt24 = !seconds.isEmpty && detected.keys.allSatisfy { $0 == ppgDeltasPerRecord }
-        let runs = ppgRuns(seconds: seconds)
         return PpgReconstruction(seconds: seconds, reasonCounts: reasonCounts,
                                  detectedDeltaCounts: detected,
                                  conflictingDuplicateSeconds: conflicting,
-                                 runs: runs,
-                                 nativeRateHz: allAt24 ? ppgNativeRateHz : nil)
+                                 supersededDuplicateSeconds: superseded,
+                                 runs: ppgRuns(seconds: seconds),
+                                 nativeRateHz: allAt24 ? grid.samplesPerRecord : nil,
+                                 grid: grid, secondsByFormat: formats)
     }
 
-    /// Contiguous runs over emitted seconds; a withheld second or a config
-    /// identity change breaks the run.
+    /// Contiguous runs over emitted seconds; a missing or withheld second, a configuration or burst
+    /// change, or a clock source or phase change breaks the run.
     static func ppgRuns(seconds: [PpgSecond]) -> [PpgRun] {
-        let emitted = seconds.filter { $0.withheldReason == nil }
         var runs: [PpgRun] = []
-        guard let first = emitted.first else { return runs }
-        var start = first.ts
-        var prev = first.ts
-        var identity = first.configIdentity
-        for second in emitted.dropFirst() {
-            if second.ts != prev + 1 || second.configIdentity != identity {
-                runs.append(PpgRun(start: start, end: prev + 1, configIdentity: identity))
-                start = second.ts
-                identity = second.configIdentity
-            }
-            prev = second.ts
+        var current: (start: Int64, last: Int64, config: PpgConfig, clock: PpgClock)? = nil
+        func close() {
+            guard let run = current else { return }
+            runs.append(PpgRun(start: run.start, end: run.last + 1, runId: "ppg-\(run.start)",
+                               config: run.config, clock: run.clock))
         }
-        runs.append(PpgRun(start: start, end: prev + 1, configIdentity: identity))
+        for second in seconds where second.withheldReason == nil {
+            if let run = current, second.ts == run.last + 1, second.config == run.config, second.clock == run.clock {
+                current = (run.start, second.ts, run.config, run.clock)
+            } else {
+                close()
+                current = (second.ts, second.ts, second.config, second.clock)
+            }
+        }
+        close()
         return runs
+    }
+
+    // MARK: - Input coverage
+
+    /// Actual input coverage over a window: the seconds the transport delivered a record for
+    /// (`expected`), the seconds emitted (`eligible`) and every withheld second by reason. One
+    /// record per second is what the transport delivers, so record-seconds are the expectation;
+    /// capture is duty-cycled (v26 arrives in bursts), so wall-clock time is not.
+    struct ModalityCoverage: Equatable {
+        var expectedSeconds = 0
+        var eligibleSeconds = 0
+        var withheld: [String: Int] = [:]
+        var runs = 0
+        var segments = 0
+
+        var withheldSeconds: Int { withheld.values.reduce(0, +) }
+        /// The reason most seconds were withheld for, or nil when none were.
+        var dominantWithheldReason: String? {
+            withheld.max { $0.value == $1.value ? $0.key > $1.key : $0.value < $1.value }?.key
+        }
+
+        func jsonObject() -> [String: Any] {
+            var out: [String: Any] = ["expected_seconds": expectedSeconds, "eligible_seconds": eligibleSeconds,
+                                      "withheld_seconds": withheldSeconds, "runs": runs, "segments": segments]
+            out["withheld"] = withheld
+            return out
+        }
+    }
+
+    /// PPG coverage over `[from, to)`: every reconstructed second in the window, and the distinct runs
+    /// touching it.
+    static func ppgCoverage(secondsByTs: [Int64: PpgSecond], runs: [PpgRun], from: Int64, to: Int64,
+                            segments: Int = 0) -> ModalityCoverage {
+        var out = ModalityCoverage()
+        guard to > from else { return out }
+        func count(_ second: PpgSecond) {
+            out.expectedSeconds += 1
+            if let reason = second.withheldReason { out.withheld[reason, default: 0] += 1 }
+            else { out.eligibleSeconds += 1 }
+        }
+        if Int(to - from) <= secondsByTs.count {
+            for t in from..<to { if let second = secondsByTs[t] { count(second) } }
+        } else {
+            for (t, second) in secondsByTs where t >= from && t < to { count(second) }
+        }
+        out.runs = runs.filter { $0.start < to && $0.end > from }.count
+        out.segments = segments
+        return out
+    }
+
+    /// IMU coverage over `[from, to)`. The worker withholds no IMU second, so every delivered second is
+    /// eligible.
+    static func imuCoverage(timeline: ActivityLane.ImuTimeline, runs: [ActivityLane.Run], from: Int64, to: Int64,
+                            segments: Int = 0) -> ModalityCoverage {
+        var out = ModalityCoverage()
+        guard to > from, let first = ActivityLane.lowerBound(timeline.seconds, from) else { return out }
+        var index = first
+        while index < timeline.seconds.count, timeline.seconds[index] < to {
+            out.expectedSeconds += 1
+            index += 1
+        }
+        out.eligibleSeconds = out.expectedSeconds
+        out.runs = runs.filter { $0.start < to && $0.end > from }.count
+        out.segments = segments
+        return out
     }
 
     // MARK: - PPG segments
 
-    /// One endpoint-owned PPG segment (CONTRACTS §4): `samples` holds
-    /// `durationS * 24` absolute ADC counts; sample j is at
-    /// `startUnix + j/24`. Consecutive segments share no endpoint sample.
+    /// One endpoint-owned PPG segment (CONTRACTS §4): `samples` holds `durationS * samplesPerSecond`
+    /// absolute ADC counts; sample k is at `startUnix + clock.phaseSeconds + k / samplesPerSecond`.
+    /// Consecutive segments share no sample, and the segments of one run share its `runId`, are
+    /// time-contiguous and share one configuration and clock.
     struct PpgSegment: Equatable {
         let startUnix: Int64
         let durationS: Int
         let samples: [Int32]
-        /// Always true here: a run carries a single config identity by
-        /// construction, so every segment's configuration is stable.
-        let configStable: Bool
+        let runId: String
+        let config: PpgConfig
+        let clock: PpgClock
+        let grid: PpgGrid
+
+        /// Always true: a run carries one configuration by construction. An older sidecar's rhythm
+        /// gate reads it.
+        var configStable: Bool { true }
+        var samplesPerSecond: Int { grid.samplesPerRecord }
     }
 
     /// Split a PPG run into non-overlapping segments of at most `maxDuration`
     /// seconds at whole-second boundaries, endpoint-owned.
     static func ppgSegments(run: PpgRun, secondsByTs: [Int64: PpgSecond],
-                            maxDuration: Int = maxSegmentDurationSeconds) -> [PpgSegment] {
+                            maxDuration: Int = maxSegmentDurationSeconds,
+                            grid: PpgGrid = ppgGrid) -> [PpgSegment] {
         guard maxDuration > 0 else { return [] }
         var segments: [PpgSegment] = []
         var chunkStart = run.start
         while chunkStart < run.end {
             let chunkEnd = segmentEnd(start: chunkStart, maxDuration: maxDuration, runEnd: run.end)
             var samples: [Int32] = []
+            samples.reserveCapacity(Int(chunkEnd - chunkStart) * grid.samplesPerRecord)
             for t in chunkStart..<chunkEnd {
                 if let second = secondsByTs[t], second.withheldReason == nil {
                     samples.append(contentsOf: second.samples)
                 }
             }
             if !samples.isEmpty {
-                segments.append(PpgSegment(startUnix: chunkStart,
-                                           durationS: Int(chunkEnd - chunkStart),
-                                           samples: samples, configStable: true))
+                segments.append(PpgSegment(startUnix: chunkStart, durationS: Int(chunkEnd - chunkStart),
+                                           samples: samples, runId: run.runId, config: run.config,
+                                           clock: run.clock, grid: grid))
             }
             chunkStart = chunkEnd
         }
         return segments
     }
 
+    /// The segment `config` object (docs/model-integration/README.md, PPG segments).
+    static func configObject(_ config: PpgConfig) -> [String: Any] {
+        var out: [String: Any] = ["identity": config.identity, "known": config.known, "stable": true]
+        if let burst = config.burstIndex { out["burst_index"] = Int(burst) }
+        if let flags = config.frontEndFlags { out["front_end_flags"] = Int(flags) }
+        if let optical = config.optical {
+            for (key, value) in [("source_a", optical.sourceA), ("drive_a", optical.driveA),
+                                 ("source_b", optical.sourceB), ("drive_b", optical.driveB),
+                                 ("range_a", optical.rangeA), ("offset_a", optical.offsetA),
+                                 ("range_b", optical.rangeB), ("offset_b", optical.offsetB)] {
+                if let value { out[key] = value }
+            }
+        }
+        return out
+    }
+
+    /// The segment `clock` object. The sidecar interprets `packet_timing_verified` and
+    /// `samples_per_second`; the rest is provenance.
+    static func clockObject(_ clock: PpgClock, grid: PpgGrid) -> [String: Any] {
+        [
+            "source": clock.source.wireName,
+            "grid": grid.rawValue,
+            "grid_evidence": ppgGridEvidence,
+            "endpoint": grid.endpoint,
+            "record_period_s": 1,
+            "samples_per_second": grid.samplesPerRecord,
+            "sample_time": "start_unix + phase_s + k/\(grid.samplesPerRecord)",
+            "phase_s": clock.phaseSeconds.map { $0 as Any } ?? NSNull(),
+            // The grid comes from offline continuity evidence on one corpus and firmware; the strap
+            // clock behind `ts` was never checked against independent packet timing.
+            "packet_timing_verified": false,
+        ]
+    }
+
     // MARK: - Sidecar request input (CONTRACTS §4)
+
+    enum Modality: String { case imu, ppg }
+
+    /// The modality a family's input comes from. A request never asks for a family whose input it
+    /// does not carry; an unknown family is asked whenever the request carries anything.
+    static func requiredModality(of family: String) -> Modality? {
+        switch family {
+        case "movement", "oscillation", "tremor", "arm_swing": return .imu
+        case "ppg_quality", "pulse_shape", "perfusion_research", "rhythm_shadow": return .ppg
+        default: return nil
+        }
+    }
+
+    /// `families` (caller order) a request carrying the given modalities may ask for.
+    static func families(_ families: [String], imu: Bool, ppg: Bool) -> [String] {
+        families.filter { family in
+            switch requiredModality(of: family) {
+            case .imu?: return imu
+            case .ppg?: return ppg
+            case nil: return imu || ppg
+            }
+        }
+    }
+
+    /// One recorded placement declaration (`placement_intervals`): body location only, half-open
+    /// `[start, end)` with a nil end for an open interval.
+    struct PlacementInterval: Equatable {
+        let start: Int64
+        let end: Int64?
+        let placement: String
+        let source: String
+        let deviceScoped: Bool
+    }
+
+    /// Where the strap was worn over one request, from recorded declarations only. A device-scoped
+    /// declaration wins over a user-level one where both exist (the phone's PlacementStore rule).
+    /// Nothing records the wrist side or the screen orientation, so `watch_side` and
+    /// `device_orientation` stay "unknown"; this never guesses them from a body location.
+    struct PlacementSummary: Equatable {
+        /// The one location covering every second, "mixed" when several do, "unknown" when any
+        /// second has no declaration.
+        let bodyLocation: String
+        /// "user" | "device" | "mixed" | "none" (nothing declared in the request).
+        let source: String
+
+        static let undeclared = PlacementSummary(bodyLocation: "unknown", source: "none")
+
+        func jsonObject() -> [String: Any] {
+            ["body_location": bodyLocation, "source": source,
+             "watch_side_source": "not_recorded", "device_orientation_source": "not_recorded"]
+        }
+    }
+
+    static func placementSummary(_ intervals: [PlacementInterval], from: Int64, to: Int64) -> PlacementSummary {
+        guard to > from, !intervals.isEmpty else { return .undeclared }
+        // Device-scoped declarations first; user-level ones fill only what they leave uncovered.
+        var gaps: [(Int64, Int64)] = [(from, to)]
+        var pieces: [PlacementInterval] = []
+        for scoped in [true, false] {
+            let layer = intervals.filter { $0.deviceScoped == scoped }.sorted { $0.start < $1.start }
+            var remaining: [(Int64, Int64)] = []
+            for (gapStart, gapEnd) in gaps {
+                var cursor = gapStart
+                for interval in layer where interval.start < gapEnd && (interval.end ?? Int64.max) > cursor {
+                    let start = max(interval.start, cursor), end = min(interval.end ?? Int64.max, gapEnd)
+                    guard start < end else { continue }
+                    if start > cursor { remaining.append((cursor, start)) }
+                    pieces.append(interval)
+                    cursor = end
+                }
+                if cursor < gapEnd { remaining.append((cursor, gapEnd)) }
+            }
+            gaps = remaining
+        }
+        guard !pieces.isEmpty else { return .undeclared }
+        let sources = Set(pieces.map(\.source))
+        let source = sources.count == 1 ? sources.first! : "mixed"
+        guard gaps.isEmpty else { return PlacementSummary(bodyLocation: "unknown", source: source) }
+        let locations = Set(pieces.map(\.placement))
+        return PlacementSummary(bodyLocation: locations.count == 1 ? locations.first! : "mixed", source: source)
+    }
+
+    /// The `coverage` member of one request: actual input over the request's interval.
+    struct RequestCoverage: Equatable {
+        let intervalStart: Int64
+        let intervalEnd: Int64
+        let imu: ModalityCoverage
+        let ppg: ModalityCoverage
+
+        func jsonObject() -> [String: Any] {
+            ["interval_start_unix": intervalStart, "interval_end_unix": intervalEnd,
+             "imu": imu.jsonObject(), "ppg": ppg.jsonObject()]
+        }
+    }
 
     /// The typed `input` member of `POST /v1/infer` for metric
     /// `sensor_biomarkers`.
@@ -894,6 +1242,8 @@ enum SensorBiomarkerInputs {
         let watchSide: String
         let deviceOrientation: String
         let families: [String]
+        let coverage: RequestCoverage?
+        let placement: PlacementSummary
 
         struct ImuSection: Equatable {
             let samplingRateHz: Int
@@ -927,8 +1277,10 @@ enum SensorBiomarkerInputs {
                     "segments": ppg.segments.map {
                         ["start_unix": $0.startUnix, "duration_s": $0.durationS,
                          "samples": $0.samples,
-                         "sample_count_per_second": SensorBiomarkerInputs.ppgNativeRateHz,
-                         "config": ["stable": $0.configStable]]
+                         "sample_count_per_second": $0.samplesPerSecond,
+                         "run_id": $0.runId,
+                         "config": SensorBiomarkerInputs.configObject($0.config),
+                         "clock": SensorBiomarkerInputs.clockObject($0.clock, grid: $0.grid)] as [String: Any]
                     },
                 ]
             }
@@ -937,7 +1289,7 @@ enum SensorBiomarkerInputs {
 
         /// Every key except the sample-bearing `imu` / `ppg` sections.
         func metadataObject() -> [String: Any] {
-            [
+            var out: [String: Any] = [
                 "schema_version": schemaVersion,
                 "device": ["id": deviceID, "family": deviceFamily],
                 "input_revision": inputRevision,
@@ -945,7 +1297,10 @@ enum SensorBiomarkerInputs {
                 "watch_side": watchSide,
                 "device_orientation": deviceOrientation,
                 "families": families,
+                "placement": placement.jsonObject(),
             ]
+            if let coverage { out["coverage"] = coverage.jsonObject() }
+            return out
         }
 
         /// The same JSON as `jsonObject()`, written directly. The metadata (the only strings) goes
@@ -1026,10 +1381,18 @@ enum SensorBiomarkerInputs {
         return out
     }
 
+    /// Small metadata values written with sorted keys, so segment JSON is deterministic.
+    static func jsonText(_ value: Any) -> String {
+        (try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .fragmentsAllowed]))
+            .map { String(decoding: $0, as: UTF8.self) } ?? "null"
+    }
+
     static func segmentJSON(_ segment: PpgSegment) -> String {
-        var out = "{\"config\":{\"stable\":\(segment.configStable)},\"duration_s\":\(segment.durationS),"
-            + "\"sample_count_per_second\":\(ppgNativeRateHz),\"samples\":["
-        out.reserveCapacity(segment.samples.count * 8 + 128)
+        var out = "{\"clock\":\(jsonText(clockObject(segment.clock, grid: segment.grid))),"
+            + "\"config\":\(jsonText(configObject(segment.config))),\"duration_s\":\(segment.durationS),"
+            + "\"run_id\":\(jsonText(segment.runId)),"
+            + "\"sample_count_per_second\":\(segment.samplesPerSecond),\"samples\":["
+        out.reserveCapacity(segment.samples.count * 8 + 1024)
         for (i, v) in segment.samples.enumerated() {
             if i > 0 { out.append(",") }
             out.append(String(v))
@@ -1051,6 +1414,9 @@ enum SensorBiomarkerInputs {
     /// which runs form one chunk-group (algorithm-context overlap is its
     /// concern, not this module's); this module only guarantees contiguous,
     /// non-overlapping segments and the 8 MiB budget.
+    ///
+    /// A modality no requested family reads is never sent, a request asks only for families whose
+    /// input it carries, and each request reports its actual input coverage and recorded placement.
     static func buildRequests(imuRuns: [ActivityLane.Run],
                               ppgRuns: [PpgRun],
                               imuTimeline: ActivityLane.ImuTimeline,
@@ -1062,16 +1428,21 @@ enum SensorBiomarkerInputs {
                               watchSide: String = "unknown",
                               deviceOrientation: String = "unknown",
                               families: [String],
+                              placement: [PlacementInterval] = [],
                               maxDuration: Int = maxSegmentDurationSeconds,
-                              maxBodyBytes: Int = bodyBudgetBytes) throws -> [BuiltRequest] {
+                              maxBodyBytes: Int = bodyBudgetBytes,
+                              grid: PpgGrid = ppgGrid) throws -> [BuiltRequest] {
         guard maxDuration > 0, maxBodyBytes > 0 else { return [] }
         let revision = inputRevision(objects: objects)
+        // A modality no requested family reads is never built or sent.
+        let usedImuRuns = Self.families(families, imu: true, ppg: false).isEmpty ? [] : imuRuns
+        let usedPpgRuns = Self.families(families, imu: false, ppg: true).isEmpty ? [] : ppgRuns
         // IMU first, then PPG — each modality's segments are internally
         // time-ordered and non-overlapping by construction.
         var imuSegs: [ImuSegment] = []
-        for run in imuRuns { imuSegs.append(contentsOf: imuSegments(run: run, timeline: imuTimeline, maxDuration: maxDuration)) }
+        for run in usedImuRuns { imuSegs.append(contentsOf: imuSegments(run: run, timeline: imuTimeline, maxDuration: maxDuration)) }
         var ppgSegs: [PpgSegment] = []
-        for run in ppgRuns { ppgSegs.append(contentsOf: ppgSegments(run: run, secondsByTs: ppgSecondsByTs, maxDuration: maxDuration)) }
+        for run in usedPpgRuns { ppgSegs.append(contentsOf: ppgSegments(run: run, secondsByTs: ppgSecondsByTs, maxDuration: maxDuration, grid: grid)) }
 
         // Safety: if a single segment still exceeds the budget (never at the
         // 300 s cap, but defensive), halve the cap and rebuild.
@@ -1083,9 +1454,9 @@ enum SensorBiomarkerInputs {
             guard tooBig, duration > 30 else { break }
             duration /= 2
             imuSegs = []
-            for run in imuRuns { imuSegs.append(contentsOf: imuSegments(run: run, timeline: imuTimeline, maxDuration: duration)) }
+            for run in usedImuRuns { imuSegs.append(contentsOf: imuSegments(run: run, timeline: imuTimeline, maxDuration: duration)) }
             ppgSegs = []
-            for run in ppgRuns { ppgSegs.append(contentsOf: ppgSegments(run: run, secondsByTs: ppgSecondsByTs, maxDuration: duration)) }
+            for run in usedPpgRuns { ppgSegs.append(contentsOf: ppgSegments(run: run, secondsByTs: ppgSecondsByTs, maxDuration: duration, grid: grid)) }
         }
 
         // Pack segments greedily in time order into budget-bounded requests. Each segment's JSON
@@ -1102,7 +1473,9 @@ enum SensorBiomarkerInputs {
         }
         kinded.sort { ($0.start, $0.kind) < ($1.start, $1.kind) }
 
-        func makeInput(imu: [ImuSegment], ppg: [PpgSegment], emptySections: Bool = false) -> SensorBiomarkerInput {
+        func makeInput(imu: [ImuSegment], ppg: [PpgSegment], emptySections: Bool = false,
+                       coverage: RequestCoverage? = nil, placement summary: PlacementSummary = .undeclared,
+                       requestFamilies: [String]) -> SensorBiomarkerInput {
             SensorBiomarkerInput(
                 schemaVersion: 1, deviceID: deviceID, deviceFamily: deviceFamily,
                 inputRevision: revision, dayUTC: dayUTC,
@@ -1111,12 +1484,14 @@ enum SensorBiomarkerInputs {
                     units: ["accel": "g", "gyro": "deg/s"],
                     segments: imu),
                 ppg: ppg.isEmpty && !emptySections ? nil : SensorBiomarkerInput.PpgSection(
-                    nativeRateHz: ppgNativeRateHz, units: "adc_counts", segments: ppg),
-                watchSide: watchSide, deviceOrientation: deviceOrientation, families: families)
+                    nativeRateHz: grid.samplesPerRecord, units: "adc_counts", segments: ppg),
+                watchSide: watchSide, deviceOrientation: deviceOrientation, families: requestFamilies,
+                coverage: coverage, placement: summary)
         }
-        // Both section headers present: an upper bound on any request's non-segment bytes.
-        let skeletonBytes = try makeInput(imu: [], ppg: [], emptySections: true)
-            .writeJSON(imuSegmentsJSON: [], ppgSegmentsJSON: []).count
+        // Both section headers present: an upper bound on any request's non-segment bytes, plus room
+        // for the coverage and placement members.
+        let skeletonBytes = try makeInput(imu: [], ppg: [], emptySections: true, requestFamilies: families)
+            .writeJSON(imuSegmentsJSON: [], ppgSegmentsJSON: []).count + 4096
 
         var requests: [BuiltRequest] = []
         var pendingImu: [ImuSegment] = []
@@ -1129,12 +1504,23 @@ enum SensorBiomarkerInputs {
 
         func closeRequest() throws {
             guard let start = requestStart, let end = requestEnd else { return }
-            let input = makeInput(imu: pendingImu, ppg: pendingPpg)
-            let json = try input.writeJSON(imuSegmentsJSON: pendingImuJSON, ppgSegmentsJSON: pendingPpgJSON)
-            let interval = isoInterval(start: start, end: end)
-            requests.append(BuiltRequest(input: input, intervalStartUTC: interval.start,
-                                         intervalEndUTC: interval.end, serializedSizeBytes: json.count,
-                                         inputJSON: json))
+            let requestFamilies = Self.families(families, imu: !pendingImu.isEmpty, ppg: !pendingPpg.isEmpty)
+            if !requestFamilies.isEmpty {
+                let coverage = RequestCoverage(
+                    intervalStart: start, intervalEnd: end,
+                    imu: imuCoverage(timeline: imuTimeline, runs: usedImuRuns, from: start, to: end,
+                                     segments: pendingImu.count),
+                    ppg: ppgCoverage(secondsByTs: ppgSecondsByTs, runs: usedPpgRuns, from: start, to: end,
+                                     segments: pendingPpg.count))
+                let input = makeInput(imu: pendingImu, ppg: pendingPpg, coverage: coverage,
+                                      placement: placementSummary(placement, from: start, to: end),
+                                      requestFamilies: requestFamilies)
+                let json = try input.writeJSON(imuSegmentsJSON: pendingImuJSON, ppgSegmentsJSON: pendingPpgJSON)
+                let interval = isoInterval(start: start, end: end)
+                requests.append(BuiltRequest(input: input, intervalStartUTC: interval.start,
+                                             intervalEndUTC: interval.end, serializedSizeBytes: json.count,
+                                             inputJSON: json))
+            }
             pendingImu = []
             pendingPpg = []
             pendingImuJSON = []
@@ -1167,13 +1553,13 @@ enum SensorBiomarkerInputs {
 
     /// A cheap upper bound for the single-segment budget guard: 12 JSON
     /// numbers per IMU sample (6 values with separators) at a generous 16 B
-    /// each, plus the ADC counts at 12 B each.
+    /// each, plus the ADC counts at 12 B each and the PPG clock/config members.
     static func estimatedBytes(_ segment: ImuSegment) -> Int {
         let imuNumbers = segment.accelG.count * 6
         return imuNumbers * 16 + segment.startUnix.description.count + 32
     }
 
     static func estimatedBytes(_ segment: PpgSegment) -> Int {
-        segment.samples.count * 12 + segment.startUnix.description.count + 32
+        segment.samples.count * 12 + segment.startUnix.description.count + 1024
     }
 }
