@@ -575,8 +575,11 @@ final class ActivityContextJoinTests: XCTestCase {
         let obj = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
         XCTAssertEqual(Set(obj.keys), ["schema_version", "ontology_version", "model_version",
                                        "preprocessing_version", "input_revision", "data_through",
-                                       "status", "reasons", "epochs", "summary", "contexts"])
+                                       "status", "reasons", "epochs", "summary", "contexts", "join_version"])
         XCTAssertEqual(obj["schema_version"] as? Int, 1)
+        // recent_activity_s is measured from the slot start since join-2 (WP6); the marker says so.
+        XCTAssertEqual(obj["join_version"] as? String, ActivityContextJoin.version)
+        XCTAssertEqual(ActivityContextJoin.version, "join-2")
         XCTAssertEqual(obj["ontology_version"] as? String, "v1")
         XCTAssertEqual(obj["model_version"] as? String, "hart-activity-1")
         XCTAssertEqual(obj["preprocessing_version"] as? String, "hart-pre-1")
@@ -599,6 +602,14 @@ final class ActivityContextJoinTests: XCTestCase {
         // Full round trip.
         let decoded = try! JSONDecoder().decode(ActivityContextDocument.self, from: data)
         XCTAssertEqual(decoded, doc)
+
+        // A document published before the marker (join-1 semantics) still decodes, with no join version.
+        var legacy = obj
+        legacy["join_version"] = nil
+        let old = try! JSONDecoder().decode(ActivityContextDocument.self,
+                                            from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(old.joinVersion)
+        XCTAssertEqual(old.contexts, doc.contexts)
     }
 
     func testActivityContextSummaryCodableRoundTrip() {
