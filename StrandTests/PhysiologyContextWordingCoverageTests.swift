@@ -19,6 +19,7 @@ enum PhysiologyContextReasonRegistries {
         ("ContextReferences", PC.ContextReferences.reasonCodes),
         ("ChangeDetection", PC.ChangeDetection.reasonCodes),
         ("Functional", PC.Functional.reasonCodes),
+        ("PostureEvidence", PC.PostureEvidence.reasonCodes),
     ]
 
     /// Every registered code, once.

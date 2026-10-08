@@ -174,6 +174,10 @@ struct MeasurementContextDetailModel: Equatable {
                                          decoder.dominantLabel.map(W.likelyActivity) ?? String(localized: "Mixed or unknown"),
                                          note: String(localized: "A likely activity or posture, not a confirmed one. This estimate reads heart rate, so it is shown for reference only and never used to qualify the measurement.")))
         }
+        if let posture = e.posture, let position = W.positionRow(posture, locale: locale) {
+            rows.append(ContextDetailRow("position", String(localized: "Likely position"), position.value,
+                                         note: position.note))
+        }
         var notes: [String] = []
         if let reasons = W.reasonList(a.reasons) { notes.append(reasons) }
         if a.heartRateDependent {
@@ -259,7 +263,10 @@ struct MeasurementContextDetailModel: Equatable {
                 notes.append("\(W.day(from, locale: locale))\u{2013}\(W.day(to, locale: locale))")
             }
             if let center = W.referenceCenter(c, units: units, locale: locale) { notes.append(center) }
-            if c.pooledContribution > 0 {
+            if let borrowed = W.predecessorNote(c) {
+                // The pooled share of a borrowed reference is the previous strap's, not a related context's.
+                notes.append(borrowed)
+            } else if c.pooledContribution > 0 {
                 notes.append(String(localized: "\(W.percent(c.pooledContribution, locale: locale)) from related contexts"))
             }
             if let r = W.reasonList(c.reasons) { notes.append(r) }

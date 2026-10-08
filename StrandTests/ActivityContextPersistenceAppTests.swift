@@ -107,6 +107,104 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
                       "the day is decoded and written again, not only re-stamped: \(logs)")
     }
 
+    // MARK: Retrospective intervals (D8-10)
+
+    @MainActor
+    func testAFinalDayGainsRetrospectiveRowsThatOnlyHistoricalReadsServe() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 3_600), deviceId: id)
+        var logs: [String] = []
+        await coordinator(repo, logs: { logs.append($0) }).drainMaterialization(pauseNs: 0)
+
+        let ledgerRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        let ledger = try XCTUnwrap(ledgerRow)
+        XCTAssertEqual(ledger.finality, "final")
+        XCTAssertEqual(ledger.retrospectiveVersion, ActivityContextRetrospective.version,
+                       "the ledger names the smoother whose rows it holds")
+        let causal = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        let smoothed = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end,
+                                                                reading: .retrospective)
+        XCTAssertFalse(causal.isEmpty)
+        XCTAssertFalse(smoothed.isEmpty, "a final day is written with its retrospective rows: \(logs)")
+        XCTAssertTrue(causal.allSatisfy { $0.derivation == ActivityContextIntervalRow.causal })
+        XCTAssertTrue(smoothed.allSatisfy { $0.derivation == ActivityContextIntervalRow.retrospective })
+
+        // Causal readers (every live consumer and every baseline) are unchanged: the decoder's own rows.
+        let live = await repo.storedActivityContext(from: day.start, to: day.end, feedback: [])
+        XCTAssertEqual(live.intervals, causal.map(ActivityContextInterval.init(row:)))
+        XCTAssertTrue(live.intervals.allSatisfy { $0.derivation == .causal })
+        // A historical read of the finished day prefers the retrospective rows.
+        let past = await repo.storedActivityContextWithStatus(from: day.start, to: day.end, feedback: [],
+                                                              reading: .historical)
+        XCTAssertEqual(past.intervals, smoothed.map(ActivityContextInterval.init(row:)))
+        XCTAssertTrue(past.intervals.allSatisfy { $0.derivation == .retrospective })
+    }
+
+    @MainActor
+    func testARelaunchDoesNotRePlanADayAlreadyAtTheCurrentRetrospectiveVersion() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        let firstRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        let first = try XCTUnwrap(firstRow)
+        XCTAssertEqual(first.retrospectiveVersion, ActivityContextRetrospective.version)
+
+        var logs: [String] = []
+        await coordinator(repo, logs: { logs.append($0) }).drainMaterialization(pauseNs: 0)
+        let againRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        XCTAssertEqual(againRow, first, "nothing is rewritten")
+        XCTAssertFalse(logs.contains { $0.hasSuffix(day.key) && $0.hasPrefix("Activity context: saved") },
+                       "the day is not derived again: \(logs)")
+    }
+
+    @MainActor
+    func testAFinalDayWithoutTheSmootherGainsItOnceThenStops() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = oldDay
+        _ = try await store.insert(desk(from: day.start + 9 * 3_600, seconds: 1_800), deviceId: id)
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        // A day saved by a build that wrote no retrospective rows: same causal rows, ledger names no smoother.
+        let savedRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        var saved = try XCTUnwrap(savedRow)
+        let causal = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        saved.retrospectiveVersion = nil
+        try await store.replaceActivityContext(deviceId: id, day: saved, intervals: causal)
+
+        await coordinator(repo).drainMaterialization(pauseNs: 0)
+        let upgradedRow = try await store.activityContextDay(deviceId: id, day: day.key)
+        XCTAssertEqual(upgradedRow?.retrospectiveVersion, ActivityContextRetrospective.version)
+        let smoothed = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end,
+                                                                reading: .retrospective)
+        XCTAssertFalse(smoothed.isEmpty)
+    }
+
+    @MainActor
+    func testAProvisionalDayGetsNoRetrospectiveRows() async throws {
+        let (repo, store, id) = try await fixture()
+        let today = ActivityContextMaterialization.localDays(endingAt: now, count: 1, timeZone: .current)[0]
+        let start = max(today.start, now - 1_800)
+        let seconds = min(1_200, now - start - 1)
+        guard seconds >= 300 else { throw XCTSkip("too close to local midnight for a day in progress") }
+        _ = try await store.insert(desk(from: start, seconds: seconds), deviceId: id)
+        await coordinator(repo, days: 1).drainMaterialization(pauseNs: 0)
+
+        let ledgerRow = try await store.activityContextDay(deviceId: id, day: today.key)
+        let ledger = try XCTUnwrap(ledgerRow)
+        XCTAssertEqual(ledger.finality, "provisional")
+        XCTAssertNil(ledger.retrospectiveVersion)
+        let smoothed = try await store.activityContextIntervals(deviceId: id, from: today.start, to: today.end,
+                                                                reading: .retrospective)
+        XCTAssertTrue(smoothed.isEmpty, "a day still in progress is never smoothed")
+        let causal = try await store.activityContextIntervals(deviceId: id, from: today.start, to: today.end)
+        XCTAssertFalse(causal.isEmpty)
+        let past = await repo.storedActivityContextWithStatus(from: today.start, to: today.end, feedback: [],
+                                                              reading: .historical)
+        XCTAssertEqual(past.intervals, causal.map(ActivityContextInterval.init(row:)),
+                       "a historical read of a provisional day is the causal one")
+    }
+
     // MARK: Interval context columns (INT-A)
 
     @MainActor
@@ -159,8 +257,13 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         var previousEvents = try await store.activityContextTransitions(deviceId: id, from: previous.start, to: previous.end)
         previousEvents.append(ActivityContextTransitionRow(ts: day.start - 30, kind: "walk_stop", probability: 0.9,
                                                            decoderVersion: previousLedger.decoderVersion))
+        // Rewritten with its retrospective rows too, so the previous day stays at the current smoother version and
+        // is not re-derived (which would replace the injected event with the decoder's own).
+        let previousSmoothed = try await store.activityContextIntervals(deviceId: id, from: previous.start,
+                                                                        to: previous.end, reading: .retrospective)
         try await store.replaceActivityContext(deviceId: id, day: previousLedger, intervals: previousRows,
-                                               transitions: previousEvents)
+                                               transitions: previousEvents,
+                                               retrospective: previousSmoothed.filter { $0.startTs >= previous.start })
 
         var logs: [String] = []
         await coordinator(repo, logs: { logs.append($0) }).drainMaterialization(pauseNs: 0)

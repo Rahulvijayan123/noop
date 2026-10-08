@@ -114,11 +114,13 @@ extension Repository {
     /// strap does not split a day's story. `through` is the latest decode horizon of the days in the window
     /// (nil when none has been saved). Days derived by another rule set are not served (see
     /// `storedActivityContextWithStatus`, which also says which days are provisional). The wearer's stretch
-    /// corrections are applied on top (D9-07), as in `storedActivityContextWithStatus`.
+    /// corrections are applied on top (D9-07), as in `storedActivityContextWithStatus`. `reading` as there.
     func storedActivityContext(from: Int, to: Int, timeZone: TimeZone = .current,
-                               feedback: [StretchFeedback]? = nil)
+                               feedback: [StretchFeedback]? = nil,
+                               reading: ActivityContextIntervalReading = .causal)
         async -> (intervals: [ActivityContextInterval], through: Int?) {
-        let stored = await storedActivityContextWithStatus(from: from, to: to, timeZone: timeZone, feedback: feedback)
+        let stored = await storedActivityContextWithStatus(from: from, to: to, timeZone: timeZone, feedback: feedback,
+                                                           reading: reading)
         return (stored.intervals, stored.through)
     }
 
@@ -129,8 +131,15 @@ extension Repository {
     /// written back: the stored rows stay what the model said. `feedback` defaults to the phone's saved verdicts
     /// (`StretchFeedbackStore.shared`, the last `keepSyncedDays` of answers); pass `[]` for the decoder's own
     /// reading.
+    ///
+    /// `reading` (D8-10): `.causal` (the default) is the decoder's forward filter only, and is what every live or
+    /// causal consumer reads: the stress detector, today's lines, daytime stress and its baselines, HRV windows. A
+    /// look back over past days ("what was I doing last week") passes `.historical`, which serves a final day from
+    /// its retrospective (forward-backward smoothed) rows where it has them and every other day causally. A
+    /// retrospective label must never reach a causal baseline, so nothing that feeds one passes `.historical`.
     func storedActivityContextWithStatus(from: Int, to: Int, timeZone: TimeZone = .current,
-                                         feedback: [StretchFeedback]? = nil) async -> StoredActivityContext {
+                                         feedback: [StretchFeedback]? = nil,
+                                         reading: ActivityContextIntervalReading = .causal) async -> StoredActivityContext {
         let empty = StoredActivityContext(intervals: [], through: nil, days: [])
         guard to > from, let store = await storeHandle() else { return empty }
         let ids = rawPhysiologyReadIds(store: store)
@@ -142,7 +151,7 @@ extension Repository {
         var lists: [[ActivityContextInterval]] = []
         var days: [StoredActivityContextDay] = []
         for id in ids {
-            let rows = (try? await store.activityContextIntervals(deviceId: id, from: from, to: to)) ?? []
+            let rows = (try? await store.activityContextIntervals(deviceId: id, from: from, to: to, reading: reading)) ?? []
             let own = (ledgers[id] ?? [:]).values.filter { $0.dayEnd > from && $0.dayStart < to }
             for ledger in own {
                 days.append(StoredActivityContextDay(
