@@ -35,9 +35,11 @@ Method (``method_version`` ``prv-nonlinear-1``):
    Fewer than ``min_segments`` used segments -> withheld (values null) with a reason.
 6. Latency cap: at most ``max_segments`` segments are evaluated, chosen evenly across the night
    in time order (deterministic); the counts of available and evaluated segments are reported. A
-   wall-clock guard (``time_budget_s``) withholds the whole block (``compute_budget_exceeded``)
-   instead of risking the route's 3 s budget for every other block: it can only remove the block,
-   never change a published value. Stretches shorter than one segment are not cleaned (they
+   CPU-time guard (``time_budget_s``, this thread's CPU seconds) withholds the whole block
+   (``compute_budget_exceeded``) instead of risking the route's 3 s budget for every other block:
+   it can only remove the block, never change a published value. It is CPU time, not wall clock,
+   so a loaded host (which only makes the request WAIT for a core) cannot flip a stored block
+   between available and withheld; the route's own wall-clock watchdog still bounds latency. Stretches shorter than one segment are not cleaned (they
    cannot contribute), which changes no result.
 """
 
@@ -84,7 +86,7 @@ class PrvNonlinearConfig:
     min_segments: int = 3
     #: latency cap: evaluate at most this many segments, evenly spaced over the night
     max_segments: int = 24
-    #: wall-clock guard (s) for the whole block: past it the block is WITHHELD
+    #: CPU-time guard (this thread's CPU seconds) for the whole block: past it the block is WITHHELD
     #: (``compute_budget_exceeded``) rather than risk the route's 3 s budget for every other
     #: block; it never changes a published number, only whether one is published
     time_budget_s: float = 0.4
@@ -227,7 +229,7 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline, cfg_root: SleepFeatur
     night = tl.night
     if night.is_nap:
         return _block("not_applicable", [REASON_NOT_MAIN_NIGHT], cfg)
-    started = time.perf_counter()
+    started = time.thread_time()
     beats = [b for b in req.beats if night.start <= b.ts < night.end]
     if not beats:
         return _block("withheld", [REASON_NO_RR_BEATS], cfg)
@@ -237,7 +239,7 @@ def compute_night(req: SleepFeaturesRequest, tl: Timeline, cfg_root: SleepFeatur
     sampen: list[float] = []
     alpha: list[float] = []
     for k in chosen:
-        if time.perf_counter() - started > cfg.time_budget_s:
+        if time.thread_time() - started > cfg.time_budget_s:
             return _block("withheld", [REASON_COMPUTE_BUDGET_EXCEEDED], cfg, available=len(segments))
         s, a = segment_statistics(segments[k], cfg)
         if s is None or a is None:

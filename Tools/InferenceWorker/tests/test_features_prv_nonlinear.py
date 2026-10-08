@@ -271,8 +271,11 @@ def test_block_is_assembled_per_night_within_latency_budget():
     assert blk["method_version"] == "prv-nonlinear-1"
     assert "prv_nonlinear" not in doc["nights"][0]["metric_status"]["module_errors"]
     assert blk["segments_evaluated"] <= pn.PRV_NONLINEAR_CONFIG.max_segments
-    # Added cost on the committed full-night fixture (26 400 beats): generous bound for a loaded host.
+    # The guard is CPU time, so a loaded host cannot trip it: the committed full night's block is
+    # decided by its data (here too few 300-beat true-adjacent stretches), never by machine load.
+    assert "compute_budget_exceeded" not in blk["reasons"], blk["reasons"]
+    # Added CPU cost on the committed full-night fixture (26 400 beats), well inside the guard.
     tl = build_timeline(req.nights[0])
-    started = time.perf_counter()
+    started = time.thread_time()
     pn.compute_night(req, tl, CONFIG)
-    assert time.perf_counter() - started < 1.5
+    assert time.thread_time() - started < pn.PRV_NONLINEAR_CONFIG.time_budget_s
