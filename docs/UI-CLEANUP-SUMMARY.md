@@ -100,3 +100,19 @@ Not done: dark mode, a runtime macOS visual check (the Mac builds and its tests 
 ## Tools
 
 In `_build-scratch/tools/`: `ui-build.sh <worktree> <name> ios|mac|test|watch|pkg`, `ui-sim.sh` (install, tour, shot), `areas.json`. Demo launch arguments are in `Strand/Data/DemoLaunchArgs.swift` and are DEBUG only.
+
+## Release merge into nara/main (2026-10-08)
+
+The cleanup branch was merged onto `nara/main` (3b4ee16a5) and the two unpushed `phone/settings-perf-sync-20261007`
+commits (background sync offloads, IMU saving revert) were merged in so nothing already built for the phone is lost.
+
+Where the cleanup overlapped newer work on main, main's version was kept: Today page, `FullDayChartView`, steps and
+key metric detail, Sana chat (view model, components, thinking trace, viz views), Sana sidebar and memory, and the imperial
+default unit system. As a result these cleanup pieces are not in the release: the heart-rate day and stretches restyle,
+the Coach chat restyle, `HeartRateDaySections`, `WalkingDayView`, `StrapSignalDayView`, `DemoActivityExtras`, the onboarding
+unit pickers and `HrGapTimelineSegmentsTests`. `LiquidSky.swift`, `LiquidSkyMotionTests`, `ThinkingOrb` and `ImageFXMosaic`
+were restored because main still uses them.
+
+Verification on the merged tree: iOS simulator, macOS and watchOS builds pass; the device build installs; StrandTests ran
+3389 tests with only the three known failures (`ActivityCalibrationSessionTests` x2,
+`IntradayWordingAndCoachTests.testMinuteBucketsAreDescribedAsMinuteBuckets`); `QuietMotionCoverageTests` passes.
