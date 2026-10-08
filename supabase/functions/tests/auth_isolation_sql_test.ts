@@ -187,6 +187,7 @@ const SERVICE_ONLY_FUNCTIONS = [
   "coach_take_utility_quota",
   "coach_add_utility_tokens",
   "coach_messages_save_v1",
+  "coach_thread_delete_v1",
   "coach_search_v1",
   "coach_memories_ranked_v1",
   "coach_context_manifest_v1",

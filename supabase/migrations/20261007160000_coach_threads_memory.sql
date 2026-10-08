@@ -1,7 +1,7 @@
 -- Sana threads, folders, durable memory and the context library (docs/COACH_MEMORY.md §2 and §3).
 -- Additive only: five new owner-scoped tables, new columns on coach_messages, coach_memory_items and
--- coach_usage, generated search columns with user-scoped GIN indexes (btree_gin), two trigger functions,
--- a one-time grouping of the existing conversation into threads, and ten service-role-only RPCs.
+-- coach_usage, generated search columns with user-scoped GIN indexes (btree_gin), one trigger function,
+-- a one-time grouping of the existing conversation into threads, and eleven service-role-only RPCs.
 --
 -- Tables:
 --   coach_folders             the owner's chat folders (client-generated ids)
@@ -18,18 +18,25 @@
 -- authenticated (Supabase's default privileges grant it on new functions, so the revokes are load-bearing).
 -- Helper and trigger functions live in `internal`.
 --
--- Existing conversation: every coach_messages row without a client_id gets one, and every row without a
--- thread is grouped per owner into `backfill` threads, a new thread wherever consecutive messages are more
--- than 3 hours apart. The thread-stats trigger is created after that, so the backfill's own counts are the
--- only ones written. Re-applying the file runs the grouping again for rows that are still thread-less (for
--- example ones the previous coach function wrote between this migration and its deploy).
+-- Existing conversation: every coach_messages row without a client_id gets one; a refusal an old build
+-- saved (internal.coach_is_refusal) and the question right before it are marked blocked, since old builds
+-- never set meta.blocked; then every row without a thread is grouped per owner into `backfill` threads, a
+-- new thread wherever consecutive messages are more than 3 hours apart. The thread-stats trigger is created
+-- after that, so the backfill's own counts are the only ones written. Re-applying the file runs the marking
+-- and the grouping again for rows that are still thread-less (for example ones the previous coach function
+-- wrote between this migration and its deploy).
 --
 -- Deletion: every new table cascades from auth.users; coach_messages cascade from their thread through the
 -- composite (thread_id, user_id) foreign key, which also keeps a message from joining another owner's thread.
+-- A thread's folder is the composite (folder_id, user_id) key, so a thread can only sit in its owner's folder.
 --
--- Safe to re-run (if not exists / create or replace / drop ... if exists). Rollback: redeploy the previous
--- `coach` function; the new objects can stay. To remove them: drop the three coach_messages_thread_stats_*
--- triggers and coach_threads_folder_owner, the functions below, the new columns, and the five tables.
+-- Safe to re-run (if not exists / create or replace / drop ... if exists). Rollback: set the coach function's
+-- COACH_THREADS_DISABLED=1 secret. GET status then stops announcing `features`, so thread-aware apps go back
+-- to one conversation, while this function keeps every data rule (the 50,000-message retention, 200 active
+-- memories, retired rows hidden, forget tombstones, deleted chats staying deleted). Never redeploy the coach
+-- function from before this migration: it prunes every owner to the newest 500 messages, hard-deletes the
+-- memories beyond 50 (retired rows counted) and lists retired rows again. To remove the objects: drop the
+-- three coach_messages_thread_stats_* triggers, the functions below, the new columns, and the five tables.
 begin;
 set local lock_timeout = '10s';
 set local statement_timeout = '120s';
@@ -59,8 +66,10 @@ create table if not exists public.coach_threads (
   title text check (title is null or char_length(title) between 1 and 120),
   title_source text not null default 'none'
     check (title_source in ('none', 'auto', 'user', 'fallback', 'legacy')),
-  -- Ownership of the folder is enforced by internal.coach_thread_folder_owner (42501).
-  folder_id uuid references public.coach_folders(id) on delete set null,
+  -- One of the owner's folders: the composite key coach_threads_folder_fkey below. A foreign key rather than a
+  -- BEFORE trigger, because any BEFORE ROW UPDATE trigger makes PostgreSQL recompute `search` (and rewrite its
+  -- TOAST value) on every update of the row, which the stats trigger and the lease do constantly.
+  folder_id uuid,
   pinned boolean not null default false,
   origin text not null default 'app' check (origin in ('app', 'legacy_client', 'backfill')),
   created_at timestamptz not null default now(),
@@ -77,14 +86,33 @@ create table if not exists public.coach_threads (
   summary_messages integer not null default 0 check (summary_messages >= 0),
   curated_through timestamptz,
   summarized_at timestamptz,
-  -- Maintenance lease (coach_thread_claim_v1 / coach_thread_publish_v1).
+  -- Maintenance lease (coach_thread_claim_v1 / coach_thread_publish_v1). maintenance_claimed_at fences the
+  -- publish against a forget or forget-all that lands while the pass runs.
   maintenance_token uuid,
   maintenance_until timestamptz,
+  maintenance_claimed_at timestamptz,
   search tsvector generated always as (
     setweight(to_tsvector('english', coalesce(title, '')), 'A')
     || setweight(to_tsvector('english', coalesce(summary, '')), 'B')) stored,
   constraint coach_threads_id_user_key unique (id, user_id)
 );
+
+-- For a database that holds an earlier draft of this table.
+alter table public.coach_threads add column if not exists maintenance_claimed_at timestamptz;
+
+do $$
+begin
+  if exists (select 1 from pg_constraint
+              where conrelid = 'public.coach_threads'::regclass and conname = 'coach_threads_folder_id_fkey') then
+    alter table public.coach_threads drop constraint coach_threads_folder_id_fkey;
+  end if;
+  if not exists (select 1 from pg_constraint
+                  where conrelid = 'public.coach_threads'::regclass and conname = 'coach_threads_folder_fkey') then
+    alter table public.coach_threads
+      add constraint coach_threads_folder_fkey foreign key (folder_id, user_id)
+      references public.coach_folders (id, user_id) on delete set null (folder_id);
+  end if;
+end $$;
 
 create index if not exists coach_threads_user_list_idx
   on public.coach_threads (user_id, pinned desc, last_message_at desc nulls last, id);
@@ -173,6 +201,8 @@ alter table public.coach_memory_items
   add column if not exists version integer not null default 1 check (version >= 1),
   add column if not exists retired_at timestamptz,
   add column if not exists retired_reason text check (retired_reason is null or char_length(retired_reason) <= 300),
+  -- The row a merge folded this one into; forgetting that row deletes this one too.
+  add column if not exists merged_into uuid,
   add column if not exists search tsvector generated always as (
     to_tsvector('english', topic || ' ' || content)) stored;
 
@@ -187,6 +217,8 @@ alter table public.coach_memory_items
 
 create index if not exists coach_memory_items_user_active_idx
   on public.coach_memory_items (user_id) where retired_at is null;
+create index if not exists coach_memory_items_merged_into_idx
+  on public.coach_memory_items (user_id, merged_into) where merged_into is not null;
 
 alter table public.coach_usage
   add column if not exists utility_calls integer not null default 0,
@@ -246,6 +278,81 @@ begin
   end if;
   return v_cut;
 end;
+$$;
+
+-- Every refusal text CoachSafety.Violation.refusal (Strand/Coach/CoachSafety.swift) has shipped, current and
+-- earlier wordings, whitespace collapsed. Old builds save a refused question and its refusal without
+-- meta.blocked, so the server recognises the refusal by its text (coach_messages_save_v1 and the backfill).
+-- coach_threads_sql_test.ts fails when CoachSafety gains a wording that is not listed here; never remove one.
+create or replace function internal.coach_is_refusal(p text) returns boolean
+language sql immutable set search_path = '' as $$
+  select coalesce(char_length(p) <= 2000 and internal.coach_collapse(p) = any (array[
+    -- medicalDiagnosis (015ff9876)
+    'I''m your coach, not a doctor — I can''t diagnose conditions, interpret symptoms, or recommend '
+    'treatments. '
+    'Pain, injuries, or health symptoms need a licensed healthcare provider who can properly assess you. '
+    'I''m here to help with your training, recovery, and sleep once you''re cleared.',
+    -- promptInjection (015ff9876)
+    'I''m your recovery and performance coach — I''m here to help with your charge, effort, sleep, '
+    'training, and nutrition. '
+    'Let''s keep it about your goals. What would you like to work on?',
+    -- pedSteroid (015ff9876)
+    'I can''t provide advice on performance-enhancing drugs, steroids, or related substances. '
+    'These carry serious health risks and legal implications. '
+    'If you''re curious about optimizing performance naturally, I''m happy to help with evidence-based '
+    'training, sleep, and nutrition strategies. '
+    'For anything pharmaceutical, please consult a licensed physician.',
+    -- extremeCaloricDeficit (015ff9876)
+    'I can''t recommend extreme caloric restriction — it''s counterproductive for training and can be '
+    'harmful to your health. '
+    'Sustainable fat loss typically works best at a moderate deficit (300–500 calories below maintenance). '
+    'If you''re struggling with your relationship with food, please consider speaking with a registered '
+    'dietitian or your doctor.',
+    -- selfHarm (015ff9876)
+    'I''m not equipped to help with what you''re going through, but I want you to know that support is '
+    'available. '
+    'Please reach out to the **988 Suicide & Crisis Lifeline** (call or text **988** in the US) '
+    'or the **Crisis Text Line** (text **HOME** to **741741**). You deserve support from someone trained '
+    'to help.',
+    -- medicalAuthority (015ff9876)
+    'I''m a coach, not a medical professional. I can''t diagnose conditions, prescribe treatments, or '
+    'provide medical advice. '
+    'For health concerns, please consult a licensed healthcare provider. I''m here to help with your '
+    'training and recovery goals.',
+    -- eatingDisorder (015ff9876)
+    'I hear you, and I want to be honest — what you''re describing sounds like it could benefit from '
+    'support beyond what a coach can offer. '
+    'There''s no shame in that. The **National Eating Disorders Association** helpline is available at '
+    '**1-800-931-2237**, '
+    'or you can text **NEDA** to **741741**. I''m here for your training whenever you''re ready.',
+    -- minorUnsafe (015ff9876)
+    'Some training approaches aren''t recommended for younger athletes. '
+    'I''ll focus on age-appropriate training that builds a strong foundation. '
+    'For anything health-related, it''s important to involve a parent or guardian and your doctor.',
+    -- dangerousSupplements (015ff9876)
+    'I can''t recommend specific dosages or protocols for supplements that carry significant health risks. '
+    'Some of these substances can cause serious harm, especially without medical supervision. '
+    'If you''re interested in safe supplementation, I''m happy to discuss evidence-based options. For '
+    'anything beyond that, please consult a doctor.',
+    -- medicalDiagnosis (0e8b5da15)
+    'I''m your health assistant, not a doctor — I can''t diagnose conditions, interpret symptoms, or '
+    'recommend treatments. '
+    'Pain, injuries, or health symptoms need a licensed healthcare provider who can properly assess you. '
+    'I''m here to help with your training, recovery, and sleep once you''re cleared.',
+    -- promptInjection (0e8b5da15)
+    'I''m Sana, your health assistant — I''m here to help with your charge, effort, sleep, training, and '
+    'nutrition. '
+    'Let''s keep it about your goals. What would you like to work on?'
+  ]::text[]), false)
+$$;
+
+-- An integer from JSON (a whole number or a string of digits), or null. Used for the memory version guards.
+create or replace function internal.coach_int(p jsonb) returns integer
+language sql immutable set search_path = '' as $$
+  select case
+    when jsonb_typeof(p) = 'number' and (p #>> '{}') ~ '^-?[0-9]{1,9}$' then (p #>> '{}')::integer
+    when jsonb_typeof(p) = 'string' and btrim(p #>> '{}') ~ '^-?[0-9]{1,9}$' then btrim(p #>> '{}')::integer
+  end
 $$;
 
 -- The preview of a thread's newest message (any role).
@@ -325,33 +432,78 @@ language sql immutable set search_path = '' as $$
     '{}'::text[]) end
 $$;
 
--- Fallback for tombstone tokens when the caller sent none (forget_all, or an older caller). It approximates
--- docs/COACH_MEMORY.md §6: NFKC, lowercase, words of 3+ characters minus English stop words with light
--- stemming (ing, ed, es, s), and every number or date token whatever its length. The edge function's own
--- tokens are preferred whenever it sends them.
+-- The light stemmer of the edge function's memoryTokens (_shared/coach_llm.ts): the plural, then the verb
+-- ending, then a doubled final consonant and a final e, so "running"/"runs" meet at "run" and "race"/"races"/
+-- "racing" at "rac".
+create or replace function internal.coach_memory_stem(p text) returns text
+language plpgsql immutable set search_path = '' as $$
+declare
+  s text := p;
+begin
+  if s ~ 'ies$' and char_length(s) > 4 then
+    s := left(s, -3) || 'y';
+  elsif s ~ 'es$' and char_length(s) > 4 then
+    s := left(s, -2);
+  elsif s ~ 's$' and s !~ 'ss$' and char_length(s) > 3 then
+    s := left(s, -1);
+  end if;
+  if s ~ 'ing$' and char_length(s) > 5 then
+    s := left(s, -3);
+  elsif s ~ 'ed$' and char_length(s) > 4 then
+    s := left(s, -2);
+  end if;
+  if char_length(s) > 3 and s ~ '([b-df-hj-np-tv-z])\1$' and s !~ '(ll|ss|ff|zz)$' then
+    s := left(s, -1);
+  end if;
+  if char_length(s) > 3 and s ~ 'e$' then
+    s := left(s, -1);
+  end if;
+  return s;
+end;
+$$;
+
+-- Tombstone tokens when the caller sent none (forget_all, a forget that takes merged rows along, or an older
+-- caller). A port of the edge function's memoryTokens (docs/COACH_MEMORY.md §6), so these tombstones match
+-- the curator's candidates the same way the function's own do: NFKC and lowercase, "n't" read as "not", "half
+-- marathon" as one word; every number and date token whatever its length, with a unit written against it
+-- kept on it ("10k", "100kg", "1,500m"; "5ks" is "5k"); a month name, and "may" only next to a number; "no" and
+-- "never" as "not"; other words of 3+ characters minus the stop words, stemmed. coach_threads_sql_test.ts
+-- compares the two on a corpus.
 create or replace function internal.coach_memory_tokens(p text) returns text[]
 language sql immutable set search_path = '' as $$
-  select coalesce(array_agg(distinct s.tok order by s.tok), '{}'::text[])
+  with norm as (
+    select regexp_replace(regexp_replace(lower(normalize(left(coalesce(p, ''), 4000), NFKC)),
+                                         'n[’'']t\M', ' not', 'g'),
+                          '\m(half|ultra)[[:space:]-]+marathon', '\1marathon', 'g') as t
+  ), raw as (
+    select m.v[1] as w, m.ord
+      from norm,
+           regexp_matches(norm.t, '([0-9]+(?:[.,:/-][0-9]+)*(?:[a-z]{1,3}(?![[:alpha:]]))?|[[:alpha:]]+)', 'g')
+             with ordinality as m(v, ord)
+  ), near as (
+    select r.w, lag(r.w) over (order by r.ord) as prev, lead(r.w) over (order by r.ord) as next from raw r
+  )
+  select coalesce(array_agg(distinct x.tok order by x.tok), '{}'::text[])
     from (select case
-                   when w.tok ~ '[0-9]' then w.tok
-                   when w.tok ~ 'ing$' and char_length(w.tok) > 5 then left(w.tok, -3)
-                   when w.tok ~ 'ed$' and char_length(w.tok) > 4 then left(w.tok, -2)
-                   when w.tok ~ 'es$' and char_length(w.tok) > 4 then left(w.tok, -2)
-                   when w.tok ~ 's$' and w.tok !~ 'ss$' and char_length(w.tok) > 3 then left(w.tok, -1)
-                   else w.tok end as tok
-            from (select m[1] as tok
-                    from regexp_matches(lower(normalize(left(coalesce(p, ''), 4000), NFKC)),
-                                        '([0-9]+(?:[./:-][0-9]+)*|[[:alpha:]]+)', 'g') as m) w
-           where w.tok ~ '[0-9]'
-              or (char_length(w.tok) >= 3 and w.tok <> all (array[
-                'the', 'and', 'for', 'are', 'but', 'not', 'you', 'all', 'any', 'can', 'had', 'her', 'was', 'one',
-                'our', 'out', 'has', 'have', 'him', 'his', 'how', 'its', 'may', 'now', 'she', 'too', 'use', 'who',
-                'did', 'get', 'got', 'let', 'with', 'that', 'this', 'from', 'they', 'them', 'then', 'than',
-                'there', 'their', 'what', 'when', 'where', 'which', 'while', 'will', 'would', 'about', 'after',
-                'again', 'also', 'been', 'being', 'both', 'each', 'into', 'just', 'like', 'more', 'most', 'much',
-                'must', 'only', 'other', 'over', 'same', 'some', 'such', 'very', 'were', 'your', 'yours',
-                'because', 'before', 'between', 'could', 'does', 'doing', 'during', 'should', 'these', 'those',
-                'through', 'under', 'until', 'here', 'having', 'user', 'users']))) s
+                   when n.w ~ '[0-9]' then regexp_replace(n.w, '^([0-9]+(?:[.,][0-9]+)?(?:k|km))s$', '\1')
+                   when n.w = any (array['january', 'february', 'march', 'april', 'june', 'july', 'august',
+                                         'september', 'october', 'november', 'december', 'jan', 'feb', 'mar', 'apr',
+                                         'jun', 'jul', 'aug', 'sep', 'sept', 'oct', 'nov', 'dec']) then n.w
+                   when n.w = 'may' then
+                     case when coalesce(n.prev, '') ~ '[0-9]' or coalesce(n.next, '') ~ '[0-9]' then 'may' end
+                   when n.w in ('no', 'never') then 'not'
+                   when char_length(n.w) >= 3 and n.w <> all (array[
+                     'the', 'and', 'for', 'are', 'but', 'you', 'all', 'any', 'can', 'had', 'her', 'was', 'one', 'our',
+                     'out', 'has', 'have', 'him', 'his', 'how', 'its', 'may', 'now', 'she', 'too', 'use', 'who', 'did',
+                     'get', 'got', 'let', 'with', 'that', 'this', 'from', 'they', 'them', 'then', 'than', 'there',
+                     'their', 'what', 'when', 'where', 'which', 'while', 'will', 'would', 'about', 'after', 'again',
+                     'also', 'been', 'being', 'both', 'each', 'into', 'just', 'like', 'more', 'most', 'much', 'must',
+                     'only', 'other', 'over', 'same', 'some', 'such', 'very', 'were', 'your', 'yours', 'because',
+                     'before', 'between', 'could', 'does', 'doing', 'during', 'should', 'these', 'those', 'through',
+                     'under', 'until', 'here', 'having', 'user', 'users']) then internal.coach_memory_stem(n.w)
+                 end as tok
+            from near n) x
+   where x.tok is not null
 $$;
 
 -- The audit snapshot of a memory row. Forget events are written without content.
@@ -369,21 +521,10 @@ $$;
 -- 4. Trigger functions
 -- ---------------------------------------------------------------------------------------------------------
 
--- A thread may only sit in one of its owner's folders.
-create or replace function internal.coach_thread_folder_owner() returns trigger
-language plpgsql security definer set search_path = '' as $$
-declare
-  v_owner uuid;
-begin
-  if new.folder_id is not null then
-    select f.user_id into v_owner from public.coach_folders f where f.id = new.folder_id;
-    if found and v_owner is distinct from new.user_id then
-      raise exception 'folder_not_owned' using errcode = '42501';
-    end if;
-  end if;
-  return new;
-end;
-$$;
+-- An earlier draft kept threads in their owner's folders with a BEFORE trigger; coach_threads_folder_fkey
+-- does that now (see the folder_id column).
+drop trigger if exists coach_threads_folder_owner on public.coach_threads;
+drop function if exists internal.coach_thread_folder_owner();
 
 -- Keeps coach_threads.message_count, last_message_at, preview and updated_at current. INSERT and DELETE are
 -- statement-level triggers with transition tables, so a bulk write updates each thread once; UPDATE is a
@@ -456,6 +597,24 @@ drop trigger if exists coach_messages_thread_stats_delete on public.coach_messag
 
 update public.coach_messages set client_id = gen_random_uuid() where client_id is null;
 
+-- Builds before threads never set meta.blocked. Their refusals are fixed texts, and each was saved with the
+-- refused question just before it (the reply stamped a few milliseconds later), so both are marked here,
+-- before any title is chosen. The 3-second bound keeps out a question whose streamed answer was replaced by
+-- a refusal seconds later: that question was answered, not refused.
+update public.coach_messages m
+   set meta = m.meta || '{"blocked": true}'::jsonb
+  from (select o.id
+          from (select x.id, x.role, x.content, x.created_at,
+                       lead(x.role) over w as next_role, lead(x.content) over w as next_content,
+                       lead(x.created_at) over w as next_at
+                  from public.coach_messages x
+                 where x.thread_id is null
+                window w as (partition by x.user_id order by x.created_at, x.id)) o
+         where (o.role = 'assistant' and internal.coach_is_refusal(o.content))
+            or (o.role = 'user' and o.next_role = 'assistant' and internal.coach_is_refusal(o.next_content)
+                and o.next_at - o.created_at <= interval '3 seconds')) b
+ where m.id = b.id and m.thread_id is null and not m.blocked;
+
 -- One group per owner and run of messages no more than 3 hours apart.
 create temporary table coach_backfill_rows on commit drop as
 with ordered as (
@@ -505,11 +664,6 @@ create trigger coach_messages_thread_stats_update
   when (old.thread_id is distinct from new.thread_id or old.content is distinct from new.content)
   execute function internal.coach_messages_thread_stats();
 
-drop trigger if exists coach_threads_folder_owner on public.coach_threads;
-create trigger coach_threads_folder_owner
-  before insert or update of folder_id, user_id on public.coach_threads
-  for each row execute function internal.coach_thread_folder_owner();
-
 -- ---------------------------------------------------------------------------------------------------------
 -- 6. RPCs (public, service role only)
 -- ---------------------------------------------------------------------------------------------------------
@@ -558,6 +712,11 @@ $$;
 -- thread whose last message is within 3 hours of the row, else starts a new legacy_client thread. Each
 -- thread is then checked once: tombstoned -> thread_deleted, another owner's -> thread_conflict, missing ->
 -- created. Messages upsert on (user_id, client_id) keeping their first created_at and thread, merging meta.
+-- Then: a saved refusal (internal.coach_is_refusal) and the question at most 3 s before it are marked
+-- blocked; a legacy_client thread still without a title takes its first non-blocked question as a legacy
+-- title; and once the owner is 2% over the cap, the oldest messages go back to the cap, with any thread they
+-- leave empty. Saves of one owner are serialised with each other and with coach_thread_delete_v1 on one
+-- advisory lock, so a delete never misses a thread a save is still creating.
 create or replace function public.coach_messages_save_v1(p_user uuid, p_rows jsonb)
 returns jsonb
 language plpgsql security definer set search_path = '' as $$
@@ -572,14 +731,21 @@ declare
   v_rejected jsonb := '[]'::jsonb;
   v_threads jsonb := '[]'::jsonb;
   v_saved integer := 0;
+  v_saved_ids uuid[] := '{}'::uuid[];
   v_owner uuid;
   v_title text;
   v_r jsonb;
+  v_cap integer := internal.coach_messages_cap();
+  v_total bigint;
+  v_emptied uuid[];
 begin
   perform internal.coach_owner_check(p_user);
   if jsonb_typeof(p_rows) is distinct from 'array' or jsonb_array_length(p_rows) > 200 then
     raise exception 'invalid_rows' using errcode = '22023';
   end if;
+  -- The same key as coach_thread_delete_v1. Every statement below runs after the lock, so it sees a delete
+  -- that committed while this save waited.
+  perform pg_advisory_xact_lock(hashtextextended('coach_threads:' || p_user::text, 0));
 
   -- 1. Resolve every row's thread. Thread-less rows are taken oldest first so a batch from an old build
   --    stays together.
@@ -688,18 +854,72 @@ begin
       meta = m.meta || excluded.meta,
       thread_id = coalesce(m.thread_id, excluded.thread_id);
     v_saved := v_saved + 1;
+    v_saved_ids := v_saved_ids || v_row.client_id;
   end loop;
 
+  -- 3b. Refusals. A build before threads never sets meta.blocked, and a newer one does not set it on an
+  --     answer CoachSafety.screenOutput replaced, so a saved refusal is recognised by its text. The question
+  --     right before it is marked too when it was saved at most 3 s earlier (an old build stamps the pair a
+  --     few milliseconds apart); a question answered by a stream that was then replaced is further away.
+  for v_row in
+    select m.id, m.thread_id, m.created_at
+      from public.coach_messages m
+     where m.user_id = p_user and m.client_id = any(v_saved_ids) and m.role = 'assistant'
+       and m.thread_id is not null and not m.blocked and internal.coach_is_refusal(m.content)
+  loop
+    update public.coach_messages m set meta = m.meta || '{"blocked": true}'::jsonb
+     where m.id = v_row.id and m.user_id = p_user;
+    update public.coach_messages m set meta = m.meta || '{"blocked": true}'::jsonb
+      from (select p.id, p.role, p.created_at
+              from public.coach_messages p
+             where p.user_id = p_user and p.thread_id = v_row.thread_id
+               and (p.created_at, p.id) < (v_row.created_at, v_row.id)
+             order by p.created_at desc, p.id desc
+             limit 1) prev
+     where m.id = prev.id and m.user_id = p_user and prev.role = 'user' and not m.blocked
+       and v_row.created_at - prev.created_at <= interval '3 seconds';
+  end loop;
+
+  -- 3c. An old build never names its chats: a legacy_client thread without a title takes its first
+  --     non-blocked question, cut like the backfill's titles ('legacy', so a model title may replace it).
+  update public.coach_threads t
+     set title = x.title, title_source = 'legacy'
+    from (select w.thread_id,
+                 (select internal.coach_thread_title(m.content)
+                    from public.coach_messages m
+                   where m.user_id = p_user and m.thread_id = w.thread_id and m.role = 'user' and not m.blocked
+                     and internal.coach_thread_title(m.content) is not null
+                   order by m.created_at, m.id
+                   limit 1) as title
+            from (select distinct (e.value ->> 'thread_id')::uuid as thread_id
+                    from jsonb_array_elements(v_work) as e(value)) w
+            join public.coach_threads t0 on t0.id = w.thread_id and t0.user_id = p_user
+           where v_status ->> w.thread_id::text = 'ok' and t0.origin = 'legacy_client'
+             and t0.title is null and t0.title_source = 'none') x
+   where t.id = x.thread_id and t.user_id = p_user and x.title is not null
+     and t.title is null and t.title_source = 'none';
+
   -- 4. Retention: the newest messages up to the cap, and tombstones for 90 days. The threads' message counts
-  --    are a cheap gate, so a save only walks the owner's messages once they are actually over the cap.
-  if (select coalesce(sum(t.message_count), 0) from public.coach_threads t where t.user_id = p_user)
-       > internal.coach_messages_cap() then
-    delete from public.coach_messages m
-     using (select x.id from public.coach_messages x
-             where x.user_id = p_user
-             order by x.created_at desc, x.id desc
-            offset internal.coach_messages_cap()) old
-     where m.id = old.id and m.user_id = p_user;
+  --    are a cheap gate. The prune waits until the owner is 2% over the cap (50,000 + 1,000), then deletes the
+  --    oldest rows back to the cap, oldest first through (user_id, created_at): a save at the cap does not walk
+  --    the whole history every time. A thread the prune empties goes too (no tombstone: an outbox may still
+  --    bring it back with newer rows); its summary has no messages left to describe.
+  select coalesce(sum(t.message_count), 0) into v_total from public.coach_threads t where t.user_id = p_user;
+  if v_total > v_cap + v_cap / 50 then
+    with gone as (
+      delete from public.coach_messages m
+       where m.user_id = p_user
+         and m.id in (select x.id from public.coach_messages x
+                       where x.user_id = p_user
+                       order by x.created_at, x.id
+                       limit greatest(v_total - v_cap, 0))
+      returning m.thread_id)
+    select coalesce(array_agg(distinct g.thread_id) filter (where g.thread_id is not null), '{}'::uuid[])
+      into v_emptied
+      from gone g;
+    -- A separate statement, so the delete's stats trigger has already lowered message_count.
+    delete from public.coach_threads t
+     where t.user_id = p_user and t.id = any(v_emptied) and t.message_count = 0;
   end if;
   delete from public.coach_thread_tombstones d
    where d.user_id = p_user and d.deleted_at < now() - interval '90 days';
@@ -708,16 +928,54 @@ begin
 end;
 $$;
 
+-- Deletes one of the owner's chats, or (p_thread null) every chat and every message, in one transaction:
+-- tombstones first, then the threads (their messages cascade through the composite key), then any message
+-- left without a thread. A thread id the owner does not have is tombstoned all the same, so a save still on
+-- its way is refused with thread_deleted. Holds the per-owner advisory lock coach_messages_save_v1 takes, so
+-- a save that is creating the thread either commits first (and its rows go here) or runs after and sees the
+-- tombstone. Returns {deleted: number of threads deleted}.
+create or replace function public.coach_thread_delete_v1(p_user uuid, p_thread uuid default null)
+returns jsonb
+language plpgsql security definer set search_path = '' as $$
+declare
+  v_deleted integer := 0;
+begin
+  perform internal.coach_owner_check(p_user);
+  perform pg_advisory_xact_lock(hashtextextended('coach_threads:' || p_user::text, 0));
+  if p_thread is not null then
+    insert into public.coach_thread_tombstones (user_id, thread_id, deleted_at)
+    values (p_user, p_thread, now())
+    on conflict (user_id, thread_id) do update set deleted_at = excluded.deleted_at;
+    delete from public.coach_threads t where t.user_id = p_user and t.id = p_thread;
+    get diagnostics v_deleted = row_count;
+  else
+    insert into public.coach_thread_tombstones (user_id, thread_id, deleted_at)
+    select p_user, t.id, now() from public.coach_threads t where t.user_id = p_user
+    on conflict (user_id, thread_id) do update set deleted_at = excluded.deleted_at;
+    delete from public.coach_threads t where t.user_id = p_user;
+    get diagnostics v_deleted = row_count;
+    delete from public.coach_messages m where m.user_id = p_user;
+  end if;
+  return jsonb_build_object('deleted', v_deleted);
+end;
+$$;
+
 -- Ranked full-text search over the owner's non-blocked messages and thread titles/summaries, grouped by
 -- thread; or, for a query without lexemes, the threads with activity in [p_from, p_to), newest first.
+-- p_light (the manifest's "relevant earlier chats") ranks only the newest 500 matches, read straight off the
+-- index without collecting every match, and returns total_hits null, no months and no hits: snippets are
+-- built only for the returned threads.
+-- An earlier draft had no p_light; its overload would make PostgREST's named-argument call ambiguous.
+drop function if exists public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz);
 create or replace function public.coach_search_v1(p_user uuid, p_query text, p_limit integer default 20,
   p_thread_limit integer default 8, p_exclude_thread uuid default null, p_from timestamptz default null,
-  p_to timestamptz default null)
+  p_to timestamptz default null, p_light boolean default false)
 returns jsonb
 language plpgsql stable security definer set search_path = '' as $$
 declare
   v_limit integer := least(greatest(coalesce(p_limit, 20), 1), 50);
   v_thread_limit integer := least(greatest(coalesce(p_thread_limit, 8), 1), 30);
+  v_light boolean := coalesce(p_light, false);
   v_opts constant text := 'StartSel=«, StopSel=», MaxWords=26, MinWords=8, MaxFragments=1';
   v_terms text[] := internal.coach_query_terms(p_query);
   v_kept text[];
@@ -790,20 +1048,34 @@ begin
 
   -- Every match counts towards total_hits and months, but only the newest 5,000 are ranked: ranking is the
   -- expensive step, and a query that broad is better narrowed with a date window (which this then honours)
-  -- than ranked across a whole history. Below 5,000 matches the result is exact.
+  -- than ranked across a whole history. Below 5,000 matches the result is exact. The light path never
+  -- collects every match: its pool is the newest 500, which the planner can read off (user_id, created_at)
+  -- and stop. Each path's CTE is gated on v_light, a one-time filter, so only one of them runs.
   with all_matches as materialized (
     select m.id, m.created_at
       from public.coach_messages m
-     where m.user_id = p_user and m.search @@ v_q and not m.blocked and m.thread_id is not null
+     where not v_light
+       and m.user_id = p_user and m.search @@ v_q and not m.blocked and m.thread_id is not null
        and (p_from is null or m.created_at >= p_from) and (p_to is null or m.created_at < p_to)
        and (p_exclude_thread is null or m.thread_id <> p_exclude_thread)
+  ), pool as (
+    select a.id from all_matches a order by a.created_at desc, a.id desc limit 5000
+  ), light_pool as (
+    select m.id
+      from public.coach_messages m
+     where v_light
+       and m.user_id = p_user and m.search @@ v_q and not m.blocked and m.thread_id is not null
+       and (p_from is null or m.created_at >= p_from) and (p_to is null or m.created_at < p_to)
+       and (p_exclude_thread is null or m.thread_id <> p_exclude_thread)
+     order by m.created_at desc, m.id desc
+     limit 500
   ), matches as (
     select m.id, m.thread_id, m.role, m.created_at,
            ts_rank_cd(m.search, v_q, 1 | 32)
              * (1 + 0.25 * exp(-greatest(extract(epoch from (now() - m.created_at))::float8, 0) / 86400.0 / 90.0))
              as rank
-      from (select a.id from all_matches a order by a.created_at desc, a.id desc limit 5000) pool
-      join public.coach_messages m on m.id = pool.id
+      from (select p.id from pool p union all select l.id from light_pool l) ids
+      join public.coach_messages m on m.id = ids.id
   ), by_thread as (
     select x.thread_id, count(*) as hits, max(x.rank) as best from matches x group by x.thread_id
   ), thread_matches as (
@@ -837,13 +1109,14 @@ begin
   ), top_hits as (
     select x.*, row_number() over (order by x.rank desc, x.created_at desc, x.id) as pos
       from matches x
+     where not v_light
      order by x.rank desc, x.created_at desc, x.id
      limit v_limit
   )
   select jsonb_build_object(
     'terms', to_jsonb(v_kept),
     'dropped_terms', to_jsonb(v_dropped),
-    'total_hits', (select count(*) from all_matches),
+    'total_hits', case when v_light then null else (select count(*) from all_matches) end,
     'months', coalesce((select jsonb_agg(jsonb_build_object('month', mo.month, 'hits', mo.hits) order by mo.month)
                           from (select to_char(x.created_at at time zone 'UTC', 'YYYY-MM') as month, count(*) as hits
                                   from all_matches x group by 1) mo), '[]'::jsonb),
@@ -945,9 +1218,11 @@ begin
     into v_thread
     from public.coach_threads t where t.id = p_thread and t.user_id = p_user;
 
+  -- The earlier chats: the current one is not among them.
   select jsonb_build_object('thread_count', count(*), 'first_at', min(t.created_at), 'last_at', max(t.last_message_at))
     into v_library
-    from public.coach_threads t where t.user_id = p_user and t.message_count > 0;
+    from public.coach_threads t
+   where t.user_id = p_user and t.message_count > 0 and (p_thread is null or t.id <> p_thread);
 
   select coalesce(jsonb_agg(jsonb_build_object('id', r.id, 'title', r.title, 'last_message_at', r.last_message_at)
                             order by r.last_message_at desc nulls last, r.id), '[]'::jsonb)
@@ -965,7 +1240,7 @@ begin
                                 'last_message_at', e.value -> 'last_message_at', 'snippet', e.value -> 'snippet')
                               order by e.ord), '[]'::jsonb)
       into v_relevant
-      from jsonb_array_elements(public.coach_search_v1(p_user, p_query, 1, 3, p_thread) -> 'threads')
+      from jsonb_array_elements(public.coach_search_v1(p_user, p_query, 1, 3, p_thread, p_light => true) -> 'threads')
              with ordinality as e(value, ord);
   end if;
 
@@ -996,7 +1271,11 @@ begin
 end;
 $$;
 
--- Takes the thread's maintenance lease when it is free or expired.
+-- Takes the thread's maintenance lease when it is free or expired. The claim is ordered against forget and
+-- forget-all: it waits on the owner's coach_user_state row (which those hold FOR UPDATE until they commit)
+-- and stamps maintenance_claimed_at only then. So a forget either committed before the claim, and the pass
+-- reads its floor and tombstone, or it is stamped after maintenance_claimed_at and coach_thread_publish_v1
+-- sees it. Lock order everywhere is thread row, then coach_user_state.
 create or replace function public.coach_thread_claim_v1(p_user uuid, p_thread uuid, p_lease_seconds integer default 120)
 returns jsonb
 language plpgsql security definer set search_path = '' as $$
@@ -1004,27 +1283,39 @@ declare
   v_lease integer := least(greatest(coalesce(p_lease_seconds, 120), 10), 900);
   v_t public.coach_threads;
   v_floor timestamptz;
+  v_claimed timestamptz;
 begin
   perform internal.coach_owner_check(p_user);
-  update public.coach_threads t
-     set maintenance_token = gen_random_uuid(),
-         maintenance_until = now() + make_interval(secs => v_lease)
+  perform 1 from public.coach_threads t
    where t.id = p_thread and t.user_id = p_user
      and (t.maintenance_until is null or t.maintenance_until <= now())
-  returning t.* into v_t;
+     for update;
   if not found then
     return jsonb_build_object('claimed', false);
   end if;
-  select s.memory_floor_at into v_floor from public.coach_user_state s where s.user_id = p_user;
+  insert into public.coach_user_state (user_id) values (p_user) on conflict (user_id) do nothing;
+  select s.memory_floor_at into v_floor from public.coach_user_state s where s.user_id = p_user for share;
+  v_claimed := clock_timestamp();
+  update public.coach_threads t
+     set maintenance_token = gen_random_uuid(),
+         maintenance_until = now() + make_interval(secs => v_lease),
+         maintenance_claimed_at = v_claimed
+   where t.id = p_thread and t.user_id = p_user
+  returning t.* into v_t;
   return jsonb_build_object('claimed', true, 'token', v_t.maintenance_token, 'summary', v_t.summary,
     'summary_through', v_t.summary_through, 'summary_messages', v_t.summary_messages,
     'curated_through', v_t.curated_through, 'message_count', v_t.message_count, 'title', v_t.title,
-    'title_source', v_t.title_source, 'memory_floor_at', v_floor);
+    'title_source', v_t.title_source, 'memory_floor_at', v_floor, 'maintenance_claimed_at', v_claimed,
+    'last_message_at', v_t.last_message_at);
 end;
 $$;
 
 -- Publishes a maintenance pass in one transaction: the summary patch and the curator's memory ops together,
--- only while p_token still holds an unexpired lease. Releases the lease.
+-- only while p_token still holds an unexpired lease. Releases the lease. When the owner's memory was reset
+-- after the claim (forget-all moved memory_floor_at, or any memory was forgotten), the ops were mined from a
+-- stale view and could bring a forgotten fact back: they are dropped, curated_through stays where it was so
+-- the next pass mines again with the new floor and tombstones, the summary keys still apply, and the reason
+-- is memory_reset.
 create or replace function public.coach_thread_publish_v1(p_user uuid, p_thread uuid, p_token uuid,
   p_patch jsonb, p_ops jsonb)
 returns jsonb
@@ -1032,14 +1323,28 @@ language plpgsql security definer set search_path = '' as $$
 declare
   v_patch jsonb := case when jsonb_typeof(p_patch) = 'object' then p_patch else '{}'::jsonb end;
   v_ops jsonb := '[]'::jsonb;
+  v_claimed timestamptz;
+  v_floor timestamptz;
+  v_reset boolean;
 begin
   perform internal.coach_owner_check(p_user);
-  perform 1 from public.coach_threads t
+  select t.maintenance_claimed_at into v_claimed from public.coach_threads t
    where t.id = p_thread and t.user_id = p_user and p_token is not null
      and t.maintenance_token = p_token and t.maintenance_until > now()
      for update;
   if not found then
     return jsonb_build_object('applied', false, 'reason', 'lease_lost', 'ops', '[]'::jsonb);
+  end if;
+
+  -- The lock coach_memory_apply_v1 takes: a forget either committed before this point or waits for it.
+  insert into public.coach_user_state (user_id) values (p_user) on conflict (user_id) do nothing;
+  select s.memory_floor_at into v_floor from public.coach_user_state s where s.user_id = p_user for update;
+  v_reset := v_claimed is not null
+    and (v_floor >= v_claimed
+         or exists (select 1 from public.coach_memory_events e
+                     where e.user_id = p_user and e.op = 'forget' and e.created_at >= v_claimed));
+  if v_reset then
+    v_patch := v_patch - 'curated_through';
   end if;
 
   update public.coach_threads t set
@@ -1069,6 +1374,9 @@ begin
     maintenance_until = null
    where t.id = p_thread and t.user_id = p_user;
 
+  if v_reset then
+    return jsonb_build_object('applied', true, 'reason', 'memory_reset', 'ops', '[]'::jsonb);
+  end if;
   if jsonb_typeof(p_ops) = 'array' and jsonb_array_length(p_ops) > 0 then
     v_ops := public.coach_memory_apply_v1(p_user, p_ops, 'curator', p_thread);
   end if;
@@ -1081,6 +1389,12 @@ $$;
 -- reason evict), the event retention and the 30-day purge of retired rows. Writers for one owner are
 -- serialised on their coach_user_state row. Returns [{op, id, applied, reason?}], plus one
 -- {op:'evict', id, applied:true, reason:'cap'} per evicted row.
+-- Version guards, for ops resolved from an earlier read (the curator and the consolidator send them): update
+-- and retire may carry expect_version, and merge may carry versions {"<id>": version} for keep_id and every
+-- id. When a guarded row is missing, retired or at another version, the whole op is skipped with reason
+-- stale. An op without a guard behaves as it always did.
+-- Forget and forget-all stamp their tombstones and memory_floor_at with the clock read after taking the lock,
+-- so they sort after every maintenance claim that came before them (coach_thread_claim_v1).
 create or replace function public.coach_memory_apply_v1(p_user uuid, p_ops jsonb, p_actor text, p_thread uuid default null)
 returns jsonb
 language plpgsql security definer set search_path = '' as $$
@@ -1104,6 +1418,13 @@ declare
   v_active integer;
   v_bump boolean := false;
   v_results jsonb := '[]'::jsonb;
+  v_guard boolean;
+  v_expect integer;
+  v_versions jsonb;
+  v_req uuid[];
+  v_members uuid[];
+  v_stale boolean;
+  v_now timestamptz;
   r public.coach_memory_items;
 begin
   perform internal.coach_owner_check(p_user);
@@ -1116,6 +1437,7 @@ begin
 
   insert into public.coach_user_state (user_id) values (p_user) on conflict (user_id) do nothing;
   perform 1 from public.coach_user_state s where s.user_id = p_user for update;
+  v_now := clock_timestamp();
 
   for v_op in select e.value from jsonb_array_elements(p_ops) with ordinality as e(value, ord) order by e.ord loop
     v_kind := case when jsonb_typeof(v_op) = 'object' then v_op ->> 'op' end;
@@ -1142,7 +1464,15 @@ begin
       v_results := v_results || jsonb_build_array(jsonb_build_object('op', 'add', 'id', v_after.id, 'applied', true));
 
     elsif v_kind in ('update', 'confirm', 'retire', 'forget') then
+      v_guard := v_kind in ('update', 'retire') and v_op ? 'expect_version';
+      v_expect := case when v_guard then internal.coach_int(v_op -> 'expect_version') end;
       select * into v_before from public.coach_memory_items m where m.id = v_id and m.user_id = p_user for update;
+      if v_guard and (not found or v_before.retired_at is not null or v_expect is null
+                      or v_before.version is distinct from v_expect) then
+        v_results := v_results || jsonb_build_array(jsonb_build_object('op', v_kind, 'id', v_id, 'applied', false,
+          'reason', 'stale'));
+        continue;
+      end if;
       if not found then
         v_results := v_results || jsonb_build_array(jsonb_build_object('op', v_kind, 'id', v_id, 'applied', false,
           'reason', 'not_found'));
@@ -1202,37 +1532,73 @@ begin
       else -- forget: the row goes; its earlier events lose their content; the tombstone keeps only tokens.
         v_tokens := coalesce(internal.coach_text_array(v_op -> 'tokens', 64, 64),
                              internal.coach_memory_tokens(v_before.content));
+        -- The rows a merge folded into this one (and into those, and so on) state the same fact in their own
+        -- words: they go with it, each leaving its own tombstone.
+        with recursive folded(id) as (
+          select m.id from public.coach_memory_items m where m.user_id = p_user and m.merged_into = v_id
+          union
+          select m.id from public.coach_memory_items m join folded f on m.merged_into = f.id
+           where m.user_id = p_user
+        )
+        select coalesce(array_agg(f.id), '{}'::uuid[]) into v_members from folded f;
+        for r in
+          delete from public.coach_memory_items m where m.user_id = p_user and m.id = any(v_members) returning m.*
+        loop
+          insert into public.coach_memory_events (user_id, memory_id, op, actor, before, after, thread_id, reason,
+                                                  tokens, created_at)
+          values (p_user, r.id, 'forget', p_actor, internal.coach_memory_snapshot(r, false), null, p_thread,
+                  'merged into a forgotten memory', internal.coach_memory_tokens(r.content), v_now);
+          v_bump := v_bump or internal.coach_memory_revises(r.topic, r.importance);
+        end loop;
         delete from public.coach_memory_items m where m.id = v_id and m.user_id = p_user;
         update public.coach_memory_events e
            set before = case when e.before ? 'content' then e.before - 'content' else e.before end,
                after = case when e.after ? 'content' then e.after - 'content' else e.after end
-         where e.user_id = p_user and e.memory_id = v_id and (e.before ? 'content' or e.after ? 'content');
-        insert into public.coach_memory_events (user_id, memory_id, op, actor, before, after, thread_id, reason, tokens)
+         where e.user_id = p_user and (e.memory_id = v_id or e.memory_id = any(v_members))
+           and (e.before ? 'content' or e.after ? 'content');
+        insert into public.coach_memory_events (user_id, memory_id, op, actor, before, after, thread_id, reason, tokens,
+                                                created_at)
         values (p_user, v_id, 'forget', p_actor, internal.coach_memory_snapshot(v_before, false), null, p_thread,
-                left(nullif(btrim(coalesce(v_op ->> 'reason', '')), ''), 300), v_tokens);
+                left(nullif(btrim(coalesce(v_op ->> 'reason', '')), ''), 300), v_tokens, v_now);
         v_bump := v_bump or internal.coach_memory_revises(v_before.topic, v_before.importance);
       end if;
       v_results := v_results || jsonb_build_array(jsonb_build_object('op', v_kind, 'id', v_id, 'applied', true));
 
     elsif v_kind = 'merge' then
+      v_guard := v_op ? 'versions';
+      v_versions := case when jsonb_typeof(v_op -> 'versions') = 'object' then v_op -> 'versions' end;
       select * into v_before from public.coach_memory_items m where m.id = v_id and m.user_id = p_user for update;
+      if v_guard and (v_versions is null or not found or v_before.retired_at is not null
+                      or internal.coach_int(v_versions -> v_id::text) is distinct from v_before.version) then
+        v_results := v_results || jsonb_build_array(jsonb_build_object('op', 'merge', 'id', v_id, 'applied', false,
+          'reason', 'stale'));
+        continue;
+      end if;
       if not found or v_before.retired_at is not null then
         v_results := v_results || jsonb_build_array(jsonb_build_object('op', 'merge', 'id', v_id, 'applied', false,
           'reason', case when found then 'retired' else 'not_found' end));
         continue;
       end if;
-      select coalesce(array_agg(distinct x.id), '{}'::uuid[]) into v_ids
+      select coalesce(array_agg(distinct x.id), '{}'::uuid[]) into v_req
         from (select internal.coach_uuid(e.value #>> '{}') as id
                 from jsonb_array_elements(case when jsonb_typeof(v_op -> 'ids') = 'array' then v_op -> 'ids'
                                                else '[]'::jsonb end) as e(value)) x
        where x.id is not null and x.id <> v_id;
       select count(*), coalesce(sum(m.confirmations), 0), max(m.last_confirmed_at),
              coalesce(bool_or(internal.coach_memory_revises(m.topic, m.importance)), false),
-             coalesce(array_agg(m.id order by m.id), '{}'::uuid[])
-        into v_others, v_confirmations, v_last, v_others_revise, v_ids
+             coalesce(array_agg(m.id order by m.id), '{}'::uuid[]),
+             coalesce(bool_or(internal.coach_int(v_versions -> m.id::text) is distinct from m.version), false)
+        into v_others, v_confirmations, v_last, v_others_revise, v_ids, v_stale
         from (select m.* from public.coach_memory_items m
-               where m.user_id = p_user and m.id = any(v_ids) and m.retired_at is null
+               where m.user_id = p_user and m.id = any(v_req) and m.retired_at is null
                order by m.id for update) m;
+      -- Guarded: every member must still be there, active and unchanged, or the merged text may restate a
+      -- fact that has since been forgotten, retired or rewritten.
+      if v_guard and (v_stale or v_others <> cardinality(v_req)) then
+        v_results := v_results || jsonb_build_array(jsonb_build_object('op', 'merge', 'id', v_id, 'applied', false,
+          'reason', 'stale'));
+        continue;
+      end if;
       if v_others = 0 then
         v_results := v_results || jsonb_build_array(jsonb_build_object('op', 'merge', 'id', v_id, 'applied', false,
           'reason', 'nothing_to_merge'));
@@ -1253,7 +1619,7 @@ begin
               internal.coach_memory_snapshot(v_after) || jsonb_build_object('merged_ids', to_jsonb(v_ids)), p_thread,
               left(nullif(btrim(coalesce(v_op ->> 'reason', '')), ''), 300));
       for r in
-        update public.coach_memory_items m set retired_at = now(), retired_reason = 'merged'
+        update public.coach_memory_items m set retired_at = now(), retired_reason = 'merged', merged_into = v_id
          where m.user_id = p_user and m.id = any(v_ids) and m.retired_at is null
         returning m.*
       loop
@@ -1269,16 +1635,17 @@ begin
       with gone as (
         delete from public.coach_memory_items m where m.user_id = p_user returning m.*
       )
-      insert into public.coach_memory_events (user_id, memory_id, op, actor, before, after, thread_id, reason, tokens)
+      insert into public.coach_memory_events (user_id, memory_id, op, actor, before, after, thread_id, reason, tokens,
+                                              created_at)
       select p_user, g.id, 'forget', p_actor, internal.coach_memory_snapshot(g, false), null, p_thread,
-             'forget_all', internal.coach_memory_tokens(g.content)
+             'forget_all', internal.coach_memory_tokens(g.content), v_now
         from gone g;
       update public.coach_memory_events e
          set before = case when e.before ? 'content' then e.before - 'content' else e.before end,
              after = case when e.after ? 'content' then e.after - 'content' else e.after end
        where e.user_id = p_user and (e.before ? 'content' or e.after ? 'content');
       update public.coach_user_state s
-         set memory_floor_at = now(), recent_searches = '[]'::jsonb, suggestions = '[]'::jsonb,
+         set memory_floor_at = v_now, recent_searches = '[]'::jsonb, suggestions = '[]'::jsonb,
              suggestions_fingerprint = null, suggestions_at = null, updated_at = now()
        where s.user_id = p_user;
       v_bump := true;
@@ -1392,6 +1759,8 @@ revoke all on function internal.coach_uuid(text) from public, anon, authenticate
 revoke all on function internal.coach_collapse(text) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_preview_text(text) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_thread_title(text) from public, anon, authenticated, service_role;
+revoke all on function internal.coach_is_refusal(text) from public, anon, authenticated, service_role;
+revoke all on function internal.coach_int(jsonb) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_thread_preview(uuid, uuid) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_messages_cap() from public, anon, authenticated, service_role;
 revoke all on function internal.coach_query_terms(text, integer) from public, anon, authenticated, service_role;
@@ -1401,16 +1770,17 @@ revoke all on function internal.coach_memory_importance(jsonb, integer) from pub
 revoke all on function internal.coach_memory_content(text) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_memory_revises(text, integer) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_text_array(jsonb, integer, integer) from public, anon, authenticated, service_role;
+revoke all on function internal.coach_memory_stem(text) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_memory_tokens(text) from public, anon, authenticated, service_role;
 revoke all on function internal.coach_memory_snapshot(public.coach_memory_items, boolean)
   from public, anon, authenticated, service_role;
-revoke all on function internal.coach_thread_folder_owner() from public, anon, authenticated, service_role;
 revoke all on function internal.coach_messages_thread_stats() from public, anon, authenticated, service_role;
 
 revoke all on function public.coach_take_utility_quota(uuid, integer, integer) from public, anon, authenticated;
 revoke all on function public.coach_add_utility_tokens(uuid, integer) from public, anon, authenticated;
 revoke all on function public.coach_messages_save_v1(uuid, jsonb) from public, anon, authenticated;
-revoke all on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz)
+revoke all on function public.coach_thread_delete_v1(uuid, uuid) from public, anon, authenticated;
+revoke all on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz, boolean)
   from public, anon, authenticated;
 revoke all on function public.coach_memories_ranked_v1(uuid, text, integer, boolean) from public, anon, authenticated;
 revoke all on function public.coach_context_manifest_v1(uuid, uuid, text) from public, anon, authenticated;
@@ -1422,7 +1792,8 @@ revoke all on function public.coach_consolidation_claim_v1(uuid, integer) from p
 grant execute on function public.coach_take_utility_quota(uuid, integer, integer) to service_role;
 grant execute on function public.coach_add_utility_tokens(uuid, integer) to service_role;
 grant execute on function public.coach_messages_save_v1(uuid, jsonb) to service_role;
-grant execute on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz)
+grant execute on function public.coach_thread_delete_v1(uuid, uuid) to service_role;
+grant execute on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz, boolean)
   to service_role;
 grant execute on function public.coach_memories_ranked_v1(uuid, text, integer, boolean) to service_role;
 grant execute on function public.coach_context_manifest_v1(uuid, uuid, text) to service_role;
@@ -1436,17 +1807,19 @@ grant execute on function public.coach_consolidation_claim_v1(uuid, integer) to 
 -- ---------------------------------------------------------------------------------------------------------
 
 comment on table public.coach_folders is
-  'Sana chat folders. Client-generated ids; a thread may only sit in its owner''s folder (coach_thread_folder_owner). Service role only.';
+  'Sana chat folders. Client-generated ids; a thread may only sit in its owner''s folder (coach_threads_folder_fkey on (folder_id, user_id)). Service role only.';
 comment on table public.coach_threads is
   'One row per Sana chat. Stats (message_count, last_message_at, preview) are kept by the coach_messages triggers; the rolling summary and the maintenance lease are written by coach_thread_publish_v1 / coach_thread_claim_v1. Service role only.';
 comment on column public.coach_threads.title_source is
-  'none | auto (model) | user (renamed) | fallback (first words of the question) | legacy (backfill). Only none, fallback and legacy titles are regenerated.';
+  'none | auto (model) | user (renamed) | fallback (first words of the question) | legacy (first question of an old build''s chat: the backfill, or coach_messages_save_v1 for a legacy_client thread). Only none, fallback and legacy titles are regenerated.';
 comment on column public.coach_threads.origin is
   'app (client thread id) | legacy_client (saved by an app build without threads) | backfill (grouped by the 20261007160000 migration).';
 comment on column public.coach_threads.summary_through is
   'Newest message created_at folded into summary; summary_messages counts those messages.';
 comment on column public.coach_threads.curated_through is
   'Newest message created_at the memory curator has read.';
+comment on column public.coach_threads.maintenance_claimed_at is
+  'When the current (or last) maintenance lease was claimed. coach_thread_publish_v1 drops the pass''s memory ops when a forget or forget-all is stamped at or after it (reason memory_reset).';
 comment on column public.coach_threads.search is
   'Title (weight A) and summary (weight B), english. Indexed with user_id through btree_gin.';
 comment on table public.coach_thread_tombstones is
@@ -1460,31 +1833,35 @@ comment on table public.coach_user_state is
 comment on column public.coach_messages.thread_id is
   'The chat this message belongs to (coach_threads, same owner through the composite foreign key).';
 comment on column public.coach_messages.blocked is
-  'meta.blocked: a turn screened out by CoachSafety, or its refusal. Excluded from summaries, curation, search, recall, follow-ups and suggestions.';
+  'meta.blocked: a turn screened out by CoachSafety, or its refusal. Set by the app, or by the server for a saved refusal text (internal.coach_is_refusal) and the question at most 3 s before it. Excluded from summaries, curation, search, recall, follow-ups and suggestions.';
 comment on column public.coach_messages.search is
   'english tsvector of the first 8,000 characters; user messages weight A, assistant messages weight B.';
 comment on column public.coach_memory_items.source is
   'tool (save_memory) | curator (maintenance pass) | user (asked explicitly) | legacy (before 20261007160000).';
 comment on column public.coach_memory_items.retired_at is
   'Soft retirement (retire, merge, evict). Readers ignore retired rows; they are purged after 30 days.';
+comment on column public.coach_memory_items.merged_into is
+  'The memory a merge folded this (retired) row into. Forgetting that memory hard-deletes this row too.';
 comment on column public.coach_usage.utility_calls is
   'Cheap-model calls today (coach_take_utility_quota against COACH_DAILY_UTILITY_LIMIT).';
 comment on column public.coach_usage.utility_tokens is
   'Cheap-model tokens today (coach_add_utility_tokens).';
 comment on function public.coach_messages_save_v1(uuid, jsonb) is
-  'Stores a validated batch of chat rows for p_user: resolves legacy thread-less rows, checks tombstones and ownership per thread, creates missing threads, upserts on (user_id, client_id) merging meta, prunes beyond 50,000 messages. Returns {saved, rejected[{client_id, reason}], threads[{id, created}]}.';
-comment on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz) is
-  'Ranked lexical search of p_user''s non-blocked messages and thread titles/summaries, grouped by thread; browse by date window for a query without lexemes.';
+  'Stores a validated batch of chat rows for p_user: resolves legacy thread-less rows, checks tombstones and ownership per thread, creates missing threads, upserts on (user_id, client_id) merging meta, marks saved refusals (and the question before them) blocked, titles legacy_client threads, and once over 51,000 messages prunes the oldest back to 50,000 with any thread left empty. Serialised per owner with coach_thread_delete_v1. Returns {saved, rejected[{client_id, reason}], threads[{id, created}]}.';
+comment on function public.coach_thread_delete_v1(uuid, uuid) is
+  'Tombstones and deletes one of p_user''s threads (tombstone even for an unknown id), or with p_thread null every thread and message. Serialised with coach_messages_save_v1. Returns {deleted}.';
+comment on function public.coach_search_v1(uuid, text, integer, integer, uuid, timestamptz, timestamptz, boolean) is
+  'Ranked lexical search of p_user''s non-blocked messages and thread titles/summaries, grouped by thread; browse by date window for a query without lexemes. p_light: threads only, ranked over the newest 500 matches.';
 comment on function public.coach_memories_ranked_v1(uuid, text, integer, boolean) is
   'Active memories ranked for a question, safety pins first.';
 comment on function public.coach_context_manifest_v1(uuid, uuid, text) is
   'The context library manifest for one turn: ranked memories, the current thread''s summary, library counts, recent and relevant threads, open loops, memory_revision. Never message contents.';
 comment on function public.coach_thread_claim_v1(uuid, uuid, integer) is
-  'Takes a thread''s maintenance lease when free or expired.';
+  'Takes a thread''s maintenance lease when free or expired; stamps maintenance_claimed_at after waiting out any forget in progress.';
 comment on function public.coach_thread_publish_v1(uuid, uuid, uuid, jsonb, jsonb) is
-  'Applies a maintenance pass (summary patch and curator memory ops) atomically while the lease token is current; releases the lease. {applied:false, reason:lease_lost} otherwise.';
+  'Applies a maintenance pass (summary patch and curator memory ops) atomically while the lease token is current; releases the lease. {applied:false, reason:lease_lost} otherwise; {applied:true, reason:memory_reset, ops:[]} without the ops or curated_through when a forget or forget-all landed after the claim.';
 comment on function public.coach_memory_apply_v1(uuid, jsonb, text, uuid) is
-  'Applies resolved memory ops (add, update, confirm, retire, merge, forget, forget_all, consolidated), enforces the 200-row cap, audits every change in coach_memory_events.';
+  'Applies resolved memory ops (add, update, confirm, retire, merge, forget, forget_all, consolidated), enforces the 200-row cap, audits every change in coach_memory_events. Optional version guards (expect_version, versions) skip a stale op with reason stale; forget also deletes the rows merged into the forgotten one.';
 comment on function public.coach_consolidation_claim_v1(uuid, integer) is
   'Claims the owner''s memory consolidation pass when it is due.';
 comment on function public.coach_take_utility_quota(uuid, integer, integer) is

@@ -114,6 +114,9 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
         alter default privileges in schema public grant all on sequences to anon, authenticated;
         alter default privileges in schema public grant execute on functions to anon, authenticated;`);
       await apply('20260930235900_coach_harness.sql');
+      // Production has this index from 20260824185725_post_persistence_indexes.sql (not applied here); the coach
+      // retention prune and coach_search_v1's light pool read the owner's messages newest/oldest first through it.
+      await sql(`create index if not exists coach_messages_user_idx on public.coach_messages (user_id, created_at desc);`);
       await apply('20261007160000_coach_threads_memory.sql');
     }
     await sql(`insert into auth.users(id) values ('${USER_A}'),('${USER_B}');`);
