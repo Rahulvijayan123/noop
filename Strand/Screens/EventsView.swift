@@ -6,7 +6,9 @@ import StrandDesign
 // The Events tab renders `[HealthEvent]`. Anything that can fill that array (the backend, the local
 // store, manual logging) drives the whole screen: grouping by day, the All / Reported / Detected filter,
 // the timeline, the latest-reaction card, the full list, the per-event page and the recovery history.
-// `HealthEvent.sample` only fills the screen until real data is wired in. Models are `Codable` so a
+// No production source feeds the tab yet, so it shows `HealthEvent.current`: empty in a release build.
+// `HealthEvent.sample` (fabricated events, including a made-up medication) exists in DEBUG builds only and
+// appears only under `--demo-seed` or `--demo-events`, labelled as sample data. Models are `Codable` so a
 // backend payload can decode straight into them.
 
 enum EventTone: String, Codable, Hashable {
@@ -74,8 +76,9 @@ struct HealthEvent: Identifiable, Hashable, Codable {
     var recovery: EventRecovery?
 }
 
-// MARK: - Sample data (replace with the backend feed)
+// MARK: - Sample data (DEBUG only, never shown as the wearer's own events)
 
+#if DEBUG
 extension EventPhysiology {
     /// A drop that starts at `start`, then climbs back after `end` (hours since local midnight).
     static func sample(day: Date, start: Double, end: Double) -> EventPhysiology {
@@ -143,13 +146,25 @@ extension HealthEvent {
         return events
     }
 }
+#endif
+
+extension HealthEvent {
+    /// The events the Events tab shows. Nothing real feeds it yet, so a release build shows none; the
+    /// fabricated samples are reachable only from a DEBUG demo launch.
+    static var current: [HealthEvent] {
+        #if DEBUG
+        if DemoLaunch.showsSampleEvents { return sample }
+        #endif
+        return []
+    }
+}
 
 
 // MARK: - Screens
 
 /// The Events tab: the latest event the body reacted to, then the newest days of the timeline.
 struct EventsView: View {
-    var events: [HealthEvent] = HealthEvent.sample
+    var events: [HealthEvent] = HealthEvent.current
     @ObservedObject private var filterState = EventFilterState.shared
 
     /// The most recent event that carries a physiology trace.
@@ -174,8 +189,16 @@ struct EventsView: View {
             }
             let days = EventGrouping.days(events, filter: filterState.filter, limit: 3)
             if days.isEmpty {
-                ComingSoon(what: filterState.filter.emptyText)
+                ComingSoon(what: events.isEmpty ? "No events yet. Reactions you log or the band detects will appear here."
+                                                : filterState.filter.emptyText)
             }
+            #if DEBUG
+            if DemoLaunch.showsSampleEvents {
+                Text("Sample events for a demo build. Not your data.")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+            #endif
             ForEach(days) { day in
                 EventDaySection(day: day, history: events)
             }

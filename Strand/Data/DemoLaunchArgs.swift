@@ -52,6 +52,12 @@ enum DemoLaunch {
         }
     }
 
+    /// The Events tab shows its fabricated sample events only for a demo launch (`--demo-seed` with history, or `--demo-events`).
+    static var showsSampleEvents: Bool {
+        CommandLine.arguments.contains("--demo-events")
+            || (CommandLine.arguments.contains("--demo-seed") && intArg("--demo-days") != 0)
+    }
+
     /// `first` is the newest sample event with physiology (the one the Events tab features); anything else
     /// is a sample event id.
     private static func sampleEvent(_ name: String?) -> HealthEvent? {
