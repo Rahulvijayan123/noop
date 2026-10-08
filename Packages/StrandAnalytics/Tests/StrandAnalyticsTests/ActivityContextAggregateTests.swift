@@ -205,6 +205,55 @@ final class ActivityContextAggregateTests: XCTestCase {
             .aggregate(for: .sitting))
         XCTAssertEqual(onlyRide.hrMean, 88)
         XCTAssertFalse(onlyRide.hrSettled)
+        XCTAssertEqual(a.inVehicleHrMean, 88, "the ride's own heart rate is reported apart")
+        XCTAssertNil(ActivityContextAggregator.summarize([desk], from: t0, to: t0 + 2_400).aggregate(for: .sitting)?
+            .inVehicleHrMean)
+    }
+
+    func testARidesHeartRateRangeIsNotTheSeatedRange() throws {
+        var ride = iv(0, 1_800, .sitting, hr: 88, hrN: 1_800, hrMin: 70, hrMax: 120)
+        ride.detail = .inVehicle
+        let desk = iv(1_800, 2_400, .sitting, hr: 66, hrN: 600, hrMin: 58, hrMax: 74)
+        let a = try XCTUnwrap(ActivityContextAggregator.summarize([ride, desk], from: t0, to: t0 + 2_400)
+            .aggregate(for: .sitting))
+        XCTAssertEqual(a.hrMean, 66)
+        XCTAssertEqual(a.hrMin, 58, "the range comes from the rows the mean came from")
+        XCTAssertEqual(a.hrMax, 74)
+        let onlyRide = try XCTUnwrap(ActivityContextAggregator.summarize([ride], from: t0, to: t0 + 1_800)
+            .aggregate(for: .sitting))
+        XCTAssertEqual(onlyRide.hrMin, 70, "a fallback mean carries the fallback rows' range")
+        XCTAssertEqual(onlyRide.hrMax, 120)
+    }
+
+    func testAWindowThatSeesOnlyARowsTransientReadsNoneOfItsSettledValues() throws {
+        // A 600 s sitting row after a walk: 82 bpm over the whole row, 70 once settled (from +120).
+        var afterWalk = iv(0, 600, .sitting, hr: 82, hrN: 600, rmssd: 40, beats: 700, diffSqSum: 1_600 * 699, diffCount: 699)
+        afterWalk.settlingSeconds = 120; afterWalk.settledFrom = t0 + 120
+        afterWalk.hrMeanSettled = 70; afterWalk.hrSamplesSettled = 480
+        afterWalk.rmssdSettled = 50; afterWalk.rrDiffSqSumMs2Settled = 2_500 * 559; afterWalk.rrDiffCountSettled = 559
+        let transientOnly = try XCTUnwrap(ActivityContextAggregator.summarize([afterWalk], from: t0, to: t0 + 120)
+            .aggregate(for: .sitting))
+        XCTAssertFalse(transientOnly.hrSettled, "none of the settled part is inside the window")
+        XCTAssertFalse(transientOnly.rmssdSettled)
+        XCTAssertEqual(transientOnly.hrMean, 82)
+        XCTAssertEqual(transientOnly.unsettledSeconds, 120, "all of the window is transient")
+        XCTAssertEqual(transientOnly.unsettledShare, 1, accuracy: 1e-9)
+        // Half of the settled part inside the window: its settled values, at half their evidence.
+        let half = try XCTUnwrap(ActivityContextAggregator.summarize([afterWalk], from: t0 + 360, to: t0 + 600)
+            .aggregate(for: .sitting))
+        XCTAssertTrue(half.hrSettled)
+        XCTAssertEqual(half.hrMean, 70)
+        XCTAssertEqual(half.hrSamples, 240)
+        XCTAssertEqual(try XCTUnwrap(half.rmssd), 50, accuracy: 1e-9)
+        XCTAssertEqual(half.rmssdWindowDominantS, 480, "the settled part's own duration")
+        XCTAssertEqual(half.unsettledSeconds, 0)
+        // Straddling the settled start: 60 s of transient, 60 s settled.
+        let straddle = try XCTUnwrap(ActivityContextAggregator.summarize([afterWalk], from: t0 + 60, to: t0 + 180)
+            .aggregate(for: .sitting))
+        XCTAssertTrue(straddle.hrSettled)
+        XCTAssertEqual(straddle.hrSamples, 60)
+        XCTAssertEqual(straddle.unsettledSeconds, 60)
+        XCTAssertEqual(straddle.unsettledShare, 0.5, accuracy: 1e-9)
     }
 
     func testMovementAndLegacyRowsAreReadWholeAsBefore() throws {

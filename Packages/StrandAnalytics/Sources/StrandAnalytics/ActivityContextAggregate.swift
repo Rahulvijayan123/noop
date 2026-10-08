@@ -27,9 +27,11 @@ import Foundation
 // `[settledFrom, end)`). The heart rate and RMSSD of a class are taken from settled evidence only: a row's settled
 // values when it has them, its whole values when nothing settles it (or it predates the field), and nothing from a
 // row that is all transient or a ride in a vehicle (not rest). Only when a class has no settled evidence at all is
-// it read from those rows instead, and `hrSettled` / `rmssdSettled` say so. `unsettledSeconds` is how much of the
-// class sat inside settling windows, `inVehicleSeconds` how much was a ride. Movement rows have no settling, so
-// their values are unchanged.
+// it read from those rows instead, and `hrSettled` / `rmssdSettled` say so (`hrMin` / `hrMax` follow the same rows).
+// A row's settled values are weighted by how much of `[settledFrom, end)` lies inside the window, so a window that
+// covers only a row's transient reads none of them. `unsettledSeconds` is how much of the class sat inside settling
+// windows (the part inside the window), `inVehicleSeconds` how much was a ride and `inVehicleHrMean` the rides'
+// own heart rate. Movement rows have no settling, so their values are unchanged.
 //
 // SDNN IS NOT ROLLED UP HERE, DELIBERATELY. SDNN is the spread of every NN interval in a window, not a
 // successive-difference statistic, and it changes substantially with recording duration — a longer window
@@ -65,8 +67,13 @@ public struct ActivityClassAggregate: Equatable, Sendable {
     public var unsettledSeconds: Int = 0
     /// Seconds of the class that were a ride in a vehicle (`detail == .inVehicle`).
     public var inVehicleSeconds: Int = 0
+    /// Evidence-weighted heart rate over the class's ride seconds alone; nil without a ride. The class's `hrMean`
+    /// leaves rides out whenever it has anything else (and then says so through `hrSettled`), so a consumer that
+    /// describes a ride reads it here.
+    public var inVehicleHrMean: Double? = nil
     /// Whether `hrMean` / `rmssd` came from settled, non-vehicle evidence only (true), or had to fall back to rows
-    /// that include the post-transition transient or a ride (false). True when there is no value at all.
+    /// that include the post-transition transient or a ride (false). True when there is no value at all. `hrMin` /
+    /// `hrMax` come from the same rows as `hrMean`.
     public var hrSettled: Bool = true
     public var rmssdSettled: Bool = true
 
@@ -96,7 +103,8 @@ public enum ActivityContextAggregator {
             var intervals = 0
             /// Settled (or never unsettled) non-vehicle evidence, and the fallback from everything else.
             var hr = Pool(), hrFallback = Pool()
-            var hrMin: Int?, hrMax: Int?
+            var hrMin: Int?, hrMax: Int?, hrMinFallback: Int?, hrMaxFallback: Int?
+            var vehicleHr = Pool()
             var rmssd = RRPool(), rmssdFallback = RRPool()
             var unsettled = 0.0, vehicle = 0.0
             var respSum = 0.0, respWeight = 0.0
@@ -117,23 +125,51 @@ public enum ActivityContextAggregator {
             a.seconds += overlap
             a.confidence += iv.confidence * overlap
             a.intervals += 1
+            // The settled part of the row, `[settledFrom, end)`, and how much of it lies inside the window: a row's
+            // settled values were measured over that part only, so they are weighted by its overlap with the window,
+            // not by the whole row's. A window that sees only the row's transient reads none of its settled values.
+            let settledFrom = iv.settledFrom.map { min(max($0, iv.start), iv.end) }
+            let settledSpan = settledFrom.map { iv.end - $0 } ?? 0
+            let settledShare = settledSpan > 0 ? Double(max(0, hi - max(lo, settledFrom!))) / Double(settledSpan) : 0
             // Settling applies to the row and leaves part of it unread (all transient, or too short a remainder).
-            let transient = (iv.settlingSeconds ?? 0) > 0
-            if transient { a.unsettled += Double(iv.settlingSeconds ?? 0) * share }
+            let settling = iv.settlingSeconds ?? 0
+            let transient = settling > 0
+            if transient {
+                if let sf = settledFrom, sf > iv.start {
+                    // The settling seconds lie in `[start, settledFrom)`: count the part of that inside the window.
+                    let lead = Double(max(0, min(hi, sf) - lo))
+                    a.unsettled += lead * min(1, Double(settling) / Double(sf - iv.start))
+                } else {
+                    a.unsettled += Double(settling) * share
+                }
+            }
             if iv.isInVehicle { a.vehicle += overlap }
             let plain = !transient && !iv.isInVehicle
-            if let mean = iv.hrMeanSettled, let n = iv.hrSamplesSettled, n > 0, !iv.isInVehicle {
-                a.hr.add(mean, Double(n) * share)
-            } else if let mean = iv.hrMean, iv.hrSamples > 0 {
-                if plain { a.hr.add(mean, Double(iv.hrSamples) * share) }
-                else { a.hrFallback.add(mean, Double(iv.hrSamples) * share) }
+            if iv.isInVehicle, let mean = iv.hrMean, iv.hrSamples > 0 {
+                a.vehicleHr.add(mean, Double(iv.hrSamples) * share)
             }
-            if let lowest = iv.hrMin { a.hrMin = min(a.hrMin ?? lowest, lowest) }
-            if let highest = iv.hrMax { a.hrMax = max(a.hrMax ?? highest, highest) }
+            // The extremes go with the pool the row's heart rate went to, so a class's range never comes from rows its
+            // mean left out (a settled row's extremes are its whole row's: no settled extremes are stored).
+            var rested: Bool?
+            if let mean = iv.hrMeanSettled, let n = iv.hrSamplesSettled, n > 0, !iv.isInVehicle, settledShare > 0 {
+                a.hr.add(mean, Double(n) * settledShare); rested = true
+            } else if let mean = iv.hrMean, iv.hrSamples > 0 {
+                if plain { a.hr.add(mean, Double(iv.hrSamples) * share); rested = true }
+                else { a.hrFallback.add(mean, Double(iv.hrSamples) * share); rested = false }
+            }
+            if let rested {
+                if let lowest = iv.hrMin {
+                    if rested { a.hrMin = min(a.hrMin ?? lowest, lowest) } else { a.hrMinFallback = min(a.hrMinFallback ?? lowest, lowest) }
+                }
+                if let highest = iv.hrMax {
+                    if rested { a.hrMax = max(a.hrMax ?? highest, highest) } else { a.hrMaxFallback = max(a.hrMaxFallback ?? highest, highest) }
+                }
+            }
             // Scale the sums by the same partial-overlap share the other evidence-weighted terms use: an
             // interval crossing the window edge contributes only its covered fraction of evidence.
-            if let sumSq = iv.rrDiffSqSumMs2Settled, let count = iv.rrDiffCountSettled, count > 0, !iv.isInVehicle {
-                a.rmssd.add(sumSq: sumSq, count: count, share: share, windowS: iv.end - (iv.settledFrom ?? iv.start))
+            if let sumSq = iv.rrDiffSqSumMs2Settled, let count = iv.rrDiffCountSettled, count > 0, !iv.isInVehicle,
+               settledShare > 0 {
+                a.rmssd.add(sumSq: sumSq, count: count, share: settledShare, windowS: settledSpan)
             } else if let components = Self.diffComponents(iv) {
                 if plain {
                     a.rmssd.add(sumSq: components.sumSq, count: components.count, share: share, windowS: iv.durationSeconds)
@@ -157,12 +193,14 @@ public enum ActivityContextAggregator {
         }
 
         let classes = byClass.map { cls, a -> ActivityClassAggregate in
-            let hr = a.hr.weight > 0 ? a.hr : a.hrFallback
+            let settledHr = a.hr.weight > 0
+            let hr = settledHr ? a.hr : a.hrFallback
             let rr = a.rmssd.count > 0 ? a.rmssd : a.rmssdFallback
             return ActivityClassAggregate(
                 activityClass: cls, seconds: Int(a.seconds.rounded()), intervals: a.intervals,
                 meanConfidence: a.seconds > 0 ? a.confidence / a.seconds : 0,
-                hrMean: hr.weight > 0 ? hr.sum / hr.weight : nil, hrMin: a.hrMin, hrMax: a.hrMax,
+                hrMean: hr.weight > 0 ? hr.sum / hr.weight : nil,
+                hrMin: settledHr ? a.hrMin : a.hrMinFallback, hrMax: settledHr ? a.hrMax : a.hrMaxFallback,
                 hrSamples: Int(hr.weight.rounded()),
                 rmssd: rr.count > 0 ? (rr.sumSq / rr.count).squareRoot() : nil,
                 rmssdIntervals: rr.intervals,
@@ -172,6 +210,7 @@ public enum ActivityContextAggregator {
                 cadenceSpm: a.cadenceWeight > 0 ? a.cadenceSum / a.cadenceWeight : nil,
                 gait: a.gait.flatMap { $0.isEmpty ? nil : $0.summary },
                 unsettledSeconds: Int(a.unsettled.rounded()), inVehicleSeconds: Int(a.vehicle.rounded()),
+                inVehicleHrMean: a.vehicleHr.weight > 0 ? a.vehicleHr.sum / a.vehicleHr.weight : nil,
                 hrSettled: a.hr.weight > 0 || a.hrFallback.weight == 0,
                 rmssdSettled: a.rmssd.count > 0 || a.rmssdFallback.count == 0)
         }.sorted { l, r in
