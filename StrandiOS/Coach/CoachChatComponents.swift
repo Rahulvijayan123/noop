@@ -89,6 +89,7 @@ struct CoachBubble: View {
     var followUpsEnabled = true
     var onFollowUp: (String) -> Void = { _ in }
     @State private var containerWidth: CGFloat = 560
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     /// The user bubble's widest; replies use the whole column.
     private var maxBubbleWidth: CGFloat { min(containerWidth * 0.82, 560) }
@@ -159,7 +160,7 @@ struct CoachBubble: View {
                 CoachPromptList(prompts: followUps, isEnabled: followUpsEnabled, accessibilityPrefix: "Follow-up question", onSend: onFollowUp)
             }
         }
-        .animation(.easeOut(duration: 0.25), value: message.vizPhase)
+        .animation(reduceMotion ? nil : .easeOut(duration: 0.25), value: message.vizPhase)
     }
 
     @ViewBuilder

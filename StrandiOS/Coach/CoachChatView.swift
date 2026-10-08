@@ -12,6 +12,8 @@ struct CoachChatView: View {
     @EnvironmentObject private var coachEngine: AICoachEngine
     @EnvironmentObject private var profile: ProfileStore
     @EnvironmentObject private var router: NavRouter
+    /// Following the stream scrolls with a short ease; with Reduce Motion on it jumps instead.
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @StateObject private var vm = CoachChatViewModel()
     @FocusState private var inputFocused: Bool
     /// True while the list should chase new content. Only the wearer dragging the list upward turns it off:
@@ -176,16 +178,16 @@ struct CoachChatView: View {
                 // Streaming flushes at ~25Hz; an animated scroll per flush is wasteful, so follow at ~10Hz.
                 guard following, Date.timeIntervalSinceReferenceDate - throttle.last >= 0.1 else { return }
                 throttle.last = Date.timeIntervalSinceReferenceDate
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.messages.last?.vizPhase) { _, _ in
                 // A placeholder or finished visual grows the list under the reader; keep the end of the answer in view.
                 guard following else { return }
-                withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.messages.count) { _, _ in
                 following = true
-                withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
             }
             .onChange(of: vm.isGenerating) { _, generating in
                 guard !generating else { return }
@@ -193,14 +195,14 @@ struct CoachChatView: View {
                 for delay in [0.0, 0.35] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         guard following else { return }
-                        withAnimation(.easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
                     }
                 }
             }
             .onChange(of: inputFocused) { _, focused in
                 guard focused else { return }
                 DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
             .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
