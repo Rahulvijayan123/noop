@@ -1251,8 +1251,6 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
     public var prvMinValidPairs: Int = 200
     public var prvMinCoverageFraction: Double = 0.90
     public var prvMaxRejectedFraction: Double = 0.05
-    /// pNN50's successive-difference threshold (ms) — the conventional 50 ms, fixed.
-    public var prvPnn50ThresholdMs: Double = 50
     // ── Morning response (spec-02 §4.3) ─────────────────────────────────
     /// Curve span before / after the anchor (s).
     public var morningWindowBeforeSeconds: Int = 1800
@@ -1291,7 +1289,8 @@ public struct SleepAnalyticsConfig: Equatable, Sendable {
         parts += [prvDiagnosticsEnabled ? "1" : "0"]
         parts += [prvWindowSeconds, prvMinValidPairs].map(String.init)
         // spec-02 morning response (computed since config v2), all read by `morningResponseGroup` and the
-        // thermal span. The pNN50 threshold joins when the PRV group reads it (cardiac workstream).
+        // thermal span. pNN50 has no tunable: its 50 ms is the statistic's definition
+        // (`HRVAnalyzer.pnn50GapAware`), carried in the document as `pnn50_method`.
         parts += ["morning", String(morningWindowBeforeSeconds), String(morningWindowAfterSeconds),
                   String(morningMinValidMinutesPerSide), String(morningHrMinuteMinDistinctSeconds),
                   String(morningMovementMinuteMinAdjacencies)]
