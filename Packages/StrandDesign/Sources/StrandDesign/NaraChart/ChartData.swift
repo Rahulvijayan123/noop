@@ -89,14 +89,28 @@ public enum ChartDay {
 /// `day` is the LOCAL start of the day the value belongs to; a night belongs to the day you woke up. Charts
 /// plot it with `unit: .day` (or the bin they aggregate to), so a bar or point sits in the middle of its day
 /// rather than on the boundary before it.
+///
+/// Every chart reads the day through `localDay(in:)`, so any instant inside the day works (a wake time, a
+/// noon), and a point built from a key with `init(key:)` (or the `TrendPoint` bridge) stays on its calendar
+/// day when the chart is drawn in another time zone than the one it was built in (a page that kept its
+/// points in `@State` while the wearer travelled). A `day` passed to `init(day:)` is read in the chart's own
+/// calendar, so prefer `init(key:)` for stored day keys. One value per day: charts merge two values on the
+/// same day into their mean (bar totals sum per bin as `aggregation` says).
 public struct DailyPoint: Identifiable, Hashable, Sendable {
-    public var day: Date
+    public var day: Date {
+        // A day set after init is an instant of the caller's choosing; it is no longer the start of a day
+        // in the zone the point was built in.
+        didSet { zone = nil }
+    }
     public var value: Double
     /// Drawn hollow (points) or as a light fill with a solid cap (bars); the legend says "Estimate".
     public var isEstimate: Bool
     /// Method or source run. A change starts a new line, so two incompatible methods are never joined
     /// (the same idea as `TrendPoint.segment`).
     public var series: String
+    /// The time zone `day` was resolved in, when the point was built from a calendar day (a key, a
+    /// `TrendPoint`); nil for a `day` passed in directly. Not part of the point's identity.
+    var zone: TimeZone?
     public var id: Date { day }
 
     public init(day: Date, value: Double, isEstimate: Bool = false, series: String = "default") {
@@ -104,6 +118,7 @@ public struct DailyPoint: Identifiable, Hashable, Sendable {
         self.value = value
         self.isEstimate = isEstimate
         self.series = series
+        self.zone = nil
     }
 
     /// A point for a stored `yyyy-MM-dd` key, at the local start of that day. Nil for a malformed key.
@@ -111,6 +126,37 @@ public struct DailyPoint: Identifiable, Hashable, Sendable {
                  calendar: Calendar = .current) {
         guard let day = ChartDay.date(forKey: key, calendar: calendar) else { return nil }
         self.init(day: day, value: value, isEstimate: isEstimate, series: series)
+        self.zone = calendar.timeZone
+    }
+
+    /// The local start, in `calendar`, of the calendar day this point belongs to. A point built in another
+    /// time zone keeps its calendar day (Oct 7 stays Oct 7); otherwise this is `calendar.startOfDay(for: day)`.
+    public func localDay(in calendar: Calendar = .current) -> Date {
+        if let zone, zone != calendar.timeZone {
+            var built = Calendar(identifier: .gregorian)
+            built.timeZone = zone
+            return ChartDay.date(forKey: ChartDay.key(for: day, calendar: built), calendar: calendar)
+                ?? calendar.startOfDay(for: day)
+        }
+        return calendar.startOfDay(for: day)
+    }
+
+    /// This point moved to its local day in `calendar` (see `localDay(in:)`).
+    func normalised(in calendar: Calendar) -> DailyPoint {
+        var point = DailyPoint(day: localDay(in: calendar), value: value, isEstimate: isEstimate, series: series)
+        point.zone = calendar.timeZone
+        return point
+    }
+
+    public static func == (lhs: DailyPoint, rhs: DailyPoint) -> Bool {
+        lhs.day == rhs.day && lhs.value == rhs.value && lhs.isEstimate == rhs.isEstimate && lhs.series == rhs.series
+    }
+
+    public func hash(into hasher: inout Hasher) {
+        hasher.combine(day)
+        hasher.combine(value)
+        hasher.combine(isEstimate)
+        hasher.combine(series)
     }
 }
 
@@ -202,7 +248,11 @@ public enum ChartDomain: Equatable, Sendable {
             if !anchoredLow { lo -= room }
             if !anchoredHigh { hi += room }
             if nonNegative && lo < 0 { lo = 0 }
-            let step = ChartTicks.step(span: hi - lo, count: count, candidates: steps)
+            // The round step that wastes the least of the plot: the smallest step that splits the span
+            // into `count` intervals could round 37...148 out to 0...150, a third of the plot below the
+            // lowest reading.
+            let step = ChartTicks.fittingStep(low: lo, high: hi, count: count, candidates: steps)
+                ?? ChartTicks.step(span: hi - lo, count: count, candidates: steps)
             lo = (lo / step).rounded(.down) * step
             hi = (hi / step).rounded(.up) * step
             if let clamp {
@@ -241,6 +291,44 @@ public enum ChartTicks {
             return multiple * magnitude
         }
         return 10 * magnitude
+    }
+
+    /// The round step for a FITTED axis over `low...high`: of the steps that, once both ends are rounded out
+    /// to whole steps, give between three and `count + 1` intervals, the one whose rounded domain is
+    /// shortest (the larger step on a tie). Nil when no step qualifies. Steps are 1, 2 and 5 times a power of
+    /// ten, plus 25, 250 … (never 2.5, whose half-way ticks a whole-number format would misprint), or the
+    /// `candidates` when given. Heart rate 45-140 rounds to 25...150 rather than 0...150. Pure.
+    public static func fittingStep(low: Double, high: Double, count: Int, candidates: [Double]? = nil) -> Double? {
+        let span = high - low
+        guard span.isFinite, span > 0, low.isFinite, high.isFinite else { return nil }
+        let minIntervals = max(1, min(3, count))
+        let maxIntervals = max(minIntervals, count + 1)
+        let options: [Double]
+        if let candidates {
+            options = candidates.filter { $0 > 0 && $0.isFinite }
+        } else {
+            let raw = span / Double(max(1, count))
+            let exponent = log10(raw).rounded(.down)
+            var steps: [Double] = []
+            for shift in -1...1 {
+                let magnitude: Double = pow(10, exponent + Double(shift))
+                let multiples: [Double] = magnitude >= 10 ? [1, 2, 2.5, 5] : [1, 2, 5]
+                for multiple in multiples { steps.append(multiple * magnitude) }
+            }
+            options = steps
+        }
+        var best: (step: Double, extent: Double)?
+        for step in options.sorted() {
+            let lower = (low / step).rounded(.down) * step
+            let upper = (high / step).rounded(.up) * step
+            let intervals = Int(((upper - lower) / step).rounded())
+            guard intervals >= minIntervals, intervals <= maxIntervals else { continue }
+            let extent = upper - lower
+            if let current = best, extent > current.extent * (1 + 1e-9) { continue }
+            if let current = best, abs(extent - current.extent) <= current.extent * 1e-9, step < current.step { continue }
+            best = (step, extent)
+        }
+        return best?.step
     }
 
     /// Multiples of `step` inside `domain`, rounded to the step so 0.1 + 0.2 never prints as 0.30000004,
@@ -480,6 +568,6 @@ public enum ChartAxisStyle: Equatable, Sendable {
     case month
     /// "Sep 2025" on the first mark of each year, "Dec" otherwise; whole years ("2024") on very long spans.
     case monthYear
-    /// Clock time ("6 AM"), from `chartTimeTicks`.
+    /// Clock time ("6 AM") on round wall-clock times (`ChartAxis.wallClockTicks`).
     case hours
 }

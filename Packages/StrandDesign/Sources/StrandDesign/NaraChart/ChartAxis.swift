@@ -1,6 +1,5 @@
 #if !os(watchOS)
-// Swift Charts axes, and the time marks wrap `chartTimeTicks` from the watch-excluded OverviewHRChart.swift;
-// the watch draws no charts.
+// Swift Charts axes; the watch draws no charts.
 import SwiftUI
 import Charts
 
@@ -123,7 +122,8 @@ public enum ChartAxis {
     /// present, and put each mark in the MIDDLE of its day, where a bar or point plotted with `unit: .day`
     /// sits. Month styles start each label on its month's boundary, where the grid line is, and read across
     /// the month; a newest month too narrow for its name is labelled right-aligned at the window's end.
-    /// Hours use `chartTimeTicks`.
+    /// Hours step like `chartTimeTicks` (6, 3, 2 or 1 hours, or 15 minutes, by span) but on wall-clock
+    /// times (`wallClockTicks`), so the 23- and 25-hour days of a clock change still read 12 AM, 6 AM, 12 PM.
     ///
     /// Swift Charts keeps x labels inside the plot and truncates one that does not fit ("Oct 2025" became
     /// "O…"), so a label whose mark is near an edge is anchored on that edge instead of centred, and a
@@ -307,7 +307,7 @@ public enum ChartAxis {
             return (marks, text, anchors, boundaries(of: unit, in: window, calendar: calendar))
 
         case .hours:
-            var ticks = chartTimeTicks(start: window.lowerBound, end: window.upperBound, calendar: calendar)
+            var ticks = wallClockTicks(start: window.lowerBound, end: window.upperBound, calendar: calendar)
             // A full day ends on the clock time it started at (midnight to midnight): that closing mark would
             // repeat the first label on the trailing edge, so it goes, before thinning counts it.
             if ticks.count > 1, let first = ticks.first, let last = ticks.last, last >= window.upperBound,
@@ -321,6 +321,47 @@ public enum ChartAxis {
             let text = labels(for: ticks, style: .hours, calendar: calendar)
             return (ticks, text, zip(ticks, text).map { anchor(for: $0, label: $1, in: window) }, ticks)
         }
+    }
+
+    /// Clock ticks from `start` to `end` (both included): the step `chartTimeTicks` picks for the span (6 h
+    /// above 20 h, 3 h above 10 h, 2 h above 5 h, 1 h above 2 h, else 15 min), placed on the WALL-CLOCK
+    /// multiples of that step on each local day, so a clock change does not shift every later tick off
+    /// its round hour. A time the clock skips that day does not exist and gets no tick. Pure.
+    static func wallClockTicks(start: Date, end: Date, calendar: Calendar) -> [Date] {
+        guard end > start else { return [] }
+        let span = end.timeIntervalSince(start) / 60
+        let step: Int
+        switch span {
+        case (20 * 60)...: step = 360
+        case (10 * 60)...: step = 180
+        case (5 * 60)...: step = 120
+        case (2 * 60)...: step = 60
+        default: step = 15
+        }
+        var ticks: [Date] = []
+        var day = calendar.startOfDay(for: start)
+        let lastDay = calendar.startOfDay(for: end)
+        var guardDays = 0
+        while day <= lastDay, guardDays < 64 {
+            guardDays += 1
+            let parts = calendar.dateComponents([.year, .month, .day], from: day)
+            for minute in stride(from: 0, to: 24 * 60, by: step) {
+                var wanted = parts
+                wanted.hour = minute / 60
+                wanted.minute = minute % 60
+                wanted.second = 0
+                guard let tick = calendar.date(from: wanted) else { continue }
+                if tick > end { break }
+                guard tick >= start else { continue }
+                let back = calendar.dateComponents([.day, .hour, .minute], from: tick)
+                guard back.day == parts.day, back.hour == minute / 60, back.minute == minute % 60 else { continue }
+                if let last = ticks.last, tick <= last { continue }
+                ticks.append(tick)
+            }
+            guard let next = calendar.date(byAdding: .day, value: 1, to: day) else { break }
+            day = calendar.startOfDay(for: next)
+        }
+        return ticks
     }
 
     /// The part of each calendar `unit` inside the window, oldest first. The oldest part is dropped when it

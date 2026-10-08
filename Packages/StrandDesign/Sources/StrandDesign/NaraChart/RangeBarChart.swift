@@ -15,7 +15,13 @@ import Charts
 /// what the chart is for.
 ///
 /// Long ranges bin to the mean bedtime and wake of each week or month (`bin: range.totalsBin`). An estimated
-/// night is a light bar with solid ends, and the legend says "Estimate".
+/// night is a light bar with solid ends, and the legend says "Estimate". `RangeBarChart.bin` returns the bars
+/// as drawn (clock offsets), so the readout above the chart (`ReadoutContent.range(selection:in:bin:)`) shows
+/// the same means. Pass one item per sleep (the main sleep for a schedule); two on one wake day are two bars
+/// in the same column on daily bars, and both count towards a binned mean.
+///
+/// The clock axis widens to every bar and usual window, also one before the 18:00 anchor (an early evening
+/// bedtime), so nothing is drawn outside the plot.
 ///
 /// ```swift
 /// RangeBarChart(items: nights.map { .init(day: $0.wakeDay, start: $0.bedtime, end: $0.wake) },
@@ -40,13 +46,31 @@ public struct RangeBarChart: View {
         }
     }
 
+    /// One bar as the chart draws it: a night, or a week's or month's mean night, as wall-clock hours after
+    /// the anchor (`clockOffset`: with the 18:00 anchor, 5 is 11 PM and 13 is 7 AM on the wake day).
+    public struct Span: Identifiable, Equatable, Sendable {
+        /// The local start of the wake day, or of the week or month for a binned bar.
+        public var day: Date
+        public var start: Double
+        public var end: Double
+        public var isEstimate: Bool
+        public var id: String { "\(day.timeIntervalSince1970)|\(start)" }
+
+        public init(day: Date, start: Double, end: Double, isEstimate: Bool = false) {
+            self.day = day
+            self.start = start
+            self.end = end
+            self.isEstimate = isEstimate
+        }
+    }
+
     struct Bar: Identifiable {
+        let id: Int
         let day: Date
         /// Negated clock offsets: `top` is the (earlier) start, `bottom` the end.
         let top: Double
         let bottom: Double
         let isEstimate: Bool
-        var id: Date { day }
     }
 
     private let bars: [Bar]
@@ -80,41 +104,27 @@ public struct RangeBarChart: View {
                 height: CGFloat = NoopMetrics.chartHeightPrimary, accessibilityTitle: String,
                 calendar: Calendar = .current) {
         let window = bin == .day ? window : ChartAxis.snap(window, to: bin, calendar: calendar)
-        let windowed = items.filter { $0.day >= window.lowerBound && $0.day < window.upperBound && $0.end > $0.start }
-            .sorted { $0.day < $1.day }
-        // (day or bin start, start offset, end offset, estimate), ascending.
-        var offsets: [(day: Date, start: Double, end: Double, isEstimate: Bool)] = windowed.map { item in
-            (item.day, Self.clockOffset(item.start, wakeDay: item.day, anchorHour: anchorHour, calendar: calendar),
-             Self.clockOffset(item.end, wakeDay: item.day, anchorHour: anchorHour, calendar: calendar), item.isEstimate)
-        }
-        if bin != .day {
-            var groups: [Date: (start: Double, end: Double, count: Int, estimates: Int)] = [:]
-            for night in offsets {
-                let key = calendar.dateInterval(of: bin, for: night.day)?.start ?? night.day
-                var group = groups[key] ?? (0, 0, 0, 0)
-                group.start += night.start
-                group.end += night.end
-                group.count += 1
-                if night.isEstimate { group.estimates += 1 }
-                groups[key] = group
-            }
-            offsets = groups.keys.sorted().compactMap { key in
-                guard let group = groups[key], group.count > 0 else { return nil }
-                let n = Double(group.count)
-                return (key, group.start / n, group.end / n, group.estimates * 2 >= group.count)
-            }
-        }
+        let offsets = Self.bin(items, by: bin, anchorHour: anchorHour, calendar: calendar)
+            .filter { $0.day >= window.lowerBound && $0.day < window.upperBound }
         var bands: [ClosedRange<Double>] = []
-        for typical in [typicalStart, typicalEnd].compactMap({ $0 }) {
-            let low = Self.timeOfDayOffset(typical.lowerBound, anchorHour: anchorHour, calendar: calendar)
-            let high = Self.timeOfDayOffset(typical.upperBound, anchorHour: anchorHour, calendar: calendar)
-            bands.append(min(low, high)...max(low, high))
+        // Each usual window sits next to the bars it describes (bedtimes, wakes), even when it crosses the
+        // anchor, so a 17:30-18:30 bedtime window is drawn at the top rather than near the wake band.
+        let count = Double(offsets.count)
+        let meanStart: Double? = offsets.isEmpty ? nil : offsets.reduce(0.0) { $0 + $1.start } / count
+        let meanEnd: Double? = offsets.isEmpty ? nil : offsets.reduce(0.0) { $0 + $1.end } / count
+        if let typicalStart {
+            bands.append(Self.typicalBand(typicalStart, near: meanStart, anchorHour: anchorHour, calendar: calendar))
+        }
+        if let typicalEnd {
+            bands.append(Self.typicalBand(typicalEnd, near: meanEnd, anchorHour: anchorHour, calendar: calendar))
         }
         let earliest = (offsets.map(\.start) + bands.map(\.lowerBound)).min() ?? 4
         let latest = (offsets.map(\.end) + bands.map(\.upperBound)).max() ?? 14
         let layout = Self.clockAxis(earliest: earliest, latest: latest, anchorHour: anchorHour, calendar: calendar)
 
-        self.bars = offsets.map { Bar(day: $0.day, top: -$0.start, bottom: -$0.end, isEstimate: $0.isEstimate) }
+        self.bars = offsets.enumerated().map { index, span in
+            Bar(id: index, day: span.day, top: -span.start, bottom: -span.end, isEstimate: span.isEstimate)
+        }
         self.bin = bin
         self.anchorHour = anchorHour
         self.capHeight = (layout.domain.upperBound - layout.domain.lowerBound) * NaraChartStyle.estimateCapShare
@@ -122,7 +132,7 @@ public struct RangeBarChart: View {
         self.color = color
         self.xLayout = ChartAxis.layout(window, style: xStyle, calendar: calendar)
         self.yLayout = layout
-        self.xs = offsets.map(\.day)
+        self.xs = Array(Set(offsets.map(\.day))).sorted()
         self.state = state
         self.height = height
         self.accessibilityTitle = accessibilityTitle
@@ -157,7 +167,57 @@ public struct RangeBarChart: View {
         }
     }
 
-    // MARK: Clock math (pure)
+    // MARK: Binning and clock math (pure)
+
+    /// The bars for `items` as the chart draws them, ascending: on `.day` one span per item (each on the
+    /// local start of its wake day); on `.weekOfYear` or `.month` one per bin, from the mean start offset to
+    /// the mean end offset of its nights (wall-clock hours from the anchor, so a mean never wraps around
+    /// midnight), an estimate when at least half its nights are. Items that do not end after they start
+    /// are left out. Use it for a readout that matches the selected bar.
+    public static func bin(_ items: [Item], by unit: Calendar.Component = .day, anchorHour: Int = 18,
+                           calendar: Calendar = .current) -> [Span] {
+        let nights = items.filter { $0.end > $0.start }.map { item -> Span in
+            let day = calendar.startOfDay(for: item.day)
+            return Span(day: day,
+                        start: clockOffset(item.start, wakeDay: day, anchorHour: anchorHour, calendar: calendar),
+                        end: clockOffset(item.end, wakeDay: day, anchorHour: anchorHour, calendar: calendar),
+                        isEstimate: item.isEstimate)
+        }.sorted { (a: Span, b: Span) -> Bool in a.day != b.day ? a.day < b.day : a.start < b.start }
+        guard unit != .day else { return nights }
+        var groups: [Date: (start: Double, end: Double, count: Int, estimates: Int)] = [:]
+        for night in nights {
+            let key = calendar.dateInterval(of: unit, for: night.day)?.start ?? night.day
+            var group = groups[key] ?? (0, 0, 0, 0)
+            group.start += night.start
+            group.end += night.end
+            group.count += 1
+            if night.isEstimate { group.estimates += 1 }
+            groups[key] = group
+        }
+        return groups.keys.sorted().compactMap { key in
+            guard let group = groups[key], group.count > 0 else { return nil }
+            let n = Double(group.count)
+            return Span(day: key, start: group.start / n, end: group.end / n, isEstimate: group.estimates * 2 >= group.count)
+        }
+    }
+
+    /// A usual window (only its times of day are used) as anchor offsets, placed on the side of the anchor
+    /// nearest `near` (the mean offset of the bars it describes); with no bars, inside 0..<24.
+    static func typicalBand(_ typical: ClosedRange<Date>, near: Double?, anchorHour: Int,
+                            calendar: Calendar) -> ClosedRange<Double> {
+        var low = timeOfDayOffset(typical.lowerBound, anchorHour: anchorHour, calendar: calendar)
+        let high = timeOfDayOffset(typical.upperBound, anchorHour: anchorHour, calendar: calendar)
+        var width = high - low
+        if width < 0 { width += 24 }
+        if let near {
+            let middle: Double = low + width / 2
+            let shifts: [Double] = [-24, 0, 24]
+            var best: Double = 0
+            for shift in shifts where abs(middle + shift - near) < abs(middle + best - near) { best = shift }
+            low += best
+        }
+        return low...(low + width)
+    }
 
     /// Wall-clock hours from `anchorHour` on the evening before `wakeDay` to `date`: 23:00 is 5, 07:00 on
     /// the wake day is 13. Counted in local clock time (whole days between the dates plus the clock reading),
@@ -179,8 +239,8 @@ public struct RangeBarChart: View {
         return offset < 0 ? offset + 24 : offset
     }
 
-    /// The clock label for an offset ("11 PM", or "23" in a 24-hour locale).
-    static func clockLabel(offset: Double, anchorHour: Int, calendar: Calendar) -> String {
+    /// The clock label for an offset ("11 PM", or "23" in a 24-hour locale; "11:20 PM" off the hour).
+    public static func clockLabel(offset: Double, anchorHour: Int = 18, calendar: Calendar = .current) -> String {
         let minutes = Int(((Double(anchorHour) + offset) * 60).rounded())
         let wrapped = ((minutes % 1440) + 1440) % 1440
         var parts = DateComponents()
@@ -195,10 +255,14 @@ public struct RangeBarChart: View {
 
     /// The negated clock axis: whole hours from just before the earliest start to just after the latest
     /// end, at a step of 1, 2, 3, 4 or 6 hours that gives at most six intervals. Both ends are widened to the
-    /// step, so the top and bottom of the plot are labelled lines rather than an unlabelled strip.
+    /// step, so the top and bottom of the plot are labelled lines rather than an unlabelled strip. The top
+    /// goes above the anchor (a negative offset) for a bedtime before it, so no bar runs off the plot; the
+    /// axis spans at most two days.
     static func clockAxis(earliest: Double, latest: Double, anchorHour: Int, calendar: Calendar) -> ChartYAxisLayout {
-        let rawTop = max(0, (earliest - 0.5).rounded(.down))
-        let rawBottom = min(36, max(rawTop + 2, (latest + 0.5).rounded(.up)))
+        // Half an hour of air above the earliest start, but never above the anchor unless a bar is.
+        let padded = (earliest - 0.5).rounded(.down)
+        let rawTop = earliest >= 0 ? max(0, padded) : max(-12, padded)
+        let rawBottom = min(rawTop + 48, max(rawTop + 2, (latest + 0.5).rounded(.up)))
         var top = rawTop, bottom = rawBottom, step = 6.0
         for candidate in [1.0, 2, 3, 4, 6] {
             let t = (rawTop / candidate).rounded(.down) * candidate
@@ -259,7 +323,7 @@ public struct RangeBarChart: View {
         }
         .naraChartAxes(x: xLayout, y: yLayout, calendar: calendar)
         .chartOverlay { proxy in
-            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection)
+            ChartScrubLayer(proxy: proxy, xs: xs, selection: $selection, unit: bin, calendar: calendar)
         }
         .naraChartRangeAnimation(xLayout.window)
         .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: xs,

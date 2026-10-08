@@ -367,7 +367,11 @@ private struct ScheduleGallery: View {
         }
         ForEach(KitSample.allCases, id: \.self) { sample in
             let items = Self.nights(sample)
-            KitChartCase(title: sample.title) { selection in
+            let spans = RangeBarChart.bin(items, by: sample.range.totalsBin)
+            let readout: ((Date?) -> ReadoutContent)? = sample == .month || sample == .year
+                ? { selection in ReadoutContent.range(selection: selection, in: spans, bin: sample.range.totalsBin) }
+                : nil
+            KitChartCase(title: sample.title, readout: readout) { selection in
                 RangeBarChart(items: items, typicalStart: clock(22, 45)...clock(23, 30),
                               typicalEnd: clock(6, 30)...clock(7, 15), color: StrandPalette.restColor,
                               bin: sample.range.totalsBin, state: sample.state("No nights yet"),
@@ -375,6 +379,19 @@ private struct ScheduleGallery: View {
                               xStyle: sample.range.axisStyle, selection: selection,
                               accessibilityTitle: "Sleep schedule")
             }
+        }
+        // One early-evening bedtime: the clock axis widens above the 6 PM anchor instead of clipping it.
+        let early = Self.nights(.three).enumerated().map { index, item -> RangeBarChart.Item in
+            guard index == 1 else { return item }
+            let evening = KitData.calendar.date(byAdding: .day, value: -1, to: item.day) ?? item.day
+            return RangeBarChart.Item(day: item.day, start: evening.addingTimeInterval(17.5 * 3600), end: item.end)
+        }
+        KitChartCase(title: "W · a 5:30 PM bedtime (axis widens above 6 PM)") { selection in
+            RangeBarChart(items: early, typicalStart: clock(22, 45)...clock(23, 30),
+                          typicalEnd: clock(6, 30)...clock(7, 15), color: StrandPalette.restColor,
+                          window: KitData.window(.week, offsets: KitSample.three.offsets),
+                          xStyle: ChartRange.week.axisStyle, selection: selection,
+                          height: NoopMetrics.chartHeightSecondary, accessibilityTitle: "Sleep schedule")
         }
     }
 }
@@ -506,6 +523,8 @@ private struct VO2Gallery: View {
             ("1 reading · M", .ready, .month, [-3]),
             ("3 readings · M", .ready, .month, [-17, -10, -3]),
             ("6M weekly, held to today", .ready, .half, Array(stride(from: -178, through: -3, by: 7))),
+            ("M · last reading 40 days ago, held across", .ready, .month, [-40]),
+            ("W · the previous reading held until day 4", .ready, .week, [-10, -3]),
             ("Y, method change (hollow, dashed) and a gap", .ready, .year,
              stride(from: -360, through: -3, by: 7).filter { !(-260 ... -200).contains($0) }),
         ]
@@ -524,6 +543,25 @@ private struct VO2Gallery: View {
 }
 
 private struct StepsGallery: View {
+    /// Daily intensity minutes over the quarter, every third day without any.
+    static func intensityMinutes() -> [DailyPoint] {
+        var points: [DailyPoint] = []
+        for offset in -89...0 where offset % 3 != 0 {
+            let value: Double = max(0, KitData.wave(offset, base: 26, swing: 22))
+            points.append(DailyPoint(day: KitData.day(offset), value: value))
+        }
+        return points
+    }
+
+    /// The weekly sum under the selection (else the latest), with "So far this week" on the running week.
+    static func weeklyReadout(_ selection: Date?, weeks: [DailyPoint], partial: Set<Date>) -> ReadoutContent {
+        let selected: DailyPoint? = selection == nil
+            ? weeks.last : ChartSelection.point(for: selection, in: weeks, unit: .weekOfYear)
+        let soFar = selected.map { partial.contains($0.day) } ?? false
+        return ReadoutContent.daily(selection: selection, in: weeks, bin: .weekOfYear, unit: "min",
+                                    format: KitData.integer, context: soFar ? "So far this week" : nil)
+    }
+
     static func readout(_ binned: [DailyPoint], bin: Calendar.Component) -> (Date?) -> ReadoutContent {
         { selection in
             ReadoutContent.daily(selection: selection, in: binned, bin: bin, unit: "steps", format: KitData.integer,
@@ -539,22 +577,36 @@ private struct StepsGallery: View {
             ("M · daily bars, gaps, estimates", .ready, .month, KitSample.month.offsets),
             ("3M · weekly bins (mean per day)", .ready, .quarter, (-89...0).filter { !(-40 ... -33).contains($0) }),
             ("Y · monthly bins (mean per day)", .ready, .year, KitSample.year.offsets),
+            ("All · 20 days of history (daily bars by span)", .ready, .all, Array(-19...0)),
         ]
         ForEach(Array(cases.enumerated()), id: \.offset) { index, item in
             let points = item.3.map { offset in
                 DailyPoint(day: KitData.day(offset), value: max(400, KitData.wave(offset, base: 8_600, swing: 4_200)),
                            isEstimate: KitSample.month.estimates.contains(offset) && item.2 == .month)
             }
-            let bin = item.2.totalsBin
+            let window = KitData.window(item.2, offsets: item.3)
+            let bin = item.2.totalsBin(for: window)
             let binned = DailyBarChart.bin(points, by: bin, aggregation: .mean)
             KitChartCase(title: item.0, readout: index >= 3 ? Self.readout(binned, bin: bin) : nil) { selection in
                 DailyBarChart.totals(points, color: StrandPalette.metricCyan,
                                      goal: ChartReference(10_000, label: "Goal 10,000"),
-                                     bin: bin, state: item.1, window: KitData.window(item.2, offsets: item.3),
+                                     bin: bin, state: item.1, window: window,
                                      xStyle: item.2.axisStyle,
                                      y: ChartValueAxis(unit: "steps", domain: .fitted(minSpan: 2_000, includeZero: true)),
                                      selection: selection, accessibilityTitle: "Steps")
             }
+        }
+        // Weekly SUMS (intensity minutes against a weekly goal): the running week is drawn as partial.
+        let minutes = Self.intensityMinutes()
+        let quarter = KitData.window(.quarter, offsets: [])
+        let weeks = DailyBarChart.bin(minutes, by: .weekOfYear, aggregation: .sum)
+        let partial = DailyBarChart.partialBins(minutes, by: .weekOfYear, window: quarter)
+        KitChartCase(title: "3M · weekly sums, the running week partial",
+                     readout: { selection in Self.weeklyReadout(selection, weeks: weeks, partial: partial) }) { selection in
+            DailyBarChart.totals(minutes, color: StrandPalette.effortColor, goal: ChartReference(150, label: "150 min"),
+                                 bin: .weekOfYear, aggregation: .sum, window: quarter, xStyle: ChartRange.quarter.axisStyle,
+                                 y: ChartValueAxis(unit: "min", domain: .fitted(minSpan: 60, includeZero: true)),
+                                 selection: selection, accessibilityTitle: "Intensity minutes")
         }
     }
 }

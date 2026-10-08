@@ -16,7 +16,12 @@ import Charts
 ///   next one or under its hatching.
 /// - `valueBands` shade ranges of the value axis (stress Low/Medium/High, heart-rate zones); `markers` are
 ///   labelled vertical rules at a moment (wake, a dose, an alert).
-/// - Long series are downsampled for drawing after the gaps are found on the full series.
+/// - Long series are downsampled for drawing, one run at a time, after the gaps are found on the full
+///   series, so a short stretch between two gaps keeps its ends.
+/// - VoiceOver's swipe up/down steps through about 48 moments across the window plus the ends of every
+///   run, not through every sample (a day of 1-minute buckets would take 1,440 swipes).
+/// - Pass samples ascending by time, one per time, and keep the array stable: the chart is rebuilt on every
+///   scrub step, and an ascending array skips the sort.
 /// - `compact` is the small-card form (no value labels, fewer time labels, no legend or band labels).
 ///   `live` puts the "now" cap on the latest sample and turns off the range animation, which would
 ///   otherwise replay on every new second as the window slides.
@@ -121,6 +126,8 @@ public struct IntradayChart: View {
     private let envelope: [EnvelopePoint]
     private let times: [Date]
     private let values: [Double]
+    /// The moments VoiceOver steps through.
+    private let spokenTimes: [Date]
     private let color: Color
     private let interpolation: ChartInterpolation
     private let bands: [Band]
@@ -156,7 +163,16 @@ public struct IntradayChart: View {
                 legend: [ChartLegendItem]? = nil, state: ChartState = .ready,
                 window: ClosedRange<Date>, y: ChartValueAxis, selection: Binding<Date?>,
                 height: CGFloat? = nil, accessibilityTitle: String, calendar: Calendar = .current) {
-        let windowed = samples.filter { $0.value.isFinite && window.contains($0.time) }.sorted { $0.time < $1.time }
+        var windowed = samples.filter { $0.value.isFinite && window.contains($0.time) }
+        if zip(windowed, windowed.dropFirst()).contains(where: { $0.time >= $1.time }) {
+            // Out of order or repeated times: sort, and keep the last sample given for each time, so a time
+            // is a mark's identity.
+            let ordered = windowed.enumerated().sorted { ($0.element.time, $0.offset) < ($1.element.time, $1.offset) }
+            windowed = []
+            for (_, sample) in ordered {
+                if windowed.last?.time == sample.time { windowed[windowed.count - 1] = sample } else { windowed.append(sample) }
+            }
+        }
         let runs = ChartGaps.runs(windowed.map(\.time), series: windowed.map { _ in "line" },
                                   cadence: .buckets(seconds: max(1, bucketSeconds)), calendar: calendar)
         let all = zip(windowed, runs).map { LinePoint(time: $0.time, value: $0.value, run: $1) }
@@ -174,16 +190,14 @@ public struct IntradayChart: View {
         let yLayout = y.layout(for: windowed.map(\.value) + envelope.flatMap { [$0.low, $0.high] } + references.map(\.value))
         let domain = yLayout.domain
 
-        self.line = ChartDownsample.minMaxBucketed(all, threshold: ChartDownsample.markThreshold,
-                                                   targetCount: ChartDownsample.targetVertices,
-                                                   date: \.time, value: \.value)
+        let line = NaraRunDownsample.reduce(all, run: \.run, date: \.time, value: \.value)
+        self.line = line
         self.dashedRuns = Set(runEstimates.filter(\.value).keys)
         self.isolated = all.filter { runCounts[$0.run] == 1 }
-        self.envelope = ChartDownsample.minMaxBucketed(envelope, threshold: ChartDownsample.markThreshold,
-                                                       targetCount: ChartDownsample.targetVertices,
-                                                       date: \.time, value: \.high)
+        self.envelope = NaraRunDownsample.reduce(envelope, run: \.run, date: \.time, value: \.high)
         self.times = windowed.map(\.time)
         self.values = windowed.map(\.value)
+        self.spokenTimes = Self.spokenTimes(all.map(\.time), runs: all.map(\.run), window: window)
         self.color = color
         self.interpolation = interpolation
         self.bands = bands.compactMap { band in
@@ -240,16 +254,13 @@ public struct IntradayChart: View {
         } else {
             self.summary = String(localized: "\(accessibilityTitle), no data", bundle: .module)
         }
-        let spoken = ChartDownsample.minMaxBucketed(all, threshold: ChartDownsample.markThreshold,
-                                                    targetCount: ChartDownsample.targetVertices,
-                                                    date: \.time, value: \.value)
         self.descriptor = NaraChartDescriptor(
             title: accessibilityTitle, summary: summary,
             xTitle: String(localized: "Time", bundle: .module), yTitle: unitLabel ?? accessibilityTitle,
             yRange: domain,
             dateText: { NaraChartText.date($0, unit: nil, calendar: calendar) },
             valueText: valueText,
-            series: [.init(name: accessibilityTitle, isContinuous: true, points: spoken.map { ($0.time, $0.value) })])
+            series: [.init(name: accessibilityTitle, isContinuous: true, points: line.map { ($0.time, $0.value) })])
 
         if let legend {
             self.legend = legend
@@ -264,6 +275,26 @@ public struct IntradayChart: View {
             }
             self.legend = automatic
         }
+    }
+
+    /// The moments VoiceOver's adjustable action steps through (pure): the sample nearest each of `steps`
+    /// even divisions of the window, plus the first and last sample of every run, ascending and distinct.
+    static func spokenTimes(_ times: [Date], runs: [String], window: ClosedRange<Date>, steps: Int = 48) -> [Date] {
+        guard !times.isEmpty else { return [] }
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        var picked = Set<Date>()
+        if span > 0, steps > 0 {
+            for k in 0...steps {
+                let target = window.lowerBound.addingTimeInterval(span * Double(k) / Double(steps))
+                if let index = ChartSelection.nearestIndex(to: target, in: times) { picked.insert(times[index]) }
+            }
+        }
+        for index in times.indices where runs.count == times.count {
+            if index == 0 || runs[index] != runs[index - 1] || index == times.count - 1 || runs[index] != runs[index + 1] {
+                picked.insert(times[index])
+            }
+        }
+        return picked.sorted()
     }
 
     // MARK: Body
@@ -309,7 +340,7 @@ public struct IntradayChart: View {
                 .frame(width: geo.size.width, height: geo.size.height, alignment: .topLeading)
             }
         }
-        .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: times,
+        .naraChartAccessibility(title: accessibilityTitle, summary: summary, descriptor: descriptor, xs: spokenTimes,
                                 selection: $selection,
                                 describe: { [times, values, format, unit, calendar] time in
                                     guard let index = ChartSelection.nearestIndex(to: time, in: times) else { return nil }

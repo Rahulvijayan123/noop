@@ -559,6 +559,9 @@ public struct SegmentedPillControl<T: Hashable>: View {
     /// Defaults to everything enabled; ADDED additively, no existing call site touched.
     let isEnabled: (T) -> Bool
     let fillsAvailableWidth: Bool
+    /// Re-tapping the selected segment writes it back to the binding (silently). For a control whose
+    /// binding SHOWS a coerced value (`RangeControl`), so the tap commits what is shown.
+    let commitsReselection: Bool
     @Binding var selection: T
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
     public init(_ items: [T], selection: Binding<T>, adaptsToAvailableWidth: Bool = false,
@@ -572,11 +575,21 @@ public struct SegmentedPillControl<T: Hashable>: View {
                 fillsAvailableWidth: Bool = false,
                 isEnabled: @escaping (T) -> Bool,
                 label: @escaping (T) -> String) {
+        self.init(items, selection: selection, adaptsToAvailableWidth: adaptsToAvailableWidth,
+                  fillsAvailableWidth: fillsAvailableWidth, isEnabled: isEnabled, commitsReselection: false,
+                  label: label)
+    }
+    init(_ items: [T], selection: Binding<T>, adaptsToAvailableWidth: Bool = false,
+         fillsAvailableWidth: Bool = false,
+         isEnabled: @escaping (T) -> Bool,
+         commitsReselection: Bool,
+         label: @escaping (T) -> String) {
         self.items = items
         self._selection = selection
         self.adaptsToAvailableWidth = adaptsToAvailableWidth
         self.fillsAvailableWidth = fillsAvailableWidth
         self.isEnabled = isEnabled
+        self.commitsReselection = commitsReselection
         self.label = label
     }
     @ViewBuilder
@@ -606,7 +619,11 @@ public struct SegmentedPillControl<T: Hashable>: View {
                 let sel = item == selection
                 let enabled = isEnabled(item)
                 Button {
-                    guard selection != item else { return }   // re-tapping the active segment stays silent
+                    guard selection != item else {
+                        // Re-tapping the active segment stays silent; a coerced control commits what it shows.
+                        if commitsReselection { selection = item }
+                        return
+                    }
                     StrandHaptic.selection.play()
                     withAnimation(StrandMotion.interactive) { selection = item }
                 } label: {
