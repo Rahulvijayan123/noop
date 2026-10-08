@@ -22,16 +22,45 @@ public enum PreSleepHeartRateFeedback {
     public static let defaultPreSleepWindowSeconds = 30 * 60
     public static let defaultMinimumValidSamples = 10
     public static let minimumBaselineNights = Baselines.minNightsSeed
+    /// D4-14: a workout / locomotion bout ending within this many seconds before the window starts (or
+    /// overlapping it) leaves the pre-sleep HR still recovering from exertion, so the night is neither
+    /// compared with the resting history nor folded into it.
+    public static let recentExertionLookbackSeconds = 30 * 60
+
+    /// A workout or locomotion bout on the wall clock, `[start, end)` unix seconds (a detected / logged
+    /// workout, or an active / locomotion activity-context run).
+    public struct ExertionBout: Equatable, Sendable {
+        public let start: Int
+        public let end: Int
+        public init(start: Int, end: Int) { self.start = start; self.end = end }
+    }
+
+    /// Seconds between the end of the latest exertion bout and the window start (0 when a bout overlaps
+    /// the window), or nil when no bout ended within `recentExertionLookbackSeconds` before the window or
+    /// inside it. The ONE rule both `evaluate` and a history-assembling caller use.
+    public static func recentExertion(windowStartTs: Int, windowEndTs: Int,
+                                      bouts: [ExertionBout]) -> Int? {
+        let relevant = bouts.filter {
+            $0.end > $0.start && $0.start < windowEndTs
+                && $0.end > windowStartTs - recentExertionLookbackSeconds
+        }
+        guard let latestEnd = relevant.map({ min($0.end, windowEndTs) }).max() else { return nil }
+        return max(0, windowStartTs - latestEnd)
+    }
 
     /// A prior eligible pre-sleep observation. Callers persist/assemble history; this pure slice does
     /// not write, schedule a prompt, or penalize a missing night.
     public struct HistoricalReading: Equatable, Sendable {
         public let day: String
         public let meanBpm: Double
+        /// D4-14: the night's window followed exertion (see `recentExertion`). Such a night is excluded
+        /// from the resting history fold. Defaults false, so existing callers are unchanged.
+        public let recentExertion: Bool
 
-        public init(day: String, meanBpm: Double) {
+        public init(day: String, meanBpm: Double, recentExertion: Bool = false) {
             self.day = day
             self.meanBpm = meanBpm
+            self.recentExertion = recentExertion
         }
     }
 
@@ -45,6 +74,9 @@ public enum PreSleepHeartRateFeedback {
         case insufficientPreSleepSamples(valid: Int, required: Int)
         case insufficientBaseline(validNights: Int, required: Int)
         case staleBaseline(daysSinceUpdate: Int)
+        /// D4-14: a workout / locomotion bout ended `secondsBefore` the window started (0 = overlapping):
+        /// the observation is reported, but it is not compared with the resting history.
+        case recentExertion(secondsBefore: Int)
         case eligible
     }
 
@@ -96,6 +128,9 @@ public enum PreSleepHeartRateFeedback {
         case noPersonalComparison
         /// A mature personal baseline has not received a plausible value recently enough to compare.
         case staleBaseline(daysSinceUpdate: Int)
+        /// The window followed exertion (`secondsBefore` the window start; 0 = overlapping), so its HR is
+        /// partly recovery, not the resting pre-sleep state the history describes.
+        case recentExertion(secondsBefore: Int)
     }
 
     /// This slice intentionally makes no causal inference from a single observation or its journal facts.
@@ -150,7 +185,8 @@ public enum PreSleepHeartRateFeedback {
     public static func evaluate(enabled: Bool, sessions: [SleepSession], hr: [HRSample],
                                 history: [HistoricalReading], journalEntries: [JournalEntry], day: String,
                                 minimumValidSamples: Int = defaultMinimumValidSamples,
-                                preSleepWindowSeconds: Int = defaultPreSleepWindowSeconds) -> Feedback {
+                                preSleepWindowSeconds: Int = defaultPreSleepWindowSeconds,
+                                exertionBouts: [ExertionBout] = []) -> Feedback {
         let unsupported = Recommendation.unsupported
         let noInference = Inference.notEstablished
         guard enabled else {
@@ -197,7 +233,9 @@ public enum PreSleepHeartRateFeedback {
         var seenDays = Set<String>()
         let priorHistory = history
             .compactMap { reading -> (reading: HistoricalReading, date: Date)? in
-                guard let date = canonicalDay(reading.day), date < evaluationDate,
+                // D4-14: post-exertion nights are not resting pre-sleep nights; they never enter the fold.
+                guard !reading.recentExertion,
+                      let date = canonicalDay(reading.day), date < evaluationDate,
                       seenDays.insert(reading.day).inserted else { return nil }
                 return (reading, date)
             }
@@ -220,6 +258,13 @@ public enum PreSleepHeartRateFeedback {
         let context = journalEntries.filter { $0.day == day }.map {
             JournalFact(day: $0.day, question: $0.question, answeredYes: $0.answeredYes,
                         numericValue: $0.numericValue)
+        }
+        if let secondsBefore = recentExertion(windowStartTs: start, windowEndTs: primary.start,
+                                              bouts: exertionBouts) {
+            return Feedback(eligibility: .recentExertion(secondsBefore: secondsBefore),
+                            observation: observation, comparison: nil,
+                            uncertainty: [.recentExertion(secondsBefore: secondsBefore)],
+                            inference: noInference, recommendation: unsupported, journalContext: context)
         }
         guard baseline.nValid >= minimumBaselineNights else {
             return Feedback(eligibility: .insufficientBaseline(validNights: baseline.nValid,

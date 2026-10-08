@@ -226,6 +226,11 @@ final class AppModel: ObservableObject {
     /// Which live R-R packet `rrBuf` last took, so each packet enters it once (`RRPacketCursor`).
     private var stressPackets = RRPacketCursor()
     private var stressState = BiofeedbackPrefs.loadStressState()
+    /// D6-04: the stored activity-context runs around now (the best motion evidence the live path has;
+    /// gravity is offloaded and lags), refreshed at most once a minute off the packet path.
+    private var stressContextIntervals: [ActivityContextInterval] = []
+    private var stressContextReadAt = 0
+    private var stressContextReading = false
 
     /// Import source currently writing to the local store, if any.
     @Published private var activeImportSource: DataSourceImportKind?
@@ -1817,21 +1822,41 @@ final class AppModel: ObservableObject {
         // quiet hours, rate limit, edge).
         let cfg = BiofeedbackPrefs.stressConfig()
         guard cfg.enabled, live.bonded, live.worn else { return }
+        let nowSec = Int(Date().timeIntervalSince1970)
+        // D6-04: the newest stored activity-context run is the best motion evidence available at packet
+        // latency. Locomotion / unknown / asleep / post-workout suppress and freeze the slow baseline, and
+        // a known postural transition gates the dip that follows it. Read off the packet path, once a
+        // minute; with nothing fresh the context is `.none` and stillness is reported unverified.
+        if nowSec - stressContextReadAt >= 60, !stressContextReading {
+            stressContextReading = true
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let read = await self.repo.storedActivityContext(
+                    from: nowSec - StressOnsetDetector.postExertionSeconds - 600, to: nowSec + 1)
+                self.stressContextIntervals = read.intervals
+                self.stressContextReadAt = nowSec
+                self.stressContextReading = false
+            }
+        }
         let decision = StressOnsetDetector.evaluate(
             rrBuffer: rrBuf,
             currentHR: bpm.map(Double.init),
-            recentMotionG: nil,   // wrist gravity is offloaded + lags live; the resting-HR band is the gate
+            recentMotionG: nil,   // live gravity is offloaded + lags; motion evidence rides `context` instead
             sessionActive: stressNudgeCenter.pending != nil,   // never stack a fresh nudge over a live one
             state: stressState,
             config: cfg,
-            nowSec: Int(Date().timeIntervalSince1970),
-            tzOffsetSec: TimeZone.current.secondsFromGMT())
+            nowSec: nowSec,
+            tzOffsetSec: TimeZone.current.secondsFromGMT(),
+            context: StressOnsetDetector.liveContext(intervals: stressContextIntervals, nowSec: nowSec))
         stressState = decision.nextState
         BiofeedbackPrefs.saveStressState(decision.nextState)
         guard decision.shouldNudge else { return }
         if canBuzz { buzz(loops: UInt8(clamping: decision.buzzLoops)) }
         stressNudgeCenter.present(fastRMSSD: decision.fastRMSSD, baselineRMSSD: decision.baselineRMSSD)
-        live.append(log: "Stress check-in , HRV dipped while still")
+        // Claim stillness only when the stored context actually showed it (D6-04).
+        live.append(log: decision.stillnessVerified
+                    ? "Stress check-in , HRV dipped while still"
+                    : "Stress check-in , HRV dipped (stillness not confirmed)")
     }
 
     /// Whether the encrypted channel is up so a confirming buzz can actually fire (the command

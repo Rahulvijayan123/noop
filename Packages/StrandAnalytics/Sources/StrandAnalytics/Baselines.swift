@@ -499,10 +499,15 @@ public enum Baselines {
         return (dropped, fmt.string(from: Date(timeIntervalSince1970: epoch)))
     }
 
+    ///
+    /// `rejectHardOutliers` is threaded through to `update` exactly as the plain overload does, so a
+    /// trailing-window caller that also honours the recalibration epoch can turn rejection off (the RD2
+    /// window-fold mode) instead of silently getting the incremental-fold default.
     public static func foldHistory(_ values: [Double?], dayKeys: [String], cfg: MetricCfg,
-                                   baselineEpoch: Double? = nil) -> BaselineState {
+                                   baselineEpoch: Double? = nil,
+                                   rejectHardOutliers: Bool = true) -> BaselineState {
         let epoch = baselineEpoch ?? hrvBaselineEpoch()
-        guard epoch > 0 else { return foldHistory(values, cfg: cfg) }
+        guard epoch > 0 else { return foldHistory(values, cfg: cfg, rejectHardOutliers: rejectHardOutliers) }
 
         // Pre-build the day-start epoch (UTC) for each "yyyy-MM-dd" key once.
         let fmt = DateFormatter()
@@ -517,7 +522,7 @@ public enum Baselines {
                d.timeIntervalSince1970 < epoch {
                 continue
             }
-            state = update(state, value: v, cfg: cfg)
+            state = update(state, value: v, cfg: cfg, rejectHardOutliers: rejectHardOutliers)
         }
         if let s = state { return s }
         let seed = (cfg.minVal + cfg.maxVal) / 2.0

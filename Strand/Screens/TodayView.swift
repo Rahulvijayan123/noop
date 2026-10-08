@@ -1073,8 +1073,11 @@ struct TodayView: View {
     /// sheet reads drivers + confidence out of a single sheet-local `let`.
     private func chargeBreakdown() -> (drivers: [ChargeDriver], confidence: ScoreConfidence)? {
         guard let row = chargeBreakdownRow else { return nil }
+        // Engine-first (non-observing read of the engine's per-night results: no new body dependency).
         return ChargeBreakdownWiring.breakdown(days: repo.days, row: row, sleepPerfPercent: restScore,
-                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch())
+                                               hrvBaselineEpoch: Baselines.hrvBaselineEpoch(),
+                                               recoveryBaselineEpoch: Baselines.recoveryBaselineEpoch(),
+                                               engine: AppModel.shared?.intelligence.results ?? [])
     }
 
     /// The night's relative skin-temp marker for the displayed row (A5), or nil. Surfaced verbatim from
@@ -1279,10 +1282,11 @@ struct TodayView: View {
             // #2315: with the recalibration epoch, which is what makes the claim above true. Without it this
             // gate folded the whole history while the Charge engine folded from the epoch, so the pill could
             // read solid off nights the ring is no longer using.
-            let hrvBase = Baselines.foldHistory(repo.days.map(\.avgHrv), dayKeys: repo.days.map(\.day),
-                                                cfg: Baselines.hrvCfg,
-                                                baselineEpoch: Baselines.hrvBaselineEpoch())
-            conf = ScoreConfidence.charge(recovery: displayDay?.recovery, hrvBaseline: hrvBase)
+            // D4-V02: CAUSAL for the selected day (only the days before it), or the engine's own per-night
+            // tier when it scored this number, so a past day keeps the tier it was scored with.
+            conf = ChargeBreakdownWiring.chargeConfidence(days: repo.days, row: displayDay,
+                                                          hrvBaselineEpoch: Baselines.hrvBaselineEpoch(),
+                                                          engine: AppModel.shared?.intelligence.results ?? [])
         case "sleep_performance":
             // A watch night with a Rest score reads as built; without one it's still calibrating.
             conf = restScore != nil ? .building : .calibrating

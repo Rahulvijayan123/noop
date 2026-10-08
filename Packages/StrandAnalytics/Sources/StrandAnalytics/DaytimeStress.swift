@@ -183,18 +183,28 @@ public enum DaytimeStress {
         /// separate "you were moving" from "no reading" and keeps active hours out of the calm
         /// reference and the coverage totals. See the motion-gate constants above.
         public let maskedForActivity: Bool
+        /// True when the hour was left unscored because it was mostly inside a detected sleep / in-bed
+        /// block (D4-05): a sleep-in or a nap inside the clock "waking" window is not a calm awake hour.
+        /// Always false when the read had no `DayContext`.
+        public let maskedForSleep: Bool
+        /// The hour's context shares and posture flag (D8-12 provenance), or nil when no context was
+        /// supplied. Never a posture guess: `postureUnresolved` is reported as such.
+        public let context: HourContext?
 
         /// True when the hour was scored (had enough HR to place on the curve).
         public var hasData: Bool { level != nil }
 
         public init(hour: Int, startTs: Int, level: Double?, meanHR: Double?, rmssd: Double?,
-                    maskedForActivity: Bool = false) {
+                    maskedForActivity: Bool = false, maskedForSleep: Bool = false,
+                    context: HourContext? = nil) {
             self.hour = hour
             self.startTs = startTs
             self.level = level
             self.meanHR = meanHR
             self.rmssd = rmssd
             self.maskedForActivity = maskedForActivity
+            self.maskedForSleep = maskedForSleep
+            self.context = context
         }
     }
 
@@ -238,11 +248,23 @@ public enum DaytimeStress {
         /// `highStressMinutes`, `dayMean` and `peak` all stay on the non-overlapping `hours`, because
         /// overlapping windows would count the same minute more than once.
         public let timeline: [HourPoint]
+        /// ADDITIVE (D4-05) - waking hours left unscored because they were mostly asleep / in bed.
+        /// 0 when no `DayContext` was supplied.
+        public let sleepMaskedHours: Int
+        /// ADDITIVE (D8-12) - SCORED hours whose awake stationary time was mostly committed standing
+        /// (scored, but kept out of the calm reference and unable to back `sustainedHigh` alone).
+        public let uprightCommittedHours: Int
+        /// ADDITIVE (D8-12) - SCORED hours whose awake stationary time mostly had no resolved posture.
+        public let postureUnresolvedHours: Int
 
         public init(hours: [HourPoint], sustainedHigh: Bool, sustainedRun: Int,
                     dayMean: Double?, peak: HourPoint?, activityMaskedHours: Int = 0,
                     highStressMinutes: Int = 0, hrOnlyFallback: Bool = false,
-                    timeline: [HourPoint]? = nil) {
+                    timeline: [HourPoint]? = nil, sleepMaskedHours: Int = 0,
+                    uprightCommittedHours: Int = 0, postureUnresolvedHours: Int = 0) {
+            self.sleepMaskedHours = sleepMaskedHours
+            self.uprightCommittedHours = uprightCommittedHours
+            self.postureUnresolvedHours = postureUnresolvedHours
             self.hours = hours
             self.timeline = timeline ?? hours
             self.sustainedHigh = sustainedHigh
@@ -316,10 +338,6 @@ public enum DaytimeStress {
     /// `phase = 0` is the on-the-hour grid every existing reading uses. `phase = timelineStepSeconds`
     /// is the same grid slid forward, so its windows straddle the hour boundaries rather than
     /// replacing them.
-    private static func bucketOf(_ localTs: Int, phase: Int) -> Int {
-        floorDiv(localTs - phase, bucketSeconds) * bucketSeconds + phase
-    }
-
     // MARK: - Public API
 
     /// Build the daytime stress timeline from a day's banked HR + R-R.
@@ -342,11 +360,15 @@ public enum DaytimeStress {
     ///     The Stress screen reads `hours` and draws its own interactive timeline; making it pay for a
     ///     second pass of bucketing and one RMSSD per extra window, on the screen that already does three
     ///     200 000-row reads, would be cost for nothing. The widget and the Today card ask for it.
+    ///   - context: the day's detected sleep / in-bed blocks and stored activity-context intervals
+    ///     (D4-05 / D8-12). Defaults to `.none`, which is byte-identical to the clock-only read. See
+    ///     `DaytimeStress+Context.swift` for the one mask rule it applies.
     public static func analyze(hr: [HRSample], rr: [RRInterval],
                                gravity: [GravitySample] = [],
                                tzOffsetSeconds: Int = 0,
                                mode: ScoringMode = .dayRelative,
-                               includeTimeline: Bool = false) -> Result {
+                               includeTimeline: Bool = false,
+                               context: DayContext = .none) -> Result {
         // v7.0.2 perf (#707): buckets the day's full HR + R-R streams into per-hour aggregates and runs an
         // RMSSD per hour — invoked from the Stress view, so a `body` re-evaluation re-buckets the whole day.
         // Memoize on the streams' fingerprint + tz offset + scoring mode; result is a small `Result`, raw
@@ -372,16 +394,18 @@ public enum DaytimeStress {
             // The flag is part of the KEY, not just the call. Without it a screen read (false)
             // would seed the cache with a hourly-only result and the next widget read (true) would be
             // handed it, silently losing the sliding series with nothing to show why.
-            tz: tzOffsetSeconds, mode: modeKey, includeTimeline: includeTimeline)
+            tz: tzOffsetSeconds, mode: modeKey, includeTimeline: includeTimeline,
+            context: contextFingerprint(context))
         return analyzeCache.value(key) {
             analyzeUncached(hr: hr, rr: rr, gravity: gravity, tzOffsetSeconds: tzOffsetSeconds,
-                            mode: mode, includeTimeline: includeTimeline)
+                            mode: mode, includeTimeline: includeTimeline, context: context)
         }
     }
 
     private struct StressKey: Hashable {
         let hr: StreamFingerprint; let rr: StreamFingerprint; let gravity: StreamFingerprint
         let tz: Int; let mode: ModeKey; let includeTimeline: Bool
+        let context: StreamFingerprint
     }
 
     /// Hashable fingerprint of `ScoringMode` for the memo cache — `BaselineState` itself isn't
@@ -397,7 +421,7 @@ public enum DaytimeStress {
     private static func analyzeUncached(hr: [HRSample], rr: [RRInterval],
                                         gravity: [GravitySample],
                                         tzOffsetSeconds: Int, mode: ScoringMode,
-                                        includeTimeline: Bool) -> Result {
+                                        includeTimeline: Bool, context: DayContext) -> Result {
         guard !hr.isEmpty else { return .empty }
 
         // 1) Bucket HR + R-R into LOCAL hour-of-day buckets, keyed by the bucket start
@@ -443,25 +467,20 @@ public enum DaytimeStress {
         // gate to answer the same question about the same samples.
         let activity = gravity.isEmpty ? [] : WorkoutDetector.activitySeries(gravity)
         func activeFractions(_ phase: Int) -> [Int: Double] {
-            var out: [Int: Double] = [:]
-            guard !activity.isEmpty else { return out }
-            var counts: [Int: (active: Int, total: Int)] = [:]
-            for p in activity {
-                let bucket = bucketOf(p.ts + tzOffsetSeconds, phase: phase)
-                var e = counts[bucket] ?? (0, 0)
-                e.total += 1
-                if p.intensity > WorkoutDetector.motionThreshold { e.active += 1 }
-                counts[bucket] = e
-            }
-            for (b, e) in counts where e.total > 0 {
-                out[b] = Double(e.active) / Double(e.total)
-            }
-            return out
+            Self.activeFractions(activity, tzOffsetSeconds: tzOffsetSeconds, phase: phase)
         }
         let activeFracByBucket = activeFractions(0)
-        func isAmbulatory(_ bucket: Int) -> Bool {
-            (activeFracByBucket[bucket] ?? 0) >= activityMaskFraction
+        // D4-05 / D8-12: the day's sleep / activity / posture context, one mask rule shared with the
+        // baseline aggregate (`hourMask`). An empty context yields nil hour contexts, so every mask below
+        // reduces to the gravity gate alone, byte-identical to the pre-context read.
+        let ctxIndex = ContextIndex(context)
+        func hourCtx(_ bucket: Int) -> HourContext? {
+            ctxIndex.hour(localBucket: bucket, tzOffsetSeconds: tzOffsetSeconds)
         }
+        func mask(_ bucket: Int, _ activeFrac: [Int: Double]) -> (asleep: Bool, ambulatory: Bool, upright: Bool) {
+            hourMask(gravityActiveFraction: activeFrac[bucket], context: hourCtx(bucket))
+        }
+        func isAmbulatory(_ bucket: Int) -> Bool { mask(bucket, activeFracByBucket).ambulatory }
 
         // 3) The reference point + spread for each signal — WHERE they come from depends on
         //    `mode`. Every other step (bucketing above incl. the motion gate, the waking-hour
@@ -489,7 +508,13 @@ public enum DaytimeStress {
             // Ambulatory hours are excluded from the day's OWN calm reference too (the motion
             // gate): an exertion hour's elevated HR / suppressed HRV must not pull the calm
             // anchor up or inflate the across-hour spread the z-scores divide by.
-            let referenceAggs = aggs.filter { isWakingHour($0.bucket) && !isAmbulatory($0.bucket) }
+            // Context (when supplied): hours mostly asleep / in bed, and upright-committed hours, are not
+            // the seated awake calm floor either, so they stay out of the reference too.
+            let referenceAggs = aggs.filter {
+                guard isWakingHour($0.bucket) else { return false }
+                let m = mask($0.bucket, activeFracByBucket)
+                return !m.ambulatory && !m.asleep && !m.upright
+            }
             let hrMeans = referenceAggs.compactMap { $0.meanHR }
             let rmssdVals = referenceAggs.compactMap { $0.rmssd }
             refHR = calmReference(hrMeans, calmIsLow: true)         // calm HR is LOW
@@ -535,9 +560,7 @@ public enum DaytimeStress {
         // hour differently — which is the whole reason the sliding read reuses the references
         // computed above rather than deriving its own.
         func scoreGrid(_ gridAggs: [HourAgg], _ activeFrac: [Int: Double]) -> [HourPoint] {
-            func ambulatory(_ bucket: Int) -> Bool {
-                (activeFrac[bucket] ?? 0) >= activityMaskFraction
-            }
+            func ambulatory(_ bucket: Int) -> Bool { mask(bucket, activeFrac).ambulatory }
             var points: [HourPoint] = []
             points.reserveCapacity(gridAggs.count)
             for a in gridAggs {
@@ -553,21 +576,32 @@ public enum DaytimeStress {
             // `.noData`, not "masked".
             let shadow = ambulatory(a.bucket - bucketSeconds)
                 && a.meanHR != nil && refHR != nil && a.meanHR! > refHR! + postActivityShadowBPM
-            let masked = a.meanHR != nil && (ambulatory(a.bucket) || shadow)
+            // Sleep mask (D4-05): an hour mostly inside a detected sleep / in-bed block is not an awake
+            // hour at all, so it is withheld (and not counted as activity) whatever its HR.
+            let asleep = a.meanHR != nil && mask(a.bucket, activeFrac).asleep
+            let masked = !asleep && a.meanHR != nil && (ambulatory(a.bucket) || shadow)
             // Score only when at least one signal is present AND HR cleared the count gate AND the
-            // hour was not motion-masked (HR is the always-available anchor; RMSSD enriches it).
-            let level: Double? = (a.meanHR != nil && !masked)
+            // hour was not motion- or sleep-masked (HR is the always-available anchor; RMSSD enriches it).
+            let level: Double? = (a.meanHR != nil && !masked && !asleep)
                 ? squash(rawScore(hr: a.meanHR, meanHR: refHR, sdHR: sdHR,
                                   rmssd: a.rmssd, meanRMSSD: refRMSSD, sdRMSSD: sdRMSSD))
                 : nil
             points.append(HourPoint(hour: hourOfDay, startTs: wallStart,
                                     level: level, meanHR: a.meanHR, rmssd: a.rmssd,
-                                    maskedForActivity: masked))
+                                    maskedForActivity: masked, maskedForSleep: asleep,
+                                    context: hourCtx(a.bucket)))
             }
             return points
         }
         let points = scoreGrid(aggs, activeFracByBucket)
         let activityMaskedHours = points.reduce(0) { $0 + ($1.maskedForActivity ? 1 : 0) }
+        let sleepMaskedHours = points.reduce(0) { $0 + ($1.maskedForSleep ? 1 : 0) }
+        let uprightCommittedHours = points.reduce(0) {
+            $0 + ($1.level != nil && $1.context?.postureFlag == .uprightCommitted ? 1 : 0)
+        }
+        let postureUnresolvedHours = points.reduce(0) {
+            $0 + ($1.level != nil && $1.context?.postureFlag == .postureUnresolved ? 1 : 0)
+        }
 
         // 4b) The half-step DISPLAY timeline: the same hour-long window re-read every
         //     `timelineStepSeconds`, scored against the SAME references, and merged with the
@@ -591,12 +625,17 @@ public enum DaytimeStress {
             return points.isEmpty ? .empty
                 : Result(hours: points, sustainedHigh: false, sustainedRun: 0,
                          dayMean: nil, peak: nil, activityMaskedHours: activityMaskedHours,
-                         highStressMinutes: 0, hrOnlyFallback: hrOnlyFallback, timeline: timeline)
+                         highStressMinutes: 0, hrOnlyFallback: hrOnlyFallback, timeline: timeline,
+                         sleepMaskedHours: sleepMaskedHours)
         }
 
         // 5) Sustained-high flag: walk back from the latest SCORED hour while each is HIGH.
+        // D8-12: an upright-committed hour is skipped by the walk (neither counts nor breaks the run), so
+        // standing still for a few hours, whose HR carries an orthostatic lift, cannot alone trip the
+        // Breathe nudge. With no context no hour is flagged, so the walk is unchanged.
         var run = 0
-        for (_, lvl) in scored.reversed() {
+        for (p, lvl) in scored.reversed() {
+            if p.context?.postureFlag == .uprightCommitted { continue }
             if lvl >= highBandFloor { run += 1 } else { break }
         }
         let sustained = run >= sustainedHours
@@ -613,7 +652,9 @@ public enum DaytimeStress {
         return Result(hours: points, sustainedHigh: sustained, sustainedRun: run,
                       dayMean: dayMean, peak: peak, activityMaskedHours: activityMaskedHours,
                       highStressMinutes: highStressMinutes, hrOnlyFallback: hrOnlyFallback,
-                      timeline: timeline)
+                      timeline: timeline, sleepMaskedHours: sleepMaskedHours,
+                      uprightCommittedHours: uprightCommittedHours,
+                      postureUnresolvedHours: postureUnresolvedHours)
     }
 
     // MARK: - Helpers

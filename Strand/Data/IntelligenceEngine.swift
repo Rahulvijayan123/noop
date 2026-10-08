@@ -283,11 +283,18 @@ final class IntelligenceEngine: ObservableObject {
         /// (`RecoveryScorer.skinTempRelative`), or nil when no deviation is available. Surfaced as
         /// "+0.3 C vs your normal" with a relative tier tag; never a fake clinical absolute.
         var skinTempRel: SkinTempRelative? = nil
+        /// D4-01 provenance: the newest night the HRV baseline this day was scored against had folded (the
+        /// baseline is CAUSAL, built only from nights before `day`). nil when nothing preceded it.
+        var baselineAsOfDay: String? = nil
+        /// D4-04 provenance: true when the method-consistent (NOOP-computed) HRV baseline was still thin and
+        /// was shrunk toward the all-method (vendor-import) baseline for this day.
+        var baselineFallbackUsed: Bool = false
         var id: String { day }
 
         func withLegacyScore(hrv: Double, recovery: Double?) -> Computed {
             Computed(day: day, recovery: recovery, strain: strain, sleepMin: sleepMin, hrv: hrv, rhr: rhr,
-                     source: source, confidence: confidence, drivers: drivers, skinTempRel: skinTempRel)
+                     source: source, confidence: confidence, drivers: drivers, skinTempRel: skinTempRel,
+                     baselineAsOfDay: baselineAsOfDay, baselineFallbackUsed: baselineFallbackUsed)
         }
     }
 
@@ -784,8 +791,8 @@ final class IntelligenceEngine: ObservableObject {
         guard let store = await repo.storeHandle() else { note = String(localized: "No on-device store yet."); return }
         guard let hrvCfg = Baselines.metricCfg["hrv"],
               let rhrCfg = Baselines.metricCfg["resting_hr"],
-              let respCfg = Baselines.metricCfg["resp"],
-              let skinCfg = Baselines.metricCfg["skin_temp"] else { return }
+              Baselines.metricCfg["resp"] != nil,
+              Baselines.metricCfg["skin_temp"] != nil else { return }
 
         // #836 (idle-tick gate): re-scoring a 21-day window re-reads ~21×54 h of raw data and re-runs
         // analyzeDay over it. After a big Apple Health import (a reporter's: 2.1 M rows, ~190 k HR/day) that
@@ -2015,20 +2022,9 @@ final class IntelligenceEngine: ObservableObject {
         // ── Seed the baseline from the UNION of imported nightly history + the values just computed.
         // THIS is the BLE-only recovery fix: the "-noop" nightly avgHrv/restingHr finally feed the
         // baseline so a strap-only user crosses Baselines.minNightsSeed and recovery lights up.
-        // IMPORTED values win per day: write them first, then fill ONLY days the import doesn't cover
-        // (Swift has no putIfAbsent , `dict[day] == nil` is true only when the KEY is absent, so a day
-        // imported with a nil avgHrv stays imported, not overwritten by the computed value).
-        var histHrvByDay: [String: Double?] = [:]
-        var histRhrByDay: [String: Double?] = [:]
-        var histRespByDay: [String: Double?] = [:]
-        for d in hist {
-            histHrvByDay[d.day] = d.avgHrv
-            histRhrByDay[d.day] = d.restingHr.map(Double.init)
-            histRespByDay[d.day] = d.respRateBpm
-        }
-        Self.mergeNightlyIntoHistory(&histHrvByDay, nightlyHrvByDay)
-        Self.mergeNightlyIntoHistory(&histRhrByDay, nightlyRhrByDay)
-        Self.mergeNightlyIntoHistory(&histRespByDay, nightlyRespByDay)
+        // IMPORTED values win per day in the all-method parent (`mergeNightlyIntoHistory`'s rule, applied
+        // inside `Baselines.chargeBaselinesAsOf` below), so a day imported with a nil avgHrv is backfilled
+        // by the computed value rather than shadowing it.
         // Which SOURCE measured each night's respiration — the input `Baselines.deviceEraEpoch` (#459)
         // needs, and respiration is now a metric that requires it: a WHOOP export reports its OWN measured
         // rate (~16.1 for this history) while an Oura ring reports the rate its firmware measured (~14.6),
@@ -2056,61 +2052,69 @@ final class IntelligenceEngine: ObservableObject {
         // so this is byte-identical to the plain fold until the user taps Recalibrate, at which point the
         // whole Charge build-up (HRV + resting HR + resp + skin) re-anchors together.
         let recoveryEpoch = Baselines.recoveryBaselineEpoch()
-        let hrvDayKeys = histHrvByDay.keys.sorted()                         // chronological "yyyy-MM-dd"
-        let hrvSeq = hrvDayKeys.map { histHrvByDay[$0]! }                   // chronological [Double?]
-        let rhrDayKeys = histRhrByDay.keys.sorted()
-        let rhrSeq = rhrDayKeys.map { histRhrByDay[$0]! }
-        let respDayKeys = histRespByDay.keys.sorted()
-        let respSeq = respDayKeys.map { histRespByDay[$0]! }
-        // Skin-temp baseline is on-device-only (imported rows carry skinTempDevC, not the raw mean),
-        // so fold purely over the pass-1 nightly means in chronological order.
-        let skinDayKeys = nightlySkinByDay.keys.sorted()
-        let skinSeq = skinDayKeys.map { nightlySkinByDay[$0]! }
-        // Resp baseline gated on `usable`: RecoveryScorer includes the resp term whenever a
-        // baseline object is present , a CALIBRATING (<4-night) baseline would let one noisy
-        // RSA night move recovery (mirrors the skin-temp use-site gate; honest cold-start).
-        // The respiration baseline is scoped to the CURRENT device era. `deviceEraEpoch` returns 0.0 for a
-        // single-brand history — every WHOOP-origin id (import, strap, the "-noop" computed sibling, the
-        // Apple/HC riders) buckets to one brand — so a WHOOP-only user folds byte-identically to before;
-        // only a history that actually crosses brands is truncated. `max` with the manual Recalibrate
-        // epoch keeps whichever cut is LATER, since both mean "ignore nights before this".
-        // KNOWN GAP, and pre-existing: the bucket is per BRAND, so it does not separate an imported WHOOP
-        // vendor rate from NOOP's own RSA estimate on WHOOP nights — two methods that were already pooled
-        // before this change and still are. #459's primitive is likewise still unwired for the HRV and
-        // resting-HR baselines it was written for; that is #459's own scope, not this change's.
-        let respEraEpoch = Baselines.deviceEraEpoch(respDayKeys.map { (day: $0, sourceId: respSourceByDay[$0] ?? deviceId) })
-        let respFold = Baselines.foldHistory(respSeq, dayKeys: respDayKeys, cfg: respCfg,
-                                             baselineEpoch: max(recoveryEpoch, respEraEpoch))
-        // Skin-temp gated the same way for consistency: its only use-site re-checks `.usable`
-        // (AnalyticsEngine's skinTempDevC guard) so this is belt-and-suspenders, but it stops a
-        // future use-site from trusting a CALIBRATING baseline. (PR #97 review.)
-        let skinFold = Baselines.foldHistory(skinSeq, dayKeys: skinDayKeys, cfg: skinCfg, baselineEpoch: recoveryEpoch)
+        // The resp / skin `usable` gates (a CALIBRATING baseline must not let one noisy night move
+        // recovery) and the respiration device-era scope now live in `Baselines.chargeBaselinesAsOf`,
+        // which applies the era to HRV and resting HR too and separates vendor from NOOP methods (D4-04).
+        //
+        // The epoch is read ONCE, here, and handed to BOTH the scored fold and the #1614 trace. Baselines+Trace
+        // is deliberately pure so it cannot read the pref itself, and letting the scored fold take its
+        // UserDefaults default while the trace read its own copy would leave a window - however small - where
+        // a diagnostic describes a fold the score did not perform.
+        let hrvEpoch = Baselines.hrvBaselineEpoch()
+        // D4-01 / D4-V02 / D4-04: every night is scored against its OWN causal baseline, built only from
+        // the nights before it, never from itself or anything later. One end-of-history fold used to score
+        // the whole window, so a re-scored night saw its own value and the future, its stored Charge moved
+        // every time new nights arrived, and its confidence wore the END state's tier (the worker scores
+        // causally, `day < $2`, so app and server disagreed by construction). The as-of fold also:
+        //   - restarts HRV / resting HR / respiration at EVERY brand-era boundary (the per-day winning
+        //     source below; WHOOP-only histories are one era, so this is a no-op for them), closing the
+        //     #459 gap the respiration-only `deviceEraEpoch` left for HRV and resting HR;
+        //   - scores NOOP's own nightly values against a NOOP-method baseline (child), shrinking toward the
+        //     vendor-import-inclusive merge (parent) with explicit `fallbackUsed` provenance while the
+        //     NOOP history is thin, instead of silently pooling the two methods.
+        // Older NOOP nights outside this pass's scan window come from the stored computed rows (the worker
+        // likewise folds its own stored history), so the first nights of the window are not left without a
+        // history to be scored against. The epochs are read once above and passed explicitly.
+        let storedComputedRows: [DailyMetric]
+        if let scanOldest = dayRun.last?.date.key {
+            storedComputedRows = ((try? await store.dailyMetrics(deviceId: computedId, from: "0000-01-01",
+                                                                 to: scanOldest)) ?? [])
+                .filter { $0.day < scanOldest }
+        } else {
+            storedComputedRows = []
+        }
+        // ONE pure assembly (`Baselines.assembleChargeHistory`, unit-tested) feeds both the scorer and the
+        // trace below, so the diagnostic can never describe different maps from the ones scored.
+        let chargeMaps = Baselines.assembleChargeHistory(
+            imported: hist,
+            windowHrv: nightlyHrvByDay, windowRhr: nightlyRhrByDay,
+            windowResp: nightlyRespByDay, windowSkin: nightlySkinByDay,
+            windowSourceByDay: respSourceByDay,
+            storedComputed: storedComputedRows, storedSource: deviceId)
+        let chargeAsOf = Baselines.chargeBaselinesAsOf(chargeMaps, defaultSource: deviceId,
+                                                       hrvEpoch: hrvEpoch, recoveryEpoch: recoveryEpoch)
         // #1614: the per-night HRV fold, traced. HRV ONLY, deliberately: it is Charge's dominant driver
         // and the one whose spread the score divides by, so tracing all four baselines would quadruple
         // the log for the three that are not the question being asked. Capped at the last 14 nights,
         // which is enough to see whether the spread is lifting without an established user's history
-        // burying the rest of the export. The whole history is still folded, so the state is unchanged
-        // and the trace cannot describe a baseline the scorer is not using.
-        //
-        // The epoch is read ONCE, here, and handed to BOTH folds. Baselines+Trace is deliberately pure so
-        // it cannot read the pref itself, and letting the scored fold take its UserDefaults default while
-        // the trace read its own copy would leave a window - however small - where a diagnostic describes
-        // a fold the score did not perform. Passing it explicitly below is byte-identical to that default.
-        let hrvEpoch = Baselines.hrvBaselineEpoch()
+        // burying the rest of the export. It traces the SAME maps the as-of fold above uses: the NOOP-method
+        // child series (incl. the stored pre-window nights) on the same day axis, from the start of the
+        // current brand era and the recalibration epoch (`Baselines.chargeHrvTraceInput`). Its LAST line is
+        // the child's end-of-history state; each night is scored against its own as-of state (D4-01), and a
+        // night whose child was still thin against that child shrunk toward the vendor-inclusive parent,
+        // which the per-day `charge` trace lines and `fallbackUsed` describe.
         if TestCentre.active(.recovery) {
-            let traced = Baselines.foldHistoryTrace(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg,
+            let input = Baselines.chargeHrvTraceInput(chargeMaps, defaultSource: deviceId, hrvEpoch: hrvEpoch)
+            let traced = Baselines.foldHistoryTrace(input.values, dayKeys: input.dayKeys, cfg: hrvCfg,
                                                     metric: "hrv",
-                                                    baselineEpoch: hrvEpoch,
+                                                    baselineEpoch: input.epoch,
                                                     tail: 14)
             for line in traced.lines { diagnosticSink?(line, .recovery) }
         }
-        let baselines2 = AnalyticsEngine.ProfileBaselines(
-            // HRV honours noop.hrvBaselineEpoch; rhr/resp/skin honour noop.recoveryBaselineEpoch via their
-            // parallel day keys, so the manual Recalibrate restarts the whole Charge build-up together.
-            hrv: Baselines.foldHistory(hrvSeq, dayKeys: hrvDayKeys, cfg: hrvCfg, baselineEpoch: hrvEpoch),
-            restingHR: Baselines.foldHistory(rhrSeq, dayKeys: rhrDayKeys, cfg: rhrCfg, baselineEpoch: recoveryEpoch),
-            resp: respFold.usable ? respFold : nil,
-            skinTemp: skinFold.usable ? skinFold : nil)
+        // A scored night always has a key in the maps above; the empty fallback (no HRV baseline, so no
+        // score) is only a guard and can never leak the end-of-history state into a past night.
+        let noBaselines = ChargeBaselineSnapshot(profile: AnalyticsEngine.ProfileBaselines(),
+                                                 hrvAsOfDay: nil, fallbackUsed: false)
 
         // Real (non-detected) workouts in the scored window, used to de-duplicate detected bouts so a
         // user who BOTH has real sessions AND wears the strap doesn't see the same session twice (the
@@ -2261,6 +2265,8 @@ final class IntelligenceEngine: ObservableObject {
             var daily = sleepEditedDaily(night.daily, detected: night.cachedSleep, editsByStart: editsByStart,
                                          habitualMidsleepSec: habitualMidsleepSec)
             daily = DayCycleIntelligenceIntegration.applying(physiologicalSteps, to: daily)
+            let asOf = chargeAsOf.byDay[night.daily.day] ?? noBaselines
+            let baselines2 = asOf.profile
             daily = Self.recomputeRecoveryDaily(daily, nightlySkinTempC: night.nightlySkin,
                                                baselines: baselines2)
             let recovery = daily.recovery
@@ -2285,7 +2291,8 @@ final class IntelligenceEngine: ObservableObject {
             out.append(Computed(day: daily.day, recovery: recovery, strain: daily.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
-                                drivers: drivers, skinTempRel: skinRel))
+                                drivers: drivers, skinTempRel: skinRel,
+                                baselineAsOfDay: asOf.hrvAsOfDay, baselineFallbackUsed: asOf.fallbackUsed))
             // ── Per-day scoring diagnostic (Sleep overhaul §2.5) ─────────────────────────────────────
             // ONE concise, privacy-safe line per scored day into the shareable strap log: the day key, the
             // FINAL computed total-sleep minutes (after any edit substitution), how many sleep blocks the
