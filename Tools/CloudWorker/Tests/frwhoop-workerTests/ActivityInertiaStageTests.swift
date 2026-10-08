@@ -417,6 +417,55 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertEqual((p["summary"] as? [String: Any])?["candidate_stamp"] as? String, stamp)
     }
 
+    /// The comparison decode starts where the published one did (INT-C / WP4 note): the wearer's personalized
+    /// reference and the warm-up lookback, so the stored candidate differs from the publication only by Inertia.
+    func testTheCandidateDecodesWithThePublishedConfigAndLookback() throws {
+        var stats = ActivityLane.Stats()
+        let stage = try inertia("ok", kind: "inertia1", tier: "candidate", mode: .candidate)
+        let inferred = try infer(stage, stats: &stats)
+        let heads = try XCTUnwrap(inferred.motionHeads.trackInput)
+        // A day that starts just after midnight (so the half-hour lookback shapes its first minutes) and has the
+        // stub's 10:00 window, decoded with a personalized reference, the way the lane builds the published one.
+        var sim = DaySim(start: dayStart - ActivityContextDays.lookbackSeconds)
+        sim.still(ActivityContextDays.lookbackSeconds + 300)
+        sim.gap(36_000 - 300)
+        sim.still(120); sim.walk(120); sim.still(120)
+        let (streams, before) = ActivityContextDays.split(sim.streams, at: dayStart)
+        let input = ActivityContextDays.trackInput(
+            windows: sim.windows, streams: streams, sleep: [], exercise: [], dayStart: dayStart, dayEnd: dayEnd,
+            sleepKnownOutsideSessions: true, encoderVersion: "stub-model")
+        let lookback = try XCTUnwrap(ActivityContextDays.lookbackInput(
+            windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
+            sleepKnownOutsideSessions: true, encoderVersion: "stub-model"))
+        var personal = ActivityDecoderConfig()
+        personal.restingHeartRate = 44
+        personal.maxHeartRate = 168
+        let context = ActivityLane.ContextDayBuild(built: nil, input: input, generatedAt: 1_789_500_000,
+                                                   config: personal, lookback: lookback)
+        func json(_ d: ActivityContextDayDocument) throws -> NSDictionary {
+            let e = JSONEncoder(); e.outputFormatting = [.sortedKeys]
+            return try XCTUnwrap(try JSONSerialization.jsonObject(with: e.encode(d)) as? NSDictionary)
+        }
+        var withHeads = input
+        withHeads.motionHeads = heads
+        let evidence = MotionHeadsEvidenceConfig(mode: .candidate, bundle: heads.bundle, expectedBundleSHA256: stubSha)
+        var expectedConfig = personal
+        expectedConfig.motionHeads = evidence
+        let expected = ActivityContextDays.dayDocumentAndReport(input: withHeads, generatedAt: 1_789_500_000,
+                                                                config: expectedConfig, lookback: lookback).document
+        var genericConfig = ActivityDecoderConfig()
+        genericConfig.motionHeads = evidence
+        let generic = ActivityContextDays.dayDocumentAndReport(input: withHeads, generatedAt: 1_789_500_000,
+                                                               config: genericConfig).document
+        XCTAssertNotEqual(try json(expected), try json(generic), "the fixture must tell the two decodes apart")
+
+        let p = try payloadObject(ActivityLane.motionHeadsPayload(day: day, inertia: stage, collector: inferred.motionHeads,
+                                                                  context: context, stats: &stats))
+        let stored = try XCTUnwrap(p["candidate_document"] as? NSDictionary)
+        XCTAssertEqual(stored, try json(expected))
+        XCTAssertEqual(stats.inertiaCandidateDocuments, 1)
+    }
+
     // MARK: - Audit fixes: settings (G-11, G-15, W-5, W-7)
 
     func testInertiaBooleansAcceptTheUsualSpellingsAndRefuseTheRest() {

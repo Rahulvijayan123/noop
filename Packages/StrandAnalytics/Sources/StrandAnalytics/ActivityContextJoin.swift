@@ -19,6 +19,14 @@ import Foundation
 
 public enum ActivityContextJoin {
 
+    /// Semantics of the join's published values, stamped on the C10 document (`join_version`) so a reader can
+    /// tell documents apart when a value changes meaning without changing shape. A document without the key was
+    /// built by join-1, where `recent_activity_s` was measured from the interval END and activity still running
+    /// at the end was skipped.
+    /// join-2: `recent_activity_s` / `recentActivity` is measured from the interval START (0 when activity that
+    /// began by the start is still going at it), and transitions count label changes across gaps <= `transitionGapS`.
+    public static let version = "join-2"
+
     /// Resting-eligibility stationary floor (C4: >= 90% supported stationary time).
     public static let restingStationaryFloor: Double = 0.90
     /// Resting-eligibility coverage floor (C4: >= 90% qualified temporal coverage).

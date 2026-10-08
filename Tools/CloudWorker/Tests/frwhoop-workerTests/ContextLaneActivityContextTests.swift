@@ -58,7 +58,31 @@ final class ContextLaneActivityContextTests: XCTestCase {
         XCTAssertEqual(ev.ts, 250)
         XCTAssertEqual(ev.probability, 0.62, accuracy: 1e-9)
         XCTAssertEqual(ev.availableAt, 500)
+        XCTAssertNil(ev.onsetTs, "older documents carry no onset")
+        XCTAssertNil(ev.source)
         XCTAssertNil(ContextInputs.parseTransition(["ts": "250", "kind": "", "revision": "1"]))
+    }
+
+    /// The decoder's onset back-date and detector reach the PC input (INT-C / D2-05), and the SQL selects them
+    /// from the same chosen document as the event.
+    func testTransitionOnsetAndSourceAreReadFromTheDocument() throws {
+        let sql = ContextSQL.activityTransitions
+        XCTAssertTrue(sql.contains("coalesce(x.value ->> 'onset_ts', '') as onset_ts"), sql)
+        XCTAssertTrue(sql.contains("coalesce(x.value ->> 'source', '') as source"), sql)
+        var row = ["ts": "250", "kind": "stand_to_sit_like", "probability": "0.7", "revision": "3", "at": "400",
+                   "onset_ts": "243", "source": "transition_expert"]
+        let ev = try XCTUnwrap(ContextInputs.parseTransition(row))
+        XCTAssertEqual(ev.onsetTs, 243)
+        XCTAssertEqual(ev.source, "transition_expert")
+        XCTAssertEqual(ev.changeTs, 243)
+        // An onset after the detection second is not a back-date: dropped. Empty strings are "not said".
+        row["onset_ts"] = "251"
+        XCTAssertNil(try XCTUnwrap(ContextInputs.parseTransition(row)).onsetTs)
+        row["onset_ts"] = ""; row["source"] = ""
+        let bare = try XCTUnwrap(ContextInputs.parseTransition(row))
+        XCTAssertNil(bare.onsetTs)
+        XCTAssertNil(bare.source)
+        XCTAssertEqual(bare.changeTs, 250)
     }
 
     func testEpochSqlReadsOneRevisionPerUtcDayAndRunsAndEventsShareTheRankedDocument() {

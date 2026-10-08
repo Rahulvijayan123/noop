@@ -3,8 +3,9 @@
 -- 20261003130000_activity_context_days.sql (section 12, the ActivityContext v2 day documents),
 -- 20261003140000_activity_context_stream_days.sql (section 13, stream days and the read surface) and
 -- 20261004150000_activity_context_canonical_class.sql (section 14, the canonical class columns) and
--- 20261007120000_activity_context_current_lineage_and_versions.sql (section 15, the current-lineage view
--- and version-driven re-derivation) applied. Every fixture change rolls back; no deployed credentials or data are touched.
+-- 20261008100000_activity_context_current_lineage_and_versions.sql (section 15, the current-lineage view
+-- and version-driven re-derivation) and 20261008100200_activity_context_transitions_onset_source.sql (section 16)
+-- applied. Every fixture change rolls back; no deployed credentials or data are touched.
 -- Statement timeout keeps a misbehaving assertion from hanging a disposable cluster.
 --
 -- Run against a disposable cluster the way the other *.sql tests run:
@@ -12,7 +13,8 @@
 --        -f ../../migrations/20261003130000_activity_context_days.sql \
 --        -f ../../migrations/20261003140000_activity_context_stream_days.sql \
 --        -f ../../migrations/20261004150000_activity_context_canonical_class.sql \
---        -f ../../migrations/20261007120000_activity_context_current_lineage_and_versions.sql \
+--        -f ../../migrations/20261008100000_activity_context_current_lineage_and_versions.sql \
+--        -f ../../migrations/20261008100200_activity_context_transitions_onset_source.sql \
 --        -f activity_context_contract.sql
 -- (the migrations must apply to a fully migrated Supabase-style schema first; the fixtures here
 -- only need base_schema, production_persistence, scoring_service_state, physiology_revisions,
@@ -181,6 +183,10 @@ begin
     where user_id=u and device_id=dev and day=v_day;
   assert n=1, 'matching-revision failure must count';
   assert j.last_error='model error', 'matching-revision failure must record the error';
+  -- Park the failed job: its first backoff is only 5 s, and on a loaded machine it expires before the later
+  -- sections run, whose claims would then pick this (later) day first and publish against the wrong job.
+  update public.activity_context_jobs set not_before = clock_timestamp() + interval '1 day'
+    where user_id=u and device_id=dev and day=v_day;
   raise notice 'PASS 3b supersede clean release vs matching failure';
 end;
 $$;
@@ -1941,7 +1947,7 @@ do $$ begin raise notice 'PASS 14.4 owner isolation of the class columns'; end $
 
 rollback;
 
--- 15. Current lineage and version-driven re-derivation (20261007120000). History stays in
+-- 15. Current lineage and version-driven re-derivation (20261008100000). History stays in
 -- activity_context_epochs; activity_context_epochs_current is the newest publish of each UTC day; the
 -- worker's registered versions and the day's settled state are folded into both day fingerprints; a bounded
 -- sweep re-derives the days whose fingerprint is not today's; an older build never takes the registry back.
@@ -2257,4 +2263,54 @@ $$;
 reset role;
 do $$ begin raise notice 'PASS 15.4 privileges'; end $$;
 
+rollback;
+
+-- 16. The transitions read surface exposes each event's onset and detector (20261008100200). Appended
+-- columns: the existing ones keep their position, type and meaning; documents without the keys read NULL.
+begin;
+set local statement_timeout = '60s';
+insert into auth.users(id) values ('a0000000-0000-4000-8000-000000000001');
+insert into public.devices(id,user_id,source_kind) values
+ ('a0000000-0000-4000-8000-000000000011','a0000000-0000-4000-8000-000000000001','noop_push');
+do $$
+declare
+  u1 uuid := 'a0000000-0000-4000-8000-000000000001'; d1 uuid := 'a0000000-0000-4000-8000-000000000011';
+  v_day date := (clock_timestamp() at time zone 'UTC')::date - 2;
+  lo bigint := extract(epoch from (((clock_timestamp() at time zone 'UTC')::date - 2)::timestamp at time zone 'UTC'))::bigint;
+  r record; cols text[];
+begin
+  insert into public.activity_context_days(user_id,device_id,day,algorithm_version,schema_version,ontology_version,
+    decoder_version,feature_schema,model_version,preprocessing_version,job_fingerprint,input_revision,
+    publish_interval_s,observed_s,run_count,event_count,unclear_s,mean_confidence,document,result_revision,computed_at)
+  values (u1,d1,v_day,'streams-activity-1',2,'v2.0','hsmm-1.8','imu-feat-2','streams-activity-1','streams-v1',repeat('a',64),1,
+          5,3600,0,2,0,0.7,
+          jsonb_build_object('runs','[]'::jsonb,'events',jsonb_build_array(
+            jsonb_build_object('kind','stand_to_sit_like','probability',0.8,'ts',lo+200,'onset_ts',lo+193,'source','transition_expert'),
+            jsonb_build_object('kind','walk_start','probability',0.6,'ts',lo+400))),
+          1,clock_timestamp());
+
+  select array_agg(attname::text order by attnum) into cols from pg_attribute
+   where attrelid = 'public.activity_context_transitions'::regclass and attnum > 0 and not attisdropped;
+  assert cols = array['user_id','device_id','day','algorithm_version','ts','at','kind','probability','model_version',
+                      'decoder_version','ontology_version','feature_schema','encoder_id','encoder_version',
+                      'result_revision','computed_at','source_rank','onset_ts','onset_at','source'],
+    'existing columns keep their order; the new ones are appended: ' || cols::text;
+  select * into r from public.activity_context_transitions where user_id = u1 and ts = lo + 200;
+  assert r.onset_ts = lo + 193 and r.onset_at = to_timestamp(lo + 193) and r.source = 'transition_expert'
+     and r.kind = 'stand_to_sit_like' and abs(r.probability - 0.8) < 0.001,
+    'the event row carries its onset and detector';
+  select * into r from public.activity_context_transitions where user_id = u1 and ts = lo + 400;
+  assert r.onset_ts is null and r.onset_at is null and r.source is null and r.kind = 'walk_start',
+    'an event without the keys reads NULL, never a made-up onset';
+  assert (select coalesce(onset_ts, ts) from public.activity_context_transitions where user_id = u1 and ts = lo + 400) = lo + 400,
+    'coalesce(onset_ts, ts) is the change time a reader uses';
+  assert (select reloptions @> array['security_invoker=true'] from pg_class where oid = 'public.activity_context_transitions'::regclass),
+    'the replaced view still runs with the caller''s rights';
+  assert not has_table_privilege('anon', 'public.activity_context_transitions', 'select')
+     and has_table_privilege('authenticated', 'public.activity_context_transitions', 'select')
+     and has_table_privilege('service_role', 'public.activity_context_transitions', 'select'),
+    'CREATE OR REPLACE kept the grants';
+end;
+$$;
+do $$ begin raise notice 'PASS 16 transition onset and source'; end $$;
 rollback;

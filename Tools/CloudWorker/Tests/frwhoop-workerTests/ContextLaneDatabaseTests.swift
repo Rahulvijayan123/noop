@@ -483,7 +483,10 @@ final class ContextLaneDatabaseTests: XCTestCase {
         lane.enqueueIntervalSeconds = 3_600
         lane.lastEnqueueAt = Date()  // only the replay job is due
         lane.drain(budget: 2)
-        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        // This owner's outcome, not the lane's global count: the shared scratch database can hold other suites'
+        // due jobs, which the same drain may claim.
+        XCTAssertEqual(try job(o, mode: "causal_live")["outcome"], "published", lane.stats.lastError ?? "")
+        XCTAssertEqual(try contextDays(o, mode: "causal_live").count, 1)
         let first = try XCTUnwrap(try contextDays(o, mode: "causal_live").last)
         let stored = try XCTUnwrap(try db.query("""
             select availability_cutoff::text as cutoff, generated_at::text as generated,
@@ -513,7 +516,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
 
         try replay()
         lane.drain(budget: 4)
-        XCTAssertEqual(lane.stats.unchanged, 1, "same cutoff, same visible inputs: \(lane.stats.lastError ?? "")")
+        XCTAssertEqual(try job(o, mode: "causal_live")["outcome"], "unchanged",
+                       "same cutoff, same visible inputs: \(lane.stats.lastError ?? "")")
         let after = try contextDays(o, mode: "causal_live")
         XCTAssertEqual(after.count, 1)
         XCTAssertEqual(after.last?["input_fingerprint"], first["input_fingerprint"])
@@ -586,7 +590,9 @@ final class ContextLaneDatabaseTests: XCTestCase {
         }
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 8)
+        // One claim at a time until the job has failed: with one drain of budget 8 a slow machine outlives the
+        // first 5-s backoff and the same job fails a second time inside the drain.
+        for _ in 0..<8 where try job(o)["failures"] == "0" { lane.drain(budget: 1) }
         XCTAssertGreaterThanOrEqual(lane.stats.failed, 1)
         XCTAssertGreaterThanOrEqual(lane.stats.failuresPersisted, 1)
         let failedJob = try job(o)

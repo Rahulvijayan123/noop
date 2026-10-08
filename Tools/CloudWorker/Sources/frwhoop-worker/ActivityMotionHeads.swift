@@ -501,9 +501,12 @@ enum ActivityMotionHeadsDays {
     /// The candidate comparison for one day: the same input the published v2 document was decoded from, plus
     /// the Inertia windows, decoded with Inertia as candidate evidence. Refused bundles are withheld, and so is
     /// everything when the deployment has not pinned the bundle digest (candidate mode requires the pin).
+    /// `config` and `lookback` are the published document's (`ContextDayBuild.config` / `.lookback`: the wearer's
+    /// reference as of the day and the warm-up half hour), so the comparison differs from it only by the expert.
     static func candidate(mode: InertiaSettings.Mode, heads: MotionHeadsTrackInput,
                           input: ActivityContextTrackInput?, generatedAt: Int,
-                          expectedBundleSHA256: String?) -> Candidate {
+                          expectedBundleSHA256: String?, config base: ActivityDecoderConfig = ActivityDecoderConfig(),
+                          lookback: ActivityContextTrackInput? = nil) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedBundleSHA256 else { return .withheld("bundle_sha256_not_pinned") }
         // The candidate defaults (INERTIA1.md §7).
@@ -512,9 +515,10 @@ enum ActivityMotionHeadsDays {
         if let why = evidence.evidenceRefusal { return .withheld(why) }
         guard var input else { return .withheld("context_days_disabled") }
         input.motionHeads = heads
-        var config = ActivityDecoderConfig()
+        var config = base
         config.motionHeads = evidence
-        let built = ActivityContextDays.dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config)
+        let built = ActivityContextDays.dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config,
+                                                             lookback: lookback)
         // A comparison must name the evidence that shaped it; a decode the evidence never reached is withheld.
         guard built.document.versions.motionHeads != nil else {
             return .withheld(built.report?.refusal ?? "motion_heads_not_accepted")

@@ -245,8 +245,9 @@ public struct ActivityContextSummary: Equatable, Sendable {
     public let unknownShare: Double
     /// Number of motion-label changes between consecutive overlapping epochs.
     public let transitions: Int
-    /// Seconds since the last supported non-stationary epoch ended, measured from the interval
-    /// end; nil when no supported epoch ends at or before the interval end.
+    /// Seconds from the end of the last supported non-stationary epoch that began by the interval start, to the
+    /// interval START (0 when it is still going at the start); nil when there is none (`ActivityContextJoin.version`
+    /// join-2; join-1 measured from the interval end).
     public let recentActivity: Int?
     /// "user_confirmed" | "model" | "none" — v1 policy only ever writes user_confirmed or none.
     public let postureSource: String
@@ -327,7 +328,8 @@ public struct HrvSlotContext: Codable, Equatable, Sendable {
     /// Duration-weighted motion shares over the WHOLE slot bucket.
     public let shares: [String: Double]
     public let unknownShare: Double
-    /// Seconds since the last supported activity ended, from the slot end; nil when none.
+    /// Seconds from the last supported activity's end to the slot START, 0 when it is still going at the start;
+    /// nil when none. Documents without `join_version` (join-1) measured it from the slot end.
     public let recentActivityS: Int?
     /// True when the slot overlaps the post-activity annotation window.
     public let postActivity: Bool
@@ -388,17 +390,20 @@ public struct ActivityContextDocument: Codable, Equatable, Sendable {
     public let epochs: [ActivityEpoch]
     public let summary: ActivitySnapshotSummary
     public let contexts: ActivityContexts
+    /// `ActivityContextJoin.version` the `contexts` and `summary` values were computed with (additive key
+    /// `join_version`; nil on documents published before it, which are join-1).
+    public let joinVersion: String?
 
     public init(schemaVersion: Int = 1, ontologyVersion: String = "v1",
                 modelVersion: String, preprocessingVersion: String, inputRevision: Int,
                 dataThrough: String, status: ActivityStatus, reasons: [String],
                 epochs: [ActivityEpoch], summary: ActivitySnapshotSummary,
-                contexts: ActivityContexts) {
+                contexts: ActivityContexts, joinVersion: String? = ActivityContextJoin.version) {
         self.schemaVersion = schemaVersion; self.ontologyVersion = ontologyVersion
         self.modelVersion = modelVersion; self.preprocessingVersion = preprocessingVersion
         self.inputRevision = inputRevision; self.dataThrough = dataThrough
         self.status = status; self.reasons = reasons; self.epochs = epochs
-        self.summary = summary; self.contexts = contexts
+        self.summary = summary; self.contexts = contexts; self.joinVersion = joinVersion
     }
 
     enum CodingKeys: String, CodingKey {
@@ -406,7 +411,7 @@ public struct ActivityContextDocument: Codable, Equatable, Sendable {
              modelVersion = "model_version", preprocessingVersion = "preprocessing_version",
              inputRevision = "input_revision", dataThrough = "data_through",
              status = "status", reasons = "reasons", epochs = "epochs",
-             summary = "summary", contexts = "contexts"
+             summary = "summary", contexts = "contexts", joinVersion = "join_version"
     }
 }
 

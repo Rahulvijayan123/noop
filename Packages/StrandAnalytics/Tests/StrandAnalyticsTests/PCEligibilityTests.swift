@@ -593,6 +593,62 @@ final class PCEligibilityContextTests: XCTestCase {
         XCTAssertEqual(verdict(settling: settling([event(-60, .walkStop)])).state, .eligible)
     }
 
+    /// The settling gate counts an event over its span `[onsetTs ?? ts, ts]` (INT-C / D2-05), so both window edges
+    /// stay conservative: a change that began inside the support but was flagged a few seconds after it still
+    /// excludes, and an onset earlier than the settling window never loosens an event flagged inside it (settling
+    /// runs from when the change finished, at or after detection).
+    func testSettlingCountsTheEventFromItsOnsetToItsDetection() {
+        func onset(_ ts: Int, _ onset: Int?) -> PC.TransitionEventInput {
+            PC.TransitionEventInput(ts: F.t0 + ts, kind: ActivityTransitionKind.standToSitLike.rawValue,
+                                    probability: 0.8, revision: 1, onsetTs: onset.map { F.t0 + $0 }, source: "hsmm")
+        }
+        // Flagged 3 s after the support ends, began 4 s before it ends.
+        XCTAssertEqual(verdict(settling: settling([onset(303, nil)])).state, .eligible)
+        XCTAssertEqual(verdict(settling: settling([onset(303, 296)])).state, .ineligible)
+        // Flagged 3 s after the support ends and began after it too: outside the window.
+        XCTAssertEqual(verdict(settling: settling([onset(303, 301)])).state, .eligible)
+        // Flagged 115 s before the support (inside the 120-s settling window): excludes whatever its onset.
+        XCTAssertEqual(verdict(settling: settling([onset(-115, nil)])).state, .ineligible)
+        XCTAssertEqual(verdict(settling: settling([onset(-115, -125)])).state, .ineligible)
+        // Flagged before the settling window: outside it, whatever its onset.
+        XCTAssertEqual(verdict(settling: settling([onset(-121, -126)])).state, .eligible)
+        // Among several events the span scan still finds one that began before the window ends.
+        XCTAssertEqual(verdict(settling: settling([onset(-500, nil), onset(301, 301), onset(305, 299),
+                                                   onset(400, nil)])).state, .ineligible)
+        // An onset is never after the detection second, nor more than maxOnsetLeadS before it.
+        XCTAssertEqual(onset(50, 60).changeTs, F.t0 + 50)
+        XCTAssertEqual(onset(50, -500).changeTs, F.t0 + 50 - ActivityTransitionEvent.maxOnsetLeadS)
+        // "Seconds since the last postural transition" is measured from detection, never overstated by the onset.
+        var activity = PC.IntervalAlgebra.composition(over: support, track: quiet)
+        var preceding = PC.IntervalAlgebra.precedingHistory(before: support.start, track: quiet, lookbackS: 1800)
+        PC.TransitionEvents.annotate(&activity, &preceding, support: support,
+                                     events: PC.TransitionEvents.prepare([onset(-30, -38)], causalCutoff: nil),
+                                     coverage: decoderCoverage)
+        XCTAssertEqual(preceding.secondsSinceLastPosturalTransition, 30)
+        // A change that began inside the support but was flagged after it is counted during the support.
+        PC.TransitionEvents.annotate(&activity, &preceding, support: support,
+                                     events: PC.TransitionEvents.prepare([onset(303, 296)], causalCutoff: nil),
+                                     coverage: decoderCoverage)
+        XCTAssertEqual(activity.transitionEvents?.postural, 1)
+        // Causal availability is still the detection second: flagged after the cutoff, it is not known yet.
+        XCTAssertTrue(PC.TransitionEvents.prepare([onset(303, 296)], causalCutoff: F.t0 + 300).isEmpty)
+    }
+
+    /// The new fields are optional on the wire: an input stored before them decodes, and nil fields are not
+    /// written (so an input without them keeps its fingerprint).
+    func testTransitionEventInputOnsetAndSourceAreOptionalOnTheWire() throws {
+        let old = #"{"ts":100,"kind":"walk_start","probability":0.5,"revision":2}"#
+        let decoded = try JSONDecoder().decode(PC.TransitionEventInput.self, from: Data(old.utf8))
+        XCTAssertNil(decoded.onsetTs)
+        XCTAssertNil(decoded.source)
+        XCTAssertEqual(decoded.changeTs, 100)
+        let encoded = String(decoding: try JSONEncoder().encode(decoded), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("onsetTs") || encoded.contains("source"), encoded)
+        let full = PC.TransitionEventInput(ts: 100, kind: "walk_start", probability: 0.5, revision: 2, onsetTs: 95,
+                                           source: "transition_expert")
+        XCTAssertEqual(try JSONDecoder().decode(PC.TransitionEventInput.self, from: JSONEncoder().encode(full)), full)
+    }
+
     func testTransitionGateIsDeclaredHeartRateDependentAndUnobservedEventsGateNothing() {
         let hr = verdict(.heartRate, settling: settling([]))
         XCTAssertEqual(hr.state, .eligible)

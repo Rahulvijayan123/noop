@@ -61,6 +61,11 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
         addTeardownBlock {
             db.rollbackTransaction()
+            // `sessions` rows first (the workouts a test logs): their delete trigger (`bump_user_revision`) upserts
+            // `user_sync_state` for the user, which fails inside the account cascade, and the silently failed
+            // delete left the owner and its queued work behind for every later suite (the context lane claimed
+            // it: ContextLaneDatabaseTests' causal replay saw two publishes).
+            try? db.exec("delete from public.sessions where user_id = '\(user)'")
             try? db.exec("delete from auth.users where id = '\(user)'")
         }
         let today = Int(Date().timeIntervalSince1970) / 86_400 * 86_400

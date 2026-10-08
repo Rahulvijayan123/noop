@@ -252,8 +252,9 @@ extension PhysiologyContext {
         public static func isPostural(_ kind: String) -> Bool { posturalKinds.contains(kind) }
         public static func isLocomotion(_ kind: String) -> Bool { locomotionKinds.contains(kind) }
 
-        /// Events usable by a document: valid kind text, inside the read window, available at the cutoff (causal),
-        /// de-duplicated on (ts, kind) keeping the highest revision, sorted by (ts, kind).
+        /// Events usable by a document: valid kind text, inside the read window, available at the cutoff (causal,
+        /// on the detection second `ts`), de-duplicated on (ts, kind) keeping the highest revision, sorted by
+        /// (ts, kind).
         public static func prepare(_ events: [TransitionEventInput], causalCutoff: Int?) -> [TransitionEventInput] {
             var best: [String: TransitionEventInput] = [:]
             for e in events where !e.kind.isEmpty {
@@ -267,7 +268,10 @@ extension PhysiologyContext {
             return best.values.sorted { ($0.ts, $0.kind) < ($1.ts, $1.kind) }
         }
 
-        /// Events inside `interval`; nil when no decoder document covers it and no event falls in it.
+        /// Events whose span `[changeTs, ts]` (onset to detection) overlaps `interval`; nil when no decoder document
+        /// covers it and no event falls in it. A span, not one point, so both window edges stay conservative: a
+        /// change that began inside the window but was flagged after it counts, and so does one flagged inside it
+        /// whose onset was earlier (settling runs from when the change finished, at or after detection).
         public static func summary(_ events: [TransitionEventInput], over interval: Interval,
                                    coverage: ResolvedTrack) -> TransitionEventSummary? {
             guard interval.isValid else { return nil }
@@ -277,9 +281,11 @@ extension PhysiologyContext {
             var postural = 0, locomotion = 0, other = 0
             var maxP: Double? = nil
             var i = lowerBound(events, interval.start)
-            while i < events.count, events[i].ts < interval.end {
+            // changeTs >= ts - maxOnsetLeadS, so no later event can begin before the window ends.
+            while i < events.count, events[i].ts - ActivityTransitionEvent.maxOnsetLeadS < interval.end {
                 let e = events[i]
                 i += 1
+                guard e.changeTs < interval.end else { continue }
                 counts[e.kind, default: 0] += 1
                 if isPostural(e.kind) {
                     postural += 1
@@ -297,7 +303,7 @@ extension PhysiologyContext {
                 kinds: counts.keys.sorted().map { Diagnostic($0, Double(counts[$0]!)) })
         }
 
-        /// The last postural and locomotion events strictly before `ts`.
+        /// The last postural and locomotion events detected strictly before `ts`.
         public static func last(before ts: Int, in events: [TransitionEventInput])
             -> (postural: TransitionEventInput?, locomotion: TransitionEventInput?) {
             var postural: TransitionEventInput? = nil, locomotion: TransitionEventInput? = nil
@@ -317,6 +323,8 @@ extension PhysiologyContext {
             activity.transitionEvents = summary(events, over: support, coverage: coverage)
             preceding.transitionEvents = summary(events, over: preceding.lookback, coverage: coverage)
             let (p, l) = last(before: support.start, in: events)
+            // Measured from detection, not onset: the change had finished no earlier than it was flagged, so the
+            // onset would overstate the time since it.
             preceding.secondsSinceLastPosturalTransition = p.map { support.start - $0.ts }
             preceding.lastPosturalTransitionKind = p?.kind
             preceding.secondsSinceLastLocomotionTransition = l.map { support.start - $0.ts }
