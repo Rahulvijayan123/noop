@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import pickle
 import queue
@@ -140,7 +141,38 @@ class Application:
     readiness_source: str = READINESS_INLINE
     #: When the warm worker's readiness report was adopted (``worker`` source only).
     readiness_reported_at_utc: str | None = None
+    #: Later worker reports that disagreed with the adopted one (newest last, bounded).
+    readiness_disagreements: list[dict[str, Any]] = field(default_factory=list)
+    #: Consecutive-timeout quarantine (``ExecutionConfig.quarantine_*``; 0 = off, the
+    #: default for direct library use, which has no budget to overrun).
+    quarantine_after: int = 0
+    quarantine_seconds: int = 600
+    #: provider_id -> {"consecutive_timeouts", "until" (monotonic), "until_utc", "quarantines"}.
+    _quarantine: dict[str, dict[str, Any]] = field(default_factory=dict)
+    #: What the warm infer worker measured it loaded, and the pid that reported it.
+    _worker_loaded: dict[str, Any] | None = None
+    _worker_loaded_pid: int | None = None
+    #: Whether a pid is still a live lane worker (set by the server). A report from a pid that
+    #: is gone (killed, crashed, never restarted) is not reported as loaded.
+    worker_alive: Callable[[int], bool] | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    @property
+    def worker_loaded_identity(self) -> dict[str, Any] | None:
+        loaded, pid = self._worker_loaded, self._worker_loaded_pid
+        if loaded is None:
+            return None
+        if pid is not None and self.worker_alive is not None and not self.worker_alive(pid):
+            return None
+        return loaded
+
+    @worker_loaded_identity.setter
+    def worker_loaded_identity(self, value: Mapping[str, Any] | None) -> None:
+        self.report_worker_loaded(None, value)
+
+    def report_worker_loaded(self, pid: int | None, loaded: Mapping[str, Any] | None) -> None:
+        self._worker_loaded = dict(loaded) if loaded is not None else None
+        self._worker_loaded_pid = pid
 
     # -- startup ------------------------------------------------------------
 
@@ -249,10 +281,77 @@ class Application:
             return False
         with self._lock:
             if self.readiness_reported_at_utc is not None:
+                self._note_disagreement(reported)
                 return False
             self.refresh_readiness(reported)
             self.readiness_reported_at_utc = _now_utc()
         return True
+
+    def _note_disagreement(self, reported: Mapping[str, Sequence[Any]]) -> None:
+        """Record (and log) a later worker report that differs from the adopted readiness."""
+        differs: dict[str, Any] = {}
+        for pid, state in self.provider_states.items():
+            entry = reported.get(pid) if isinstance(reported, Mapping) else None
+            ready = bool(entry[0]) if entry else False
+            if ready != state.ready:
+                differs[pid] = {"adopted_ready": state.ready, "reported_ready": ready,
+                                "reported_reason": (entry[1] if entry and len(entry) > 1 else
+                                                    "not reported")}
+        if not differs:
+            return
+        self.readiness_disagreements = (self.readiness_disagreements
+                                        + [{"at_utc": _now_utc(), "providers": differs}])[-8:]
+        sys.stderr.write(f"frwhoop-inference: a replacement worker's readiness differs from the "
+                         f"adopted report (kept the adopted one): {json.dumps(differs)}\n")
+
+    # -- consecutive-timeout quarantine ------------------------------------------
+
+    def quarantine_check(self, provider_id: str) -> dict[str, Any] | None:
+        """The active quarantine of a provider, or None (also once it has expired)."""
+        if self.quarantine_after <= 0:
+            return None
+        with self._lock:
+            entry = self._quarantine.get(provider_id)
+            if not entry or entry.get("until") is None:
+                return None
+            remaining = entry["until"] - time.monotonic()
+            if remaining <= 0:
+                # Cool-off over: the next request is a real trial (one more overrun re-arms it).
+                entry["until"] = None
+                entry["until_utc"] = None
+                return None
+            return {"consecutive_timeouts": entry["consecutive_timeouts"],
+                    "until_utc": entry["until_utc"],
+                    "retry_after_s": max(1, int(math.ceil(remaining)))}
+
+    def quarantine_record(self, provider_id: str, timed_out: bool) -> None:
+        if self.quarantine_after <= 0:
+            return
+        with self._lock:
+            entry = self._quarantine.setdefault(
+                provider_id, {"consecutive_timeouts": 0, "until": None, "until_utc": None,
+                              "quarantines": 0})
+            if not timed_out:
+                entry["consecutive_timeouts"] = 0
+                return
+            entry["consecutive_timeouts"] += 1
+            if entry["consecutive_timeouts"] >= self.quarantine_after:
+                entry["until"] = time.monotonic() + self.quarantine_seconds
+                entry["until_utc"] = _utc_in(self.quarantine_seconds)
+                entry["quarantines"] += 1
+                sys.stderr.write(f"frwhoop-inference: provider {provider_id} quarantined for "
+                                 f"{self.quarantine_seconds}s after "
+                                 f"{entry['consecutive_timeouts']} consecutive timeouts\n")
+
+    def quarantine_snapshot(self) -> dict[str, Any]:
+        now = time.monotonic()
+        with self._lock:
+            return {pid: {"consecutive_timeouts": e["consecutive_timeouts"],
+                          "quarantined": e["until"] is not None and e["until"] > now,
+                          "until_utc": e["until_utc"] if e["until"] is not None and e["until"] > now
+                          else None,
+                          "quarantines": e["quarantines"]}
+                    for pid, e in self._quarantine.items()}
 
     def readiness_pending(self) -> bool:
         return self.readiness_source == READINESS_WORKER and self.readiness_reported_at_utc is None
@@ -331,6 +430,12 @@ def _now_utc() -> str:
     return datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _utc_in(seconds: float) -> str:
+    from datetime import datetime, timedelta, timezone
+
+    return (datetime.now(tz=timezone.utc) + timedelta(seconds=seconds)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 # --------------------------------------------------------------------------
 # Inference
 # --------------------------------------------------------------------------
@@ -395,14 +500,29 @@ def run_inference(app: Application, request: InferRequest,
                             f"provider {provider.provider_id!r} is not ready: {state.reason}",
                             http_status=503, field="provider.provider_id")
 
+    quarantined = app.quarantine_check(provider.provider_id)
     started = time.monotonic()
-    if execute is None:
+    if quarantined is not None:
+        # Not dispatched: this provider overran its budget every time lately, and each overrun
+        # costs the shared worker a kill and a warm restart that every other provider waits on.
+        result, timed_out = None, False
+    elif execute is None:
         result, timed_out = _run_inline(provider, request), False
     else:
         result, timed_out = execute(provider, request, app.timeout_ms)
+        app.quarantine_record(provider.provider_id, timed_out)
     runtime_ms = int(round((time.monotonic() - started) * 1000))
 
-    if timed_out:
+    if quarantined is not None:
+        result = ProviderResult(
+            status="withheld", value=None, unit="ms",
+            withheld_reason=WithheldReason.TIMEOUT.value,
+            diagnostics={"budget_ms": app.timeout_ms, "withheld_detail": "provider_quarantined",
+                         "worker_terminated": False, **quarantined},
+            versions=provider.versions(request),
+            final_or_provisional="provisional" if request.context.live else "final",
+            publishable=provider.capability().get("publishable", False))
+    elif timed_out:
         result = ProviderResult(
             status="withheld", value=None, unit="ms",
             withheld_reason=WithheldReason.TIMEOUT.value,
@@ -935,6 +1055,8 @@ class InferenceServer(BoundedThreadingMixIn, HTTPServer):
                  sleep_features_compute: str = DEFAULT_SLEEP_FEATURES_COMPUTE):
         self.app = app
         self.execution = execution or ExecutionConfig.from_env(os.environ)
+        app.quarantine_after = self.execution.quarantine_after
+        app.quarantine_seconds = self.execution.quarantine_seconds
         # ``module:callable`` the sleep-features workers call (tests substitute a slow one).
         self.sleep_features_compute = sleep_features_compute
         try:
@@ -958,6 +1080,8 @@ class InferenceServer(BoundedThreadingMixIn, HTTPServer):
             self._close_lanes()
             raise
         self._start_handler_pool(self.execution.http_threads, self.execution.http_backlog)
+        # A loaded-identity report counts only while the worker that sent it is alive.
+        app.worker_alive = self._infer_worker_alive
         if app.readiness_pending():
             # Provider readiness comes from the first warm infer worker, so that lane cannot
             # wait for a request to start it.
@@ -976,13 +1100,21 @@ class InferenceServer(BoundedThreadingMixIn, HTTPServer):
                 "budget_ms": self.execution.sleep_features_budget_ms,
                 "compute": self.sleep_features_compute}
 
+    def _infer_worker_alive(self, pid: int) -> bool:
+        # A reaped worker's pid is cleared from the lane, so this is false from the reap on.
+        lane = self.lanes.get(LANE_INFER) if hasattr(self, "lanes") else None
+        return lane is not None and pid in lane.worker_pids()
+
     def _on_infer_hello(self, hello: Mapping[str, Any]) -> None:
         # What the warm worker measured it loaded; /healthz reports it ahead of this process's
-        # own (unloaded) copy of each provider. A respawned worker replaces the report.
+        # own (unloaded) copy of each provider, for as long as that worker is alive. A respawned
+        # worker replaces the report.
         loaded = hello.get("loaded")
+        pid = hello.get("pid")
         if isinstance(loaded, Mapping):
-            self.app.worker_loaded_identity = {str(k): v for k, v in loaded.items()
-                                               if isinstance(v, Mapping)}
+            self.app.report_worker_loaded(
+                int(pid) if isinstance(pid, int) else None,
+                {str(k): v for k, v in loaded.items() if isinstance(v, Mapping)})
         reported = hello.get("readiness") or {}
         if self.app.adopt_worker_readiness(reported):
             ready = sorted(pid for pid, state in self.app.provider_states.items() if state.ready)
@@ -1036,7 +1168,9 @@ class InferenceServer(BoundedThreadingMixIn, HTTPServer):
             "limits": self.execution.to_wire(),
             "http": self.handler_pool_snapshot(),
             "provider_readiness": {"source": self.app.readiness_source,
-                                   "reported_at_utc": self.app.readiness_reported_at_utc},
+                                   "reported_at_utc": self.app.readiness_reported_at_utc,
+                                   "disagreements": list(self.app.readiness_disagreements)},
+            "quarantine": self.app.quarantine_snapshot(),
             "lanes": lanes,
         }
 
