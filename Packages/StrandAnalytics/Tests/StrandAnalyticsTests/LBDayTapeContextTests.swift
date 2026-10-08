@@ -110,6 +110,46 @@ final class LBDayTapeContextTests: XCTestCase {
         XCTAssertEqual(tape.restHR.mean ?? 0, 62, accuracy: 1e-9)
     }
 
+    func testSkipThroughReportsOnlyDaysWhoseWatermarksMoved() throws {
+        var tapes: [String: LBDayTape] = [:]
+        let day: (Int) -> String = { _ in "d" }
+        let alerting = try window(now: base, hr: 120, imuStill: true)
+        XCTAssertEqual(LBDayTape.skipThrough(window: alerting, into: &tapes, dayOf: day), ["d"])
+        XCTAssertEqual(LBDayTape.skipThrough(window: alerting, into: &tapes, dayOf: day), [],
+                       "nothing new to persist")
+    }
+
+    // MARK: Post-workout gate keys off live-tail effort, not fidget (review fix)
+
+    /// Minute `i` with fidget-level IMU occupancy (~0.2): above the effort-bucket floor (0.15), below the
+    /// live-tail effort line (chair-still 0.32), with no steps and a still label.
+    private func fidget(_ win: inout WatchdogWindow, at i: Int) {
+        var rows = win.resolvedActivityFeatures()
+        rows[i][9] = 0.8
+        win.activityFeatures = rows
+    }
+
+    func testOneFidgetMinuteDoesNotOpenAPostWorkoutGap() throws {
+        var win = try window(now: base, imuStill: true)
+        fidget(&win, at: 5)
+        XCTAssertEqual(WatchdogActivityFeatures.priorOccupancy(win.activityFeatures[5]), 0.2, accuracy: 1e-9)
+        XCTAssertEqual(WatchdogLiveTail.periods(win)[5], .rest)
+        var tape = LBDayTape(day: "d")
+        tape.ingest(window: win, nowUnix: base)
+        XCTAssertEqual(tape.effortHR.n, 1, "the fidget minute itself still files as effort")
+        XCTAssertEqual(tape.restHR.n, 24, "minutes 6-24 stay rest: a fidget is not a workout end")
+    }
+
+    func testRealEffortMinuteStillOpensThePostWorkoutGap() throws {
+        var win = try window(now: base, imuStill: true)
+        win.motion[5] = 0.4
+        XCTAssertEqual(WatchdogLiveTail.periods(win)[5], .effort)
+        var tape = LBDayTape(day: "d")
+        tape.ingest(window: win, nowUnix: base)
+        XCTAssertEqual(tape.effortHR.n, 1)
+        XCTAssertEqual(tape.restHR.n, 5, "minutes 6-24 are recovering, in no bucket")
+    }
+
     // MARK: Day keyed by the minute, not the tick (D4-07)
 
     func testMinutesBeforeMidnightLandOnTheEarlierDay() throws {
@@ -126,6 +166,85 @@ final class LBDayTapeContextTests: XCTestCase {
         XCTAssertEqual(tapes[before]?.allHR.n, 20)
         XCTAssertEqual(tapes[after]?.restHR.n, 5, "00:00-00:04 settled; 00:05-00:09 wait")
         XCTAssertEqual(tapes[after]?.allHR.n, 10)
+    }
+
+    func testTimeZoneChangeDoesNotFileAMinuteOnTwoDays() throws {
+        // Tick at 00:20 UTC, then a westward hop (UTC-1h) one minute later: the same absolute minutes
+        // now map to the previous local day, whose own watermark is older.
+        let midnight = 1_790_000_000 - 1_790_000_000 % 86_400
+        var tapes: [String: LBDayTape] = [:]
+        let first = midnight + 1200
+        LBDayTape.ingest(window: try window(now: first, imuStill: true), nowUnix: first,
+                         into: &tapes, dayOf: Self.utcDay)
+        XCTAssertEqual(tapes.values.map(\.allHR.n).reduce(0, +), 30)
+        XCTAssertEqual(tapes.values.map(\.restHR.n).reduce(0, +), 25)
+        let second = first + 60
+        let west: (Int) -> String = { Self.utcDay($0 - 3600) }
+        LBDayTape.ingest(window: try window(now: second, imuStill: true), nowUnix: second,
+                         into: &tapes, dayOf: west)
+        XCTAssertEqual(tapes.values.map(\.allHR.n).reduce(0, +), 31, "one new minute, not 21")
+        XCTAssertEqual(tapes.values.map(\.restHR.n).reduce(0, +), 26, "one newly settled minute")
+    }
+
+    func testImuTimeZoneChangeDoesNotCountASampleTwice() {
+        let midnight = 1_790_000_000 - 1_790_000_000 % 86_400
+        let s1 = (midnight - 300..<midnight + 300).map {
+            WatchdogIMUSample(ts: $0, x: 0, y: 0, z: 1, dynAccel: 0.2)
+        }
+        var accs: [String: LBImuDayAccumulator] = [:]
+        LBImuDaily.ingest(s1, sleepIntervals: [], into: &accs, dayOf: Self.utcDay)
+        let s2 = (midnight - 300..<midnight + 360).map {
+            WatchdogIMUSample(ts: $0, x: 0, y: 0, z: 1, dynAccel: 0.2)
+        }
+        LBImuDaily.ingest(s2, sleepIntervals: [], into: &accs, dayOf: { Self.utcDay($0 - 3600) })
+        XCTAssertEqual(accs.values.map(\.sampleCount).reduce(0, +), 660, "600 then 60 new, not 600 + 360")
+    }
+
+    func testImuSkipThroughStopsAlertSamplesBackFillingTheUsual() {
+        func samples(_ r: Range<Int>, energy: Double) -> [WatchdogIMUSample] {
+            r.map { WatchdogIMUSample(ts: $0, x: 0, y: 0, z: 1, dynAccel: energy) }
+        }
+        let day: (Int) -> String = { _ in "d" }
+        var accs: [String: LBImuDayAccumulator] = [:]
+        LBImuDaily.ingest(samples(base..<base + 600, energy: 0.1), sleepIntervals: [], into: &accs, dayOf: day)
+        // An alerting tick may not train; its samples are consumed.
+        XCTAssertEqual(LBImuDaily.skipThrough(samples(base..<base + 1200, energy: 0.9), into: &accs, dayOf: day),
+                       ["d"])
+        XCTAssertEqual(LBImuDaily.skipThrough(samples(base..<base + 1200, energy: 0.9), into: &accs, dayOf: day),
+                       [])
+        // The next quiet tick re-delivers the alert stretch in its window; only new samples count.
+        LBImuDaily.ingest(samples(base + 600..<base + 1500, energy: 0.1), sleepIntervals: [],
+                          into: &accs, dayOf: day)
+        XCTAssertEqual(accs["d"]?.sampleCount, 900)
+        XCTAssertEqual(accs["d"]?.meanEnergy ?? 0, 0.1, accuracy: 1e-9)
+    }
+
+    func testSkipOnlyImuDayHasNoSamples() {
+        var accs: [String: LBImuDayAccumulator] = [:]
+        LBImuDaily.skipThrough([WatchdogIMUSample(ts: base, x: 0, y: 0, z: 1, dynAccel: 0.5)],
+                               into: &accs, dayOf: { _ in "d" })
+        XCTAssertEqual(accs["d"]?.sampleCount, 0, "callers drop skip-only accumulators from observations")
+        XCTAssertEqual(accs["d"]?.lastTs, base)
+    }
+
+    // MARK: Ingest regime provenance (review fix)
+
+    func testContextRuleMarksLegacyAndMixedDays() throws {
+        XCTAssertEqual(LBDayTape(day: "d").contextRule, LBDayTape.contextRuleCurrent)
+        XCTAssertTrue(LBDayTape(day: "d").currentContextRule)
+        let legacyJSON = #"{"day":"2026-10-01","restHR":{"sum":620,"n":10,"lastMinuteUnix":1}}"#
+        var legacy = try JSONDecoder().decode(LBDayTape.self, from: Data(legacyJSON.utf8))
+        XCTAssertEqual(legacy.contextRule, LBDayTape.contextRuleLegacy,
+                       "a pre-regime row must not look like a current-regime row")
+        XCTAssertFalse(legacy.currentContextRule)
+        XCTAssertEqual(legacy.restPosture, LBDayTape.restPosturePooledUnresolved)
+        legacy.ingest(window: try window(now: base, imuStill: true), nowUnix: base)
+        XCTAssertEqual(legacy.contextRule, LBDayTape.contextRuleMixed)
+        let round = try JSONDecoder().decode(LBDayTape.self, from: JSONEncoder().encode(legacy))
+        XCTAssertEqual(round.contextRule, LBDayTape.contextRuleMixed)
+        var fresh = LBDayTape(day: "d")
+        fresh.ingest(window: try window(now: base, imuStill: true), nowUnix: base)
+        XCTAssertEqual(fresh.contextRule, LBDayTape.contextRuleCurrent)
     }
 
     // MARK: Persisted format

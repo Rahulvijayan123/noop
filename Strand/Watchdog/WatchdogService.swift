@@ -93,8 +93,8 @@ final class WatchdogService {
                                                   lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
                                                   sleepIntervals: sleepIntervals)
             } else {
-                // The tape files the whole window now; a later quiet tick must not back-fill these minutes.
-                model.baseline.skipWatchdogTape(window: built)
+                // Tape and IMU usual consume the whole window; a later quiet tick must not back-fill it.
+                model.baseline.skipWatchdogTape(window: built, nowUnix: now)
             }
         }
         model.baseline.activityContextNote = await activityContextNote(model: model, now: now)

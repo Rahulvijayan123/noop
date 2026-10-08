@@ -30,6 +30,13 @@ public struct LBDayTape: Equatable, Sendable, Codable {
     public static let restPosturePooledUnresolved = "stationary_awake_posture_unresolved"
     /// Gravity and steps land in the store after live HR. Context waits this long behind `nowUnix`.
     public static let contextSettleSeconds = 5 * 60
+    /// Ingest regime of the minutes a tape holds. Rows from different regimes are not comparable
+    /// (the legacy rule filed one newest minute per tick and counted no-evidence minutes as rest).
+    public static let contextRuleCurrent = "wp8_v3_settled_every_minute"
+    /// A tape persisted before `contextRule` existed.
+    public static let contextRuleLegacy = "legacy_lastminute"
+    /// A legacy tape that this regime then extended: the day mixes both rules.
+    public static let contextRuleMixed = "mixed_legacy_lastminute_wp8_v3"
 
     public var day: String
     public var restHR = LBMinuteBucket()
@@ -54,14 +61,19 @@ public struct LBDayTape: Equatable, Sendable, Codable {
     public var contextWatermark: [Int] = [0, 0, 0]
     /// Posture provenance for the rest buckets.
     public var restPosture: String = LBDayTape.restPosturePooledUnresolved
+    /// Which ingest regime filed this day's minutes. Legacy rows decode as `contextRuleLegacy`.
+    public var contextRule: String = LBDayTape.contextRuleCurrent
 
     public init(day: String) { self.day = day }
+
+    /// True when every context minute of the day was filed by the current regime.
+    public var currentContextRule: Bool { contextRule == Self.contextRuleCurrent }
 
     enum CodingKeys: String, CodingKey {
         case day, restHR, restHRV, restSpO2, effortHR, effortHRV, effortSpO2, allHR, allHRV, allSpO2
         case unknownContextHR, unknownContextHRV, unknownContextSpO2
         case sleepSpO2Min, sleepSpO2N, sleepSpO2LastMinute, activeMinutes, lastActiveMinute
-        case contextWatermark, restPosture
+        case contextWatermark, restPosture, contextRule
     }
 
     public init(from decoder: Decoder) throws {
@@ -99,6 +111,7 @@ public struct LBDayTape: Equatable, Sendable, Codable {
         }
         restPosture = try c.decodeIfPresent(String.self, forKey: .restPosture)
             ?? Self.restPosturePooledUnresolved
+        contextRule = try c.decodeIfPresent(String.self, forKey: .contextRule) ?? Self.contextRuleLegacy
     }
 
     /// Persisted v1 stored ln(RMSSD). Means in (0, 5) are leftover ln → ms.
@@ -128,15 +141,21 @@ public struct LBDayTape: Equatable, Sendable, Codable {
 
     /// Files every fresh minute of `window` whose civil day (`dayOf`) is this tape's day.
     /// `dayOf == nil` accepts every minute (single-day callers and tests).
+    /// `floor` holds per-channel watermarks of the other day tapes (all-bucket, context). A minute at or
+    /// below them was already filed on another civil day (a time-zone change re-maps minutes to days).
     public mutating func ingest(window: WatchdogWindow, nowUnix: Int,
                                 lastWorkoutEndUnix: Int = 0,
                                 sleepIntervals: [WatchdogSleepInterval] = [],
                                 trainUsual: Bool = true,
-                                dayOf: ((Int) -> String)? = nil) -> Bool {
+                                dayOf: ((Int) -> String)? = nil,
+                                floor: Watermarks = Watermarks()) -> Bool {
         guard trainUsual else { return false }
         let features = window.resolvedActivityFeatures()
         let evidence = WatchdogActivityFeatures.motionEvidence(window: window)
         let labels = WatchdogActivityClass.labels(logits: window.activityLogits)
+        // Post-workout anchors use the live-tail period (exercise class, motion >= chair-still, steps),
+        // not the broader fidget-level `moving` that only picks the effort bucket.
+        let periods = WatchdogLiveTail.periods(window)
         let n = window.seqLen
         let settledBefore = nowUnix - Self.contextSettleSeconds
         var changed = false
@@ -171,7 +190,7 @@ public struct LBDayTape: Equatable, Sendable, Codable {
         func recovering(_ i: Int) -> Bool {
             let t = window.startUnix + i * WatchdogConfig.gridSeconds
             var ended = lastWorkoutEndUnix
-            for j in 0..<i where j < effort.count && effort[j] {
+            for j in 0..<i where j < periods.count && periods[j] == .effort {
                 ended = max(ended, window.startUnix + (j + 1) * WatchdogConfig.gridSeconds)
             }
             guard ended > 0 else { return false }
@@ -197,9 +216,12 @@ public struct LBDayTape: Equatable, Sendable, Codable {
                 guard let v = series[i], v.isFinite else { continue }
                 let t = minuteUnix(i)
                 if let dayOf, dayOf(t) != day { continue }
-                changed = self[keyPath: all].addUnique(value: v, minuteUnix: t) || changed
+                if t > floor.all[mark] {
+                    changed = self[keyPath: all].addUnique(value: v, minuteUnix: t) || changed
+                }
                 // Context waits for late motion rows; each minute gets exactly one context.
-                guard t + WatchdogConfig.gridSeconds <= settledBefore, t > contextWatermark[mark] else { continue }
+                guard t + WatchdogConfig.gridSeconds <= settledBefore, t > contextWatermark[mark],
+                      t > floor.context[mark] else { continue }
                 contextWatermark[mark] = t
                 changed = true
                 switch context(i) {
@@ -233,7 +255,28 @@ public struct LBDayTape: Equatable, Sendable, Codable {
              effortBucket: \.effortHRV, unknown: \.unknownContextHRV)
         file(window.spo2, channel: 5, mark: 2, all: \.allSpO2, rest: \.restSpO2,
              effortBucket: \.effortSpO2, unknown: \.unknownContextSpO2)
+        if changed, contextRule == Self.contextRuleLegacy { contextRule = Self.contextRuleMixed }
         return changed
+    }
+
+    /// Per-channel (HR, HRV, SpO2) watermarks: newest minute in the all-bucket and in a context bucket.
+    public struct Watermarks: Equatable, Sendable {
+        public var all: [Int] = [0, 0, 0]
+        public var context: [Int] = [0, 0, 0]
+        public init() {}
+
+        /// The newest minute any of `tapes` already holds, per channel.
+        public static func across<S: Sequence>(_ tapes: S) -> Watermarks where S.Element == LBDayTape {
+            var w = Watermarks()
+            for t in tapes {
+                let all = [t.allHR.lastMinuteUnix, t.allHRV.lastMinuteUnix, t.allSpO2.lastMinuteUnix]
+                for k in 0..<3 {
+                    w.all[k] = max(w.all[k], all[k])
+                    if k < t.contextWatermark.count { w.context[k] = max(w.context[k], t.contextWatermark[k]) }
+                }
+            }
+            return w
+        }
     }
 
     /// Civil days the window's minutes fall on, oldest first.
@@ -259,8 +302,11 @@ public struct LBDayTape: Equatable, Sendable, Codable {
         var changedDays: [String] = []
         for d in days(of: window, dayOf: dayOf) {
             var tape = tapes[d] ?? LBDayTape(day: d)
+            // Absolute-time floor from every other day: a minute is filed on one civil day only,
+            // even when a time-zone change re-maps it to a different day string on a later tick.
+            let floor = Watermarks.across(tapes.values.lazy.filter { $0.day != d })
             if tape.ingest(window: window, nowUnix: nowUnix, lastWorkoutEndUnix: lastWorkoutEndUnix,
-                           sleepIntervals: sleepIntervals, dayOf: dayOf) {
+                           sleepIntervals: sleepIntervals, dayOf: dayOf, floor: floor) {
                 tapes[d] = tape
                 changedDays.append(d)
             }
@@ -269,12 +315,14 @@ public struct LBDayTape: Equatable, Sendable, Codable {
     }
 
     /// A tick that may not train consumes every minute of its window on every day it touches.
+    /// Returns the days whose watermarks moved (the caller persists those).
     @discardableResult
     public static func skipThrough(window: WatchdogWindow, into tapes: inout [String: LBDayTape],
                                    dayOf: (Int) -> String) -> [String] {
-        let days = days(of: window, dayOf: dayOf)
-        for d in days {
-            var tape = tapes[d] ?? LBDayTape(day: d)
+        var changed: [String] = []
+        for d in days(of: window, dayOf: dayOf) {
+            let before = tapes[d]
+            var tape = before ?? LBDayTape(day: d)
             // Stop at the last minute that belongs to this day so a later day is not pre-consumed.
             var last = window.startUnix
             for i in 0..<window.seqLen {
@@ -282,9 +330,12 @@ public struct LBDayTape: Equatable, Sendable, Codable {
                 if dayOf(t - t % 60) == d { last = t }
             }
             tape.skipThrough(minuteUnix: last)
-            tapes[d] = tape
+            if tape != before {
+                tapes[d] = tape
+                changed.append(d)
+            }
         }
-        return days
+        return changed
     }
 
     public func observation(series: LBSeries) -> LBDailyObservation? {

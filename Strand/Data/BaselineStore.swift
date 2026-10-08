@@ -151,7 +151,8 @@ final class BaselineStore: ObservableObject {
                 self.imuAccByDay = Self.loadImu(defaults: defaults)
                 self.dayTapeByDay = Self.loadDayTape(defaults: defaults)
             }
-            self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.map { ($0.key, $0.value.observation) })
+            self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.filter { $0.value.sampleCount > 0 }
+                .map { ($0.key, $0.value.observation) })
             self.dismissedPromptDay = defaults.string(forKey: dismissedPromptKey)
         }
     }
@@ -286,7 +287,8 @@ final class BaselineStore: ObservableObject {
     /// Scoring tape only. Stub series (no DailyMetric column) stay empty — never +6 / ×0.88 / −0.2.
     func observations(from days: [DailyMetric], series: LBSeries) -> [LBDailyObservation] {
         if series == .wakingImuEnergy {
-            return imuAccByDay.values.map(\.observation).sorted { $0.day < $1.day }
+            // A skip-only accumulator (watermark, no samples) is not a day of data.
+            return imuAccByDay.values.filter { $0.sampleCount > 0 }.map(\.observation).sorted { $0.day < $1.day }
         }
         if series.hasDailyMetricColumn {
             return LongitudinalBaseline.observations(from: days, series: series)
@@ -308,7 +310,8 @@ final class BaselineStore: ObservableObject {
         defaults.set(deviceId, forKey: layer1DeviceKey)
         dayTapeByDay = tape
         imuAccByDay = imu
-        imuByDay = Dictionary(uniqueKeysWithValues: imu.map { ($0.key, $0.value.observation) })
+        imuByDay = Dictionary(uniqueKeysWithValues: imu.filter { $0.value.sampleCount > 0 }
+            .map { ($0.key, $0.value.observation) })
     }
 
     /// Unique-minute stub series from the same window Watchdog scored. Does not write Layer 1 snapshots.
@@ -326,10 +329,19 @@ final class BaselineStore: ObservableObject {
         }
     }
 
-    /// A tick that may not train (alert, quality, confounded day) consumes its minutes, so the next
-    /// quiet tick cannot back-fill them into the usual.
-    func skipWatchdogTape(window: WatchdogWindow) {
-        LBDayTape.skipThrough(window: window, into: &dayTapeByDay, dayOf: Self.minuteDayOf())
+    /// A tick that may not train (alert, quality, confounded day) consumes its minutes and IMU samples,
+    /// so the next quiet tick cannot back-fill them into either usual. Persisted at once: a relaunch
+    /// must not forget the skip and let the next quiet tick file the alerting stretch.
+    func skipWatchdogTape(window: WatchdogWindow, nowUnix: Int) {
+        let dayOf = Self.minuteDayOf()
+        if !LBDayTape.skipThrough(window: window, into: &dayTapeByDay, dayOf: dayOf).isEmpty {
+            persistDayTape()
+            tapeLastPersistUnix = nowUnix
+        }
+        if !LBImuDaily.skipThrough(window.imu, into: &imuAccByDay, dayOf: dayOf).isEmpty {
+            persistImu()
+            imuLastPersistUnix = nowUnix
+        }
     }
 
     /// Incremental IMU usual. New samples only; does not write Charge or other Layer 1 series.
