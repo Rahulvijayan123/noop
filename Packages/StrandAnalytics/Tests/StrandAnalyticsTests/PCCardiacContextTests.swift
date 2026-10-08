@@ -238,7 +238,7 @@ final class PCCardiacContextTests: XCTestCase {
         XCTAssertEqual(dn.state, .supported)
         XCTAssertEqual(dn.sleepMedianBpm, 52.5)
         XCTAssertEqual(doc.header.versions.pulse, "pc-pulse-1")
-        XCTAssertNil(doc.header.versions.respiratoryRecovery)
+        XCTAssertEqual(doc.header.versions.respiratoryRecovery, "pc-resp-recovery-1")
 
         let data = try PC.encoder().encode(doc)
         let decoded = try PC.decoder().decode(PC.DayDocument.self, from: data)
