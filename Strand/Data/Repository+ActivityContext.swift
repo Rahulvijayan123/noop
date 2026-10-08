@@ -12,16 +12,36 @@ extension Repository {
     ///
     /// The wearer's personal profile joins once a fit from their guided calibration runs beat the defaults on
     /// held-out runs (`ActivityPersonalProfileStore`); its tag is part of `cacheTag`, so cached days re-decode.
-    var activityDecoderConfig: ActivityDecoderConfig {
-        var config = activityBaseDecoderConfig
+    ///
+    /// This is today's config. A day decodes with `activityDecoderConfig(forDayStart:)`, whose resting rate is
+    /// taken as of that day.
+    var activityDecoderConfig: ActivityDecoderConfig { activityDecoderConfig(beforeDay: nil) }
+
+    /// The config the local day starting at `dayStart` decodes with: the resting-rate reference is the median of
+    /// the latest 14 nights BEFORE that day (D1-14). Not the day's own night either: that sleep ends on the morning
+    /// of the day, so its seconds after midnight would be judged against data from hours later, and the decode is
+    /// recorded as causal. A day with no earlier night uses the default reference. A past day's context
+    /// therefore does not depend on later nights, and its config tag — which the persisted ledger compares —
+    /// stays put as new nights arrive, so a moving reference re-derives only the days it actually applies to.
+    func activityDecoderConfig(forDayStart dayStart: Int) -> ActivityDecoderConfig {
+        activityDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))))
+    }
+
+    private func activityDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        var config = activityBaseDecoderConfig(beforeDay: beforeDay)
         config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
         return config
     }
 
     /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
-    var activityBaseDecoderConfig: ActivityDecoderConfig {
+    var activityBaseDecoderConfig: ActivityDecoderConfig { activityBaseDecoderConfig(beforeDay: nil) }
+
+    /// `beforeDay` (`yyyy-MM-dd`) limits the resting reference to the nights keyed strictly before it; nil uses
+    /// every night.
+    private func activityBaseDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        let nights = beforeDay.map { key in days.filter { $0.day < key } } ?? days
         var config = ActivityDecoderConfig.personalized(
-            restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: days.map(\.restingHr)),
+            restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: nights.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)
         if let model = GaitWindowStore.shared.latestModel {
             let evidence = GaitWindowStore.evidenceConfig(model: model)
@@ -30,10 +50,30 @@ extension Repository {
         return config
     }
 
+    /// The tag the persisted context's ledger records for the config the day starting at `dayStart` decodes with
+    /// (`activityContextDay.configTag`): the config's own `cacheTag` (heart-rate reference as of the day, Inertia /
+    /// ElderNet evidence, personal profile) plus the server's mode for the ElderNet windows the phone decodes with,
+    /// which the config does not name. A day stored under another tag is derived again.
+    func activityContextLedgerConfigTag(dayStart: Int) -> String {
+        let config = activityDecoderConfig(forDayStart: dayStart)
+        var tag = config.cacheTag
+        if config.gaitQuality != nil, let mode = GaitWindowStore.shared.latestMode {
+            tag += "-gm\(mode)"
+        }
+        return tag
+    }
+
+    /// Whether the server's windows (HART, ElderNet) may be attached to a day: they are computed from the raw
+    /// motion THIS phone uploads for the active strap, so a day owned by another id (an older strap, the canonical
+    /// history) never decodes with them. A day with no owner yet is the active strap's.
+    func serverWindowsApply(toDayOwnedBy ownerId: String?) -> Bool {
+        ownerId == nil || ownerId == deviceId
+    }
+
     /// The cache key carries the heart-rate reference: a decoder resumed from state built against another
     /// reference would carry that reference's reading of effort into the new one.
-    var activityContextSourceKey: String {
-        "\(importedReadIds.joined(separator: "+"))@\(activityDecoderConfig.cacheTag)"
+    func activityContextSourceKey(dayStart: Int) -> String {
+        "\(importedReadIds.joined(separator: "+"))@\(activityDecoderConfig(forDayStart: dayStart).cacheTag)"
     }
 
     var dayStateSourceKey: String { importedReadIds.joined(separator: "+") }
@@ -42,8 +82,8 @@ extension Repository {
     /// moment it opens, then brings it up to date. nil when the day has never been decoded, or was decoded by
     /// an older decoder.
     func cachedActivityContext(dayStart: Date) async -> ActivityContextDayDocument? {
-        let source = activityContextSourceKey
         let start = Int(dayStart.timeIntervalSince1970)
+        let source = activityContextSourceKey(dayStart: start)
         return await Task.detached(priority: .userInitiated) {
             ActivityContextFileStore.shared.load(source: source, dayStart: start).flatMap { $0.isCurrent ? $0 : nil }
         }.value
@@ -83,7 +123,9 @@ extension Repository {
             workouts: s.workouts, offWrist: s.offWrist)
         // HART's verdicts on the raw motion this phone uploaded, when the server has produced any for the
         // day. They arrive minutes after the strap's own streams; the day builder re-decodes when they do.
-        if let encoder = ActivityEncoderWindowStore.shared.windows(from: s.start, to: s.end) {
+        // Only for a day the active strap owns: the windows describe that strap's uploads (D5-15).
+        let windowsApply = serverWindowsApply(toDayOwnedBy: s.ownerId)
+        if windowsApply, let encoder = ActivityEncoderWindowStore.shared.windows(from: s.start, to: s.end) {
             input.encoderWindows = encoder.windows
             input.imuWindows = encoder.features
             input.encoderId = encoder.encoderId
@@ -93,9 +135,9 @@ extension Repository {
             input.transitionWindows = encoder.transitions
             input.gaitWindows = encoder.gaitWindows
         }
-        let config = activityDecoderConfig
+        let config = activityDecoderConfig(forDayStart: s.start)
         // ElderNet's gait windows for the same seconds: walking or not, and how (cadence, speed), at 5 s steps.
-        if let gait = config.gaitQuality,
+        if windowsApply, let gait = config.gaitQuality,
            let windows = GaitWindowStore.shared.trackInput(from: s.start, to: s.end, model: gait.model) {
             input.gaitQuality = windows
         }

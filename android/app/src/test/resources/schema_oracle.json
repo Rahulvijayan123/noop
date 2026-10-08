@@ -50,7 +50,8 @@
     "v46-lift-log",
     "v47-rr-whoop5-fill",
     "v48-activity-context",
-    "v49-rr-diff-components"
+    "v49-rr-diff-components",
+    "v50-activity-context-provenance"
   ],
   "divergenceReasons": {
     "android-orphan-synced-column": "REAL COLUMN DRIFT: `synced` exists on Android only. GRDB's v10 note is explicit that stepSample gets no `synced` column ('unused; see StreamStore'), and v12's ppgHrSample never had one either; the Room entities copied the flag from the older per-second entities. Nothing reads it on Android \u2014 the per-row upload flag belongs to an upload path that does not exist there \u2014 so it is dead width, not divergent data. Removing it needs a Room table rebuild.",
@@ -65,7 +66,7 @@
   "tables": {
     "activityContextDay": {
       "platform": "ios_only",
-      "reason": "Derived behavioural-context ledger (GRDB v48): which local days have been decoded, by which activity-classifier decoder / taxonomy version, and how far the data reached. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams, so a database restored from before v48 is simply refilled.",
+      "reason": "Derived behavioural-context ledger (GRDB v48): which local days have been decoded, by which activity-classifier decoder / taxonomy version, and how far the data reached. The Android decoder is not ported, so Room has no twin; the table is regenerable from the sample streams, so a database restored from before v48 is simply refilled. v50 adds the derivation key (feature schema, encoder / expert stamps, config tag, input fingerprint) and the day's finality and decode mode.",
       "columns": [
         {
           "name": "deviceId",
@@ -138,6 +139,66 @@
           "affinity": "INTEGER",
           "notNull": true,
           "default": null
+        },
+        {
+          "name": "featureSchema",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "encoderId",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "encoderVersion",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "motionHeads",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "gaitQuality",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "configTag",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "inputFingerprint",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "finality",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": "'provisional'"
+        },
+        {
+          "name": "decodeMode",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": "'causal'"
+        },
+        {
+          "name": "sleepKnownOutsideSessions",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
         }
       ],
       "primaryKey": [
@@ -151,6 +212,13 @@
           "columns": [
             "deviceId",
             "day"
+          ]
+        },
+        {
+          "name": "idx_activityContextDay_start",
+          "unique": false,
+          "columns": [
+            "dayStart"
           ]
         }
       ]
@@ -320,6 +388,48 @@
           "affinity": "INTEGER",
           "notNull": true,
           "default": "0"
+        },
+        {
+          "name": "inBed",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "uncertainty",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "experts",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "transitionCount",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "absorbedSeconds",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "precededByGapS",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "settlingSeconds",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
         }
       ],
       "primaryKey": [
@@ -337,6 +447,60 @@
           ]
         }
       ]
+    },
+    "activityContextTransition": {
+      "platform": "ios_only",
+      "reason": "Derived (GRDB v50): the activity decoder's typed transition events (sit-to-stand and the like), written with the day's activityContextInterval rows. The Android decoder is not ported, so Room has no twin; regenerable from the sample streams.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "ts",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "kind",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "probability",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "onsetTs",
+          "affinity": "INTEGER",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "source",
+          "affinity": "TEXT",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "decoderVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "ts",
+        "kind"
+      ],
+      "indices": []
     },
     "appleDaily": {
       "platform": "both",
@@ -2413,6 +2577,83 @@
       "primaryKey": [
         "deviceId",
         "ts"
+      ],
+      "indices": []
+    },
+    "spotHrvReading": {
+      "platform": "ios_only",
+      "reason": "GRDB v50: timestamped manual spot HRV readings (start, end, support, method; context joins by time). iOS-only for now: Android still banks the reading as the day-level hrv_snapshot metric point only, which iOS keeps writing too.",
+      "columns": [
+        {
+          "name": "deviceId",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "startTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "endTs",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "rmssd",
+          "affinity": "REAL",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "sdnn",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "meanNN",
+          "affinity": "REAL",
+          "notNull": false,
+          "default": null
+        },
+        {
+          "name": "cleanBeats",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "inputBeats",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "source",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "methodVersion",
+          "affinity": "TEXT",
+          "notNull": true,
+          "default": null
+        },
+        {
+          "name": "createdAt",
+          "affinity": "INTEGER",
+          "notNull": true,
+          "default": null
+        }
+      ],
+      "primaryKey": [
+        "deviceId",
+        "startTs"
       ],
       "indices": []
     },

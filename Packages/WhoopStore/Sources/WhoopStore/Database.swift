@@ -1126,7 +1126,8 @@ extension WhoopStore {
         //
         // The views name the stream tables they read. A future migration that REBUILDS one of those tables
         // (drop + rename, as v24-rr-seq did for rrInterval) must `DROP VIEW` the `*Ctx` views first and
-        // recreate them with `ActivityContextViews.createStatements`; `ActivityContextStoreTests` queries
+        // recreate them with `ActivityContextViews.createStatements` (v50 rebuilt them; v48 itself runs the
+        // frozen `v48CreateStatements`); `ActivityContextStoreTests` queries
         // every view so a forgotten one fails loudly.
         //
         // iOS-only in schema_oracle.json (the Android decoder is not ported). Every create is
@@ -1182,7 +1183,7 @@ extension WhoopStore {
             try db.create(index: "idx_activityContextDay_day", on: "activityContextDay",
                           columns: ["deviceId", "day"], options: [.ifNotExists])
 
-            for sql in ActivityContextViews.createStatements { try db.execute(sql: sql) }
+            for sql in ActivityContextViews.v48CreateStatements { try db.execute(sql: sql) }
         }
         // v49-rr-diff-components: the successive-difference components behind an interval's `rmssd`
         // (`rmssd` itself only, averaging already-square-rooted RMSSD values is not how a root-mean-square
@@ -1197,6 +1198,89 @@ extension WhoopStore {
                 t.add(column: "rrDiffSqSumMs2", .double).notNull().defaults(to: 0)
                 t.add(column: "rrDiffCount", .integer).notNull().defaults(to: 0)
             }
+        }
+        // v50-activity-context-provenance: what produced each materialized day, whether it can still change,
+        // the decoder's typed transition events, and timestamped spot HRV readings.
+        //
+        // `activityContextDay` gains the derivation key the ledger lacked: the feature schema, the encoder and
+        // expert stamps (`ActivityStateVersions`), the decoder config tag (personal HR reference, gait lane,
+        // profile), and the fingerprint of the day's whole decode input. A day whose stored key no longer
+        // matches is derived again, and the fingerprint persists across launches so a late backfill to an old
+        // day is seen after a relaunch too. `finality` is 'provisional' while the day is live or its sleep is
+        // not yet settled, else 'final'; every pre-v50 row reads 'provisional' (we cannot know). `decodeMode`
+        // is 'causal' for every phone decode (it only ever reads the past of each second). All additive and
+        // nullable or defaulted: an older row reads as "derived before provenance was recorded".
+        //
+        // `activityContextInterval` gains the run-level fields the interval builder is gaining (in-bed, overall
+        // uncertainty, the experts that shaped the run, the transitions folded inside, seconds absorbed from
+        // short fragments, the data gap before it, and the settling time after a posture change). All NULL-able,
+        // and NULL reads as "not recorded" (a 0 transition count is a real "none folded in", so it is never the
+        // default). Until the builder fills them, count a run's transitions with `activityContextIntervalTransitions`.
+        //
+        // `activityContextTransition` keeps the decoder's typed events (sit-to-stand and the like) durably, so a
+        // 10 s stand that the interval builder folds into a sitting stretch still leaves a joinable trace.
+        // Written with the day's intervals, in the same transaction. `onsetTs` / `source` are NULL until the
+        // decoder reports them.
+        //
+        // `spotHrvReading` keeps each manual 60 s HRV reading with its own start and end, instead of one value
+        // per day that a second reading overwrote. It carries no copy of the activity context: like every other
+        // measurement, a reading joins its context by time (`spotHrvReadingCtx`), so a re-derived day never leaves
+        // a stale label on it, and whether that context is still provisional is the ledger's answer.
+        //
+        // The `*Ctx` views are rebuilt: a sample now joins the interval of its day's OWNER (the ledger), not
+        // only intervals stored under the sample's own id, and carries the day's decoder version and whether
+        // the context is still provisional. iOS-only, like v48.
+        migrator.registerMigration("v50-activity-context-provenance") { db in
+            try db.alter(table: "activityContextDay") { t in
+                t.add(column: "featureSchema", .text)
+                t.add(column: "encoderId", .text)
+                t.add(column: "encoderVersion", .text)
+                t.add(column: "motionHeads", .text)
+                t.add(column: "gaitQuality", .text)
+                t.add(column: "configTag", .text)
+                t.add(column: "inputFingerprint", .text)
+                t.add(column: "finality", .text).notNull().defaults(to: "provisional")
+                t.add(column: "decodeMode", .text).notNull().defaults(to: "causal")
+                t.add(column: "sleepKnownOutsideSessions", .integer)
+            }
+            // The views find a sample's day owner by time alone.
+            try db.create(index: "idx_activityContextDay_start", on: "activityContextDay",
+                          columns: ["dayStart"], options: [.ifNotExists])
+            try db.alter(table: "activityContextInterval") { t in
+                t.add(column: "inBed", .integer)
+                t.add(column: "uncertainty", .double)
+                t.add(column: "experts", .text)
+                t.add(column: "transitionCount", .integer)       // NULL = not recorded (0 means none folded in)
+                t.add(column: "absorbedSeconds", .integer)
+                t.add(column: "precededByGapS", .integer)
+                t.add(column: "settlingSeconds", .integer)
+            }
+            try db.create(table: "activityContextTransition", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()
+                t.column("ts", .integer).notNull()               // unix seconds the decoder flagged it
+                t.column("kind", .text).notNull()                // ActivityTransitionKind code
+                t.column("probability", .double).notNull()
+                t.column("onsetTs", .integer)                    // back-dated start of the movement, when known
+                t.column("source", .text)                        // decoder | transition expert | refined
+                t.column("decoderVersion", .text).notNull()
+                t.primaryKey(["deviceId", "ts", "kind"])
+            }
+            try db.create(table: "spotHrvReading", options: [.ifNotExists]) { t in
+                t.column("deviceId", .text).notNull()            // the strap whose live R-R was read
+                t.column("startTs", .integer).notNull()          // unix seconds, inclusive
+                t.column("endTs", .integer).notNull()            // unix seconds, exclusive
+                t.column("rmssd", .double).notNull()
+                t.column("sdnn", .double)
+                t.column("meanNN", .double)
+                t.column("cleanBeats", .integer).notNull()
+                t.column("inputBeats", .integer).notNull()
+                t.column("source", .text).notNull()              // manual-hrv
+                t.column("methodVersion", .text).notNull()
+                t.column("createdAt", .integer).notNull()
+                t.primaryKey(["deviceId", "startTs"])
+            }
+            for sql in ActivityContextViews.dropStatements { try db.execute(sql: sql) }
+            for sql in ActivityContextViews.createStatements { try db.execute(sql: sql) }
         }
         return migrator
     }

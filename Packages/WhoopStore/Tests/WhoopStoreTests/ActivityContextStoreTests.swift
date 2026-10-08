@@ -73,7 +73,8 @@ final class ActivityContextStoreTests: XCTestCase {
 
         // Querying each view compiles its SELECT against the live stream tables, so a renamed or dropped
         // column in a source table fails here and not in a user's query.
-        for view in ActivityContextViews.sampleViewNames + [ActivityContextViews.dayClassView] {
+        for view in ActivityContextViews.sampleViewNames + [ActivityContextViews.dayClassView, ActivityContextViews.intervalTransitionsView,
+                                                            ActivityContextViews.spotHrvReadingView] {
             _ = try await store.rowsForTest("SELECT * FROM \(view) LIMIT 1")
         }
     }
@@ -91,7 +92,7 @@ final class ActivityContextStoreTests: XCTestCase {
     }
 
     func testMigrationIsRegisteredLast() {
-        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v49-rr-diff-components")
+        XCTAssertEqual(WhoopStore.makeMigrator().migrations.last, "v50-activity-context-provenance")
     }
 
     // MARK: - Replace / read
@@ -427,15 +428,28 @@ final class ActivityContextStoreTests: XCTestCase {
         XCTAssertEqual(rows[1]["ctxEndTs"] as Int?, day0 + 200)
     }
 
-    func testViewsOnlyUseTheSameDevicesIntervals() async throws {
+    /// v50 (D5-09 / D3V-02): a day's context is stored once, under the day's owner, while its streams are read
+    /// across every raw id, so a sample recorded under another id joins the OWNER's interval — the same answer
+    /// `Repository.storedActivityContext` gives for that second. (Before v50 the join was same-device only and
+    /// this sample read NULL context.) A device's own ledger still wins where both have one.
+    func testASampleUnderAnotherIdJoinsItsDayOwnersContext() async throws {
         let store = try await WhoopStore.inMemory()
         try await store.replaceActivityContext(deviceId: "strap-a", day: ledger(day0), intervals: [interval(day0, 1_000, "sitting")])
         try await seedHeartRate(store, [(day0 + 10, 60)], device: "strap-a")
-        try await seedHeartRate(store, [(day0 + 10, 90)], device: "strap-b")
-        let rows = try await store.rowsForTest("SELECT deviceId, ctxClass FROM hrSampleCtx ORDER BY deviceId")
-        XCTAssertEqual(rows.map { $0["deviceId"] as String }, ["strap-a", "strap-b"])
+        try await seedHeartRate(store, [(day0 + 10, 90), (day0 + 2_000, 91)], device: "strap-b")
+        try await seedHeartRate(store, [(day0 - 100, 92)], device: "strap-b")
+        let rows = try await store.rowsForTest("SELECT deviceId, ts, ctxClass, ctxDeviceId FROM hrSampleCtx ORDER BY deviceId, ts")
+        XCTAssertEqual(rows.map { $0["deviceId"] as String }, ["strap-a", "strap-b", "strap-b", "strap-b"])
         XCTAssertEqual(rows[0]["ctxClass"] as String?, "sitting")
-        XCTAssertNil(rows[1]["ctxClass"] as String?, "another strap's samples never inherit this strap's behaviour")
+        XCTAssertEqual(rows[2]["ctxClass"] as String?, "sitting", "strap-b's sample inside the owned day joins its owner's context")
+        XCTAssertEqual(rows[2]["ctxDeviceId"] as String?, "strap-a")
+        XCTAssertNil(rows[1]["ctxClass"] as String?, "a sample before any materialized day has no context")
+        XCTAssertNil(rows[3]["ctxClass"] as String?, "a gap inside the owned day stays a gap")
+
+        // Where strap-b has its own ledger for the instant, its own context wins.
+        try await store.replaceActivityContext(deviceId: "strap-b", day: ledger(day0), intervals: [interval(day0, 1_000, "running")])
+        let own = try await store.rowsForTest("SELECT ctxClass FROM hrSampleCtx WHERE deviceId = 'strap-b' AND ts = ?", [day0 + 10])
+        XCTAssertEqual(own.first?["ctxClass"] as String?, "running")
     }
 
     func testEveryPhysiologicalStreamJoinsToItsInterval() async throws {

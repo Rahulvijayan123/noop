@@ -131,9 +131,15 @@ final class ActivityContextPersistenceTests: XCTestCase {
             day: "2025-10-09", dayStart: t0, dayEnd: t0 + 86_400,
             taxonomyVersion: ActivityClassVersions.taxonomy, decoderVersion: ActivityContextVersions.decoder,
             ontologyVersion: ActivityContextVersions.ontology, intervalVersion: ActivityClassVersions.interval,
-            computedAt: t0)
+            computedAt: t0, featureSchema: ActivityContextVersions.featureSchema, configTag: "r55m190")
         XCTAssertTrue(ActivityContextPersistence.isCurrent(current))
-        var older = current; older.taxonomyVersion = "act-class-0"
+        XCTAssertTrue(ActivityContextPersistence.isCurrent(current, configTag: "r55m190"))
+        XCTAssertFalse(ActivityContextPersistence.isCurrent(current, configTag: "r52m190"), "another decoder config")
+        var older = current; older.featureSchema = nil
+        XCTAssertFalse(ActivityContextPersistence.isCurrent(older), "derived before the ledger recorded its feature schema")
+        older = current; older.featureSchema = "feat-0"
+        XCTAssertFalse(ActivityContextPersistence.isCurrent(older))
+        older = current; older.taxonomyVersion = "act-class-0"
         XCTAssertFalse(ActivityContextPersistence.isCurrent(older))
         older = current; older.decoderVersion = "hsmm-1.1"
         XCTAssertFalse(ActivityContextPersistence.isCurrent(older))
@@ -141,6 +147,69 @@ final class ActivityContextPersistenceTests: XCTestCase {
         XCTAssertFalse(ActivityContextPersistence.isCurrent(older))
         older = current; older.intervalVersion = "ctx-int-0"
         XCTAssertFalse(ActivityContextPersistence.isCurrent(older))
+    }
+
+    func testTheLedgerCarriesTheDocumentsWholeProvenanceAndFinality() throws {
+        var sim = ActivitySim(start: t0)
+        sim.desk(120)
+        let input = sim.trackInput()
+        var document = ActivityContextDayDocument(track: ActivityContextTrackBuilder.build(input), input: input, generatedAt: t0 + 500)
+        document.versions.encoderId = "hart"
+        document.versions.encoderVersion = "hart-v1.2"
+        document.versions.motionHeads = "inertia-1:abc:def"
+        document.versions.gaitQuality = "eldernet:437a38b:01b2:ff"
+        document.sleepKnownOutsideSessions = true
+        let end = t0 + 86_400
+        let early = ActivityContextPersistence.dayRow(day: "2025-10-09", document: document, intervalCount: 1,
+                                                      computedAt: t0 + 500, dayEnd: end, configTag: "r55m190",
+                                                      inputFingerprint: "fp", writtenAt: end + 60)
+        XCTAssertEqual(early.featureSchema, document.versions.featureSchema)
+        XCTAssertEqual(early.encoderId, "hart")
+        XCTAssertEqual(early.encoderVersion, "hart-v1.2")
+        XCTAssertEqual(early.motionHeads, "inertia-1:abc:def")
+        XCTAssertEqual(early.gaitQuality, "eldernet:437a38b:01b2:ff")
+        XCTAssertEqual(early.configTag, "r55m190")
+        XCTAssertEqual(early.inputFingerprint, "fp")
+        XCTAssertEqual(early.decodeMode, "causal")
+        XCTAssertEqual(early.sleepKnownOutsideSessions, true)
+        XCTAssertEqual(early.finality, "provisional", "the night running into the next morning is not staged yet")
+        let settled = ActivityContextPersistence.dayRow(day: "2025-10-09", document: document, intervalCount: 1,
+                                                        computedAt: t0 + 500, dayEnd: end,
+                                                        writtenAt: end + ActivityContextPersistence.sleepSettleS)
+        XCTAssertEqual(settled.finality, "final")
+        document.sleepKnownOutsideSessions = false
+        let live = ActivityContextPersistence.dayRow(day: "2025-10-09", document: document, intervalCount: 1,
+                                                     computedAt: t0 + 500, dayEnd: end, writtenAt: end + 86_400)
+        XCTAssertEqual(live.finality, "provisional", "a day decoded live read time outside sleep as unknown")
+    }
+
+    func testTransitionEventsBecomeRowsForTheirDayOnly() {
+        let events = [
+            ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.6, ts: t0 + 10),
+            ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.9, ts: t0 + 10),
+            ActivityTransitionEvent(kind: .standToSitLike, probability: 0.7, ts: t0 + 20),
+            ActivityTransitionEvent(kind: .walkStart, probability: 0.8, ts: t0 - 1),
+            ActivityTransitionEvent(kind: .walkStop, probability: 0.8, ts: t0 + 100),
+        ]
+        let rows = ActivityContextPersistence.transitionRows(events, from: t0, to: t0 + 100, decoderVersion: "hsmm-x")
+        XCTAssertEqual(rows, [
+            ActivityContextTransitionRow(ts: t0 + 10, kind: "sit_to_stand_like", probability: 0.9, decoderVersion: "hsmm-x"),
+            ActivityContextTransitionRow(ts: t0 + 20, kind: "stand_to_sit_like", probability: 0.7, decoderVersion: "hsmm-x"),
+        ])
+    }
+
+    func testServingStatusSeparatesStaleLabelsFromAnOldDerivationKey() {
+        let current = ActivityContextDayRow(
+            day: "2025-10-09", dayStart: t0, dayEnd: t0 + 86_400,
+            taxonomyVersion: ActivityClassVersions.taxonomy, decoderVersion: ActivityContextVersions.decoder,
+            ontologyVersion: ActivityContextVersions.ontology, intervalVersion: ActivityClassVersions.interval,
+            computedAt: t0, featureSchema: ActivityContextVersions.featureSchema, configTag: "r55")
+        XCTAssertEqual(ActivityContextPersistence.servingStatus(current, configTag: "r55"), .current)
+        XCTAssertEqual(ActivityContextPersistence.servingStatus(current, configTag: "r52"), .refreshing)
+        var legacy = current; legacy.featureSchema = nil
+        XCTAssertEqual(ActivityContextPersistence.servingStatus(legacy), .refreshing)
+        var old = current; old.decoderVersion = "hsmm-0.1"
+        XCTAssertEqual(ActivityContextPersistence.servingStatus(old), .stale)
     }
 
     func testClippingKeepsOneDaysRowsInsideItsRange() {
