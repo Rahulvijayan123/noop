@@ -221,7 +221,12 @@ channel speaks) is unchanged.
 the child's measured `loaded` map (artifact sha256s read from the bytes it loaded, the package code digest,
 thread settings), the version labels, and the request. A child whose ping carries no `loaded` map (or whose
 `loaded_digest` does not check out) gets no cache key, so nothing is cached. The ElderNet stage's in-memory
-response cache uses the same key. HART `loaded` keys: `schema, code_sha256, manifest_sha256,
+response cache uses the same key. A key carries a stamp (`ActivityPythonService.CacheStamp`: the child's spawn
+generation and loaded digest when the key was built); an answer is stored only when `answerMatches(stamp,
+replyDigest:)`: the same process answered (a respawn mid-request loads whatever is on disk then), it still reports
+that identity, and HART's reply repeats that `loaded_digest` (serve.py sends it on every infer; ElderNet's infer
+reply carries none, so the generation and the ping identity decide). Otherwise the answer is used for the job and
+not kept. HART `loaded` keys: `schema, code_sha256, manifest_sha256,
 checkpoint_sha256, config_sha256, threads, env.*` (+ transition and gait artifacts when loaded); ElderNet:
 `weights_digest, upstream_digest, calibration_sha256`; Inertia/ActiNet: `bundle_sha256,
 encoder_config_sha256, checkpoint_sha256`.
@@ -374,9 +379,13 @@ There is no experimental preview on the phone (no UI decodes a candidate arm), s
 (`GaitWindowsCache`, `WalkingInsightsSection`, `DayActivityDetailViews`) shows ElderNet gait quality from the
 route's newest row; it is quality reporting, not activity decoding, and is unchanged (see "Requests to parent").
 
-`Repository+ActivityPersonalProfile.swift` (not owned here) still gates gait windows on
-`activityBaseDecoderConfig.gaitQuality`, which is now always nil, so the personal-profile fit runs without ElderNet
-(as it effectively did at the base, where the decoder refused the unrecorded windows).
+`Repository+ActivityPersonalProfile.swift`: the personal-profile fit replays HART and the strap streams alone. Its
+former ElderNet branches were gated on `activityBaseDecoderConfig.gaitQuality`, which is now always nil, and were
+removed (round 3); the fit fingerprint keeps its `g0` text, so fits made since the policy landed are not redone.
+
+The window fetches send the release-authority capability (`authority=1`, `ServerScoreRepository.windowsURL`), so
+the server sends this build the gait `model` and the embedded gait columns it withholds from older builds (see
+"Older phones").
 
 ### Stored fields and migration
 
