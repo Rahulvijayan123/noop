@@ -44,16 +44,46 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     /// Never mixed with HR, RHR, or step count.
     case wakingImuEnergy = "waking_imu_energy"
 
+    // v2.clinical context strata (docs/BASELINE_WATCHDOG_V2.md §3). Built from the stored activity-context
+    // intervals of the whole day (not only minutes the app was open), each posture its own history. Posture comes
+    // from the activity decoder's class AND posture channel agreeing at confidence ≥ 0.6; anything else stays in
+    // the pooled awake-rest series only. Never averaged with each other or with the pooled series.
+    case awakeSupineHR = "awake_supine_hr"
+    case awakeSupineHRVLn = "awake_supine_hrv_ln"
+    case awakeSeatedHR = "awake_seated_hr"
+    case awakeSeatedHRVLn = "awake_seated_hrv_ln"
+    case awakeUprightHR = "awake_upright_hr"
+    case awakeUprightHRVLn = "awake_upright_hrv_ln"
+    /// Steady-state walking HR (≥ 3 min into a stationary-to-walking bout), a submaximal-effort marker.
+    case walkingHR = "walking_hr"
+    /// Mean HR across asleep minutes (all stages) with a within-night scale: the reference for LIVE minutes
+    /// while asleep. `sleepRHR` (the nightly resting value) is a different quantity and is never used for that.
+    case sleepHR = "sleep_hr"
+
+    /// Body position of a posture stratum (nil for every other series).
+    public var posture: LBPosture? {
+        switch self {
+        case .awakeSupineHR, .awakeSupineHRVLn: return .supine
+        case .awakeSeatedHR, .awakeSeatedHRVLn: return .seated
+        case .awakeUprightHR, .awakeUprightHRVLn: return .upright
+        default: return nil
+        }
+    }
+
     /// LABEL: series context
     /// Five contexts. Still/moving is a minute gate, not a sixth series.
     public var context: LBContext {
         switch self {
         case .sleepRHR, .sleepHRVLn, .sleepTemp, .sleepResp, .sleepSpO2Mean, .sleepSpO2Nadir:
             return .sleep
-        case .awakeRestHR, .awakeRestHRVLn, .awakeRestSpO2Mean:
+        case .awakeRestHR, .awakeRestHRVLn, .awakeRestSpO2Mean,
+             .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
+             .awakeUprightHR, .awakeUprightHRVLn:
             return .awakeRest
-        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean:
+        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR:
             return .awakeActive
+        case .sleepHR:
+            return .sleep
         case .continuousHR, .continuousHRVLn, .continuousSpO2Mean:
             return .continuous
         case .wakingSteps, .wakingActiveMin, .wakingImuEnergy:
@@ -65,8 +95,10 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     /// Quiet-column pick stays inside one family. Sleep RHR is never compared to steps.
     public var biometricFamily: String {
         switch self {
-        case .sleepRHR, .awakeRestHR, .awakeActiveHR, .continuousHR: return "hr"
-        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn: return "hrv"
+        case .sleepRHR, .awakeRestHR, .awakeActiveHR, .continuousHR,
+             .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR, .walkingHR, .sleepHR: return "hr"
+        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn,
+             .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return "hrv"
         case .sleepResp: return "resp"
         case .sleepTemp: return "temp"
         case .sleepSpO2Mean, .sleepSpO2Nadir, .awakeRestSpO2Mean, .awakeActiveSpO2Mean, .continuousSpO2Mean:
@@ -80,7 +112,8 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     /// HRV math is on ln(RMSSD). Every other series stays in native units.
     public var usesLog: Bool {
         switch self {
-        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn: return true
+        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn,
+             .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return true
         default: return false
         }
     }
@@ -178,6 +211,30 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
             return LBPlanSeries(series: self, planName: "Daily movement energy",
                                 context: .wakingLoad, dailyMetricColumn: nil,
                                 condensedSection: "5.18", unit: "g")
+        case .awakeSupineHR:
+            return LBPlanSeries(series: self, planName: "Awake lying heart rate", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .awakeSupineHRVLn:
+            return LBPlanSeries(series: self, planName: "Awake lying HRV ln(RMSSD)", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "ms")
+        case .awakeSeatedHR:
+            return LBPlanSeries(series: self, planName: "Awake seated heart rate", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .awakeSeatedHRVLn:
+            return LBPlanSeries(series: self, planName: "Awake seated HRV ln(RMSSD)", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "ms")
+        case .awakeUprightHR:
+            return LBPlanSeries(series: self, planName: "Awake standing heart rate", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .awakeUprightHRVLn:
+            return LBPlanSeries(series: self, planName: "Awake standing HRV ln(RMSSD)", context: .awakeRest,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "ms")
+        case .walkingHR:
+            return LBPlanSeries(series: self, planName: "Steady walking heart rate", context: .awakeActive,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .sleepHR:
+            return LBPlanSeries(series: self, planName: "Sleep heart rate (all stages)", context: .sleep,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
         }
     }
 }
@@ -231,16 +288,20 @@ public struct LBDailyObservation: Equatable, Sendable {
     public var coverage: Double?
     /// True when a step/activity stream existed that day (zero steps is then a real 0).
     public var streamPresent: Bool
+    /// v2: robust within-day scale of the stratum's short-window values (math space), when the materializer had
+    /// ≥ 3 qualifying intervals. Lets a LIVE short-window comparison add within-day to between-day variance.
+    public var withinDayScale: Double? = nil
 
     public init(day: String, value: Double?, qualityStatus: LBQualityStatus,
                 qualityReason: LBQualityReason? = nil, coverage: Double? = nil,
-                streamPresent: Bool = true) {
+                streamPresent: Bool = true, withinDayScale: Double? = nil) {
         self.day = day
         self.value = value
         self.qualityStatus = qualityStatus
         self.qualityReason = qualityReason
         self.coverage = coverage
         self.streamPresent = streamPresent
+        self.withinDayScale = withinDayScale
     }
 }
 
@@ -269,6 +330,33 @@ public struct LBCarry: Equatable, Sendable {
     public var usualFreeze: LBUsualFreeze? = nil
     public var usualEpochStart: Int? = nil
     public var weekOffStreak: Int = 0
+
+    // v2.clinical change-point state (two-sided CUSUM on daily predictive z; see LongitudinalBaselineStatistics).
+    /// Upper / lower CUSUM arms. `cusumS` mirrors max(pos, neg) for the v1 field.
+    public var cusumPos: Double = 0
+    public var cusumNeg: Double = 0
+    /// Last epoch that entered the CUSUM (gap reset bookkeeping).
+    public var cusumLastEpoch: Int? = nil
+    /// First epoch of the current CUSUM run (the change-point estimate when an alarm fires).
+    public var cusumRunStartPos: Int? = nil
+    public var cusumRunStartNeg: Int? = nil
+    /// Open persistent-shift episode (+1 up / −1 down / 0 none).
+    public var changeDirection: Int = 0
+    public var changeOnsetEpoch: Int? = nil
+    public var changeAlarmEpoch: Int? = nil
+    /// Pre-change 60-day copy held while the episode is young, so the adaptive copy does not silently absorb a
+    /// new level (`Params.changeHoldDays`).
+    public var heldCopyLong: LongitudinalBaseline.Stats.WindowCopy? = nil
+    public var holdUntilEpoch: Int? = nil
+    /// Ring of out-of-sample |predictive z| on established, clean, non-episode days (newest last). Calibrates the
+    /// band multiplier for heavy tails the Gaussian/t model misses. Never in-sample.
+    public var oosAbsZ: [Double] = []
+    /// |z| of recent days waiting `V2.oosDelayDays` before entering `oosAbsZ`; dropped if a change episode
+    /// opens over them, so a real change never widens the band that should detect it.
+    public var oosPending: [Int: Double] = [:]
+    /// Most recent change episode of this epoch (kept after it closes): corroborates drift from the anchor.
+    public var lastEpisodeDirection: Int = 0
+    public var lastEpisodeAlarmEpoch: Int? = nil
 
     public init(center7: Double? = nil, spread7: Double? = nil,
                 centerLong: Double? = nil, spreadLong: Double? = nil,
@@ -347,6 +435,15 @@ public struct LBCopySnapshot: Equatable, Sendable {
     public var lastUpdate: String?
     public var version: String
     public var held: Bool
+    /// v2: effective sample size (AR(1)-corrected), predictive scale √(spread² + SE²), Student-t df and
+    /// two-sided predictive p of today against this copy. Nil on v1-built snapshots.
+    public var nEff: Double? = nil
+    public var predictiveSpread: Double? = nil
+    public var df: Double? = nil
+    public var pToday: Double? = nil
+    /// Calendar window the copy was built from (inclusive), ISO days.
+    public var fromDay: String? = nil
+    public var toDay: String? = nil
 
     public init(center: Double, spread: Double, centerDisplay: Double,
                 bandLoDisplay: Double, bandHiDisplay: Double,
@@ -429,6 +526,33 @@ public struct LBEvaluation: Equatable, Sendable {
     public var contextPrompt: LBOutOfBoundsPrompt = .silent
     /// Pre-illness snapshot after a logged felt-ill. Nil unless they logged it.
     public var usualFreeze: LBUsualFreeze? = nil
+
+    // MARK: v2.clinical (additive; see docs/BASELINE_WATCHDOG_V2.md)
+    /// 3-month copy: median / MAD of clean days T−90 … T−8 (same 7-day gap as the 60-day copy).
+    public var copy90: LBCopySnapshot? = nil
+    /// Long-term historical copy: median / MAD of clean days T−365 … T−8.
+    public var copyHistorical: LBCopySnapshot? = nil
+    /// Frozen reference of the current epoch. Never moved by new data; only an epoch event re-anchors it.
+    public var anchor: LBAnchorSnapshot? = nil
+    /// Significance-tested trends (Theil–Sen + autocorrelation-corrected Mann–Kendall). Reported, never folded
+    /// into the comparison center.
+    public var trend28: LBTrendSnapshot? = nil
+    public var trend90: LBTrendSnapshot? = nil
+    /// Recent level (median of the last 14 clean days) against the frozen anchor.
+    public var drift: LBDriftSnapshot? = nil
+    /// Persistent-shift episode from the two-sided CUSUM.
+    public var change: LBChangeSnapshot = .none
+    public var maturity: LBMaturity = .none
+    /// Two-sided predictive Student-t p of today against the 60-day copy (and z on the predictive scale).
+    public var pLong: Double? = nil
+    public var zPredLong: Double? = nil
+    public var p7: Double? = nil
+    /// Out-of-sample tail calibration factor applied to the band multiplier (≥ 1).
+    public var calibrationFactor: Double = 1
+    /// Median within-day scale (math space) over the 60-day window's clean days that carried one (context strata
+    /// only). A LIVE short-window value varies around the day's level by this much on top of the between-day
+    /// spread; nil when unknown.
+    public var withinDayScaleLong: Double? = nil
 
     /// LABEL: human-readable math dump
     /// One block you can print after a test failure to see both copies, gap, CUSUM, and confidence.
@@ -577,6 +701,10 @@ public enum LongitudinalBaseline {
         public static let continuousMinMinutes = 240.0
         /// Minutes of strap IMU before the movement-energy usual may train that day.
         public static let imuMinMinutes = 60.0
+        /// v2 strata: qualifying still minutes per posture-day, steady walking minutes, asleep minutes.
+        public static let postureMinMinutes = 15.0
+        public static let walkingMinMinutes = 10.0
+        public static let sleepHRMinMinutes = 120.0
         /// Stored on the snapshot; trial clocks are Phase B and do not change Phase A math.
         public static let persistWindow = 3
         public static let persistHits = 2
@@ -800,8 +928,12 @@ public enum LongitudinalBaseline {
         }
         let trialEpoch: Int? = request.freeze.flatMap { isoEpochDay($0.t0CivilDay) }
         var illnessFreeze: LBUsualFreeze? = nil
+        // v2: the felt-ill "when well" snapshot applies only to the CURRENT illness episode (onset … last logged
+        // ill day + `V2.illnessFreezeRecoveryDays`). v1 kept the newest snapshot forever, so personal comparisons
+        // months later used a stale pre-illness reference.
         if trialEpoch == nil,
            let onset = firstFeltIllOnset(dayLogs: request.dayLogsByDay, through: t),
+           illnessFreezeActive(onset: onset, dayLogs: request.dayLogsByDay, asOf: t),
            let freezeDay = freezeAsOfDay(t0CivilDay: onset), freezeDay < t {
             let preReq = LBTrialRequest(dayLogsByDay: request.dayLogsByDay)
             let pre = evaluate(asOf: freezeDay, series: series, observations: observations,
@@ -829,11 +961,25 @@ public enum LongitudinalBaseline {
                     state.nLong = 0
                     state.establishedLong = false
                     state.cusumS = 0
+                    state.cusumPos = 0
+                    state.cusumNeg = 0
+                    state.cusumRunStartPos = nil
+                    state.cusumRunStartNeg = nil
+                    state.changeDirection = 0
+                    state.changeOnsetEpoch = nil
+                    state.changeAlarmEpoch = nil
+                    state.heldCopyLong = nil
+                    state.holdUntilEpoch = nil
+                    state.oosAbsZ = []
+                    state.oosPending = [:]
+                    state.lastEpisodeDirection = 0
+                    state.lastEpisodeAlarmEpoch = nil
                     resetEpoch = true
                 }
                 let es = trialEpoch.flatMap { d >= $0 ? trialEpoch : nil }
                 last = scoreOneDay(tEpoch: d, series: series, byDay: byDay, carry: state,
-                                   epochStart: es, dayLogs: request.dayLogsByDay)
+                                   epochStart: es, dayLogs: request.dayLogsByDay,
+                                   final: d == tEpoch, referenceEpochs: request.referenceEpochs)
                 var next = last.carry
                 next.usualFreeze = state.usualFreeze
                 last.carry = next
@@ -849,7 +995,8 @@ public enum LongitudinalBaseline {
             }
             let es = trialEpoch.flatMap { tEpoch >= $0 ? trialEpoch : nil }
             var one = scoreOneDay(tEpoch: tEpoch, series: series, byDay: byDay, carry: state,
-                                  epochStart: es, dayLogs: request.dayLogsByDay)
+                                  epochStart: es, dayLogs: request.dayLogsByDay,
+                                  final: true, referenceEpochs: request.referenceEpochs)
             one.carry.usualFreeze = state.usualFreeze
             one.usualFreeze = state.usualFreeze
             scored = one
@@ -981,10 +1128,13 @@ public enum LongitudinalBaseline {
     public static func seriesSpec(_ series: LBSeries) -> (minVal: Double, maxVal: Double, floor: Double) {
         switch series {
         case .sleepRHR: return (30, 120, 2)
-        case .awakeRestHR: return (35, 160, 3)
+        case .sleepHR: return (30, 130, 2)
+        case .awakeRestHR, .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return (35, 160, 3)
+        case .walkingHR: return (50, 190, 4)
         case .awakeActiveHR: return (40, 200, 4)
         case .continuousHR: return (35, 190, 5)
-        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn:
+        case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn,
+             .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn:
             return (5, 250, 0.08)   // native ms range; floor is on ln
         case .sleepResp: return (4, 40, 0.5)
         case .sleepTemp: return (20, 42, 0.3)
@@ -1226,18 +1376,33 @@ public enum LongitudinalBaseline {
 
     // MARK: - One-day score (longer copy first, then 7-day)
 
-    /// LABEL: score one civil day against history strictly before it
-    /// Order: CUSUM on the night that just aged into when-well → trim/median → Student-t EWMA →
-    /// borrow spread → today z → gap → confidence → persistence.
+    /// LABEL: score one civil day against history strictly before it (v2.clinical)
+    /// Order: 60-day robust copy (small-sample MAD, trim-consistent, AR(1) n_eff, predictive scale) → change-hold
+    /// → two-sided CUSUM on today's predictive z → Student-t EWMA (7-day) → borrowed spread → predictive band
+    /// (t_df quantile × out-of-sample tail factor) → z / p → persistence → confidence / trust. When `final` the
+    /// 3-month / long-term copies, anchor, trends and drift are added (`enrichV2`).
+    ///
+    /// What changed from v1 and why (audit 2026-10-07):
+    ///   • the comparison center is the robust median, never moved along a fitted slope (v1 extrapolated a noise
+    ///     slope and absorbed real ramps);
+    ///   • the band is a predictive interval with Student-t df from the AR(1) effective n, inflated by an
+    ///     out-of-sample tail factor (v1: fixed k or an in-sample 95th percentile → 8.5–10.5 % daily off-rate);
+    ///   • the change detector is the PhysiologyContext two-sided CUSUM on daily z (v1 folded |e| with k below
+    ///     E|Z| and reset it whenever the noise slope was "usable", so it never fired);
+    ///   • on a CUSUM alarm the pre-change copy is held for `V2.changeHoldDays` so the adaptive copy does not
+    ///     silently absorb the new level; the frozen anchor keeps the shift visible afterwards.
     static func scoreOneDay(tEpoch: Int, series: LBSeries, byDay: [Int: LBDailyObservation],
                             carry: LBCarry, epochStart: Int? = nil,
-                            dayLogs: [String: LBDayLog] = [:]) -> LBEvaluation {
+                            dayLogs: [String: LBDayLog] = [:],
+                            final: Bool = true,
+                            referenceEpochs: [LBReferenceEpoch] = []) -> LBEvaluation {
         let spec = seriesSpec(series)
         let p = params(for: series)
         let tISO = isoFromEpochDay(tEpoch)
         let todayObs = byDay[tEpoch]
         let todayNative = trainableNative(todayObs, series: series)
         let todayMath = todayNative.flatMap { toMath($0, series: series) }
+        let todayClean = nightIsClean(tEpoch, dayLogs: dayLogs)
 
         var lastOK = lastQualityOKEpoch(byDay: byDay, series: series, through: tEpoch, dayLogs: dayLogs)
         var stale: Bool = {
@@ -1245,66 +1410,45 @@ public enum LongitudinalBaseline {
             return tEpoch - lastOK > Params.staleDays
         }()
 
-        var longEpochs = Array((tEpoch - Params.lookbackLong)...(tEpoch - Params.gapDays - 1))
+        let lastLongNight = tEpoch - Params.gapDays - 1
+        var longEpochs = Array((tEpoch - Params.lookbackLong)...lastLongNight)
         if let epochStart {
             longEpochs = longEpochs.filter { $0 >= epochStart }
         }
         longEpochs = longEpochs.filter { nightIsClean($0, dayLogs: dayLogs) }
-        let longTrain = mathValues(epochs: longEpochs, byDay: byDay, series: series)
+        let longPairsAll: [(epoch: Int, value: Double)] = longEpochs.compactMap { e in
+            guard let x = trainableMath(byDay[e], series: series) else { return nil }
+            return (e, x)
+        }
+        let longTrain = longPairsAll.map(\.value)
         var nLongLowQ = countStatus(epochs: longEpochs, byDay: byDay, status: .lowQuality)
         let trim = trimLongList(longTrain, floor: spec.floor)
         let trimKeptFrac: Double? = longTrain.isEmpty ? nil : trim.keptFrac
         let twoBlockShift = twoBlockMedianShift(longTrain)
         let nEst = p.nLongEstablished
 
-        var centerLong: Double? = nil
-        var spreadLong: Double? = nil
-        var nLong = 0
-        var longHeld = false
-        var lastLongUpdate: String? = nil
+        // 60-day robust copy (v2 estimator), with the v1 hold when fewer than 4 clean nights exist.
+        var liveCopy: Stats.WindowCopy? = Stats.windowCopy(
+            pairs: longPairsAll, floor: spec.floor, minN: Params.nLongShow,
+            fromEpoch: tEpoch - Params.lookbackLong, toEpoch: lastLongNight)
+        var longPairs = longPairsAll
+        var lastLongUpdate: String? = liveCopy != nil
+            ? lastUpdate(epochs: longEpochs, byDay: byDay, series: series, dayLogs: dayLogs) : nil
 
-        if trim.absorbed, let med = median(trim.kept) {
-            centerLong = med
-            spreadLong = robustSpread(values: trim.kept, center: med, floor: spec.floor)
-            nLong = trim.kept.count
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
-                                       dayLogs: dayLogs)
-        } else if let med = median(longTrain), longTrain.count >= Params.nLongShow {
-            centerLong = med
-            spreadLong = robustSpread(values: longTrain, center: med, floor: spec.floor)
-            nLong = longTrain.count
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
-                                       dayLogs: dayLogs)
-        } else if let heldC = carry.centerLong, let heldS = carry.spreadLong {
-            centerLong = heldC
-            spreadLong = heldS
-            nLong = carry.nLong
-            longHeld = true
-            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series,
-                                       dayLogs: dayLogs)
-        }
-
-        let longPairsAll: [(epoch: Int, value: Double)] = longEpochs.compactMap { e in
-            guard let x = trainableMath(byDay[e], series: series) else { return nil }
-            return (e, x)
-        }
+        // Habit-matched copy (rest vs trained days), unchanged rule: ≥ 7 matched nights.
         let todayLog = dayLogs[tISO]
         let habitToday = todayLog?.habitClass ?? .unspecified
         var habitMatched = false
-        var longPairs = longPairsAll
         if habitToday == .rest || habitToday == .trained {
             let matched = longPairsAll.filter { pair in
-                let d = isoFromEpochDay(pair.epoch)
-                return (dayLogs[d]?.habitClass ?? .unspecified) == habitToday
+                (dayLogs[isoFromEpochDay(pair.epoch)]?.habitClass ?? .unspecified) == habitToday
             }
-            if matched.count >= 7 {
+            if matched.count >= 7,
+               let mc = Stats.windowCopy(pairs: matched, floor: spec.floor, minN: 7,
+                                         fromEpoch: tEpoch - Params.lookbackLong, toEpoch: lastLongNight) {
                 longPairs = matched
                 habitMatched = true
-                if let med = median(matched.map(\.value)) {
-                    centerLong = med
-                    spreadLong = robustSpread(values: matched.map(\.value), center: med, floor: spec.floor)
-                    nLong = matched.count
-                }
+                liveCopy = mc
                 lastOK = lastQualityOKEpoch(byDay: byDay, series: series, through: tEpoch,
                                             dayLogs: dayLogs, habit: habitToday)
                 stale = {
@@ -1312,87 +1456,154 @@ public enum LongitudinalBaseline {
                     return tEpoch - lastOK > Params.staleDays
                 }()
                 lastLongUpdate = longPairs.last.map { isoFromEpochDay($0.epoch) }
-                let habitEpochs = longEpochs.filter {
-                    habitMatches($0, habit: habitToday, dayLogs: dayLogs)
-                }
+                let habitEpochs = longEpochs.filter { habitMatches($0, habit: habitToday, dayLogs: dayLogs) }
                 nLongLowQ = countStatus(epochs: habitEpochs, byDay: byDay, status: .lowQuality)
             }
         }
-        if longHeld, let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
+
+        // Reference copy actually used today: the change-hold copy while an episode is young, else the live
+        // copy, else the v1 carry hold (thin window).
+        var refCopy: Stats.WindowCopy? = liveCopy
+        var longHeld = false
+        var holdingForChange = false
+        // A habit-matched copy (explicit context stratum) wins over the pooled change-hold copy.
+        if !habitMatched, let held = carry.heldCopyLong, let until = carry.holdUntilEpoch, tEpoch <= until {
+            refCopy = held
+            longHeld = true
+            holdingForChange = true
+        }
+        var centerLong: Double? = refCopy?.center
+        var spreadLong: Double? = refCopy?.scale
+        var nLong = refCopy?.n ?? 0
+        if refCopy == nil, let heldC = carry.centerLong, let heldS = carry.spreadLong {
+            centerLong = heldC
+            spreadLong = heldS
+            nLong = carry.nLong
+            longHeld = true
+            lastLongUpdate = lastUpdate(epochs: longEpochs, byDay: byDay, series: series, dayLogs: dayLogs)
+        }
+        if longHeld, !holdingForChange, let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
             lastOK = heldEpoch
             stale = tEpoch - heldEpoch > Params.staleDays
         }
         let establishedLong = nLong >= nEst
         let showLong = nLong >= Params.nLongShow && centerLong != nil
+
+        // Slope: diagnostic + Phase B only. Significance-tested; never moves today's comparison center.
         let slopePairs = Array(longPairs.suffix(slopeFitNights))
-        let slope: Double? = theilSenSlope(xs: slopePairs.map { Double($0.epoch) },
-                                           ys: slopePairs.map(\.value))
-        let lastLongNight = longPairs.last?.epoch ?? (tEpoch - Params.gapDays - 1)
-        var origin = slopePairs.isEmpty ? lastLongNight
-            : (slopePairs.first!.epoch + slopePairs.last!.epoch) / 2
-        let recentStep = recentBlockIsLevelStep(pairs: longPairs,
-                                                olderMedian: centerLong ?? 0,
-                                                spread: spreadLong ?? spec.floor)
-        // Anchor the path so it passes through the last long night: intercept stays the long median.
-        if !recentStep, let s = slope, let c = centerLong, let last = slopePairs.last, abs(s) > 1e-9 {
-            let dt = (last.value - c) / s
-            if dt.isFinite, abs(dt) < Double(Params.lookbackLong * 2) {
-                origin = last.epoch - Int(dt.rounded())
-            }
-        }
-        var residualSpread = spreadLong ?? spec.floor
-        if !recentStep, let c = centerLong, let s = slope, !slopePairs.isEmpty {
-            let resid = slopePairs.map { $0.value - (c + s * Double($0.epoch - origin)) }
-            residualSpread = robustSpread(values: resid, center: 0, floor: spec.floor)
-        }
-        let slopeUsable = !recentStep
-            && slopeIsUsable(slope: slope ?? 0, spread: spreadLong ?? spec.floor,
-                             n: slopePairs.count, residualSpread: residualSpread,
-                             established: establishedLong)
-            && (tEpoch - lastLongNight) <= slopeHorizonDays
-        let slopeValue = slope ?? 0
-
-        // CUSUM on nights the slow path does not explain. A usable slope is the drift; do not
-        // keep a CUSUM that piled up while the ramp was being fitted.
-        var cusumS = carry.cusumS
-        let entering = tEpoch - (Params.gapDays + 1)
-        if slopeUsable {
-            cusumS = 0
-        } else if let liveCenter = carry.centerLong, let liveSpread = carry.spreadLong,
-           epochStart.map({ entering >= $0 }) ?? true,
-           nightIsClean(entering, dayLogs: dayLogs),
-           let x = trainableMath(byDay[entering], series: series) {
-            cusumS = cusumStep(previousS: cusumS, value: x, center: liveCenter, spread: liveSpread)
-        }
-        let pChange = changeProbability(cusumS: cusumS)
-        let regimeShift = pChange >= Params.pThr && !slopeUsable
-
-        if regimeShift, let heldC = carry.centerLong, let heldS = carry.spreadLong, carry.establishedLong {
-            centerLong = heldC
-            spreadLong = heldS
-            nLong = max(nLong, carry.nLong)
-            longHeld = true
-            if let iso = lastLongUpdate, let heldEpoch = isoEpochDay(iso) {
-                lastOK = heldEpoch
-                stale = tEpoch - heldEpoch > Params.staleDays
-            }
-        }
-
-        let expectedToday: Double? = centerLong.map {
-            expectedOnPath(center: $0, slope: slopeValue, usable: slopeUsable,
-                           day: tEpoch, origin: origin, lastNight: lastLongNight)
-        }
-
-        let absZ: [Double] = {
-            guard let c = centerLong, let spr = spreadLong, spr > 0 else { return [] }
-            return longPairs.map { pair in
-                let exp = expectedOnPath(center: c, slope: slopeValue, usable: slopeUsable,
-                                         day: pair.epoch, origin: origin, lastNight: lastLongNight)
-                return abs(pair.value - exp) / spr
-            }
+        let slopeTrend = Stats.trend(pairs: slopePairs)
+        let slope: Double? = slopeTrend?.slopePerDay
+            ?? theilSenSlope(xs: slopePairs.map { Double($0.epoch) }, ys: slopePairs.map(\.value))
+        let slopeSignificant: Bool = {
+            guard let t = slopeTrend else { return false }
+            return t.p < V2.trendAlpha && (t.lowerPerDay > 0 || t.upperPerDay < 0)
         }()
-        let kUsed = kBandFromStableWindow(tableK: p.kBand, absResidualZ: absZ, nLong: nLong)
+        let slopeUsable = slopeSignificant
+            && slopeIsUsable(slope: slope ?? 0, spread: spreadLong ?? spec.floor, n: slopePairs.count,
+                             residualSpread: spreadLong ?? spec.floor, established: establishedLong)
+        let origin = lastLongNight
+        let expectedToday: Double? = centerLong
 
+        // Predictive scale and band multiplier for the reference copy.
+        let calFactor = oosCalibrationFactor(carry.oosAbsZ)
+        let predScale: Double? = refCopy?.predictiveScale ?? spreadLong
+        let dfLong: Double = refCopy?.df ?? max(Double(nLong) - 1, 2)
+        let tcrit = Stats.studentTCritical(alpha: V2.bandAlpha, df: dfLong)
+        let kUsed: Double = {
+            guard let s = spreadLong, s > 0, let ps = predScale else { return p.kBand }
+            return tcrit * (ps / s) * calFactor
+        }()
+        let zPredLong: Double? = {
+            guard let x = todayMath, let c = centerLong, let ps = predScale, ps > 0 else { return nil }
+            return (x - c) / ps
+        }()
+        let pLong: Double? = zPredLong.map { Stats.studentTTwoSidedP($0 / calFactor, df: dfLong) }
+
+        // Two-sided CUSUM on today's predictive z (established reference, clean trainable day only).
+        var next = LBCarry()
+        next.cusumPos = carry.cusumPos
+        next.cusumNeg = carry.cusumNeg
+        next.cusumLastEpoch = carry.cusumLastEpoch
+        next.cusumRunStartPos = carry.cusumRunStartPos
+        next.cusumRunStartNeg = carry.cusumRunStartNeg
+        next.changeDirection = carry.changeDirection
+        next.changeOnsetEpoch = carry.changeOnsetEpoch
+        next.changeAlarmEpoch = carry.changeAlarmEpoch
+        next.heldCopyLong = carry.heldCopyLong
+        next.holdUntilEpoch = carry.holdUntilEpoch
+        next.oosAbsZ = carry.oosAbsZ
+        next.oosPending = carry.oosPending
+        next.lastEpisodeDirection = carry.lastEpisodeDirection
+        next.lastEpisodeAlarmEpoch = carry.lastEpisodeAlarmEpoch
+        if let until = next.holdUntilEpoch, tEpoch > until {
+            next.heldCopyLong = nil
+            next.holdUntilEpoch = nil
+        }
+        let cfg = V2.cusum
+        if establishedLong, todayClean, let z = zPredLong {
+            if let lastE = next.cusumLastEpoch, tEpoch - lastE > cfg.maxGapDays {
+                next.cusumPos = 0
+                next.cusumNeg = 0
+                next.cusumRunStartPos = nil
+                next.cusumRunStartNeg = nil
+                next.changeDirection = 0
+                next.changeOnsetEpoch = nil
+                next.changeAlarmEpoch = nil
+                next.heldCopyLong = nil
+                next.holdUntilEpoch = nil
+            }
+            let phi = refCopy?.phi ?? Stats.phiFallback
+            let wasPos = next.cusumPos, wasNeg = next.cusumNeg
+            let step = Stats.cusumStep(pos: wasPos, neg: wasNeg, z: z / calFactor, phi: phi, config: cfg)
+            next.cusumPos = step.pos
+            next.cusumNeg = step.neg
+            if wasPos == 0, step.pos > 0 { next.cusumRunStartPos = tEpoch }
+            if step.pos == 0 { next.cusumRunStartPos = nil }
+            if wasNeg == 0, step.neg > 0 { next.cusumRunStartNeg = tEpoch }
+            if step.neg == 0 { next.cusumRunStartNeg = nil }
+            if step.alarm != 0, next.changeDirection != step.alarm {
+                next.changeDirection = step.alarm
+                next.changeOnsetEpoch = (step.alarm > 0 ? next.cusumRunStartPos : next.cusumRunStartNeg) ?? tEpoch
+                next.changeAlarmEpoch = tEpoch
+                if next.heldCopyLong == nil, !habitMatched, let rc = refCopy {
+                    next.heldCopyLong = rc
+                    next.holdUntilEpoch = tEpoch + V2.changeHoldDays
+                }
+            }
+            // PhysiologyContext semantics: the episode is ongoing while its arm is above h. The arm is capped at
+            // 1.25·h, so an episode ends ≈ (0.25·h)/k = 7 in-control days after the evidence stops.
+            if next.changeDirection > 0, next.cusumPos <= cfg.h {
+                next.changeDirection = 0
+            } else if next.changeDirection < 0, next.cusumNeg <= cfg.h {
+                next.changeDirection = 0
+            }
+            if next.changeDirection == 0 {
+                next.changeOnsetEpoch = nil
+                next.changeAlarmEpoch = nil
+                next.heldCopyLong = nil
+                next.holdUntilEpoch = nil
+            }
+            next.cusumLastEpoch = tEpoch
+            // Out-of-sample tail ring: today's |z| was computed before today entered any copy. It waits
+            // `oosDelayDays` in `oosPending`; an episode alarm drops every pending day from its onset, so the days
+            // that make up a real change never widen the band that must detect it.
+            if next.changeAlarmEpoch == tEpoch, let onset = next.changeOnsetEpoch {
+                next.oosPending = next.oosPending.filter { $0.key < onset }
+                next.lastEpisodeDirection = next.changeDirection
+                next.lastEpisodeAlarmEpoch = tEpoch
+            }
+            if next.changeDirection == 0 { next.oosPending[tEpoch] = abs(z) }
+            for (e, v) in next.oosPending.sorted(by: { $0.key < $1.key }) where tEpoch - e >= V2.oosDelayDays {
+                next.oosPending[e] = nil
+                next.oosAbsZ.append(v)
+            }
+            if next.oosAbsZ.count > V2.oosRing { next.oosAbsZ.removeFirst(next.oosAbsZ.count - V2.oosRing) }
+        }
+        let cusumS = max(next.cusumPos, next.cusumNeg)
+        let pChange = min(1, cusumS / cfg.h)
+        let regimeShift = next.changeDirection != 0
+
+        // 7-day EWMA, Student-t learn weights against the reference center (not a slope path).
         let weekEpochs = Array((tEpoch - p.span7)...(tEpoch - 1))
         var weekMath: [Double?] = []
         var lambdas: [Double] = []
@@ -1402,9 +1613,7 @@ public enum LongitudinalBaseline {
                 n7 += 1
                 var lambda = 1.0
                 if establishedLong, let c = centerLong, let s = spreadLong, s > 0 {
-                    let exp = expectedOnPath(center: c, slope: slopeValue, usable: slopeUsable,
-                                             day: e, origin: origin, lastNight: lastLongNight)
-                    lambda = studentTLambda(zLong: (x - exp) / s)
+                    lambda = studentTLambda(zLong: (x - c) / s)
                 }
                 weekMath.append(x)
                 lambdas.append(lambda)
@@ -1443,25 +1652,23 @@ public enum LongitudinalBaseline {
             weekHeld = true
         }
 
+        func smallSampleSpread(_ values: [Double], center: Double) -> Double {
+            let raw = PhysiologyContext.RobustStats.madScale(values, center: center, smallSampleCorrection: true) ?? 0
+            return max(raw, spec.floor)
+        }
         var spread7Raw: Double? = nil
         if let c7 = center7, !weekHeld {
-            let madSrc: [Double]
             let strong = madPool.filter { $0.lambda >= 0.5 }.map(\.x)
-            if strong.count >= 3 { madSrc = strong }
-            else { madSrc = madPool.map(\.x) }
-            spread7Raw = robustSpread(values: madSrc, center: c7, floor: spec.floor)
-            let mix = borrowedSpread(spread7Raw: spread7Raw ?? spec.floor,
-                                     spreadLong: spreadLong,
-                                     nLearn: nLearn,
-                                     establishedLong: establishedLong,
-                                     floor: spec.floor)
-            spread7 = mix.spread
+            let madSrc = strong.count >= 3 ? strong : madPool.map(\.x)
+            spread7Raw = smallSampleSpread(madSrc, center: c7)
+            spread7 = borrowedSpread(spread7Raw: spread7Raw ?? spec.floor, spreadLong: spreadLong,
+                                     nLearn: nLearn, establishedLong: establishedLong, floor: spec.floor).spread
         }
 
         let show7 = n7 >= Params.n7Show && (center7 != nil || center7Raw != nil)
         if show7, center7 == nil, let raw = center7Raw {
             center7 = raw
-            spread7Raw = robustSpread(values: madPool.map(\.x), center: raw, floor: spec.floor)
+            spread7Raw = smallSampleSpread(madPool.map(\.x), center: raw)
             spread7 = borrowedSpread(spread7Raw: spread7Raw ?? spec.floor, spreadLong: spreadLong,
                                      nLearn: nLearn, establishedLong: establishedLong,
                                      floor: spec.floor).spread
@@ -1479,18 +1686,34 @@ public enum LongitudinalBaseline {
         let cLongPct = confidencePctLong(nLong: nLong, nLowQuality: nLongLowQ, series: series,
                                          stale: stale, regimeShift: regimeShift)
 
-        let alertEligible = establishedLong && !stale && !regimeShift
+        // A persistent shift no longer silences alerting: the pre-change copy is held, so today is still
+        // compared with "before". Stale or not-yet-established references never alert.
+        let alertEligible = establishedLong && !stale
 
         func zScore(today: Double?, center: Double?, spread: Double?) -> Double? {
             guard let today, let center, let spread, spread > 0 else { return nil }
             return (today - center) / spread
         }
         let z7 = zScore(today: todayMath, center: center7, spread: spread7)
-        let zLong = zScore(today: todayMath, center: expectedToday ?? centerLong, spread: spreadLong)
+        let zLong = zScore(today: todayMath, center: centerLong, spread: spreadLong)
+        // 7-day predictive p: the week copy has ≤ 7 (10 for HRV) points; df from the learn mass.
+        let p7: Double? = {
+            guard let x = todayMath, let c = center7, let s = spread7, s > 0 else { return nil }
+            let nn = max(nLearn, 1)
+            let se = PhysiologyContext.RobustStats.medianStandardErrorFactor * s / nn.squareRoot()
+            let ps = (s * s + se * se).squareRoot()
+            return Stats.studentTTwoSidedP((x - c) / ps, df: max(nn - 1, 2))
+        }()
+        let k7: Double = {
+            guard let s = spread7, s > 0 else { return p.kBand }
+            let nn = max(nLearn, 1)
+            let se = PhysiologyContext.RobustStats.medianStandardErrorFactor * s / nn.squareRoot()
+            return Stats.studentTCritical(alpha: V2.bandAlpha, df: max(nn - 1, 2)) * ((s * s + se * se).squareRoot() / s)
+        }()
 
         let gap: Double?
         let gapZ: Double?
-        if let raw = center7Raw, let cl = expectedToday ?? centerLong {
+        if let raw = center7Raw, let cl = centerLong {
             gap = raw - cl
             gapZ = (spreadLong ?? 0) > 0 ? gap! / spreadLong! : nil
         } else {
@@ -1518,13 +1741,8 @@ public enum LongitudinalBaseline {
 
         let weekVals = weekMath.compactMap { $0 }
         let r1Week = lag1R1(residuals: weekVals.map { $0 - (center7 ?? $0) }) ?? 0
-        let r1Long = lag1R1(residuals: longPairs.map {
-            $0.value - expectedOnPath(center: centerLong ?? $0.value, slope: slopeValue,
-                                      usable: slopeUsable, day: $0.epoch, origin: origin,
-                                      lastNight: lastLongNight)
-        }) ?? 0
         let nEff7 = nEff(n: n7, r1: r1Week)
-        let nEffLong = nEff(n: nLong, r1: r1Long)
+        let nEffLong = refCopy?.nEff ?? nEff(n: nLong, r1: Stats.phiFallback)
         let ageLast = lastOK.map { tEpoch - $0 }
         let tonight = todayObs?.qualityStatus
         let trust7 = usualTrustPct(LBTrustInputs(
@@ -1534,9 +1752,10 @@ public enum LongitudinalBaseline {
         let trustLong = usualTrustPct(LBTrustInputs(
             nOk: nLong, nWindow: Params.longSlots, nLowQuality: nLongLowQ, nEff: nEffLong,
             nEstablish: nEst, ageLastOk: ageLast, staleDays: Params.staleDays,
-            slopeUsable: slopeUsable, freezeOk: 1, confoundToday: false, tonightStatus: tonight))
-        let how7 = howUnusualPct(z: z7, nEff: nEff7)
-        let howLong = howUnusualPct(z: zLong, nEff: nEffLong)
+            // v2: the slope no longer moves the center, so an unusable slope no longer discounts trust.
+            slopeUsable: true, freezeOk: 1, confoundToday: false, tonightStatus: tonight))
+        let how7 = p7.map { clipPct(100.0 * (1.0 - $0)) }
+        let howLong = pLong.map { clipPct(100.0 * (1.0 - $0)) }
 
         func copySnapshot(center: Double?, spread: Double?, n: Int, coverageDenom: Double,
                           lastUpdate: String?, version: String, held: Bool,
@@ -1560,35 +1779,44 @@ public enum LongitudinalBaseline {
                 lastUpdate: lastUpdate, version: version, held: held)
         }
 
-        let bandCenterLong = expectedToday ?? centerLong
-        let copy7 = show7 ? copySnapshot(center: center7, spread: spread7, n: n7,
+        var copy7 = show7 ? copySnapshot(center: center7, spread: spread7, n: n7,
                                          coverageDenom: Double(p.span7),
                                          lastUpdate: lastUpdate(epochs: weekEpochs, byDay: byDay, series: series,
                                                                 dayLogs: dayLogs),
-                                         version: Params.version7, held: weekHeld, z: z7, k: kUsed) : nil
-        let copyLong = showLong ? copySnapshot(center: bandCenterLong, spread: spreadLong, n: nLong,
+                                         version: Params.version7, held: weekHeld, z: z7, k: k7) : nil
+        copy7?.pToday = p7
+        copy7?.fromDay = isoFromEpochDay(tEpoch - p.span7)
+        copy7?.toDay = isoFromEpochDay(tEpoch - 1)
+        var copyLong = showLong ? copySnapshot(center: centerLong, spread: spreadLong, n: nLong,
                                                coverageDenom: Double(Params.longSlots),
                                                lastUpdate: lastLongUpdate,
                                                version: Params.versionLong, held: longHeld, z: zLong,
                                                k: kUsed) : nil
+        if copyLong != nil {
+            copyLong?.nEff = refCopy?.nEff
+            copyLong?.predictiveSpread = predScale
+            copyLong?.df = dfLong
+            copyLong?.pToday = pLong
+            copyLong?.fromDay = isoFromEpochDay(tEpoch - Params.lookbackLong)
+            copyLong?.toDay = isoFromEpochDay(lastLongNight)
+        }
 
-        let newCarry = LBCarry(
-            center7: center7 ?? carry.center7,
-            spread7: spread7 ?? carry.spread7,
-            centerLong: centerLong ?? carry.centerLong,
-            spreadLong: spreadLong ?? carry.spreadLong,
-            nLong: nLong,
-            establishedLong: establishedLong,
-            cusumS: cusumS,
-            zLongPrev: zLong ?? carry.zLongPrev,
-            runLength: runLength,
-            recentZLong: recent,
-            lastQualityOKEpoch: lastOK,
-            slopeLong: slope,
-            slopeUsable: slopeUsable,
-            longOriginEpoch: origin)
+        next.center7 = center7 ?? carry.center7
+        next.spread7 = spread7 ?? carry.spread7
+        next.centerLong = centerLong ?? carry.centerLong
+        next.spreadLong = spreadLong ?? carry.spreadLong
+        next.nLong = nLong
+        next.establishedLong = establishedLong
+        next.cusumS = cusumS
+        next.zLongPrev = zLong ?? carry.zLongPrev
+        next.runLength = runLength
+        next.recentZLong = recent
+        next.lastQualityOKEpoch = lastOK
+        next.slopeLong = slope
+        next.slopeUsable = slopeUsable
+        next.longOriginEpoch = origin
 
-        return LBEvaluation(
+        var ev = LBEvaluation(
             asOf: tISO, series: series, todayNative: todayNative,
             copy7: copy7, copyLong: copyLong,
             center7Raw: center7Raw,
@@ -1609,7 +1837,47 @@ public enum LongitudinalBaseline {
             pChange: pChange, cusumS: cusumS, regimeShift: regimeShift,
             twoBlockShift: twoBlockShift, trimKeptFrac: trimKeptFrac,
             runLength: runLength, worse: worse, hits3: hits3, twoOfThree: twoOfThree,
-            paramSet: Params.paramSet, carry: newCarry)
+            paramSet: V2.paramSet, carry: next)
+        ev.pLong = pLong
+        ev.zPredLong = zPredLong
+        ev.withinDayScaleLong = PhysiologyContext.RobustStats.median(longEpochs.compactMap { e in
+            guard trainableMath(byDay[e], series: series) != nil else { return nil }
+            return byDay[e]?.withinDayScale
+        })
+        ev.p7 = p7
+        ev.calibrationFactor = calFactor
+        let worseDir = p.worse
+        let dir = next.changeDirection
+        let changeWorse: Bool = {
+            switch worseDir {
+            case .higher: return dir > 0
+            case .lower: return dir < 0
+            case .either: return dir != 0
+            }
+        }()
+        let magnitude: Double? = {
+            guard dir != 0, let onset = next.changeOnsetEpoch, let ref = next.heldCopyLong?.center ?? centerLong
+            else { return nil }
+            let vals = (onset...tEpoch).compactMap { e -> Double? in
+                guard nightIsClean(e, dayLogs: dayLogs) else { return nil }
+                return trainableMath(byDay[e], series: series)
+            }
+            return PhysiologyContext.RobustStats.median(vals.map { $0 - ref })
+        }()
+        ev.change = LBChangeSnapshot(open: dir != 0, direction: dir,
+                                     onsetDay: next.changeOnsetEpoch.map(isoFromEpochDay),
+                                     alarmDay: next.changeAlarmEpoch.map(isoFromEpochDay),
+                                     magnitude: magnitude, statisticPos: next.cusumPos,
+                                     statisticNeg: next.cusumNeg, holdingCopy: holdingForChange,
+                                     holdUntilDay: next.holdUntilEpoch.map(isoFromEpochDay), worse: changeWorse)
+        if final {
+            enrichV2(&ev, tEpoch: tEpoch, series: series, byDay: byDay, dayLogs: dayLogs,
+                     epochStart: epochStart, referenceEpochs: referenceEpochs,
+                     todayMath: todayMath, todayNative: todayNative)
+        } else {
+            ev.maturity = nLong < Params.nLongShow ? .none : (establishedLong ? .established : .learning)
+        }
+        return ev
     }
 
     // MARK: - Observation helpers
@@ -1681,6 +1949,17 @@ public enum LongitudinalBaseline {
     public static func applyCoverageGate(_ obs: LBDailyObservation, series: LBSeries) -> LBDailyObservation {
         var o = obs
         switch series {
+        case .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
+             .awakeUprightHR, .awakeUprightHRVLn, .walkingHR, .sleepHR:
+            // Coverage = qualifying minutes behind the day value (materializer).
+            if o.qualityStatus == .ok {
+                let need = series == .walkingHR ? Params.walkingMinMinutes
+                    : (series == .sleepHR ? Params.sleepHRMinMinutes : Params.postureMinMinutes)
+                if (o.coverage ?? 0) < need {
+                    o.qualityStatus = .lowQuality
+                    o.qualityReason = .lowCoverage
+                }
+            }
         case .awakeRestHR, .awakeRestHRVLn:
             if o.qualityStatus == .ok {
                 guard let c = o.coverage else {

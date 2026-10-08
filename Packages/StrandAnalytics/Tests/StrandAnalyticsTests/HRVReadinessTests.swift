@@ -43,10 +43,12 @@ final class HRVReadinessTests: XCTestCase {
         let r = HRVReadiness.evaluate(avgHrv: flatHistory)
         XCTAssertNotNil(r)
         XCTAssertEqual(r!.tier, .normal)
-        // baseline7 == longMean and longSD == 0 → the band collapses to the mean, all reading back to 60 ms.
+        // baseline7 == longMean and longSD == 0. This used to pin the band COLLAPSING to the mean (a 1e-9 SD
+        // floor), which is the defect the 2026-10-07 baseline audit listed for HRVReadiness ("SD floor 1e-9");
+        // BaselineStandard rule 5 floors the ln SD at 0.05, so the band is mean · exp(±0.025).
         XCTAssertEqual(r!.baseline7Ms, 60.0, accuracy: 1e-6)
-        XCTAssertEqual(r!.normalLowMs, 60.0, accuracy: 1e-6)
-        XCTAssertEqual(r!.normalHighMs, 60.0, accuracy: 1e-6)
+        XCTAssertEqual(r!.normalLowMs, 60.0 * exp(-0.025), accuracy: 1e-6)
+        XCTAssertEqual(r!.normalHighMs, 60.0 * exp(0.025), accuracy: 1e-6)
     }
 
     // MARK: - Calibrating / nil edge (< minNights valid nights)

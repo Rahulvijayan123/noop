@@ -17,10 +17,16 @@ public struct WatchdogClinicianExport: Equatable, Sendable, Codable {
     public var text: String
 
     public static let disclaimer =
-        "Not a medical device. Not a diagnosis. Bundled graphs are students."
+        "Not a medical device. Not a diagnosis. The expected values drawn on the phone are this person's own "
+        + "established baselines for the context of each minute (asleep; lying, sitting or standing still; "
+        + "walking), not a model; where no baseline is established yet nothing is drawn. Anomaly candidates "
+        + "come only from the server models (TimesFM 3.0 forecast, UniTS reconstruction) and are listed with "
+        + "their versions; every alert passed baseline, activity, sensor-quality, significance and "
+        + "independence checks."
 
     public static func versionLine() -> String {
-        "\(WatchdogConfig.configVersion) · \(WatchdogConfig.modelVersion) student · \(WatchdogConfig.forecastModelVersion) student · Layer 1 \(WatchdogConfig.paramSet)"
+        "\(WatchdogConfig.configVersion) · expected = personal baselines \(WatchdogConfig.expectationVersion) · "
+            + "no on-device model · Layer 1 \(LongitudinalBaseline.V2.paramSet)"
     }
 
     public static func build(deviceId: String, startUnix: Int, endUnix: Int,
@@ -46,6 +52,24 @@ public struct WatchdogClinicianExport: Equatable, Sendable, Codable {
             }
             if let week { copies.append(week) }
             if let long { copies.append(long) }
+            if let c = ev.copy90 {
+                copies.append(String(format: "%@ 3-month n=%d center=%.2f", ev.series.rawValue, c.n, c.centerDisplay))
+            }
+            if let c = ev.copyHistorical {
+                copies.append(String(format: "%@ long-term n=%d center=%.2f", ev.series.rawValue, c.n, c.centerDisplay))
+            }
+            if let a = ev.anchor {
+                copies.append(String(format: "%@ frozen reference %@…%@ center=%.2f", ev.series.rawValue,
+                                     a.fromDay, a.toDay, a.centerDisplay))
+            }
+            if let d = ev.drift, d.significant {
+                copies.append(String(format: "%@ drift from reference %+.2f (%d-day level, p=%.1e)%@",
+                                     ev.series.rawValue, d.diffDisplay, d.levelDays, d.p,
+                                     d.worse ? " · worse direction" : ""))
+            }
+            if ev.change.open {
+                copies.append("\(ev.series.rawValue) change episode \(ev.change.direction > 0 ? "up" : "down") since \(ev.change.onsetDay ?? "?")")
+            }
             if ev.copy7 != nil, ev.copyLong != nil {
                 copies.append("\(ev.series.rawValue) copies not averaged")
             }

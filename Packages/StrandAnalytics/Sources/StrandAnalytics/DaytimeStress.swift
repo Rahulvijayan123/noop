@@ -265,6 +265,23 @@ public enum DaytimeStress {
 
     // MARK: - Shared stress math (identical formula to the daily StressModel)
 
+    /// Floor on the day-relative across-hour HR SD (bpm). BaselineStandard rule 5 lets a feature keep a LARGER
+    /// floor it already has: this is the σ the package's own daytime-HR config implies
+    /// (`1.253 × daytimeHRCfg.floorSpread` = 3.76 bpm, the floor the baseline-relative mode's personal fold
+    /// already carries), well above the standard 1 bpm heart-rate floor. At 1 bpm a +1 bpm hour on a flat day
+    /// still squashed to 2.19, i.e. HIGH; at 3.76 bpm it reads 1.70 and HIGH needs about +2.6 bpm.
+    public static var dayRelativeHRSDFloor: Double {
+        max(BaselineStandard.impliedSigmaFloor(Baselines.daytimeHRCfg), BaselineStandard.scaleFloor(.restingHR))
+    }
+
+    /// Floor on the day-relative across-hour RMSSD SD (ms): the daytime-RMSSD config's implied σ
+    /// (`1.253 × daytimeRMSSDCfg.floorSpread` = 8.77 ms), or the standard ln-RMSSD floor (0.05) carried to ms at
+    /// the day's calm reference (d ln x = dx / x) if that is larger.
+    static func dayRelativeRMSSDSDFloor(reference: Double?) -> Double {
+        max(BaselineStandard.impliedSigmaFloor(Baselines.daytimeRMSSDCfg),
+            max(0, reference ?? 0) * BaselineStandard.scaleFloor(.hrvRmssd))
+    }
+
     static func mean(_ xs: [Double]) -> Double? {
         guard !xs.isEmpty else { return nil }
         return xs.reduce(0, +) / Double(xs.count)
@@ -494,8 +511,10 @@ public enum DaytimeStress {
             let rmssdVals = referenceAggs.compactMap { $0.rmssd }
             refHR = calmReference(hrMeans, calmIsLow: true)         // calm HR is LOW
             refRMSSD = calmReference(rmssdVals, calmIsLow: false)   // calm HRV is HIGH
-            sdHR = std(hrMeans, mean: mean(hrMeans))
-            sdRMSSD = std(rmssdVals, mean: mean(rmssdVals))
+            // BaselineStandard rule 5 (audit 2026-10-07): the across-hour SD had no floor, so a near-flat
+            // day turned a 1 bpm wobble into a high-stress hour. Floored at the shared standard floors.
+            sdHR = max(std(hrMeans, mean: mean(hrMeans)), dayRelativeHRSDFloor)
+            sdRMSSD = max(std(rmssdVals, mean: mean(rmssdVals)), dayRelativeRMSSDSDFloor(reference: refRMSSD))
             hrOnlyFallback = false
 
         case .baselineRelative(let hrBaseline, let rmssdBaseline):

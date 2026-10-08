@@ -9,11 +9,9 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
 
     override func setUp() {
         super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
     }
 
     override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
         super.tearDown()
     }
 
@@ -162,23 +160,37 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         XCTAssertFalse(Watchdog.liveOff(severity: .withinLimits, safety: false, personalOff: false))
     }
 
-    func testThinWindowHR135IsSafetySevere() {
+    func testThinWindowHR135IsSafetySevere() throws {
+        // v2.clinical (audit 2026-10-07): three fresh minutes at 135 in a thin window used to page "severe" from a
+        // single-sample extreme. Safety now needs ≥ 10 sustained still minutes AND verified on-body / signal
+        // quality; missing metadata holds (shown, never sent).
         let now = 97_300_000
         let feed = Watchdog.syntheticFeed(now: now, hr: 135, hrv: 44, temp: 33.0, resp: 14, motion: 0)
         guard case .success(var win) = WatchdogWindowBuilder.build(feed) else {
             return XCTFail("window")
         }
+        var full = win
         if win.hr.count > 4 {
             for i in 0..<(win.hr.count - 3) { win.hr[i] = nil }
         }
-        XCTAssertTrue(Watchdog.safetyCap(window: win))
-        let r = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
-        XCTAssertEqual(r.severity, .severe)
-        XCTAssertEqual(r.qualityGate, "safety-during-quality-fail")
-        XCTAssertTrue(r.shouldNotify)
-        let silent = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(),
+        win.quality = .synthetic(for: win)
+        let thin = Watchdog.evaluate(window: .success(win), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertNotEqual(thin.severity, .severe)
+        XCTAssertFalse(thin.shouldNotify, "3 minutes is not a sustained extreme")
+
+        full.quality = .synthetic(for: full)
+        let sustained = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(sustained.severity, .severe)
+        XCTAssertTrue(sustained.shouldNotify)
+        XCTAssertEqual(sustained.verdicts?.first(where: { $0.decision == .alert })?.candidate.kind, .safetyExtreme)
+        let silent = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(),
                                        nowUnix: now, liveAlerts: false)
         XCTAssertFalse(silent.shouldNotify)
+
+        full.quality = .empty
+        let unverified = Watchdog.evaluate(window: .success(full), prompt: UniTSPrompt(), nowUnix: now)
+        XCTAssertEqual(unverified.severity, .candidate, "unknown sensor quality holds the candidate")
+        XCTAssertFalse(unverified.shouldNotify)
     }
 
     func testWristOffIsUnavailableNotRecovered() {
@@ -279,15 +291,11 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         }
     }
 
-    func testStudentVersionStringsAreNotOfficial() {
-        XCTAssertTrue(WatchdogConfig.modelVersion.contains("student")
-                      || WatchdogConfig.modelVersion == "units-ad-coreml-v3")
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("student"))
-        XCTAssertTrue(WatchdogConfig.modelVersion.contains("units-ad-coreml-v3"))
-        XCTAssertTrue(WatchdogConfig.forecastModelVersion.contains("timesfm3-student-v3"))
-        XCTAssertFalse(WatchdogConfig.modelVersion.lowercased().contains("official"))
-        XCTAssertFalse(WatchdogConfig.forecastModelVersion.lowercased().contains("official"))
-        XCTAssertNotEqual(WatchdogForecastSource.student.rawValue, "official")
+    func testThePhoneRunsNoModel() {
+        XCTAssertTrue(WatchdogConfig.expectationVersion.hasPrefix("baseline-"))
+        XCTAssertEqual(WatchdogForecastRuntime.modelVersion, WatchdogForecastSource.none.rawValue)
+        XCTAssertNil(Bundle.allBundles.lazy.compactMap { $0.url(forResource: "UniTS_AD", withExtension: "mlmodelc") }.first)
+        XCTAssertNil(Bundle.allBundles.lazy.compactMap { $0.url(forResource: "TimesFM3_Student", withExtension: "mlmodelc") }.first)
     }
 
     func testShouldTrainUsualFalseIsTapeNoOp() {
@@ -304,9 +312,13 @@ final class WatchdogPrimeHandoverLiveTests: XCTestCase {
         XCTAssertEqual(tape.restHR.n, 0)
     }
 
+    /// A still awake minute with established personal baselines (the band counts minutes it can draw against).
     private func still(now: Int, previous: WatchdogCarry) -> WatchdogResult {
+        // At the reference's awake-rest usual (68 bpm, ln-HRV 45 ms) so the band may learn from these minutes.
         Watchdog.evaluate(window: WatchdogWindowBuilder.build(
-            Watchdog.syntheticFeed(now: now, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)),
-                          prompt: prompt, nowUnix: now, previous: previous)
+            Watchdog.syntheticFeed(now: now, hr: 68, hrv: 45, temp: 33.1, resp: 14, motion: 0)),
+                          prompt: prompt, evaluations: Self.references, nowUnix: now, previous: previous)
     }
+
+    private static let references = WatchdogV2ScenarioTests.references()
 }

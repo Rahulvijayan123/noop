@@ -78,10 +78,12 @@ public enum HRVReadiness {
     public static let minNights: Int = 14
     /// Trailing nights over which the CV trend (overreaching watch) is fit.
     public static let cvTrendWindow: Int = 28
-    /// Floor on the long-window SD so a flat history yields a deterministic, tiny non-degenerate normal band
-    /// instead of an ULP-fragile zero-width one (baseline7 and longMean are both the mean of the same
-    /// constant here, but can differ by a float ULP, which a zero-width band would flip to primed/suppressed).
-    public static let longSDFloor: Double = 1e-9
+    /// Floor on the long-window SD (ln units) so a flat history yields a deterministic, non-degenerate normal
+    /// band. BaselineStandard rule 5 (audit 2026-10-07): this was 1e-9, which avoided only the ULP flip; an
+    /// ultra-stable history still produced a band a hair wide, so a 1 % dip in the 7-night mean read
+    /// "suppressed". It is now the standard ln-RMSSD floor (0.05, shared with PhysiologyContext), so the SWC
+    /// band is never narrower than ±0.025 ln (≈ ±2.5 %). KOTLIN TWIN: HRVReadiness.kt still carries 1e-9.
+    public static let longSDFloor: Double = BaselineStandard.scaleFloor(.hrvRmssd)
 
     // MARK: - Evaluate
 

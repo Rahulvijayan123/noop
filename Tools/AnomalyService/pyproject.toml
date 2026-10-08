@@ -1,0 +1,32 @@
+[project]
+name = "frwhoop-anomaly"
+version = "1.0.0"
+description = "Nara VPS anomaly service: TimesFM 3.0 forecast + UniTS reconstruction candidates (frwhoop-anomaly.service)"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+  "numpy==2.2.6",
+  "torch==2.8.0",
+  "safetensors==0.6.2",
+  "huggingface_hub==0.35.3",
+  "psycopg[binary]==3.2.10",
+  # UniTS' model code imports timm.layers (Mlp, DropPath); timm's layers import torchvision.ops.
+  "timm==1.0.30",
+  "torchvision==0.23.0",
+  "pyyaml==6.0.2",
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.2"]
+
+[project.scripts]
+frwhoop-anomaly = "frwhoop_anomaly.service:main"
+
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

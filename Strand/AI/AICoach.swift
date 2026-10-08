@@ -1193,7 +1193,7 @@ final class AICoachEngine: ObservableObject {
     // MARK: - Context builder
 
     /// Build a compact plain-text summary of the user's recent data: last ~14 days of
-    /// recovery/strain/sleep-hours/HRV/restingHR where present, plus 30-day averages, plus a few
+    /// recovery/strain/sleep-hours/HRV/restingHR where present, plus 28-day usuals, plus a few
     /// recent workouts. Kept well under ~1500 tokens. If there's no data, it says so.
     func buildContext() -> String {
         let days = repo.days // oldest → newest
@@ -1216,21 +1216,32 @@ final class AICoachEngine: ObservableObject {
             lines.append("  " + dayLine(d))
         }
 
-        // 30-day averages.
-        let last30 = Array(days.suffix(30))
+        // Usuals over the 28 CALENDAR days strictly before the newest day (BaselineStandard fix I, audit
+        // 2026-10-07: these were means of the last 30 ROWS including the newest one). HRV / resting HR /
+        // respiration / skin-temperature deviation are the standard causal usual (`PersonalUsual`: median, ln for
+        // HRV, confounded and pre-Recalibrate days out, the night count stated, nothing under 4 nights; skin from
+        // deviation rows only, never an imported absolute °C). The rest stay plain averages of the same window.
+        let newest = days.last!.day
+        let start = BaselineStandard.shift(newest, by: -PersonalUsual.windowDays) ?? ""
+        let window = days.filter { $0.day >= start && $0.day < newest }
+        let context = BaselineStandard.Context.app()
+        func usual(_ metric: BaselineStandard.Metric, _ unit: String, _ digits: Int = 0) -> String {
+            PersonalUsual.phrase(PersonalUsual.usual(days: days, metric: metric, asOf: newest, context: context),
+                                 unit: unit, digits: digits)
+        }
         lines.append("")
-        lines.append("30-day averages:")
-        lines.append("  charge: \(avgInt(last30.compactMap { $0.recovery }))"
-                     + ", effort: \(avgOne(last30.compactMap { $0.strain }))"
-                     + ", sleep: \(avgSleepHours(last30))h"
-                     + ", HRV: \(avgInt(last30.compactMap { $0.avgHrv })) ms"
-                     + ", RHR: \(avgInt(last30.compactMap { $0.restingHr.map(Double.init) })) bpm")
+        lines.append("Usual over the \(PersonalUsual.windowDays) calendar days before \(newest) (\(window.count) days with data):")
+        lines.append("  charge: \(avgInt(window.compactMap { $0.recovery }))"
+                     + ", effort: \(avgOne(window.compactMap { $0.strain }))"
+                     + ", sleep: \(avgSleepHours(window))h"
+                     + ", HRV: " + usual(.hrvRmssd, " ms")
+                     + ", RHR: " + usual(.restingHR, " bpm"))
         // Additional vitals when present (#124, the coach used to see only recovery/strain/sleep/HRV/RHR).
-        lines.append("  SpO2: \(avgInt(last30.compactMap { $0.spo2Pct }))%"
-                     + ", respiration: \(avgOne(last30.compactMap { $0.respRateBpm }))/min"
-                     + ", skin-temp deviation: \(avgOne(last30.compactMap { $0.skinTempDevC }))°C"
-                     + ", steps: \(avgInt(last30.compactMap { $0.steps.map(Double.init) }))/day"
-                     + ", active energy: \(avgInt(last30.compactMap { $0.activeKcalEst }))kcal/day")
+        lines.append("  SpO2: \(avgInt(window.compactMap { $0.spo2Pct }))%"
+                     + ", respiration: " + usual(.respiration, "/min", 1)
+                     + ", skin-temp deviation: " + usual(.skinTempDeviation, "°C", 1)
+                     + ", steps: \(avgInt(window.compactMap { $0.steps.map(Double.init) }))/day"
+                     + ", active energy: \(avgInt(window.compactMap { $0.activeKcalEst }))kcal/day")
 
         return lines.joined(separator: "\n")
     }

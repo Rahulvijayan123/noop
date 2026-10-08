@@ -168,8 +168,11 @@ struct StrandiOSApp: App {
             await model?.checkStrapNotSeen()
         })
         StaleBatteryBackgroundScheduler.schedule()
+        // On a cold background launch the service is started by the launch sequence after `repo.refresh()`;
+        // `backgroundTick` waits for that (within the task's budget) instead of ticking a nil model.
         WatchdogBackgroundScheduler.register { [weak model] in
-            await model?.watchdog.tick(skipForecast: true)
+            guard let model else { return false }
+            return await model.watchdog.backgroundTick(budgetSeconds: WatchdogBackgroundScheduler.startBudgetSeconds)
         }
         WatchdogBackgroundScheduler.scheduleIfNeeded()
         let bridge = HealthKitBridge(

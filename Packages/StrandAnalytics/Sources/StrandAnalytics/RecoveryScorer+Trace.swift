@@ -45,7 +45,8 @@ extension RecoveryScorer {
                                      rhrBaseline: BaselineState?,
                                      respBaseline: BaselineState?,
                                      sleepPerf: Double?,
-                                     skinTempDev: Double? = nil)
+                                     skinTempDev: Double? = nil,
+                                     hrvScale: HRVScale = .ms)
         -> (score: Double?, trace: [String]) {
 
         // Trace numbers use nearest rounding with half-ties away from zero on both platforms.
@@ -58,13 +59,15 @@ extension RecoveryScorer {
         // rhrZ and the saturation guard, not only through recovery(). recovery() now drops an
         // unusable one, so without the same gate here the trace would list an rhr term the score
         // did not use, which is precisely the divergence the line below promises cannot happen.
-        let rhrB = rhrBaseline.flatMap { $0.usable ? $0 : nil }
+        let rhrB = usableOrNil(rhrBaseline)
+        // Same for respiration (audit 2026-10-07): recovery() drops an unusable respiration baseline.
+        let respB = usableOrNil(respBaseline)
 
         // The score the dashboard reads, verbatim, so the trace cannot diverge from it.
         let score = recovery(hrv: hrv, rhr: rhr, resp: resp,
                              hrvBaseline: hrvBaseline, rhrBaseline: rhrB,
-                             respBaseline: respBaseline, sleepPerf: sleepPerf,
-                             skinTempDev: skinTempDev)
+                             respBaseline: respB, sleepPerf: sleepPerf,
+                             skinTempDev: skinTempDev, hrvScale: hrvScale)
 
         // Cold-start gate: HRV baseline not usable -> recovery() returns nil before any term is built.
         // Report the gate so a nil Charge is explainable, then stop (no terms were scored).
@@ -77,13 +80,16 @@ extension RecoveryScorer {
 
         // Per-driver baseline state lines (mean / spread / nValid / status). The skin-temp term carries no
         // baseline arg here (skinTempDev is already a deviation), so it has no baseline line.
+        // On the ln scale the mean/spread are ln units, so the line names the scale and the centre in ms.
+        let hrvScaleTag = hrvScale == .ln
+            ? " scale=ln meanMs=\(r2(hrvScale.ms(hrvBaseline.baseline)))" : ""
         lines.append("charge baseline hrv mean=\(r2(hrvBaseline.baseline)) spread=\(r2(hrvBaseline.spread)) "
-            + "nValid=\(hrvBaseline.nValid) status=\(hrvBaseline.status.rawValue)")
+            + "nValid=\(hrvBaseline.nValid) status=\(hrvBaseline.status.rawValue)" + hrvScaleTag)
         if let b = rhrB {
             lines.append("charge baseline rhr mean=\(r2(b.baseline)) spread=\(r2(b.spread)) "
                 + "nValid=\(b.nValid) status=\(b.status.rawValue)")
         }
-        if let b = respBaseline {
+        if let b = respB {
             lines.append("charge baseline resp mean=\(r2(b.baseline)) spread=\(r2(b.spread)) "
                 + "nValid=\(b.nValid) status=\(b.status.rawValue)")
         }
@@ -103,7 +109,7 @@ extension RecoveryScorer {
         // L9: every WEIGHT / SCALE / centre constant goes through r2() too (not just the z-scores), so a
         // future non-round weight (e.g. 0.333) renders identically on Swift and Kotlin and the parity
         // fixture cannot silently desync. The values render the same as before today.
-        let hrvZRaw = zScore(hrv, mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
+        let hrvZRaw = zScore(hrvScale.model(hrv), mean: hrvBaseline.baseline, spread: hrvBaseline.spread)
         let sat = parasympatheticSaturation(hrvZ: hrvZRaw, rhrZ: rhrZForGuard)
         terms.append(("hrv", hrvZRaw, wHRV))
         lines.append("charge term hrv z=\(r2(hrvZRaw)) w=\(r2(wHRV)) (higher HRV is better)")
@@ -117,7 +123,7 @@ extension RecoveryScorer {
         }
 
         // Resp term: lower is better, optional (needs BOTH the value and a baseline).
-        if let r = resp, let b = respBaseline {
+        if let r = resp, let b = respB {
             let z = zScore(b.baseline, mean: r, spread: b.spread)
             terms.append(("resp", z, wResp))
             lines.append("charge term resp z=\(r2(z)) w=\(r2(wResp)) (lower resp is better)")

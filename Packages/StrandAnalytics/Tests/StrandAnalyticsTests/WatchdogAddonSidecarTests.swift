@@ -238,7 +238,7 @@ final class WatchdogAddonSidecarTests: XCTestCase {
         XCTAssertNil(rows.first?.signals)
     }
 
-    func testExportMarksStudentsAndKeepsTwoCopies() {
+    func testExportSaysNoOnDeviceModelAndKeepsTwoCopies() {
         let week = LBCopySnapshot(center: 70, spread: 3, centerDisplay: 70,
                                   bandLoDisplay: 64, bandHiDisplay: 76, n: 7,
                                   coverage: 40, version: "t", held: false)
@@ -252,10 +252,9 @@ final class WatchdogAddonSidecarTests: XCTestCase {
         let pack = WatchdogClinicianExport.build(
             deviceId: "s", startUnix: 0, endUnix: 10, ledger: [],
             evaluations: [ev], dayLogs: [:], annotations: [], recovery: nil)
-        XCTAssertTrue(pack.versionLine.contains("student"))
-        XCTAssertFalse(pack.versionLine.lowercased().contains("official"))
-        XCTAssertTrue(pack.text.contains("student"))
-        XCTAssertFalse(pack.text.lowercased().contains("official"))
+        XCTAssertTrue(pack.versionLine.contains("no on-device model"))
+        XCTAssertTrue(pack.text.contains("own established baselines"))
+        XCTAssertFalse(pack.text.lowercased().contains("student"))
         XCTAssertTrue(pack.copyLines.contains(where: { $0.contains("week") }))
         XCTAssertTrue(pack.copyLines.contains(where: { $0.contains("long") }))
         XCTAssertTrue(pack.copyLines.contains(where: { $0.contains("not averaged") }))

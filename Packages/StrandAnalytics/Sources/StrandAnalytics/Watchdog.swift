@@ -97,7 +97,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var lastForecastUnix: Int
     /// Civil seconds the last cube columns belong to (`now+60…now+300` at emit). Holds do not slide these.
     public var lastForecastHorizonUnix: [Int]
-    /// Last `lastForecast*` arrays came from a real 6×5 student cube, not a hold.
+    /// Legacy (persisted carries): last `lastForecast*` arrays came from a 6×5 cube. Always false now — the
+    /// phone runs no forecast.
     public var forecastStudentOk: Bool
     public var quietJointEma: Double
     public var lastReconEnergy: Double
@@ -142,9 +143,9 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     public var lastEventStartUnix: Int
     public var lastCutReason: String
     public var eventMemory: WatchdogEventMemory
-    /// Last TimesFM cube origin: student | hold | inject. `official` unused until convert pins exist.
+    /// Last forecast origin: `none` on the phone (no on-device forecast); older carries may hold student / hold.
     public var lastForecastSource: String
-    /// Last 30 student / inject path J values. Hold does not append.
+    /// Last 30 forecast path J values (empty: the phone runs no forecast; tests may inject).
     public var forecastJRing: [Double]
     /// Episode id that already sent its first severe page. Empty = none.
     public var notifiedSevereEpisodeId: String
@@ -153,6 +154,10 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     /// Last measurement civil minute that counted as a persist observation.
     public var lastPersistObsMinute: Int
     public var notifyDelivery: String
+    /// Unix second the current push was handed to the notifier (`notifyDelivery == "queued"`). A "queued" older
+    /// than `WatchdogNotifyPolicy.queuedStaleSeconds` never got its delivery callback persisted (the app was
+    /// killed mid-post) and counts as failed. nil = not stamped (falls back to `lastNotifiedAt`).
+    public var notifyQueuedAtUnix: Int?
     /// First unix the current safety extreme was seen. 0 = none. Survives thin / UniTS-fail ticks.
     public var safetyFirstUnix: Int
     public var safetyExtreme: Double
@@ -212,6 +217,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
                 lastPersistMinute: Int = 0,
                 lastPersistObsMinute: Int = 0,
                 notifyDelivery: String = "",
+                notifyQueuedAtUnix: Int? = nil,
                 safetyFirstUnix: Int = 0,
                 safetyExtreme: Double = 0,
                 safetyChannel: String = "") {
@@ -286,6 +292,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         self.lastPersistMinute = lastPersistMinute
         self.lastPersistObsMinute = lastPersistObsMinute
         self.notifyDelivery = notifyDelivery
+        self.notifyQueuedAtUnix = notifyQueuedAtUnix
         self.safetyFirstUnix = safetyFirstUnix
         self.safetyExtreme = safetyExtreme
         self.safetyChannel = safetyChannel
@@ -367,6 +374,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         lastPersistMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistMinute) ?? 0
         lastPersistObsMinute = try c.decodeIfPresent(Int.self, forKey: .lastPersistObsMinute) ?? 0
         notifyDelivery = try c.decodeIfPresent(String.self, forKey: .notifyDelivery) ?? ""
+        notifyQueuedAtUnix = try c.decodeIfPresent(Int.self, forKey: .notifyQueuedAtUnix)
         safetyFirstUnix = try c.decodeIfPresent(Int.self, forKey: .safetyFirstUnix) ?? 0
         safetyExtreme = try c.decodeIfPresent(Double.self, forKey: .safetyExtreme) ?? 0
         safetyChannel = try c.decodeIfPresent(String.self, forKey: .safetyChannel) ?? ""
@@ -480,13 +488,15 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     public var calibrationSource: String
     public var cutReason: String
     public var eventExplained: Bool
-    /// student | hold | inject. Production never sets inject or official.
+    /// `none` in production (no on-device forecast); `inject` in tests only.
     public var forecastSource: String
     /// Same door as the live card **Off**: candidate+ / safety / personal-off. Not Layer 1 HOW OFF.
     public var liveOff: Bool
     public var personalOff: Bool
     /// Holistic alert from per-vital labels. Not a change to any one graph.
     public var physiologyOff: Bool
+    /// v2: every candidate this tick with its five-check verdict (alert / hold / suppress). Nil on legacy rows.
+    public var verdicts: [WatchdogVerdict]? = nil
 }
 
 public enum Watchdog {
@@ -501,7 +511,8 @@ public enum Watchdog {
                                 sleepSessionOpen: Bool = false,
                                 sleepIntervals: [WatchdogSleepInterval] = [],
                                 skipForecast: Bool = false,
-                                liveAlerts: Bool = true) -> WatchdogResult {
+                                liveAlerts: Bool = true,
+                                modelCandidates: [WatchdogModelCandidate] = []) -> WatchdogResult {
         var carry = previous
         carry.phaseUsual.dropResidualScaleCenters()
         if let inject {
@@ -527,10 +538,11 @@ public enum Watchdog {
                 openTail = WatchdogLiveTail.resolve(rawWin)
             }
             if let reason = WatchdogQuality.gate(rawWin, tail: openTail) {
-                if reason != .wristOff, safetyCap(window: rawWin) {
+                if reason != .wristOff,
+                   let v = verifiedSafety(window: rawWin, evaluations: evaluations, carry: carry) {
                     return safetyDuringQualityFail(window: rawWin, nowUnix: nowUnix,
                                                    interval: liveIntervalMinutes, carry: carry,
-                                                   liveAlerts: liveAlerts)
+                                                   liveAlerts: liveAlerts, verdict: v)
                 }
                 carry.consecutiveMismatchTicks = 0
                 rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
@@ -546,23 +558,15 @@ public enum Watchdog {
             let livePrompt = carry.phaseUsual.blendPrompt(prompt, key: WatchdogPhaseKey(phase: phase, family: blendFam))
             var modelWin = win
             modelWin.maskStaleChannels()
-            let residual: UniTSResidual
-            do {
-                residual = try UniTSRuntime().reconstruct(modelWin, prompt: livePrompt, tail: openTail)
-            } catch {
-                if safetyCap(window: win) {
-                    return safetyDuringQualityFail(window: win, nowUnix: nowUnix,
-                                                   interval: liveIntervalMinutes, carry: carry,
-                                                   liveAlerts: liveAlerts)
-                }
-                rememberSafety(hit: nil, nowUnix: nowUnix, carry: &carry)
-                return unavailable(.empty, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: carry)
-            }
+            // Expected = the person's own established Layer 1 reference for each minute's context (no model).
+            let residual = WatchdogExpectation.residual(window: modelWin, evaluations: evaluations,
+                                                        carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix,
+                                                        tail: openTail)
             return combine(window: modelWin, display: win, residual: residual, prompt: livePrompt,
                            evaluations: evaluations,
                            dayLog: dayLog, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: &carry,
                            sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast,
-                           liveAlerts: liveAlerts)
+                           liveAlerts: liveAlerts, modelCandidates: modelCandidates)
         }
     }
 
@@ -616,7 +620,8 @@ public enum Watchdog {
                         carry: inout WatchdogCarry,
                         sleepSessionOpen: Bool = false,
                         skipForecast: Bool = false,
-                        liveAlerts: Bool = true) -> WatchdogResult {
+                        liveAlerts: Bool = true,
+                        modelCandidates: [WatchdogModelCandidate] = []) -> WatchdogResult {
         let shown = display ?? window
         let confounded = dayLog?.confoundsUsual == true
         let tail = WatchdogLiveTail.resolve(window)
@@ -636,6 +641,13 @@ public enum Watchdog {
             }
             _ = age
             return pair
+        }
+        /// The latest fresh measurement, with or without an expectation: the measured value always shows, even
+        /// before the person's baseline for this context is established (then there is just no expected line).
+        func freshLast(_ obs: [Double?], channel: Int) -> Double? {
+            guard WatchdogQuality.channelFresh(obs, startUnix: window.startUnix, nowUnix: nowUnix,
+                                               channel: channel, family: window.family) else { return nil }
+            return UniTSRuntime.lastPaired(obs, obs, from: tail.startIndex)?.obs
         }
         let lastHR = freshPair(window.hr, residual.reconstructedHR, channel: 0)
         let lastRHR = freshPair(window.rhr, residual.reconstructedRHR, channel: 1)
@@ -695,8 +707,16 @@ public enum Watchdog {
         for k in 0..<min(6, rawR.count) {
             if let r = rawR[k] { absR[k] = abs(r) }
         }
-        let safety = WatchdogSafety.fired(window)
-        rememberSafety(hit: safetyHit(window: window), nowUnix: nowUnix, carry: &carry)
+        // v2: every alerting decision comes from verified candidates (WatchdogVerifier.swift). The single-minute
+        // extreme check (`WatchdogSafety.fired`) and the cross-context personal-off are retired from decisions.
+        let verification = WatchdogAlertVerifier.run(window: shown, evaluations: evaluations,
+                                                     models: modelCandidates,
+                                                     carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix)
+        let verdicts = verification.verdicts
+        let safetyVerdict = verdicts.first { $0.candidate.kind == .safetyExtreme && $0.decision == .alert }
+        let safety = safetyVerdict != nil
+        rememberSafety(hit: safetyVerdict.map { ($0.candidate.channels.first ?? "HR", $0.candidate.magnitude) },
+                       nowUnix: nowUnix, carry: &carry)
         let previousSafety = carry.lastSafety
         let previousFused = carry.lastJointEnergy
         let eHR = tail.energy(obs: window.hr, hat: adapted.reconstructedHR,
@@ -801,17 +821,18 @@ public enum Watchdog {
         if eTemp >= WatchdogCalibration.tNote { hot.append("Temp") }
         if eResp >= WatchdogCalibration.tNote { hot.append("Resp") }
         if eSpO2 >= WatchdogCalibration.tNote { hot.append("SpO2") }
-        let personalOff = evaluations.contains {
-            $0.alertEligible && LongitudinalBaseline.isOffUsual(z: $0.zLong, k: $0.kBandUsed)
-        } || personalNativeOff(hrBpm: lastHR?.obs, hrvMs: lastHRV?.obs, evaluations: evaluations)
+        // v2 personal-off: a sustained, context-matched deviation from this person's Layer 1 stratum that has
+        // not been explained away (hold or alert). Day-level Layer 1 flags no longer set the live state.
+        let personalOff = verdicts.contains { $0.candidate.kind == .personalDeviation && $0.decision != .suppress }
+        let anyOpen = verdicts.contains { $0.decision != .suppress }
         let persistMinute = nowUnix - nowUnix % WatchdogConfig.gridSeconds
         let obsMinute = latestValidObsMinute(window: window)
         let vitalMarks = WatchdogPhysiologyAlert.marks(absR: absR, mask: present)
-        let physiologyOff = WatchdogPhysiologyAlert.shouldAlert(
-            marks: vitalMarks, safety: safety, personalOff: personalOff)
+        _ = vitalMarks
+        let physiologyOff = verdicts.contains { $0.decision == .alert }
         if persistMinute > carry.lastPersistMinute,
            let obs = obsMinute, obs > carry.lastPersistObsMinute {
-            if reconJ >= WatchdogCalibration.tNote || personalOff {
+            if anyOpen {
                 carry.consecutiveMismatchTicks += 1
                 carry.consecutiveInRangeTicks = 0
                 carry.consecutiveQuietTicks = 0
@@ -825,8 +846,8 @@ public enum Watchdog {
         }
         let persistTicks = carry.consecutiveMismatchTicks
 
-        let severity = WatchdogScores.severity(recon: reconJ, forecast: forecastJ, persistTicks: persistTicks,
-                                               safety: safety, confounded: confounded, personalOff: personalOff)
+        _ = persistTicks
+        let severity = WatchdogScores.severity(verdicts: verdicts, confounded: confounded)
         if severity == .severe && !safety {
             switch eventHint {
             case .normalStillAwake, .normalSleep, .forecastDriftOnly,
@@ -853,23 +874,28 @@ public enum Watchdog {
             && (severity == .candidate || severity == .active || severity == .severe)
 
         let state = nextState(severity: severity, carry: &carry)
+        // Escalation keys on the VERIFIED alert level (3 safety · 2 multi-source · 1 single source + model ·
+        // 0 none), not on the baseline-deviation energy (which only labels and draws).
+        let alertLevel = Self.alertLevel(verdicts)
         let (notify, reason) = WatchdogNotifyPolicy.decision(severity: severity, openedEpisode: openedEpisode,
                                                             safety: safety, previousSafety: previousSafety,
-                                                            fused: reconJ, previousFused: previousFused,
-                                                            recon: reconJ, previousRecon: previousFused,
+                                                            fused: alertLevel, previousFused: previousFused,
+                                                            recon: alertLevel, previousRecon: previousFused,
                                                             eventLabel: eventHint,
                                                             episodeId: carry.episodeId,
                                                             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
                                                             lastNotifiedAt: carry.lastNotifiedAt,
                                                             nowUnix: nowUnix,
-                                                            notifyDelivery: carry.notifyDelivery)
-        let allowNotify = notify && liveAlerts && (safety || physiologyOff)
+                                                            notifyDelivery: carry.notifyDelivery,
+                                                            notifyQueuedAtUnix: carry.notifyQueuedAtUnix)
+        // Only a verified alert may notify (a logged confounder day keeps non-safety alerts on screen only).
+        let allowNotify = notify && liveAlerts && physiologyOff && (safety || !confounded)
         if allowNotify {
             carry.lastNotifiedAt = nowUnix
             carry.notifyDelivery = "queued"
             // notifiedSevereEpisodeId is stamped only after a successful send.
         }
-        carry.lastJointEnergy = reconJ
+        carry.lastJointEnergy = alertLevel   // notify-policy level (see alertLevel), not the prior's energy
         carry.lastReconEnergy = labelJ
         carry.lastSafety = safety
         if forecast.studentOk {
@@ -914,7 +940,7 @@ public enum Watchdog {
                                       usualTrust: layer1UsualTrust(evaluations, matching: [.sleepTemp]),
                                       persistTicks: persistTicks, hot: hot.contains("Temp"),
                                       hat: lastTemp?.hat),
-            obs: lastTemp?.obs,
+            obs: lastTemp?.obs ?? last(shown.temp),
             stillInWindow: shown.temp.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.tempTrust,
             heldObs: &carry.sparseTrust.tempObs)
@@ -923,7 +949,7 @@ public enum Watchdog {
                                       usualTrust: layer1UsualTrust(evaluations, matching: [.sleepResp]),
                                       persistTicks: persistTicks, hot: hot.contains("Resp"),
                                       hat: lastResp?.hat),
-            obs: lastResp?.obs,
+            obs: lastResp?.obs ?? last(shown.resp),
             stillInWindow: shown.resp.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.respTrust,
             heldObs: &carry.sparseTrust.respObs)
@@ -932,7 +958,7 @@ public enum Watchdog {
                                       usualTrust: layer1UsualTrust(evaluations, matching: [.sleepSpO2Mean]),
                                       persistTicks: persistTicks, hot: hot.contains("SpO2"),
                                       hat: lastSpO2?.hat),
-            obs: lastSpO2?.obs,
+            obs: lastSpO2?.obs ?? last(shown.spo2),
             stillInWindow: shown.spo2.contains { $0 != nil },
             heldTrust: &carry.sparseTrust.spo2Trust,
             heldObs: &carry.sparseTrust.spo2Obs)
@@ -954,12 +980,12 @@ public enum Watchdog {
         let bandLearn = WatchdogBand.learnable(eventHint) && bandFam != .other && !safety
             && reconJ < WatchdogCalibration.tNote && !hot.contains("HR")
             && presentMax < WatchdogBand.residualCap && !confounded && !recovering
-            && !personalOff
+            && !anyOpen
             && severity != .candidate && severity != .active && severity != .severe
         let sessionElig = WatchdogEventLabeler.sidecarEligible(eventHint) && !safety
             && reconJ < WatchdogCalibration.tNote && !hot.contains("HR")
             && presentMax < WatchdogBand.residualCap && !confounded && !recovering
-            && !personalOff
+            && !anyOpen
             && severity != .candidate && severity != .active && severity != .severe
         if sessionElig {
             if carry.sessionAbs.count < 6 { carry.sessionAbs = Array(repeating: 0, count: 6) }
@@ -1069,13 +1095,13 @@ public enum Watchdog {
         adapted.rangeHalf[.spo2] = adapted.scaleSpO2.last ?? adapted.rangeHalf[.spo2] ?? 0
 
         let signals: [WatchdogSignalEvidence] = [
-            .init(name: "HR", observed: lastHR?.obs, usual: prompt.hr,
+            .init(name: "HR", observed: lastHR?.obs ?? freshLast(window.hr, channel: 0), usual: prompt.hr,
                   reconstructed: lastHR?.hat, energy: eHR, unit: "bpm", trustPct: trustHR,
                   rangeHalf: adapted.rangeHalf(for: .hr)),
-            .init(name: "RHR", observed: lastRHR?.obs, usual: prompt.rhr,
+            .init(name: "RHR", observed: lastRHR?.obs ?? freshLast(window.rhr, channel: 1), usual: prompt.rhr,
                   reconstructed: lastRHR?.hat, energy: eRHR, unit: "bpm", trustPct: trustRHR,
                   rangeHalf: adapted.rangeHalf(for: .rhr)),
-            .init(name: "HRV", observed: lastHRV?.obs, usual: prompt.hrvAwake ?? prompt.hrv,
+            .init(name: "HRV", observed: lastHRV?.obs ?? freshLast(window.hrv, channel: 2), usual: prompt.hrvAwake ?? prompt.hrv,
                   reconstructed: lastHRV?.hat, energy: eHRV, unit: "ms", trustPct: trustHRV,
                   rangeHalf: adapted.rangeHalf(for: .hrv)),
             .init(name: "Temp", observed: lastTemp?.obs ?? last(shown.temp), usual: prompt.temp,
@@ -1141,8 +1167,7 @@ public enum Watchdog {
             copy = (copy.headline, "Several readings moving together · not a diagnosis")
         }
 
-        let painted = UniTSRuntime.paintRanges(
-            residual: adapted, occupancy: UniTSRuntime.occupancy(shown), prompt: prompt)
+        let painted = UniTSRuntime.paintRanges(residual: adapted)
 
         return WatchdogResult(
             severity: severity,
@@ -1183,10 +1208,9 @@ public enum Watchdog {
                                 window.coverage * 100,
                                 WatchdogActivityRuntime.displayName(
                                     WatchdogActivityClass.labels(logits: window.activityLogits).last ?? "unknown"),
-                                adapted.modelVersion == WatchdogConfig.fallbackModelVersion
-                                    ? "prior fallback" : adapted.modelVersion,
+                                "expected = your baselines (\(adapted.modelVersion))",
                                 WatchdogConfig.tickSeconds),
-            versionLine: "\(WatchdogConfig.configVersion) · \(adapted.modelVersion)+\(WatchdogForecastRuntime.modelVersion) · episode \(carry.episodeId ?? "none")",
+            versionLine: "\(WatchdogConfig.configVersion) · \(adapted.modelVersion) · episode \(carry.episodeId ?? "none")",
             shouldNotify: allowNotify,
             carry: carry,
             modelVersion: adapted.modelVersion,
@@ -1211,8 +1235,16 @@ public enum Watchdog {
             forecastSource: forecast.source,
             liveOff: liveOff(severity: severity, safety: safety, personalOff: personalOff),
             personalOff: personalOff,
-            physiologyOff: physiologyOff
+            physiologyOff: physiologyOff,
+            verdicts: verdicts
         )
+    }
+
+    static func alertLevel(_ verdicts: [WatchdogVerdict]) -> Double {
+        let alerts = verdicts.filter { $0.decision == .alert }
+        if alerts.contains(where: { $0.candidate.kind == .safetyExtreme }) { return 3 }
+        if alerts.contains(where: { $0.independentGroups >= 2 }) { return 2 }
+        return alerts.isEmpty ? 0 : 1
     }
 
     /// Held leftover. Early uses `WatchdogForecastRuntime.pathScore` on the 6×5 cube.
@@ -1315,9 +1347,8 @@ public enum Watchdog {
     /// Live TRUST — how much to believe this vital’s in-range / off call. Not health, not a diagnosis.
     ///
     /// `50×U + 35×C + 15×E`:
-    /// - **U** short-term first: UniTS/prior hat for this channel (`0.55`) once the models have
-    ///   reconstructed it. A shown Layer 1 usual replaces that with that copy’s TRUST 0…1.
-    ///   Layer 1 nights tighten the prompt; they do not gate the half-hour call.
+    /// - **U** `0.55` when an established context baseline drew an expectation for this minute
+    ///   (`WatchdogExpectation`); a shown Layer 1 usual replaces that with that copy’s TRUST 0…1.
     /// - **C** coverage of this 30-minute (or rest-tail) window.
     /// - **E** evidence vs the reconstruction (`1 − energy/tau` in range; persist×magnitude if off).
     /// - Caps 18 / 28 apply only when there is **no hat and no shown usual** (nothing to compare).
@@ -1327,11 +1358,11 @@ public enum Watchdog {
         let coverage01 = max(0, min(1, coverage))
         let usual01 = max(0, min(1, Double(usualTrust) / 100.0))
         let hasLayer1 = usual != nil && usualTrust >= LongitudinalBaseline.trustHideThreshold
-        let hasShortTerm = hat.map(\.isFinite) ?? false
+        let hasContextExpectation = hat.map(\.isFinite) ?? false
         let u: Double
         if hasLayer1 {
             u = usual01
-        } else if hasShortTerm {
+        } else if hasContextExpectation {
             u = 0.55
         } else {
             u = 0
@@ -1347,7 +1378,7 @@ public enum Watchdog {
             evidence = max(0, 1 - energy / tau)
         }
         var score = 50.0 * u + 35.0 * coverage01 + 15.0 * evidence
-        if !hasLayer1 && !hasShortTerm {
+        if !hasLayer1 && !hasContextExpectation {
             score = min(score, usual == nil ? 18 : 28)
         }
         return max(0, min(100, Int(score.rounded())))
@@ -1403,11 +1434,27 @@ public enum Watchdog {
     }
 
     /// Thin UniTS window still pages when a fresh still-rest vital is out of range.
+    /// A verified safety extreme from the window alone (no model, no personal reference). Used when the
+    /// window fails the model-quality gate: a sustained, quality-checked extreme still alerts.
+    static func verifiedSafety(window: WatchdogWindow, evaluations: [LBEvaluation],
+                               carry: WatchdogCarry) -> WatchdogVerdict? {
+        let quality = WatchdogSignalQuality.assess(window: window)
+        let context = WatchdogContextResolver.resolve(window: window, quality: quality,
+                                                      carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix)
+        let candidates = WatchdogDetectors.safety(window: window, context: context)
+        return candidates.lazy.map {
+            WatchdogAlertVerifier.verify($0, all: candidates, window: window, quality: quality, context: context,
+                                         evaluations: evaluations, models: [])
+        }.first { $0.decision == .alert }
+    }
+
     static func safetyDuringQualityFail(window: WatchdogWindow, nowUnix: Int, interval: Int,
-                                        carry: WatchdogCarry, liveAlerts: Bool) -> WatchdogResult {
+                                        carry: WatchdogCarry, liveAlerts: Bool,
+                                        verdict: WatchdogVerdict) -> WatchdogResult {
         let previousSafety = carry.lastSafety
         var carry = carry
-        rememberSafety(hit: safetyHit(window: window), nowUnix: nowUnix, carry: &carry)
+        rememberSafety(hit: (verdict.candidate.channels.first ?? "HR", verdict.candidate.magnitude),
+                       nowUnix: nowUnix, carry: &carry)
         carry.lastSafety = true
         carry.consecutiveQuietTicks = 0
         if carry.episodeId == nil {
@@ -1423,7 +1470,8 @@ public enum Watchdog {
             notifiedSevereEpisodeId: carry.notifiedSevereEpisodeId,
             lastNotifiedAt: carry.lastNotifiedAt,
             nowUnix: nowUnix,
-            notifyDelivery: carry.notifyDelivery)
+            notifyDelivery: carry.notifyDelivery,
+            notifyQueuedAtUnix: carry.notifyQueuedAtUnix)
         let notify = liveAlerts && want
         if notify {
             carry.lastNotifiedAt = nowUnix
@@ -1464,12 +1512,12 @@ public enum Watchdog {
             rangeRHR: [],
             rangeSpO2: [],
             signals: [],
-            contributing: ["HR"],
-            qualityLine: String(format: "Safety · coverage %.0f%% · UniTS skipped", window.coverage * 100),
-            versionLine: "\(WatchdogConfig.configVersion) · safety-without-units",
+            contributing: verdict.candidate.channels,
+            qualityLine: String(format: "Safety · coverage %.0f%% · model skipped", window.coverage * 100),
+            versionLine: "\(WatchdogConfig.configVersion) · safety-only",
             shouldNotify: notify,
             carry: carry,
-            modelVersion: WatchdogConfig.fallbackModelVersion,
+            modelVersion: WatchdogConfig.expectationVersion,
             trustPct: 0,
             jointEnergy: WatchdogCalibration.tSevere,
             forecastEnergy: 0,
@@ -1490,7 +1538,8 @@ public enum Watchdog {
             forecastSource: "hold",
             liveOff: true,
             personalOff: false,
-            physiologyOff: true
+            physiologyOff: true,
+            verdicts: [verdict]
         )
     }
 
@@ -1643,10 +1692,10 @@ public enum Watchdog {
             signals: [],
             contributing: [],
             qualityLine: "Tick \(WatchdogConfig.tickSeconds)s · \(reason.rawValue)",
-            versionLine: "\(WatchdogConfig.configVersion) · \(WatchdogConfig.modelVersion)",
+            versionLine: "\(WatchdogConfig.configVersion) · \(WatchdogConfig.expectationVersion)",
             shouldNotify: false,
             carry: carry,
-            modelVersion: WatchdogConfig.modelVersion,
+            modelVersion: WatchdogConfig.expectationVersion,
             trustPct: 0,
             jointEnergy: 0,
             forecastEnergy: 0,
@@ -1696,7 +1745,11 @@ public enum Watchdog {
             prompt = UniTSPrompt()
             feed = Self.syntheticFeed(now: nowUnix, hr: 58, hrv: 48, temp: 33.1, resp: 14, motion: 0)
         }
-        let win = WatchdogWindowBuilder.build(feed)
+        var win = WatchdogWindowBuilder.build(feed)
+        if case .success(var w) = win {
+            w.quality = .synthetic(for: w)   // a debug inject is synthetic end to end, including its metadata
+            win = .success(w)
+        }
         if inject == .severe { carry.consecutiveMismatchTicks = max(carry.consecutiveMismatchTicks, 1) }
         return evaluate(window: win, prompt: prompt, nowUnix: nowUnix, liveIntervalMinutes: interval,
                         previous: carry, inject: Optional<WatchdogInject>.none, liveAlerts: liveAlerts)

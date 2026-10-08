@@ -158,10 +158,14 @@ extension LongitudinalBaseline {
         switch series {
         case .sleepRHR, .sleepHRVLn, .sleepResp, .sleepTemp, .sleepSpO2Mean, .sleepSpO2Nadir:
             return .overnightSleep
-        case .awakeRestHR, .awakeRestHRVLn, .awakeRestSpO2Mean:
+        case .awakeRestHR, .awakeRestHRVLn, .awakeRestSpO2Mean,
+             .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
+             .awakeUprightHR, .awakeUprightHRVLn:
             return .stillWaking
-        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean:
+        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR:
             return .movingWaking
+        case .sleepHR:
+            return .overnightSleep
         case .continuousHR, .continuousHRVLn, .continuousSpO2Mean:
             return .allHours
         case .wakingSteps, .wakingActiveMin, .wakingImuEnergy:
@@ -174,9 +178,18 @@ extension LongitudinalBaseline {
         case .sleepRHR:
             return LBSeriesParams(kBand: 2.0, span7: 7, nLongEstablished: 14, floor: 2,
                                   worse: .higher)
-        case .awakeRestHR:
+        case .sleepHR:
+            return LBSeriesParams(kBand: 2.0, span7: 7, nLongEstablished: 14, floor: 2,
+                                  worse: .higher)
+        case .awakeRestHR, .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR:
             return LBSeriesParams(kBand: 2.0, span7: 7, nLongEstablished: 14, floor: 3,
                                   worse: .higher)
+        case .walkingHR:
+            return LBSeriesParams(kBand: 2.2, span7: 7, nLongEstablished: 14, floor: 4,
+                                  worse: .higher)
+        case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn:
+            return LBSeriesParams(kBand: 2.6, span7: 10, nLongEstablished: 14, floor: 0.08,
+                                  worse: .lower)
         case .awakeActiveHR:
             return LBSeriesParams(kBand: 2.2, span7: 7, nLongEstablished: 14, floor: 4,
                                   worse: .higher)

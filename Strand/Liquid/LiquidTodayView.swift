@@ -1285,7 +1285,8 @@ struct LiquidTodayView: View {
         // Resolve the O(days) lookups ONCE here (not on every body re-render): the selected day and the
         // readiness verdict. Both scan repo.days (up to 599 rows); doing it per-render was the stutter.
         let day = resolveDisplayDay()
-        let newReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day)
+        // Readiness on the shared baseline standard (BaselineStandard: confounders, eras, Recalibrate epochs).
+        let newReadiness = ReadinessEngine.evaluate(days: repo.days, today: day?.day, context: .app())
         // Prior-day vitals carry, resolved ONCE here (never in body). Bound to today's own key so it can't
         // echo today's still-forming row; only on today (a past day's own row is the whole story).
         let tkey = day?.day ?? selectedDayKey
@@ -1550,7 +1551,7 @@ struct LiquidTodayView: View {
     /// pass (readinessWord + synthLine + readiness.summary). The fallback runs only in the brief window
     /// before the first load() populates the cache.
     private var readiness: ReadinessEngine.Readiness {
-        cachedReadiness ?? ReadinessEngine.evaluate(days: repo.days, today: cachedDisplayDay?.day)
+        cachedReadiness ?? ReadinessEngine.evaluate(days: repo.days, today: cachedDisplayDay?.day, context: .app())
     }
 
     /// Pure aggregation seam for the Liquid hero. The provider mapper names the sensors/imports that

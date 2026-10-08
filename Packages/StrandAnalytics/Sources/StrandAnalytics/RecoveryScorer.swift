@@ -259,6 +259,40 @@ public enum RecoveryScorer {
         return (0..<seed).contains(n) ? n : nil
     }
 
+    // MARK: - HRV scale of the baseline
+
+    /// The space an HRV `BaselineState` was folded in. `.ms` is the historical raw-millisecond fold
+    /// (`Baselines.hrvCfg`, still what the server worker passes); `.ln` is the BaselineStandard rule-1 fold
+    /// on ln(RMSSD) (`Baselines.readinessHRVLnCfg`, what the phone's causal Charge re-score passes). The
+    /// caller always hands tonight's HRV in MILLISECONDS; the scorer maps it into the baseline's space for
+    /// the z, and every display (driver rows, trace) maps the baseline centre back to ms. On `.ln` the z of
+    /// a value is (ln x − μ_ln)/σ_ln, the Plews / Task Force reading of a nightly RMSSD change.
+    public enum HRVScale: String, Equatable, Sendable {
+        case ms
+        case ln
+
+        /// Milliseconds → the baseline's space. The ln guard (`max(·, 1)`) keeps a 0 ms decode artefact
+        /// finite, exactly like ReadinessEngine's ln path.
+        public func model(_ ms: Double) -> Double {
+            self == .ln ? log(max(ms, 1.0)) : ms
+        }
+
+        /// The baseline's space → milliseconds (for display and for "neutral at baseline" re-scores).
+        public func ms(_ model: Double) -> Double {
+            self == .ln ? exp(model) : model
+        }
+    }
+
+    /// The usable-gated form of an optional baseline: an UNUSABLE baseline (calibrating, or stale) is
+    /// treated as absent. `foldHistory` returns the config's synthetic midpoint for an empty or
+    /// all-implausible history (75 bpm resting HR, 22 bpm respiration, 50 Effort), which is nobody's
+    /// baseline, so scoring against it moves Charge on a baseline the user never had (BaselineStandard
+    /// rule 4: no z below 4 valid days). Shared by the score, the driver rows and the trace so all three
+    /// gate identically.
+    static func usableOrNil(_ b: BaselineState?) -> BaselineState? {
+        b.flatMap { $0.usable ? $0 : nil }
+    }
+
     // MARK: - Recovery score
 
     /// A baseline driver: mean + spread (internal abs-dev units, as in BaselineState).
@@ -391,8 +425,11 @@ public enum RecoveryScorer {
         return max(0.0, min(100.0, score))
     }
 
-    /// Convenience overload taking BaselineState directly. Enforces the cold-start
-    /// gate using `hrvBaseline.usable`.
+    /// Convenience overload taking BaselineState directly. Enforces the cold-start gate using
+    /// `hrvBaseline.usable`, and treats every OTHER unusable baseline (resting HR, respiration, Effort) as
+    /// absent so its term drops and the weights renormalise.
+    ///
+    /// `hrvScale` names the space `hrvBaseline` was folded in; `hrv` is always milliseconds.
     public static func recovery(hrv: Double,
                                 rhr: Double,
                                 resp: Double?,
@@ -403,8 +440,9 @@ public enum RecoveryScorer {
                                 skinTempDev: Double? = nil,
                                 recoveryIndexSlope: Double? = nil,
                                 effortBaseline: BaselineState? = nil,
-                                priorDayEffort: Double? = nil) -> Double? {
-        recovery(hrv: hrv,
+                                priorDayEffort: Double? = nil,
+                                hrvScale: HRVScale = .ms) -> Double? {
+        recovery(hrv: hrvScale.model(hrv),
                  rhr: rhr,
                  resp: resp,
                  hrvBaseline: DriverBaseline(hrvBaseline),
@@ -414,13 +452,18 @@ public enum RecoveryScorer {
                  // baseline the user never had. Gated here, in the one place every BaselineState
                  // caller passes through, rather than at each call site: the headline and the driver
                  // breakdown then agree by construction. Mirrors hrvBaselineUsable below.
-                 rhrBaseline: rhrBaseline.flatMap { $0.usable ? $0 : nil }.map(DriverBaseline.init),
-                 respBaseline: respBaseline.map(DriverBaseline.init),
+                 rhrBaseline: usableOrNil(rhrBaseline).map(DriverBaseline.init),
+                 // Audit 2026-10-07 (server Charge): the worker passed its respiration fold UNGATED, so a
+                 // history with no respiration nights scored tonight against the n = 0 seed (22 bpm,
+                 // spread 0.5) and a 15 bpm night read z ≈ +11. Gated here, the one place every
+                 // BaselineState caller (phone AND server) passes through, exactly like resting HR.
+                 respBaseline: usableOrNil(respBaseline).map(DriverBaseline.init),
                  sleepPerf: sleepPerf,
                  skinTempDev: skinTempDev,
                  hrvBaselineUsable: hrvBaseline.usable,
                  recoveryIndexSlope: recoveryIndexSlope,
-                 effortBaseline: effortBaseline.map(DriverBaseline.init),
+                 // Same defect class: an unusable Effort fold is the 50/100 synthetic midpoint.
+                 effortBaseline: usableOrNil(effortBaseline).map(DriverBaseline.init),
                  priorDayEffort: priorDayEffort)
     }
 }

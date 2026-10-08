@@ -1,6 +1,6 @@
 """Write tests/data/layer1_cases.json: invented night-vital tapes that exercise every Layer 1 path (short and long
-histories, gaps, out-of-range nights, outliers, a slow drift, a level step, the CUSUM hold, the ten-night HRV week,
-each vital's own band).
+histories, gaps, out-of-range nights, outliers, a slow drift, a sustained ramp, a level step, the change hold, the
+ten-night HRV week, each vital's own band).
 
 The expected results come from the app, never from the port. After changing the cases (or Layer 1):
     uv run python scripts/make_layer1_cases.py
@@ -53,10 +53,15 @@ def cases() -> list[dict]:
         case("rhr_long_history_tonight_missing", "sleep_rhr",
              tonight(tape(90, rhr(52, 1.8), seed=17, decimals=0), None)),
         case("rhr_drift", "sleep_rhr", tape(80, lambda i, r: 50 + 0.09 * i + r.gauss(0, 1.2), seed=6, decimals=0)),
+        # A long, clear ramp (0.2 bpm a night for 90 nights): the trend test finds it (slope_usable). It is reported
+        # only; the usual is never moved along it.
+        case("rhr_sustained_ramp", "sleep_rhr",
+             tape(90, lambda i, r: 46 + 0.2 * i + r.gauss(0, 1.0), seed=23, decimals=0)),
         case("rhr_level_step", "sleep_rhr",
              tape(70, lambda i, r: (50 if i < 52 else 58) + r.gauss(0, 1.5), seed=7, decimals=0)),
         case("rhr_long_history", "sleep_rhr", tape(260, rhr(55, 2.5), seed=8, decimals=0)),
-        # An 8 bpm step 33 nights back: the CUSUM fires (regime shift) and the 60-day usual is held.
+        # An 8 bpm step 33 nights back: the change detector fires (a change episode, regime_shift) and the
+        # pre-change 60-day usual is held.
         case("rhr_regime_shift_holds_the_usual", "sleep_rhr",
              tape(100, lambda i, r: (50 if i < 67 else 58) + r.gauss(0, 1.5), seed=22, decimals=0)),
         case("rhr_mid_tape", "sleep_rhr", tape(90, rhr(53, 2.0), seed=9, decimals=0), as_of="2026-09-20"),

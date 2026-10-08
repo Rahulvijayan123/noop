@@ -206,6 +206,38 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
   return days.map((d) => byDay.get(d)).filter((r): r is Record<string, unknown> => r != null);
 }
 
+/**
+ * `GET /anomaly-candidates?since=<result_revision>[&limit=<1..200>]`: anomaly windows published by the VPS model
+ * service (TimesFM 3.0 forecast + UniTS reconstruction; supabase/migrations/20261007180000_anomaly_service.sql)
+ * for the credential's owner and the resolved device, oldest change first, after the caller's cursor. A candidate
+ * is NOT an alert: the phone's verification stage decides (WatchdogVerifier.swift). Retracted rows are returned so
+ * the phone can drop them. `cursor` is the newest result_revision returned (or the caller's `since` when none).
+ */
+export const ANOMALY_CANDIDATES_MAX_ROWS = 200;
+
+export function parseAnomalyCandidatesQuery(params: URLSearchParams) {
+  const since = params.get('since') ?? '0';
+  const limit = params.get('limit') ?? String(ANOMALY_CANDIDATES_MAX_ROWS);
+  if (!/^\d{1,16}$/.test(since) || !Number.isSafeInteger(Number(since))) throw fail('invalid_cursor', 400);
+  if (!/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > ANOMALY_CANDIDATES_MAX_ROWS) {
+    throw fail('invalid_limit', 400);
+  }
+  return { since: Number(since), limit: Number(limit) };
+}
+
+export async function readAnomalyCandidates({ rest, userId, deviceId, since, limit }: {
+  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; since: number; limit: number;
+}) {
+  const rows = (await rest.select('anomaly_candidates',
+    `user_id=eq.${userId}&device_id=eq.${deviceId}&result_revision=gt.${since}` +
+    `&select=candidate_key,start_ts,end_ts,local_day,channels,flagged_by,model_p,score,severity,direction,` +
+    `expected,observed,context,quality,model_versions,status,suppressed_reason,result_revision,computed_at` +
+    `&order=result_revision.asc&limit=${limit}`)) ?? [];
+  const list = rows as Array<Record<string, unknown>>;
+  const cursor = list.reduce((m, r) => Math.max(m, Number(r.result_revision) || 0), since);
+  return { candidates: list, cursor };
+}
+
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
   + 'result_revision,computed_at';
 
@@ -345,12 +377,13 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isExposureGet = req.method === 'GET' && route === '/exposures';
   const isGroundTruthLabels = req.method === 'POST' && route === '/ground-truth-labels';
   const isSensorBiomarkers = req.method === 'GET' && route === '/sensor-biomarkers';
+  const isAnomalyCandidates = req.method === 'GET' && route === '/anomaly-candidates';
   // Metric explanations (20261008000000_metric_insights.sql): account-level, no device.
   const isInsights = req.method === 'POST' && route === '/insights';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
-      && !isSensorBiomarkers && !isInsights) {
+      && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -387,11 +420,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
+        || isAnomalyCandidates
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
         : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
-        || isContext || isContextHistory || isSensorBiomarkers
+        || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
         || isInsights) ? null
@@ -448,6 +482,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // No stored document for any requested day: 404 (the contract's explicit absent answer).
       if (days.length === 0) throw fail('not_found', 404);
       return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isAnomalyCandidates) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseAnomalyCandidatesQuery(url.searchParams);
+      const page = await readAnomalyCandidates({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGaitWindows) {
       if (!deviceId) throw fail('device_registration_pending', 409);

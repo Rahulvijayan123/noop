@@ -136,7 +136,11 @@ enum BodyVitalSigns {
                          hrvOverCountByDay: [String: Double] = [:],
                          // #1846: the Settings lead-with choice, so this tile agrees with Today and the
                          // detail screen. A setting that reaches two of three surfaces is worse than none.
-                         skinTempPreferred: SkinTempDisplay.Kind = .absolute) -> [BodyVitalReading] {
+                         skinTempPreferred: SkinTempDisplay.Kind = .absolute,
+                         // BaselineStandard fix J: the Recalibrate epoch per metric
+                         // (`BaselineStandard.referenceEpochs()`); a personal band never folds nights before it.
+                         // Empty (the default) = no recalibration, so pure callers and tests are unchanged.
+                         epochs: [BaselineStandard.Metric: Double] = [:]) -> [BodyVitalReading] {
         let logicalDay = logicalDayKey(now)
 
         // Resolve one metric to a per-day series, taking the FIRST source (by precedence) that carries
@@ -165,8 +169,11 @@ enum BodyVitalSigns {
                                              todayKey: logicalDay)?.value
         }
 
-        func history(before day: String?, _ pts: [VitalPoint]) -> [Double?] {
-            VitalBands.calendarSeries(pts.filter { point in
+        func history(before day: String?, _ pts: [VitalPoint],
+                     metric: BaselineStandard.Metric? = nil) -> [Double?] {
+            let from = metric.flatMap { epochs[$0] }.flatMap { BaselineStandard.firstDayOnOrAfter(epoch: $0) }
+            return VitalBands.calendarSeries(pts.filter { point in
+                if let from, point.day < from { return false }
                 guard let day else { return true }
                 return point.day < day
             }.map { ($0.day, Optional($0.value)) })
@@ -267,7 +274,8 @@ enum BodyVitalSigns {
         if let skin {
             skinResult = VitalBands.band(
                 value: skin,
-                history: VitalBands.skinTempHistory(matching: skin, in: history(before: skinRow?.day, skinSeries)),
+                history: VitalBands.skinTempHistory(matching: skin, in: history(before: skinRow?.day, skinSeries,
+                                                                                metric: .skinTempDeviation)),
                 populationRange: skinIsAbsolute ? 33...36 : (-0.6)...0.6,
                 cfg: skinIsAbsolute ? Baselines.metricCfg["skin_temp"]! : VitalBands.skinTempDeviationCfg
             )
@@ -305,7 +313,7 @@ enum BodyVitalSigns {
                 format: { String(format: "%.1f", $0) },
                 banding: VitalBands.band(
                     value: respRow?.value,
-                    history: history(before: respRow?.day, respPoints),
+                    history: history(before: respRow?.day, respPoints, metric: .respiration),
                     populationRange: 12...20,
                     cfg: Baselines.respCfg
                 ),
@@ -383,7 +391,7 @@ enum BodyVitalSigns {
                 format: { String(Int($0.rounded())) },
                 banding: VitalBands.band(
                     value: rhrRow?.value,
-                    history: history(before: rhrRow?.day, rhrPoints),
+                    history: history(before: rhrRow?.day, rhrPoints, metric: .restingHR),
                     populationRange: 40...60,
                     cfg: Baselines.restingHRCfg
                 ),
@@ -399,11 +407,16 @@ enum BodyVitalSigns {
                 unit: "ms",
                 value: hrvRow?.value,
                 format: { String(Int($0.rounded())) },
+                // BaselineStandard rule 1: banded on ln, and an Apple Health HRV (SDNN) never shares a history
+                // with strap/import RMSSD — the history keeps only points of the displayed value's method.
                 banding: VitalBands.band(
                     value: hrvRow?.value,
-                    history: history(before: hrvRow?.day, hrvPoints),
+                    history: history(before: hrvRow?.day,
+                                     hrvPoints.filter { ($0.source == .appleHealth) == (hrvRow?.source == .appleHealth) },
+                                     metric: .hrvRmssd),
                     populationRange: 40...120,
-                    cfg: Baselines.hrvCfg
+                    cfg: Baselines.readinessHRVLnCfg,
+                    logScale: true
                 ),
                 metricColor: StrandPalette.metricPurple,
                 day: hrvRow?.day,

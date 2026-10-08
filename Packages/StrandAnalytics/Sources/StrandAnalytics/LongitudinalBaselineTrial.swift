@@ -464,16 +464,22 @@ public struct LBTrialRequest: Equatable, Sendable {
     public var confoundersByDay: [String: [LBConfounder]]
     /// Everyday habit log. Used to stratum rest vs trained usuals. Not an “explain this OFF” form.
     public var dayLogsByDay: [String: LBDayLog]
+    /// v2: reference-epoch boundaries (device-family change, explicit "set new reference"). Each starts a new
+    /// frozen anchor; nothing before the newest boundary on or before T enters the anchor. Treatment starts are
+    /// handled by the Phase B trial clock and also re-anchor (after wash-in).
+    public var referenceEpochs: [LBReferenceEpoch]
 
     public init(events: [LBTreatmentEvent] = [], freeze: LBFreezeBundle? = nil,
                 provenanceNow: LBProvenance = LBProvenance(),
                 confoundersByDay: [String: [LBConfounder]] = [:],
-                dayLogsByDay: [String: LBDayLog] = [:]) {
+                dayLogsByDay: [String: LBDayLog] = [:],
+                referenceEpochs: [LBReferenceEpoch] = []) {
         self.events = events
         self.freeze = freeze
         self.provenanceNow = provenanceNow
         self.confoundersByDay = confoundersByDay
         self.dayLogsByDay = dayLogsByDay
+        self.referenceEpochs = referenceEpochs
     }
 
     public func acuteFlags(on day: String) -> [LBConfounder] {
@@ -864,7 +870,9 @@ extension LongitudinalBaseline {
         if !pre.show7 { reasons.append("show_7") }
         if !pre.establishedLong { reasons.append("established_long") }
         if pre.stale { reasons.append("stale") }
-        if pre.regimeShift { reasons.append("regime_shift") }
+        // v2: a steady, significant trend is handled by the "expected untreated" path; only an abrupt change
+        // episode the trend does not explain blocks the freeze.
+        if pre.regimeShift && !pre.slopeUsable { reasons.append("regime_shift") }
         if !pre.confSpread { reasons.append("conf_spread") }
         if isSpO2Series(pre.series) {
             let okSlots = spo2LongNightsWithCoverage(asOf: pre.asOf, observations: observations)

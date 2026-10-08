@@ -176,7 +176,7 @@ def availability_estimated(document: dict[str, Any] | None, signal: Signal) -> b
 
 # --------------------------------------------------------------------------- the person's usual (the app's Baseline)
 #
-# The app's Baseline (Layer 1: LongitudinalBaseline, parameter set v1.review) runs here as layer1.py, pinned to the
+# The app's Baseline (Layer 1: LongitudinalBaseline, parameter set v2.clinical) runs here as layer1.py, pinned to the
 # app's own results (tests/test_layer1.py), so an explanation calls a night inside or outside its usual exactly as
 # the Home ring and the Monitor do from the same nightly values, replayed over the whole history as the phone does.
 # Day logs, confounders and treatment trials live on the phone; they are neutral here, as on a phone with none logged.
@@ -221,10 +221,14 @@ def app_baseline(history: dict[date, dict[str, Any]], series: str, night: date, 
 
     nights = layer1.SERIES[series].span7
     week = copy(ev.copy7, ev.show7, ev.trust7, f"weighted average of the {nights} nights before, newest weighted most")
+    # slow_trend_detected: a significant slow trend in the newest 28 of those nights, reported only (the usual never
+    # follows it). held_after_a_change: a change was detected and the usual is still the pre-change one.
     long = copy(ev.copy_long, ev.show_long, ev.trust_long,
-                "median of the nights 60 to 8 days before; the band is k robust spreads either side, k fitted to the "
-                "person's own nights once 14 are in", established=ev.established_long,
-                follows_a_slow_trend=ev.slope_usable, held_after_a_change=ev.regime_shift)
+                "median of the nights 60 to 8 days before; the band is a Student-t interval using the effective number "
+                "of independent nights, widened by how the person's own recent nights actually fell; a slow trend is "
+                "tested for significance and reported, never moves the usual; a detected change keeps the pre-change "
+                "usual for 28 days", established=ev.established_long,
+                slow_trend_detected=ev.slope_usable, held_after_a_change=ev.holding_copy)
     outside = [name for name, off in (("this_week", call.off_week), ("60_days", call.off_long)) if off]
     z = ev.z7 if call.off_week else ev.z_long
     return {"night": night.isoformat(), "value": app_rounded(call.value, decimals),
@@ -233,7 +237,7 @@ def app_baseline(history: dict[date, dict[str, Any]], series: str, night: date, 
                      "low": app_rounded(call.band_lo, decimals), "high": app_rounded(call.band_hi, decimals),
                      "outside": outside, "side": ("above" if z > 0 else "below") if outside and z is not None else None},
             "week": week, "long": long,
-            "rules": "the app's Baseline (Layer 1, v1.review) on the server's nightly values"}
+            "rules": "the app's Baseline (Layer 1, v2.clinical) on the server's nightly values"}
 
 
 def position(value: float | None, band: dict[str, Any] | None) -> str:

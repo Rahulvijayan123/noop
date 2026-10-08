@@ -84,6 +84,17 @@ final class BaselineStore: ObservableObject {
     /// Today ring and Monitor list. Nil until real nights exist.
     @Published var vitalsCheck: BaselineVitalsCheck?
     private var dismissedPromptDay: String?
+    /// v2 context strata (posture / steady walking / sleep HR, and the full-day pooled awake-rest days) from the
+    /// stored activity-context intervals. See `LongitudinalBaseline.ContextMaterializer`.
+    @Published private(set) var contextObservations: [LBSeries: [LBDailyObservation]] = [:]
+    private var contextRefreshedAt: Date?
+    private var contextRefreshing = false
+    private var contextVersion = 0
+    /// Explicit "set a new reference" days (frozen-anchor epochs). Device-family epochs are added at evaluate time.
+    @Published private(set) var reanchorDays: [String] = []
+    private let reanchorKey = "noop.baseline.reanchor.v1"
+    /// Memo for `watchdogPromptEvaluations`: the Watchdog tick asks every 20 s with identical inputs.
+    private var promptMemo: (key: String, evals: [LBEvaluation])?
 
     struct SeriesReadiness: Equatable {
         var show7: Bool
@@ -136,7 +147,41 @@ final class BaselineStore: ObservableObject {
             self.imuByDay = Dictionary(uniqueKeysWithValues: self.imuAccByDay.map { ($0.key, $0.value.observation) })
             self.dayTapeByDay = Self.loadDayTape(defaults: defaults)
             self.dismissedPromptDay = defaults.string(forKey: dismissedPromptKey)
+            self.reanchorDays = defaults.stringArray(forKey: reanchorKey) ?? []
         }
+    }
+
+    /// Reloads the context strata from the stored activity-context intervals (≤ 400 days). Throttled; the
+    /// materializer runs off the main actor.
+    func refreshContextStrata(repo: Repository, force: Bool = false) async {
+        if contextRefreshing { return }
+        if !force, let at = contextRefreshedAt, Date().timeIntervalSince(at) < 30 * 60 { return }
+        contextRefreshing = true
+        defer { contextRefreshing = false }
+        let now = Int(Date().timeIntervalSince1970)
+        let (intervals, _) = await repo.storedActivityContext(from: now - 400 * 86_400, to: now)
+        let rows = intervals.map(\.storeRow)
+        let obs = await Task.detached(priority: .utility) {
+            LongitudinalBaseline.ContextMaterializer.observations(rows: rows)
+        }.value
+        contextObservations = obs
+        contextRefreshedAt = Date()
+        contextVersion += 1
+        promptMemo = nil
+    }
+
+    /// The wearer starts a new frozen reference from `day` (e.g. after a lasting change their clinician has
+    /// reviewed). Earlier days stay in the 60/90/365-day copies; only the anchor moves. Never automatic.
+    func setNewReference(on day: String) {
+        guard !reanchorDays.contains(day) else { return }
+        reanchorDays.append(day)
+        reanchorDays.sort()
+        defaults.set(reanchorDays, forKey: reanchorKey)
+        promptMemo = nil
+    }
+
+    var referenceEpochs: [LBReferenceEpoch] {
+        reanchorDays.map { LBReferenceEpoch(startDay: $0, reason: .userReanchor) }
     }
 
     static var allWiredSeries: [LBSeries] {
@@ -164,6 +209,14 @@ final class BaselineStore: ObservableObject {
         case .awakeRestHR, .awakeActiveHR, .continuousHR: return "Heart rate"
         case .wakingSteps: return "Steps"
         case .wakingImuEnergy: return "Movement"
+        case .awakeSupineHR: return "Lying HR"
+        case .awakeSeatedHR: return "Seated HR"
+        case .awakeUprightHR: return "Standing HR"
+        case .awakeSupineHRVLn: return "Lying HRV"
+        case .awakeSeatedHRVLn: return "Seated HRV"
+        case .awakeUprightHRVLn: return "Standing HRV"
+        case .walkingHR: return "Walking HR"
+        case .sleepHR: return "Sleep HR"
         default: return series.planRow.planName
         }
     }
@@ -245,20 +298,29 @@ final class BaselineStore: ObservableObject {
         return try? JSONDecoder().decode(T.self, from: data)
     }
 
-    /// Usuals for every Watchdog vital, not only the series the patient currently has selected.
+    /// Usuals for every Watchdog vital, not only the series the patient currently has selected. v2 adds the
+    /// context strata the live comparison is matched against (posture, steady walking, sleep HR).
+    static let watchdogSeries: [LBSeries] = [
+        .sleepRHR, .awakeRestHR, .continuousHR,
+        .sleepHRVLn, .awakeRestHRVLn,
+        .sleepTemp, .sleepResp, .sleepSpO2Mean,
+        .sleepHR, .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR, .walkingHR,
+        .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn,
+    ]
+
     func watchdogPromptEvaluations(days: [DailyMetric]) -> [LBEvaluation] {
-        let needed: [LBSeries] = [
-            .sleepRHR, .awakeRestHR, .continuousHR,
-            .sleepHRVLn, .awakeRestHRVLn,
-            .sleepTemp, .sleepResp, .sleepSpO2Mean
-        ]
-        return needed.map { series in
-            LongitudinalBaseline.evaluate(
-                asOf: Self.livePromptAsOf(days: days),
-                series: series,
-                observations: observations(from: days, series: series),
-                trial: LBTrialRequest(dayLogsByDay: dayLogsByDay))
+        let asOf = Self.livePromptAsOf(days: days)
+        let key = "\(asOf)|\(days.count)|\(days.last?.day ?? "")|\(days.last?.restingHr ?? -1)|\(contextVersion)|"
+            + "\(dayLogsByDay.count)|\(dayTapeByDay[Self.dayKey(Date())]?.restHR.n ?? 0)|\(reanchorDays.count)"
+        if let memo = promptMemo, memo.key == key { return memo.evals }
+        let request = LBTrialRequest(dayLogsByDay: dayLogsByDay, referenceEpochs: referenceEpochs)
+        let evals = Self.watchdogSeries.map { series in
+            LongitudinalBaseline.evaluate(asOf: asOf, series: series,
+                                          observations: observations(from: days, series: series),
+                                          trial: request)
         }
+        promptMemo = (key, evals)
+        return evals
     }
 
     func nightCount(days: [DailyMetric], series: LBSeries) -> Int {
@@ -274,7 +336,14 @@ final class BaselineStore: ObservableObject {
         if series.hasDailyMetricColumn {
             return LongitudinalBaseline.observations(from: days, series: series)
         }
-        return dayTapeByDay.values.compactMap { $0.observation(series: series) }.sorted { $0.day < $1.day }
+        let tape = dayTapeByDay.values.compactMap { $0.observation(series: series) }
+        guard let materialized = contextObservations[series] else {
+            return tape.sorted { $0.day < $1.day }
+        }
+        // Whole-day materialized values win; the live tape fills days the interval table does not cover yet.
+        var byDay = Dictionary(tape.map { ($0.day, $0) }, uniquingKeysWith: { _, b in b })
+        for o in materialized { byDay[o.day] = o }
+        return byDay.values.sorted { $0.day < $1.day }
     }
 
     /// Unique-minute stub series from the same window Watchdog scored. Does not write Layer 1 snapshots.

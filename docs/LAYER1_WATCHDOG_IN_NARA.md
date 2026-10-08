@@ -65,7 +65,7 @@ Wrist-off stays unavailable. It is not guessed back from a quiet IMU.
 
 Baseline answers one question: given the days this person has already lived, what is usual, and how wide is that usual.
 
-Parameter set `v1.review`. Changing a constant would be a new parameter set. Old snapshots are not edited in place.
+Parameter set `v2.clinical` (was `v1.review`; see docs/BASELINE_WATCHDOG_V2.md). Changing a constant would be a new parameter set. Old snapshots are not edited in place.
 
 Each series is a day-level number, not a minute. The main ones that already have a column on the daily row are sleep resting heart rate, sleep HRV, sleep wrist temperature, sleep respiration, sleep SpO₂ mean, and waking steps. Awake rest, awake active, and all-day heart rate and HRV are built from the minute tape (still minutes versus moving minutes). Waking IMU energy is the movement of the wrist, in unique minutes, and that day trains only when coverage is at least 60 minutes. Charge is not a series.
 

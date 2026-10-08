@@ -157,9 +157,10 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
     // MARK: - Every biometric is a series
 
     func testPlanListsExactlySeventeenBiometrics() {
-        XCTAssertEqual(LBSeries.allCases.count, 18, LongitudinalBaseline.planCatalogText())
+        // 18 condensed-plan series + 8 v2.clinical context strata (docs/BASELINE_WATCHDOG_V2.md §3).
+        XCTAssertEqual(LBSeries.allCases.count, 26, LongitudinalBaseline.planCatalogText())
         let ids = LBSeries.allCases.map(\.rawValue)
-        XCTAssertEqual(Set(ids).count, 18)
+        XCTAssertEqual(Set(ids).count, 26)
         let expected = [
             "sleep_rhr", "sleep_hrv_ln", "sleep_temp", "sleep_resp",
             "sleep_spo2_mean", "sleep_spo2_nadir",
@@ -167,13 +168,16 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
             "awake_active_hr", "awake_active_hrv_ln", "awake_active_spo2_mean",
             "continuous_hr", "continuous_hrv_ln", "continuous_spo2_mean",
             "waking_steps", "waking_active_min", "waking_imu_energy",
+            "awake_supine_hr", "awake_supine_hrv_ln", "awake_seated_hr", "awake_seated_hrv_ln",
+            "awake_upright_hr", "awake_upright_hrv_ln", "walking_hr", "sleep_hr",
         ]
         XCTAssertEqual(ids, expected, LongitudinalBaseline.planCatalogText())
     }
 
     func testWorkedWeeksCoverEverySeriesOnce() {
         let covered = Set(workedWeeks().map(\.series))
-        let missing = LBSeries.allCases.filter { !covered.contains($0) }
+        // v2 context strata have no condensed-plan §5 worked week (they are not plan rows).
+        let missing = LBSeries.allCases.filter { !covered.contains($0) && $0.planRow.condensedSection != "v2.3" }
         XCTAssertTrue(missing.isEmpty, "no condensed §5 tape for \(missing.map(\.rawValue))")
     }
 
@@ -302,13 +306,19 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
             if sp.span7 == 7 {
                 XCTAssertEqual(c.center, w.center7, accuracy: w.centerTol,
                                "\(row.planName) center_7\n\(ev.consoleReport)")
-                XCTAssertEqual(c.spread, w.spread, accuracy: w.spreadTol,
-                               "\(row.planName) spread_7\n\(ev.consoleReport)")
-                XCTAssertEqual(ev.z7 ?? 0, w.z7, accuracy: w.zTol,
-                               "\(row.planName) z_7\n\(ev.consoleReport)")
+                // v2.clinical: the 7-day spread is the small-sample-corrected MAD (×1.14 at n = 7, Rousseeuw &
+                // Croux), so it is ≥ the plan's v1 worked value and at most ×1.37 (n = 4). The worked deviation
+                // in native units (z × spread) is unchanged.
+                XCTAssertGreaterThanOrEqual(c.spread, w.spread - w.spreadTol,
+                                            "\(row.planName) spread_7\n\(ev.consoleReport)")
+                XCTAssertLessThanOrEqual(c.spread, w.spread * 1.37 + w.spreadTol,
+                                         "\(row.planName) spread_7\n\(ev.consoleReport)")
+                XCTAssertEqual((ev.z7 ?? 0) * c.spread, w.z7 * w.spread,
+                               accuracy: w.zTol * w.spread + abs(w.z7) * w.spreadTol + 1e-6,
+                               "\(row.planName) z_7 × spread_7\n\(ev.consoleReport)")
             }
             XCTAssertGreaterThan(c.bandHiDisplay, c.bandLoDisplay)
-            XCTAssertEqual(ev.paramSet, "v1.review")
+            XCTAssertEqual(ev.paramSet, LongitudinalBaseline.V2.paramSet)
             XCTAssertEqual(c.version, LongitudinalBaseline.Params.version7)
             XCTAssertFalse(ev.alertEligible, "\(row.planName): week-only tape is not alert_eligible")
         }
