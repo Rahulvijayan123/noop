@@ -19,6 +19,7 @@ struct JournalReminderCard: View {
 
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var router: NavRouter
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     /// Default ON so the reminder works out of the box; the Settings toggle / this key opt out.
     @AppStorage(PuffinExperiment.journalReminderKey) private var reminderEnabled = true
@@ -71,7 +72,8 @@ struct JournalReminderCard: View {
                     Text(todayLogged ? String(localized: "Logged today") : String(localized: "Not logged today"))
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textSecondary)
-                        .lineLimit(1)
+                        .lineLimit(typeSize.isAccessibilitySize ? 2 : 1)
+                        .multilineTextAlignment(.trailing)
                     Image(systemName: "chevron.right")
                         .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)

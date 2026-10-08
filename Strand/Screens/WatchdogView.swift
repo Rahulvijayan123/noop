@@ -152,6 +152,7 @@ private struct WatchdogStatusRow: View {
     let lastTickUnix: Int?
     let intervalMinutes: Int
     var showsChevron: Bool = false
+    @Environment(\.dynamicTypeSize) private var typeSize
 
     var body: some View {
         HStack(alignment: .center, spacing: NoopMetrics.space3) {
@@ -167,7 +168,8 @@ private struct WatchdogStatusRow: View {
                 Text(line)
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
-                    .lineLimit(1)
+                    // Wraps at accessibility sizes so the reason is not cut to "No readings in the last 3...".
+                    .lineLimit(typeSize.isAccessibilitySize ? 3 : 1)
                     .minimumScaleFactor(0.85)
             }
             Spacer(minLength: NoopMetrics.space2)
