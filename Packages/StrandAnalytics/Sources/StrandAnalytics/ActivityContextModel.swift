@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.8`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.9`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.

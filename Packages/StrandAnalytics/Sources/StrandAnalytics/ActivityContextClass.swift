@@ -384,7 +384,13 @@ public enum ActivityClassifier {
         let uprightCap = postureConfidenceCap(claimed: .uprightStationary, learnedPosture: learnedPosture)
         let seatedStill = min(seatedCap, stationary * seated)
         let uprightStill = min(uprightCap, stationary * upright)
-        let sittingMass = seatedStill + locomotion[.vehicleMotion]
+        // The vehicle mass counts toward sitting (a passenger is seated) uncapped only when the claim IS the
+        // vehicle ("In a vehicle", the encoder's call). Added to a still-posture claim ("Sitting quietly" with some
+        // vehicle mass beside it) it would carry a wrist-only seated claim past the posture cap (0.57 + 0.40 =
+        // 0.97 with no learned agreement; review r5), so there the sum is capped like the seated mass itself.
+        let vehicleClaim = label == "In a vehicle"
+        let sittingMass = vehicleClaim ? seatedStill + locomotion[.vehicleMotion]
+            : min(seatedCap, seatedStill + locomotion[.vehicleMotion])
         let standingMass = uprightStill
 
         var candidates: [ActivityClass: Double] = [

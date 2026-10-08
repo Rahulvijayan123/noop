@@ -225,6 +225,22 @@ final class ActivityContextClassTests: XCTestCase {
         }
     }
 
+    /// Vehicle mass beside a still seated reading must not lift a "Sitting" claim past the posture cap (review r5:
+    /// stationary 0.6 + vehicle 0.4 with a 0.95 seated head read "Sitting quietly" at 0.97 wrist-only). The vehicle
+    /// claim itself stays the encoder's call.
+    func testVehicleMassDoesNotLiftAStillSittingClaimPastTheCap() {
+        let cap = ActivityClassifier.wristOnlyPostureConfidenceCap
+        let sitting = classify(posture: [.seatedLikely: 0.95, .uprightStationary: 0.03, .unknown: 0.02],
+                               locomotion: [.stationary: 0.6, .vehicleMotion: 0.4], arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(sitting.activityClass, .sitting)
+        XCTAssertNotEqual(sitting.detail, .inVehicle)
+        XCTAssertLessThanOrEqual(sitting.confidence, cap + 1e-12)
+        let vehicle = classify(posture: [.seatedLikely: 0.95, .uprightStationary: 0.03, .unknown: 0.02],
+                               locomotion: [.stationary: 0.3, .vehicleMotion: 0.7], arm: [.quiet: 0.9, .other: 0.1])
+        XCTAssertEqual(vehicle.detail, .inVehicle)
+        XCTAssertEqual(vehicle.confidence, min(cap, 0.3 * 0.95) + 0.7, accuracy: 1e-9)
+    }
+
     func testStandingNeedsAClearUprightLean() {
         let standing = classify(posture: [.uprightStationary: 0.7, .seatedLikely: 0.2, .unknown: 0.1],
                                 locomotion: [.stationary: 0.97, .unknown: 0.03], arm: [.quiet: 0.9, .other: 0.1])
