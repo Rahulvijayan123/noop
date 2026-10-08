@@ -63,6 +63,28 @@ final class StressLensCache {
 enum DaytimeStressMode {
     private static let baselineHistoryDays = 30
 
+    /// The sleep / in-bed blocks and stored activity-context intervals for `[from, to]` (D4-05 / D8-12),
+    /// for handing to `DaytimeStress.analyze(context:)` and `dayDaytimeAggregate(context:)`. Two cheap reads
+    /// (session rows and interval rows, never raw streams). Sleep blocks come from BOTH the imported and
+    /// the computed sources, so a strap-only night counts; an empty result is the clock-only read.
+    @MainActor
+    static func dayContext(repo: Repository, from: Int, to: Int) async -> DaytimeStress.DayContext {
+        let spans = await sleepSpans(repo: repo, from: from, to: to)
+        let intervals = await repo.storedActivityContext(from: from, to: to + 1).intervals
+        return DaytimeStress.DayContext(sleepSpans: spans, intervals: intervals)
+    }
+
+    @MainActor
+    private static func sleepSpans(repo: Repository, from: Int, to: Int) async -> [DaytimeStress.SleepSpan] {
+        // A night that began the evening before still overlaps the morning, so reach back a day.
+        let lookback = from - 86_400
+        let sessions = await repo.sleepSessions(from: lookback, to: to, limit: 400)
+            + repo.computedSleepSessions(from: lookback, to: to, limit: 400)
+        return sessions
+            .map { DaytimeStress.SleepSpan(start: $0.effectiveStartTs, end: $0.endTs) }
+            .filter { $0.end > from && $0.start <= to && $0.end > $0.start }
+    }
+
     @MainActor
     static func selected(repo: Repository, startOfToday: Date,
                          calendar: Calendar = .current,
@@ -76,8 +98,17 @@ enum DaytimeStressMode {
             .map { calendar.startOfDay(for: $0) } ?? startOfToday
         let spanEnd = Int(calendar.startOfDay(for: startOfToday).timeIntervalSince1970) - 1
         let fingerprint = await repo.hrFingerprintUnion(from: Int(spanStart.timeIntervalSince1970), to: spanEnd)
+        // D4-05: each past day's aggregate now drops its sleep / in-bed, ambulatory and upright-committed
+        // hours, so the span's sleep blocks and activity context are inputs too. Read once for the whole
+        // span (session and interval rows only), sliced per day below, and folded into the memo key so a
+        // newly staged night or a newly materialised context day re-folds the lens.
+        let spanFrom = Int(spanStart.timeIntervalSince1970)
+        let spanSleep = await sleepSpans(repo: repo, from: spanFrom, to: spanEnd)
+        let spanContext = await repo.storedActivityContext(from: spanFrom, to: spanEnd + 1)
+        let contextKey = "\(spanSleep.count):\(spanSleep.map(\.end).max() ?? 0)"
+            + ":\(spanContext.intervals.count):\(spanContext.through ?? 0)"
         let cacheKey = "\(repo.deviceId)|\(Int(calendar.startOfDay(for: startOfToday).timeIntervalSince1970))"
-            + "|\(TimeZone.current.identifier)|\(fingerprint)"
+            + "|\(TimeZone.current.identifier)|\(fingerprint)|\(contextKey)"
         return await StressLensCache.shared.resolve(cacheKey) {
             var aggregates: [(hr: Double?, rmssd: Double?)] = []
             aggregates.reserveCapacity(baselineHistoryDays)
@@ -97,13 +128,19 @@ enum DaytimeStressMode {
                 let to = Int(dayEnd.timeIntervalSince1970) - 1
                 let dayTz = TimeZone.current.secondsFromGMT(for: dayStart)
                 let dayHR = await repo.hrSamples(from: from, to: to, limit: 200_000)
-                guard !dayHR.isEmpty else { continue }
+                // run1 D4-14: a day with no HR is a HELD day, not an absent one, so the fold's skip-and-hold
+                // counts it and a mostly strapless window reads stale instead of silently "usable".
+                guard !dayHR.isEmpty else { aggregates.append((hr: nil, rmssd: nil)); continue }
                 // The live baseline scores HR only while the RMSSD term is disabled. Skip the
                 // 30 days of historical R-R reads; they cannot change the selected mode.
                 let dayRR = DaytimeStress.daytimeRMSSDScoringEnabled
                     ? await repo.rrIntervals(from: from, to: to, limit: 200_000) : []
+                let context = DaytimeStress.DayContext(
+                    sleepSpans: spanSleep.filter { $0.end > from && $0.start <= to },
+                    intervals: spanContext.intervals.filter { $0.end > from && $0.start <= to })
                 aggregates.append(
-                    DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz)
+                    DaytimeStress.dayDaytimeAggregate(hr: dayHR, rr: dayRR, tzOffsetSeconds: dayTz,
+                                                      context: context)
                 )
             }
             return DaytimeStress.scoringModeFromAggregates(aggregates)

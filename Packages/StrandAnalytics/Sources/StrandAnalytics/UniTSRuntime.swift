@@ -7,7 +7,8 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var hrv: Double?
     /// Established awake-rest HRV (ms). Never averaged with sleep. Nil unless that copy is shown.
     public var hrvAwake: Double?
-    /// `hrv` came from overnight sleep HRV. No sleep÷wake multiplier; live rest stays that sleep usual until a shown awake copy exists.
+    /// `hrv` came from overnight sleep HRV and no awake-rest copy is shown. Live daytime minutes are then compared
+    /// to `daytimeHRV`, the EXPLICIT sleep-scaled fallback (D4-08), with widened sigma; never silently the sleep usual.
     public var hrvAnchoredInSleep: Bool
     public var source: WatchdogPromptSource
     public var temp: Double?
@@ -85,10 +86,13 @@ public struct UniTSPrompt: Equatable, Sendable {
         }
         let sleepHRV = center(.sleepHRVLn)
         let awakeHRV = shownCenter(.awakeRestHRVLn)
-        // Sleep HRV / sleep SpO₂ usuals are 24-hour: live daytime minutes still compare to
-        // those recorded overnight copies. They are not wiped just because it is wake.
-        // Instant HR usual is daytime rest / all-day HR. Sleep RHR never fills this slot.
-        let hr = shownCenter(.awakeRestHR) ?? shownCenter(.continuousHR)
+        // Sleep SpO₂ usual is 24-hour: live daytime minutes still compare to the overnight copy. Sleep HRV
+        // is carried as `hrv` but a daytime minute reads it only through `daytimeHRV` (sleep-scaled,
+        // flagged, widened sigma) until an awake-rest copy is shown (D4-08).
+        // Instant HR usual is daytime REST HR only. Sleep RHR never fills this slot, and neither does the
+        // continuous (24-h, sleep + effort minutes) mean: with no awake-rest copy the slot stays nil, so
+        // the population prior and the cold-start (widened) HR sigma apply instead (D4-08).
+        let hr = shownCenter(.awakeRestHR)
         // Still RHR usual is overnight / still-gated only. Daytime HR never fills this slot.
         let rhr = shownCenter(.sleepRHR) ?? center(.sleepRHR)
         let source: WatchdogPromptSource
@@ -112,18 +116,37 @@ public struct UniTSPrompt: Equatable, Sendable {
             resp: center(.sleepResp),
             spo2: center(.sleepSpO2Mean),
             scaleHR: displayMAD(evaluations, .awakeRestHR, shownOnly: true)
-                ?? displayMAD(evaluations, .continuousHR, shownOnly: true)
                 ?? WatchdogConfig.hrScale,
             scaleRHR: displayMAD(evaluations, .sleepRHR, shownOnly: false)
                 ?? WatchdogConfig.hrScale,
+            // The sleep MAD rides the sleep-scaled fallback centre, so it is scaled by the same ratio (a
+            // log-domain dispersion is multiplicative in ms).
             scaleHRV: (awakeHRV != nil ? displayMAD(evaluations, .awakeRestHRVLn, shownOnly: true) : nil)
-                ?? displayMAD(evaluations, .sleepHRVLn, shownOnly: false)
+                ?? displayMAD(evaluations, .sleepHRVLn, shownOnly: false).map {
+                    awakeHRV == nil ? $0 * awakeToSleepHRVRatio : $0
+                }
                 ?? WatchdogConfig.hrvScale,
             scaleTemp: displayMAD(evaluations, .sleepTemp, shownOnly: false) ?? WatchdogConfig.tempScale,
             scaleResp: displayMAD(evaluations, .sleepResp, shownOnly: false) ?? WatchdogConfig.respScale,
             scaleSpO2: displayMAD(evaluations, .sleepSpO2Mean, shownOnly: false) ?? WatchdogConfig.spo2Scale
         )
     }
+
+    /// Population awake-rest ÷ overnight RMSSD ratio for the explicit daytime-HRV fallback (D4-08). A seated
+    /// daytime RMSSD runs well below the overnight (recumbent, vagally dominant) value, so comparing a daytime
+    /// minute with the sleep usual itself reads a persistent, stress-like deficit. TUNING SEAM: a population
+    /// prior (~0.6-0.7), used ONLY until the person's own awake-rest copy is shown.
+    public static let awakeToSleepHRVRatio: Double = 0.65
+
+    /// The HRV a live daytime minute is compared against: the shown awake-rest usual; else the SLEEP usual
+    /// scaled by `awakeToSleepHRVRatio` (an explicit, flagged fallback: `daytimeHRVFallbackUsed`, and the HRV
+    /// sigma is widened via `hrvAnchoredInSleep`); else nil (the population prior applies).
+    public var daytimeHRV: Double? {
+        hrvAwake ?? hrv.map { $0 * Self.awakeToSleepHRVRatio }
+    }
+
+    /// True when `daytimeHRV` is the sleep-scaled fallback rather than an awake-rest usual (provenance).
+    public var daytimeHRVFallbackUsed: Bool { hrvAwake == nil && hrv != nil }
 
     /// Half the Layer 1 usual band in display units, divided by k → 1 MAD. Same copy as the prompt; never averaged.
     static func displayMAD(_ evaluations: [LBEvaluation], _ series: LBSeries, shownOnly: Bool) -> Double? {
@@ -278,7 +301,7 @@ public struct UniTSRuntime: Sendable {
         let hatSpO2 = reconstructSpO2(observed: window.spo2, prompt: prompt.spo2, occupancy: occupancy)
 
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let hrSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrMotionSmoothMinutes)
         let hrvSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
@@ -324,7 +347,7 @@ public struct UniTSRuntime: Sendable {
         [
             prompt.hr ?? WatchdogPopulationPriors.hr,
             prompt.rhr ?? WatchdogPopulationPriors.rhr,
-            prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv,
+            prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv,
             prompt.temp ?? WatchdogPopulationPriors.temp,
             prompt.resp ?? WatchdogPopulationPriors.resp,
             prompt.spo2 ?? WatchdogPopulationPriors.spo2
@@ -501,7 +524,7 @@ public struct UniTSRuntime: Sendable {
     /// A sleep usual may seed the first minutes; it is not a flat live line. TimesFM is not this line.
     static func reconstructHRV(observed: [Double?], prompt: UniTSPrompt, occupancy: [Double]) -> [Double?] {
         let smooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
-        let seed = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let seed = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
         let center = shortTermHrvCenter(observed: observed, seed: seed)
         let target: [Double?] = zip(center, smooth).map { rest, occ in
             let drop = WatchdogConfig.hrvExerciseDropMs * occ * (rest / WatchdogConfig.hrvDropRefMs)
@@ -579,7 +602,7 @@ public struct UniTSRuntime: Sendable {
                                   prompt: UniTSPrompt)
     -> (hr: [Double], rhr: [Double], hrv: [Double], temp: [Double], resp: [Double], spo2: [Double]) {
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let hrSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrMotionSmoothMinutes)
         let hrvSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
@@ -628,7 +651,7 @@ public struct UniTSRuntime: Sendable {
     -> (hr: [Double], hrv: [Double], temp: [Double], resp: [Double]) {
         let n = WatchdogConfig.seqLen
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.hrvAwake ?? prompt.hrv ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let occ = occupancy.count >= n ? occupancy : occupancy + Array(repeating: occupancy.last ?? 0,
                                                                        count: max(0, n - occupancy.count))
