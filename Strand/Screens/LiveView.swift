@@ -186,6 +186,13 @@ struct LiveView: View {
                     HStack(spacing: NoopMetrics.gap) { startWorkoutButton; hrvReadingButton }
                     VStack(spacing: NoopMetrics.gap) { startWorkoutButton; hrvReadingButton }
                 }
+                if !activeConnection {
+                    // `.help` is a Mac tooltip: on iPhone the disabled buttons need their reason on screen.
+                    Text("Connect your strap to start a workout or take an HRV reading.")
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if let last = model.lastWorkout {
                     workoutSavedRow(last)
                 }
