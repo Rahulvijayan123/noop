@@ -224,6 +224,40 @@ Deno.test('GET /context: owner from the credential, device from deviceId, query 
     p_user: USER, p_device: DEVICE, p_day: '2026-10-04', p_mode: null, p_metric: 'hrv_rmssd' } }]);
 });
 
+Deno.test('GET /context: the stored document passes through whole, spec-02 cardiac blocks included', async () => {
+  // The route projects nothing: pulse_episodes and sleep.day_night_heart_rate (spec-02, CONTRACT §6) reach the
+  // app exactly as the worker published them, so an app build that decodes them sees the persisted values.
+  const document = {
+    header: { policy_fingerprint: 'abc123', versions: { pulse: 'pc-pulse-1' } },
+    sleep: {
+      day_night_heart_rate: {
+        state: 'supported', awake_median_bpm: 75, sleep_median_bpm: 55, difference_bpm: 20,
+        percent_dip: 26.666666666666668,
+        percent_dip_definition: '100*(awake_median_bpm-sleep_median_bpm)/awake_median_bpm',
+        awake_samples: 50400, sleep_samples: 28800, awake_eligible_s: 61200, sleep_eligible_s: 28800,
+        awake_coverage: 0.8235294117647058, sleep_coverage: 1, method: 'pc-day-night-hr-1', units: 'bpm',
+        reasons: ['labels_read_heart_rate', 'percent_dip_definition', 'rhythm_proxy_only'],
+      },
+    },
+    pulse_episodes: {
+      version: 'pc-pulse-1', state: 'supported', units: 'bpm', qualified_inactive_s: 4500,
+      episodes: [{ id: 'pulse_1', kind: 'sustained_high', interval: { start: T0, end: T0 + 900 }, duration_s: 900,
+        median_bpm: 105, extreme_bpm: 105, qualified_s: 900, context: 'awake', censoring: ['episode_censored_gap'],
+        reasons: ['pulse_episode_high'] }],
+      acceleration_events: [], high_episode_count: 1, low_episode_count: 0,
+      reasons: ['cause_not_attributed', 'not_rhythm_classification'],
+    },
+  };
+  const context = { status: 'available', mode: 'retrospective', context_revision: 9, document, envelope_tables: [] };
+  const { rest } = await fixture(() => context);
+  const response = await handleScoresRequest(request(`/context?deviceId=${LOCAL}&day=2026-10-04`), { rest, cfg });
+  assertEquals(response.status, 200);
+  const body = await response.json();
+  assertEquals(body.context, context);
+  assertEquals(body.context.document.pulse_episodes, document.pulse_episodes);
+  assertEquals(body.context.document.sleep.day_night_heart_rate, document.sleep.day_night_heart_rate);
+});
+
 Deno.test('GET /context/history: bounded range forwarded with the resolved device', async () => {
   const { rest, calls } = await fixture(() => ({ days: [], daily_values: [], bouts: [], episodes: [] }));
   const ok = await handleScoresRequest(
