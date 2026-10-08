@@ -150,7 +150,7 @@ export async function readActivityWindows({ rest, userId, deviceId, days, known 
   const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}&algorithm_version=eq.${ACTIVITY_WINDOWS_ALGORITHM}`;
   const heads = await rest.select('activity_encoder_windows', `${owner}&day=in.(${days.join(',')})`
     + '&select=day,encoder_id,model_version,preprocessing_version,feature_schema,window_count,first_ts,last_ts,'
-    + 'result_revision,computed_at') ?? [];
+    + 'input_revision,result_revision,computed_at') ?? [];
   const wanted = heads.filter((h: any) => known.get(h.day) !== String(h.result_revision)).map((h: any) => h.day);
   const bodies = wanted.length
     ? await rest.select('activity_encoder_windows',
@@ -159,12 +159,34 @@ export async function readActivityWindows({ rest, userId, deviceId, days, known 
   const bodyByDay = new Map(bodies.map((b: any) => [b.day, b]));
   return heads.map((h: any) => {
     const body: any = bodyByDay.get(h.day);
+    // Release (docs/model-integration/activity-authority.md): HART is the production producer; the ElderNet copy
+    // embedded in HART's service (`g_*` in hart-windows-1) records no release of its own, so it is shadow.
+    const authority = { input_revision: String(h.input_revision), release_mode: 'production',
+      embedded_gait_release_mode: 'shadow' };
     // A republish between the two reads makes the body newer than its head; the body's revision is the one
     // that describes the windows sent.
     return body
-      ? { ...h, result_revision: String(body.result_revision), windows: body.windows }
-      : { ...h, result_revision: String(h.result_revision), unchanged: true };
+      ? { ...h, ...authority, result_revision: String(body.result_revision), windows: body.windows }
+      : { ...h, ...authority, result_revision: String(h.result_revision), unchanged: true };
   });
+}
+
+/**
+ * The release an expert row may be shown as: its stored release (the migration's trigger keeps it at or below the
+ * row's mode), else its recorded mode for a row written before the release column existed, and shadow for anything
+ * else. Never production: no expert table holds a production row.
+ */
+const RELEASE_RANK: Record<string, number> = { shadow: 0, candidate: 1, production: 2 };
+
+/** The weaker of `recorded` (unknown text reads as shadow) and `cap`. */
+function lowerRelease(recorded: unknown, cap: 'shadow' | 'candidate'): 'shadow' | 'candidate' {
+  const rank = typeof recorded === 'string' ? RELEASE_RANK[recorded] ?? 0 : 0;
+  return Math.min(rank, RELEASE_RANK[cap]) >= 1 ? 'candidate' : 'shadow';
+}
+
+export function expertReleaseMode(row: { release_mode?: unknown; mode?: unknown }): 'shadow' | 'candidate' {
+  const recorded = row.release_mode ?? row.mode;
+  return recorded === 'candidate' && row.mode === 'candidate' ? 'candidate' : 'shadow';
 }
 
 /**
@@ -207,13 +229,16 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
 }
 
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
-  + 'result_revision,computed_at';
+  + 'input_revision,release_mode,result_revision,computed_at';
 
 /**
  * `GET /gait-windows?days=<YYYY-MM-DD>[,…][&known=<YYYY-MM-DD>:<revision>,…]`: ElderNet's per-window gait
  * detection and gait quality (`gait-windows-1`) plus its own day summary, for up to three UTC days. Same query
  * and `known` rule as `/activity-windows`. A day can hold a shadow and a candidate row (and rows of an older
- * model); the newest computed one is returned. The candidate decode document is never sent.
+ * model); the newest computed one is returned. The candidate decode document is never sent. Every row says the
+ * release it may be used under (`release_mode`, never production) and the input revision it was computed from; a
+ * full row adds the model identity and the producer's authority block (null on older rows), which a client feeds
+ * to the shared selection policy (ActivityExpertSelection) rather than trusting.
  */
 export async function readGaitWindows({ rest, userId, deviceId, days, known }: {
   rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
@@ -226,17 +251,34 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known }: {
   const out = [];
   for (const head of newest.values()) {
     const revision = String(head.result_revision);
+    const release = { release_mode: expertReleaseMode(head), input_revision: String(head.input_revision) };
     if (known.get(head.day) === revision) {
-      out.push({ ...head, result_revision: revision, unchanged: true });
+      out.push({ ...head, ...release, result_revision: revision, unchanged: true });
       continue;
     }
     const body = (await rest.select('activity_gait_windows_days',
       `${owner}&day=eq.${head.day}&mode=eq.${encodeURIComponent(head.mode)}`
       + `&model_version=eq.${encodeURIComponent(head.model_version)}`
-      + '&select=result_revision,summary,windows,model_id,weights,weights_digest,upstream_commit,preprocessing_version'))?.[0];
+      + '&select=result_revision,input_revision,release_mode,mode,authority,summary,windows,model_id,weights,'
+      + 'weights_digest,upstream_commit,preprocessing_version'))?.[0];
     if (!body) continue;
+    const bodyRelease = expertReleaseMode(body);
     out.push({
       ...head,
+      // The body's own release and revision describe the windows sent (a republish between the reads).
+      release_mode: bodyRelease,
+      input_revision: String(body.input_revision),
+      identity: {
+        model_id: body.model_id,
+        model_version: head.model_version,
+        weights_digest: body.weights_digest,
+        upstream_commit: body.upstream_commit,
+        preprocessing_version: body.preprocessing_version,
+      },
+      // The producer's view, never above the row's release.
+      authority: body.authority && typeof body.authority === 'object' && !Array.isArray(body.authority)
+        ? { ...body.authority, release_mode: lowerRelease(body.authority.release_mode, bodyRelease) }
+        : null,
       result_revision: String(body.result_revision),
       // Enough for a client to rebuild the model the windows came from and pin it (`GaitQualityModelInfo`).
       model: {
