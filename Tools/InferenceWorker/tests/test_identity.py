@@ -16,6 +16,15 @@ from provision_support import REAL_MANIFEST, REPO_PACKAGE_ROOT, load_materialize
 mm = load_materializer()
 
 
+def _rewrite(path, text: str) -> None:
+    """Rewrite a file and move its mtime on: digests are cached by (path, mtime, size), and a
+    same-size rewrite within one filesystem timestamp tick (Linux) would otherwise look unchanged.
+    Real stamps and revisions are immutable once written."""
+    before = path.stat().st_mtime_ns
+    path.write_text(text)
+    os.utime(path, ns=(before + 1_000_000_000, before + 1_000_000_000))
+
+
 def _app(manifest: str, root: str, registry: ProviderRegistry | None = None) -> Application:
     return Application.build(registry=registry or ProviderRegistry([HrvProductionProvider()]),
                              manifest_path=manifest, model_root=root)
@@ -68,7 +77,8 @@ def test_the_identity_block_reports_measured_digests_and_the_selected_revision(s
                                                                                monkeypatch):
     root, revision_id = staged_revision
     monkeypatch.setenv("FRWHOOP_SOURCE_REVISION", "0" * 40)
-    monkeypatch.delenv("FRWHOOP_RELEASE_STAMP", raising=False)
+    # No stamp, even when the tests run from an extracted release that has one beside the code.
+    monkeypatch.setenv("FRWHOOP_RELEASE_STAMP", str(root / "no-such-RELEASE.json"))
     app = _app(str(root / "manifest.json"), str(root))
     block = identity.runtime_identity(app)
 
@@ -122,7 +132,7 @@ def test_the_release_stamp_is_compared_with_what_was_measured(staged_revision, t
     assert block["manifest"]["matches_release"] is False, "the revision came from another manifest"
 
     stamp["trees"][identity.SOURCE_TREE_KEY] = "0" * 64
-    path.write_text(json.dumps(stamp))
+    _rewrite(path, json.dumps(stamp))
     assert identity.runtime_identity(app)["code_revision"]["source_matches_release"] is False
 
     monkeypatch.setenv("FRWHOOP_RELEASE_STAMP", str(tmp_path / "missing.json"))
