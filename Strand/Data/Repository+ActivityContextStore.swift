@@ -127,7 +127,8 @@ extension Repository {
     /// its seconds off-wrist with no physiology, a class answer relabels them, both stamped
     /// `provenance == "user_correction"`, confidence 1). The overlay is applied here, at read time, and never
     /// written back: the stored rows stay what the model said. `feedback` defaults to the phone's saved verdicts
-    /// (`StretchFeedbackStore.shared`); pass `[]` for the decoder's own reading.
+    /// (`StretchFeedbackStore.shared`, the last `keepSyncedDays` of answers); pass `[]` for the decoder's own
+    /// reading.
     func storedActivityContextWithStatus(from: Int, to: Int, timeZone: TimeZone = .current,
                                          feedback: [StretchFeedback]? = nil) async -> StoredActivityContext {
         let empty = StoredActivityContext(intervals: [], through: nil, days: [])
@@ -156,7 +157,10 @@ extension Repository {
             let served = rows.filter { row in !staleDays.contains { $0.dayStart <= row.startTs && row.startTs < $0.dayEnd } }
             if !served.isEmpty { lists.append(served.map(ActivityContextInterval.init(row:))) }
         }
-        let corrections = feedback ?? StretchFeedbackStore.shared.corrections(overlapping: from, to: to)
+        // Every verdict, not only the corrections: a newer "that was right" withdraws an older correction. The
+        // phone keeps synced verdicts for `StretchFeedbackStore.keepSyncedDays` (by answer time), so the overlay
+        // covers that horizon; older history reads the decoder's own label.
+        let corrections = feedback ?? StretchFeedbackStore.shared.verdicts(overlapping: from, to: to)
         let merged = ActivityContextCorrections.applying(corrections, to: ActivityContextPersistence.merged(lists))
         days.sort { ($0.dayStart, $0.deviceId) < ($1.dayStart, $1.deviceId) }
         guard !merged.isEmpty else { return StoredActivityContext(intervals: [], through: nil, days: days) }

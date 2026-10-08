@@ -64,6 +64,12 @@ final class StretchFeedbackStore: @unchecked Sendable {
         all().filter { $0.verdict == .incorrect && $0.correctedLabel != nil && $0.endTs > from && $0.startTs < to }
     }
 
+    /// Every saved verdict, right or wrong, whose stretch overlaps `[from, to)`: the answers the overlay resolves
+    /// (a newer "that was right" withdraws an older correction of the same seconds).
+    func verdicts(overlapping from: Int, to: Int) -> [StretchFeedback] {
+        all().filter { $0.endTs > from && $0.startTs < to }
+    }
+
     func pending() -> [StretchFeedback] {
         all().filter(\.needsSync).sorted { $0.updatedAt < $1.updatedAt }
     }

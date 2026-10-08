@@ -19,8 +19,8 @@ final class CoachLedgerStatusAndCorrectionsTests: XCTestCase {
     }
 
     private func day(_ start: Int, status: ActivityContextPersistence.ServingStatus, provisional: Bool,
-                     key: String) -> Repository.StoredActivityContextDay {
-        Repository.StoredActivityContextDay(day: key, dayStart: start, dayEnd: start + 86_400, deviceId: "d",
+                     key: String, deviceId: String = "d") -> Repository.StoredActivityContextDay {
+        Repository.StoredActivityContextDay(day: key, dayStart: start, dayEnd: start + 86_400, deviceId: deviceId,
                                             status: status, isProvisional: provisional, decoderVersion: "v",
                                             configTag: nil, dataThrough: start + 86_000, computedAt: start + 86_400)
     }
@@ -76,6 +76,23 @@ final class CoachLedgerStatusAndCorrectionsTests: XCTestCase {
                    day(day1, status: .current, provisional: false, key: "2026-10-02")],
             timeZone: utc, now: Date(timeIntervalSince1970: TimeInterval(day1 + 3 * 86_400)))
         XCTAssertTrue(text.contains("Saved context for 2026-10-01 came from an older classifier"), text)
+    }
+
+    func testAStaleLedgerOfAnOldStrapIsNotUnknownWhenTheCurrentStrapServesTheDay() {
+        // After a strap swap the old id keeps a stale ledger for a day the new id serves with a current one.
+        let items = [interval(day0 + 600, day0 + 1_200, .sitting)]
+        let days = [day(day0, status: .stale, provisional: false, key: "2026-10-01", deviceId: "old"),
+                    day(day0, status: .current, provisional: false, key: "2026-10-01", deviceId: "new")]
+        let text = CoachActivityContext.describe(intervals: items, from: day0, to: day0 + 1_200, days: days,
+                                                 timeZone: utc,
+                                                 now: Date(timeIntervalSince1970: TimeInterval(day0 + 3 * 86_400)))
+        XCTAssertFalse(text.contains("older classifier with different labels"), text)
+        XCTAssertFalse(stretchLines(text).joined().contains("provisional"), text)
+        // With only the old strap's stale ledger the day is still named.
+        let alone = CoachActivityContext.describe(intervals: items, from: day0, to: day0 + 1_200, days: [days[0]],
+                                                  timeZone: utc,
+                                                  now: Date(timeIntervalSince1970: TimeInterval(day0 + 3 * 86_400)))
+        XCTAssertTrue(alone.contains("Saved context for 2026-10-01 came from an older classifier"), alone)
     }
 
     func testCorrectedStretchesAreTaggedAndCounted() {
@@ -143,6 +160,8 @@ final class CoachLedgerStatusAndCorrectionsTests: XCTestCase {
         store.upsert(f(day0 + 1_000, .correct, nil))
         store.upsert(f(day0 + 5_000, .incorrect, .standing))
         XCTAssertEqual(store.corrections(overlapping: day0, to: day0 + 2_000).map(\.correctedLabel), [.lyingDown])
+        // The overlay reads every verdict: a "that was right" can withdraw an older correction.
+        XCTAssertEqual(store.verdicts(overlapping: day0, to: day0 + 2_000).map(\.verdict), [.incorrect, .correct])
     }
 
     // MARK: Metric explorer

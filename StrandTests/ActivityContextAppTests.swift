@@ -228,13 +228,13 @@ final class ActivityContextAppTests: XCTestCase {
                 ActivityContextIntervalRow(startTs: t0 + 900, endTs: t0 + 1_200, activityClass: "running", confidence: 0.7),
             ])
 
-        let stored = await repo.storedActivityContext(from: t0 - 60, to: t0 + 1_500)
+        let stored = await repo.storedActivityContext(from: t0 - 60, to: t0 + 1_500, feedback: [])
         XCTAssertEqual(stored.intervals.map(\.activityClass), [.sittingDesk, .running],
                        "the walking stretch overlaps what the active strap already accounts for")
         XCTAssertEqual(stored.intervals.map(\.start), [t0, t0 + 900])
         XCTAssertEqual(stored.through, t0 + 1_200, "the latest horizon among the days in the window")
 
-        let empty = await repo.storedActivityContext(from: t0 + 5_000, to: t0 + 6_000)
+        let empty = await repo.storedActivityContext(from: t0 + 5_000, to: t0 + 6_000, feedback: [])
         XCTAssertTrue(empty.intervals.isEmpty)
         XCTAssertNil(empty.through)
     }

@@ -63,7 +63,11 @@ enum CoachActivityContext {
         }
         lines.append(coverage)
         if let days {
-            let stale = days.filter { $0.status == .stale && $0.dayEnd > from && $0.dayStart < to }.map(\.day)
+            // One entry per device id: after a strap swap an old id can hold a stale ledger for a day the current
+            // id serves with a current one. Only a day nothing serves is unknown.
+            let served = Set(days.filter { $0.status != .stale }.map(\.dayStart))
+            let stale = days.filter { $0.status == .stale && !served.contains($0.dayStart)
+                && $0.dayEnd > from && $0.dayStart < to }.map(\.day)
             if !stale.isEmpty {
                 lines.append("Saved context for \(Set(stale).sorted().joined(separator: ", ")) came from an older classifier with different labels and is not shown until it is processed again; treat that time as unknown, not as off-wrist.")
             }
