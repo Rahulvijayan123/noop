@@ -10,9 +10,10 @@
 -- claim's input revision, and the worker claims the OLDEST due row first, across metrics and days:
 --
 --   * enqueue    a scored day's metrics at its input revision. A newer revision re-arms the row
---                (attempts reset, lease dropped) but keeps its place in line while it is still
---                pending, so a day that is re-scored every few minutes cannot push its own
---                unserved metrics to the back. A stale revision changes nothing.
+--                (attempts reset, lease dropped) but keeps its place in line while it has not
+--                run (still pending, or superseded only because its revision went stale), so a
+--                day that is re-scored every few minutes cannot push its own unserved metrics
+--                to the back. A stale revision changes nothing.
 --   * claim      the oldest due row, under a lease (token, owner, until). A row whose day has a
 --                newer input revision is superseded inside the call and never handed out. An
 --                expired lease (the holder died) counts as an attempt.
@@ -173,9 +174,12 @@ begin
       provider_id=excluded.provider_id, provider_version=excluded.provider_version,
       config_version=excluded.config_version, requested_mode=excluded.requested_mode,
       state=excluded.state, attempts=0, last_reason=excluded.last_reason, candidate_id=null,
-      -- Fairness: a row that is still waiting keeps its place in line.
-      pending_since=case when p.state='pending' and excluded.state='pending' then p.pending_since
-                         else excluded.pending_since end,
+      -- Fairness: a row that has not run keeps its place in line: still waiting, or retired by
+      -- the claim only because a newer revision arrived before this enqueue did.
+      pending_since=case when excluded.state='pending'
+                          and (p.state='pending'
+                               or (p.state='superseded' and p.last_reason='stale_input_revision'))
+                         then p.pending_since else excluded.pending_since end,
       next_attempt_at=excluded.next_attempt_at,
       -- Dropping the lease is what refuses the previous revision's settle.
       lease_token=null, lease_owner=null, lease_until=null, claimed_at=null,
