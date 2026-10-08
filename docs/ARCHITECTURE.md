@@ -214,6 +214,16 @@ carry the same class as `activity_class` (docs/BACKEND.md). The stand reminder r
 it stays quiet when the rolling window (50 minutes by default) held a minute of standing or moving
 (docs/CURRENT_ALGORITHMS.md, section 10).
 
+Which expert may shape which decode is decided in one place, `ActivityExpertSelection` in
+`Packages/StrandAnalytics` (`ActivityContextAuthority.swift`; docs/model-integration/activity-authority.md),
+used by the worker's published documents, its candidate comparisons and the phone's own decode alike. Every
+expert row carries the release it was produced under (`shadow`, `candidate` or `production`), and nothing
+downstream raises it: production sources shape the canonical decode, candidate sources only the candidate arms
+(HART alone, HART plus each expert, and the joint decode, stored in `activity_candidate_days` and never
+published), and shadow sources nothing. No expert is production today, so the canonical activity decode on both
+sides is HART alone. ElderNet has one route, the worker's standalone service; the copy HART's service can embed
+is read as shadow and never votes beside it.
+
 ## What each score needs
 
 - **Strain, sleep, resting heart rate, steps and calories** appear once a day's readings are in.
