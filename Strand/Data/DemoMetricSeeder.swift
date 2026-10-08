@@ -25,7 +25,7 @@ enum DemoMetricSeeder {
         let existing = (try? await store.metricSeries(deviceId: apple, key: "steps", from: "0000-01-01", to: "9999-12-31")) ?? []
         guard existing.isEmpty else { return }
         do { try await seed(into: store, days: DemoLaunch.seedDays) }
-        catch { NSLog("DemoMetricSeeder: seed failed — \(error)") }
+        catch { NSLog("DemoMetricSeeder: seed failed, \(error)") }
     }
 
     private static func seed(into store: WhoopStore, days: Int) async throws {

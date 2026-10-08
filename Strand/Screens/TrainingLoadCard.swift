@@ -88,7 +88,7 @@ struct TrainingLoadCard: View {
         let fatigue = tl.points.compactMap { DailyPoint(key: $0.day, value: $0.acuteLoad, series: "fatigue") }
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
             SectionHeader("Training load", trailing: tl.state == .building
-                          ? String(localized: "Building — \(tl.contiguousDays) of \(Self.established) days") : nil)
+                          ? String(localized: "Building, \(tl.contiguousDays) of \(Self.established) days") : nil)
             NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
                     readout(tl)

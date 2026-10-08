@@ -356,7 +356,7 @@ final class CoachChatViewModel: ObservableObject {
                 guard let idx = self.messages.indices.last, self.messages[idx].role == .assistant else { return }
                 self.messages[idx].didStall = true
                 self.errorMessage = self.messages[idx].content.isEmpty
-                    ? "This is taking longer than usual — Sana may be busy. Tap Retry to try again."
+                    ? "This is taking longer than usual. Sana may be busy. Tap Retry to try again."
                     : "The response stalled partway through. Tap Retry to try again."
                 self.streamTask?.cancel()
                 return

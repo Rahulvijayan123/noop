@@ -158,7 +158,7 @@ struct BackupSyncView: View {
                 // active, a cancelled picker changed nothing — and the button the message points at is
                 // hidden, so alerting here would send the user chasing a control that isn't shown.
                 alertTitle = String(localized: "No folder selected")
-                alertMessage = String(localized: "Nara didn't get a folder back from the picker. If the Open button won't do anything, tap \"Use Nara's own folder\" to back up inside Nara instead — you can read those backups from the Files app.")
+                alertMessage = String(localized: "Nara didn't get a folder back from the picker. If the Open button won't do anything, tap \"Use Nara's own folder\" to back up inside Nara instead, you can read those backups from the Files app.")
                 showAlert = true
             }
         }
