@@ -267,6 +267,31 @@ final class MetricInsightDecodingTests: XCTestCase {
         XCTAssertNil(F.decoded(F.response(status: "ready", insight: o))?.insight)
     }
 
+    /// `period` says whether the explanation is about nights or days. It is optional and read leniently: absent (a
+    /// server from before the day metrics), null, unknown or not a string all read as nights.
+    func testThePeriodDecodesLenientlyAndDefaultsToNights() throws {
+        XCTAssertEqual(MetricInsight.decode(F.insight(extra: ["period": "day"]))?.period, .day)
+        XCTAssertEqual(MetricInsight.decode(F.insight(extra: ["period": "night"]))?.period, .night)
+        XCTAssertEqual(MetricInsight.decode(F.insight())?.period, .night, "absent")
+        for value: Any in [NSNull(), "", "week", "DAY", 1, true, ["day"]] {
+            XCTAssertEqual(MetricInsight.decode(F.insight(extra: ["period": value]))?.period, .night, "\(value)")
+        }
+        // Through a whole response, and the rest of the insight is unaffected.
+        var body = F.response(status: "ready", insight: F.insight(extra: ["period": "day", "metric": "steps"]))
+        body["metric"] = "steps"
+        let r = try XCTUnwrap(F.decoded(body))
+        XCTAssertEqual(r.insight?.period, .day)
+        XCTAssertEqual(r.insight?.metric, "steps")
+        XCTAssertEqual(r.insight?.basis?.nights, 28, "the basis keeps its shape for a day metric")
+    }
+
+    /// Each metric's own period, which the screen uses while there is no explanation to read one from.
+    func testEachMetricHasTheContractsPeriod() {
+        XCTAssertEqual(MetricInsightMetric.allCases.filter { $0.period == .day }, [.heartRate, .steps, .calories])
+        XCTAssertEqual(MetricInsightMetric.allCases.filter { $0.period == .night },
+                       [.restingHeartRate, .hrvRmssd, .hrvSdnn, .skinTemp, .respRate, .spo2])
+    }
+
     func testUnknownStatusAndKindAreKeptAsUnknown() throws {
         let r = try XCTUnwrap(F.decoded(F.response(status: "queued", insight: F.insight(kind: "partial"))))
         XCTAssertEqual(r.status, .unknown("queued"))
@@ -334,6 +359,17 @@ final class MetricInsightDecodingTests: XCTestCase {
         _ = await client().request(.hrvRmssd)
         let second = try XCTUnwrap(JSONSerialization.jsonObject(with: InsightStub.bodies[1]) as? [String: Any])
         XCTAssertEqual(second as NSDictionary, ["metric": "hrv_rmssd"] as NSDictionary)
+    }
+
+    /// Every contract id is sent verbatim (docs/METRIC_INSIGHTS.md), one metric per request.
+    func testTheClientSendsEveryContractId() async throws {
+        InsightStub.body = F.response(status: "pending", retryAfter: 10)
+        for metric in MetricInsightMetric.allCases { _ = await client().request(metric) }
+        let sent = try InsightStub.bodies.map {
+            try XCTUnwrap(JSONSerialization.jsonObject(with: $0) as? [String: String])
+        }
+        XCTAssertEqual(sent, ["resting_hr", "hrv_rmssd", "hrv_sdnn", "skin_temp", "resp_rate", "spo2", "heart_rate",
+                              "steps", "calories"].map { ["metric": $0] })
     }
 
     func testTheClientMapsEveryStatus() async {

@@ -1,9 +1,9 @@
 import Foundation
 
 // MetricInsight.swift — the phone's read side of the metric explanations (`POST {scores}/insights`,
-// supabase/migrations/20261008000000_metric_insights.sql).
+// supabase/migrations/20261008000000_metric_insights.sql; the metric ids are docs/METRIC_INSIGHTS.md's).
 //
-//   POST {scores}/insights  {"metric": "resting_hr" | "hrv_rmssd"}
+//   POST {scores}/insights  {"metric": <MetricInsightMetric.rawValue>}
 //     → {status: ready|pending|unavailable, metric, insight (or null), retry_after_s (pending), reason (unavailable)}
 //
 // Same credential as every other scores route (the installation bearer through `CloudReceiverAuth`); the owner
@@ -14,10 +14,33 @@ import Foundation
 
 // MARK: - Metric
 
-/// The metrics the server explains (`INSIGHT_METRICS` in `_shared/serverScores.ts`).
+/// The metrics the server explains: one id everywhere (docs/METRIC_INSIGHTS.md, `INSIGHT_METRICS` in
+/// `_shared/serverScores.ts`).
 enum MetricInsightMetric: String, CaseIterable, Sendable {
     case restingHeartRate = "resting_hr"
     case hrvRmssd = "hrv_rmssd"
+    case hrvSdnn = "hrv_sdnn"
+    case skinTemp = "skin_temp"
+    case respRate = "resp_rate"
+    case spo2 = "spo2"
+    case heartRate = "heart_rate"
+    case steps = "steps"
+    case calories = "calories"
+
+    /// What one value of the metric covers: the night vitals are keyed by the day the night ends, the day
+    /// metrics by a whole local day.
+    var period: MetricInsightPeriod {
+        switch self {
+        case .restingHeartRate, .hrvRmssd, .hrvSdnn, .skinTemp, .respRate, .spo2: return .night
+        case .heartRate, .steps, .calories: return .day
+        }
+    }
+}
+
+/// The period an explanation is about, so the card can say "nights" or "days".
+enum MetricInsightPeriod: String, CaseIterable, Sendable {
+    case night
+    case day
 }
 
 // MARK: - Response
@@ -125,7 +148,8 @@ struct MetricInsight: Equatable, Sendable {
         let estimated: Bool
     }
 
-    /// What the analysis covered.
+    /// What the analysis covered. The shape is the same for a day metric: `nights` and `missingNights` then
+    /// count days (`MetricInsight.period`).
     struct Basis: Equatable, Sendable {
         let nights: Int?
         let from: String?
@@ -155,7 +179,10 @@ struct MetricInsight: Equatable, Sendable {
     /// `generated_at` as an instant; nil when it could not be read.
     let generatedAt: Date?
     let analysisVersion: String?
-    /// The latest measured night (`yyyy-MM-dd`) the analysis covered.
+    /// Whether the explanation is about nights or days. A server that does not send it explains nights (it
+    /// predates the day metrics), and so does a value this build does not know.
+    let period: MetricInsightPeriod
+    /// The latest measured night or day (`yyyy-MM-dd`) the analysis covered.
     let dataThrough: String?
     /// True when this is an earlier analysis served while a newer one is computed (or cannot be).
     let stale: Bool
@@ -197,6 +224,7 @@ struct MetricInsight: Equatable, Sendable {
             generatedAtText: generatedAtText,
             generatedAt: generatedAtText.flatMap(MetricInsightTimestamp.parse),
             analysisVersion: MetricInsightJSON.string(o["analysis_version"]),
+            period: MetricInsightJSON.string(o["period"]).flatMap(MetricInsightPeriod.init(rawValue:)) ?? .night,
             dataThrough: MetricInsightJSON.string(o["data_through"]),
             stale: (o["stale"] as? Bool) ?? false,
             headline: headline,

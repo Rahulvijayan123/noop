@@ -50,7 +50,7 @@ func metricAccent(_ m: MetricDescriptor) -> Color {
         return StrandPalette.strainColor(14)              // mid-strain hue
     case "hrv", "vo2max", "lean_mass":
         return StrandPalette.metricPurple
-    case "rhr", "stress", "sleep_debt_min", "body_fat", "max_hr":
+    case "rhr", "stable_awake_hr", "stress", "sleep_debt_min", "body_fat", "max_hr":
         return StrandPalette.metricRose
     case "spo2", "steps":
         return StrandPalette.metricCyan
@@ -603,7 +603,11 @@ struct MetricExplorerView: View {
         probing = true
         let nonEmpty = await repo.nonEmptyMetricIDs(MetricCatalog.all)
         guard !Task.isCancelled else { return }
-        emptyByID = Dictionary(uniqueKeysWithValues: MetricCatalog.all.map { ($0.id, !nonEmpty.contains($0.id)) })
+        // A metric the phone stores no series for (stable awake heart rate, read from the server) is never dotted:
+        // the probe cannot know whether it has data.
+        emptyByID = Dictionary(uniqueKeysWithValues: MetricCatalog.all.map {
+            ($0.id, !nonEmpty.contains($0.id) && KeyMetricCatalog.hasLocalSeries($0))
+        })
         probing = false
     }
 }
@@ -682,9 +686,9 @@ private struct MetricRow: View {
 /// a SegmentedPillControl range, a hero ChartCard (line + latest "as of"), a uniform
 /// StatTile row (Average / Min / Max / Latest / Δ), and a "What correlates" NoopCard.
 ///
-/// The key metrics in `KeyMetricCatalog` (resting heart rate) are handed to `KeyMetricDetailView` at the top of
-/// `body` instead, so every entry point that pushes this view reaches the simplified screen and none of the
-/// dossier's loading below runs for them.
+/// The key metrics in `KeyMetricCatalog` (the strap's vitals, stable awake heart rate, steps and calories) are handed
+/// to `KeyMetricDetailView` at the top of `body` instead, so every entry point that pushes this view reaches the
+/// simplified screen and none of the dossier's loading below runs for them.
 struct MetricDetailView: View {
     let metric: MetricDescriptor
     @EnvironmentObject var repo: Repository

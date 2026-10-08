@@ -1,53 +1,334 @@
 import XCTest
+import StrandAnalytics
+import WhoopStore
 @testable import Strand
 
-/// The simplified key-metric screen's pure rules: which metrics route to it, which night the headline shows, how
-/// the history chart windows and breaks its line, and the wording guard on the explanation.
+/// The simplified key-metric screen's pure rules: which metrics route to it, where each one's values come from,
+/// which night or day the headline shows, how the history chart windows and breaks its line, the night and day
+/// wording, and the wording guard on the explanation.
 final class KeyMetricDetailTests: XCTestCase {
 
     typealias H = KeyMetricHistory
     typealias F = MetricInsightFixtures
+    typealias V = KeyMetricValues
 
     private func date(_ day: String) -> Date { PhysiologyContextDates.date(day)! }
+
+    private func row(_ day: String, hrv: Double? = nil, sdnn: Double? = nil, skinC: Double? = nil,
+                     skinDev: Double? = nil) -> DailyMetric {
+        DailyMetric(day: day, totalSleepMin: nil, efficiency: nil, deepMin: nil, remMin: nil, lightMin: nil,
+                    disturbances: nil, restingHr: nil, avgHrv: hrv, recovery: nil, strain: nil, exerciseCount: nil,
+                    skinTempDevC: skinDev, avgSdnn: sdnn, skinTempC: skinC)
+    }
 
     // MARK: - Routing catalog
 
     func testRestingHeartRateFromTheStrapRoutesToTheKeyMetricScreen() throws {
         let rhr = try XCTUnwrap(MetricCatalog.metric(key: "rhr", source: "my-whoop"))
         let entry = try XCTUnwrap(KeyMetricCatalog.entry(for: rhr))
-        XCTAssertEqual(entry.insightMetric, .restingHeartRate)
-        XCTAssertEqual(entry.insightMetric.rawValue, "resting_hr")
+        XCTAssertEqual(entry.metrics, [.restingHeartRate])
+        XCTAssertEqual(entry.metrics.map(\.rawValue), ["resting_hr"])
         // The bare-key route (`TabRoute.metric("rhr")`, Today's tile) resolves to the same descriptor.
         XCTAssertEqual(MetricCatalog.all.first { $0.key == "rhr" }?.id, rhr.id)
     }
 
-    /// Follows the flag, so turning HRV on stays the one-line change in `KeyMetricCatalog`.
-    func testHRVIsMappedAndRoutesOnlyWhenEnabled() throws {
-        let hrv = try XCTUnwrap(MetricCatalog.metric(key: "hrv", source: "my-whoop"))
-        let mapped = try XCTUnwrap(KeyMetricCatalog.entries.first { $0.catalogKey == "hrv" })
-        XCTAssertEqual(mapped.insightMetric.rawValue, "hrv_rmssd")
-        XCTAssertEqual(mapped.enabled, KeyMetricCatalog.hrvEnabled)
-        if KeyMetricCatalog.hrvEnabled {
-            XCTAssertEqual(KeyMetricCatalog.entry(for: hrv)?.insightMetric, .hrvRmssd)
-        } else {
-            XCTAssertNil(KeyMetricCatalog.entry(for: hrv), "HRV keeps the full dossier while hrvEnabled is false")
+    /// Each contract metric opens from the strap's own descriptor, with the id the explanation is asked for by.
+    func testEveryContractMetricRoutesFromTheStrapsDescriptor() throws {
+        let expected: [(key: String, metrics: [String])] = [
+            ("rhr", ["resting_hr"]), ("hrv", ["hrv_rmssd", "hrv_sdnn"]), ("skin_temp", ["skin_temp"]),
+            ("resp_rate", ["resp_rate"]), ("spo2", ["spo2"]), ("stable_awake_hr", ["heart_rate"]),
+            ("steps", ["steps"]), ("energy_kcal", ["calories"]),
+        ]
+        for (key, metrics) in expected {
+            let descriptor = try XCTUnwrap(MetricCatalog.metric(key: key, source: "my-whoop"), key)
+            let entry = try XCTUnwrap(KeyMetricCatalog.entry(for: descriptor), key)
+            XCTAssertEqual(entry.metrics.map(\.rawValue), metrics, key)
         }
+        XCTAssertEqual(KeyMetricCatalog.entries.count, expected.count)
     }
 
-    func testEveryOtherMetricKeepsTheDossier() throws {
+    /// One HRV screen: RMSSD first (the side shown on arrival), SDNN beside it, each asking for its own explanation.
+    func testHRVIsOneScreenWithAnRMSSDAndAnSDNNSide() throws {
+        let hrv = try XCTUnwrap(MetricCatalog.metric(key: "hrv", source: "my-whoop"))
+        let entry = try XCTUnwrap(KeyMetricCatalog.entry(for: hrv))
+        XCTAssertEqual(entry.metrics, [.hrvRmssd, .hrvSdnn])
+        XCTAssertEqual(entry.metrics.map(\.rawValue), ["hrv_rmssd", "hrv_sdnn"])
+        XCTAssertEqual(entry.metrics.map(\.switchLabel), ["RMSSD", "SDNN"])
+        XCTAssertEqual(entry.title, "Heart rate variability")
+        XCTAssertEqual(KeyMetricSeries.explore, MetricInsightMetric.hrvRmssd.series, "RMSSD is the Explore HRV series")
+        XCTAssertEqual(MetricInsightMetric.hrvSdnn.series, .sdnn)
+        XCTAssertTrue(entry.metrics.allSatisfy { $0.period == .night && $0.measurement == .measured })
+    }
+
+    func testImportedAndOtherSourcesKeepTheirDossiers() throws {
         let routed = MetricCatalog.all.filter { KeyMetricCatalog.entry(for: $0) != nil }.map(\.id)
-        XCTAssertEqual(routed, ["my-whoop:hrv"].filter { _ in KeyMetricCatalog.hrvEnabled } + ["my-whoop:rhr"])
-        // Another source's resting HR is different data from what the server explains.
-        let miBand = try XCTUnwrap(MetricCatalog.metric(key: "rhr", source: "xiaomi-band"))
-        XCTAssertNil(KeyMetricCatalog.entry(for: miBand))
+        XCTAssertEqual(routed, ["my-whoop:stable_awake_hr", "my-whoop:energy_kcal", "my-whoop:hrv", "my-whoop:rhr",
+                                "my-whoop:resp_rate", "my-whoop:spo2", "my-whoop:skin_temp", "my-whoop:steps"])
+        // Another source's reading is different data from what the server explains, and so are the WHOOP 4.0 motion
+        // estimate and the fused 30-day steps view.
+        for (key, source) in [("rhr", "xiaomi-band"), ("spo2", "xiaomi-band"), ("energy_kcal", "xiaomi-band"),
+                              ("steps", "apple-health"), ("steps", "xiaomi-band"), ("active_kcal", "apple-health"),
+                              ("steps_est", "my-whoop"), ("steps", MetricCatalog.combinedStepsSource)] {
+            let descriptor = try XCTUnwrap(MetricCatalog.metric(key: key, source: source), "\(source):\(key)")
+            XCTAssertNil(KeyMetricCatalog.entry(for: descriptor), "\(source):\(key)")
+        }
     }
 
     func testEveryServerMetricHasACatalogEntry() {
-        XCTAssertEqual(Set(KeyMetricCatalog.entries.map(\.insightMetric)), Set(MetricInsightMetric.allCases))
-        XCTAssertEqual(Set(MetricInsightMetric.allCases.map(\.rawValue)), ["resting_hr", "hrv_rmssd"])
+        XCTAssertEqual(Set(KeyMetricCatalog.entries.flatMap(\.metrics)), Set(MetricInsightMetric.allCases))
+        XCTAssertEqual(KeyMetricCatalog.entries.flatMap(\.metrics).count, MetricInsightMetric.allCases.count,
+                       "each metric opens from exactly one screen")
+        XCTAssertEqual(Set(MetricInsightMetric.allCases.map(\.rawValue)),
+                       ["resting_hr", "hrv_rmssd", "hrv_sdnn", "skin_temp", "resp_rate", "spo2", "heart_rate", "steps",
+                        "calories"])
         for entry in KeyMetricCatalog.entries {
             XCTAssertNotNil(MetricCatalog.metric(key: entry.catalogKey, source: entry.source), entry.catalogKey)
+            XCTAssertFalse(entry.metrics.isEmpty, entry.catalogKey)
         }
+    }
+
+    /// The contract's period, title and measured-or-estimated column, metric by metric.
+    func testEachMetricFollowsTheContractsPeriodTitleAndLabel() {
+        let table: [(MetricInsightMetric, MetricInsightPeriod, String, String?)] = [
+            (.restingHeartRate, .night, "Resting heart rate", nil),
+            (.hrvRmssd, .night, "Heart rate variability", nil),
+            (.hrvSdnn, .night, "Heart rate variability", nil),
+            (.skinTemp, .night, "Wrist temperature", nil),
+            (.respRate, .night, "Respiratory rate", "Estimated"),
+            (.spo2, .night, "Blood oxygen", "Estimated, unverified"),
+            (.heartRate, .day, "Stable awake heart rate", nil),
+            (.steps, .day, "Steps", "Estimated"),
+            (.calories, .day, "Calories", "Estimated"),
+        ]
+        XCTAssertEqual(table.count, MetricInsightMetric.allCases.count)
+        for (metric, period, title, label) in table {
+            XCTAssertEqual(metric.period, period, metric.rawValue)
+            XCTAssertEqual(metric.title, title, metric.rawValue)
+            XCTAssertEqual(metric.measurement.label, label, metric.rawValue)
+        }
+        let skin = MetricCatalog.metric(key: "skin_temp", source: "my-whoop")!
+        XCTAssertEqual(KeyMetricCatalog.entry(for: skin)?.title, "Wrist temperature", "the screen's title, not the row's")
+    }
+
+    /// The new Explore row: a heart metric from the strap whose values only the server holds.
+    func testStableAwakeHeartRateIsAnExploreRowReadFromTheContextHistory() throws {
+        let stable = try XCTUnwrap(MetricCatalog.all.first { $0.key == "stable_awake_hr" })
+        XCTAssertEqual(stable.source, "my-whoop")
+        XCTAssertEqual(stable.category, "Heart")
+        XCTAssertEqual(stable.unit, "bpm")
+        XCTAssertEqual(MetricCatalog.all.filter { $0.key == "stable_awake_hr" }.count, 1)
+        XCTAssertEqual(KeyMetricCatalog.entry(for: stable)?.metrics, [.heartRate])
+        XCTAssertEqual(MetricInsightMetric.heartRate.series, .contextHistory(seriesKey: "heart_rate.stable_awake_5min"))
+        XCTAssertEqual(MetricInsightMetric.heartRate.measurement, .measured)
+        // The Explore list cannot probe it, so it never shows the "no data" dot; every other row can.
+        XCTAssertFalse(KeyMetricCatalog.hasLocalSeries(stable))
+        XCTAssertTrue(MetricCatalog.all.filter { $0.id != stable.id }.allSatisfy(KeyMetricCatalog.hasLocalSeries))
+        // The route serves 120 days a read, so the chips stop at 3M.
+        XCTAssertEqual(MetricInsightMetric.heartRate.historyDays, 120)
+        XCTAssertEqual(H.ranges(historyDays: MetricInsightMetric.heartRate.historyDays), [.week, .month, .quarter, .all])
+        XCTAssertEqual(H.ranges(historyDays: MetricInsightMetric.steps.historyDays), H.ranges)
+        XCTAssertFalse(H.isUnlocked(.half, spanDays: 119, hasHistory: true, among: [.week, .month, .quarter, .all]))
+        XCTAssertTrue(H.isUnlocked(.quarter, spanDays: 119, hasHistory: true, among: [.week, .month, .quarter, .all]))
+    }
+
+    // MARK: - Value sources
+
+    /// The wrist temperature screen is the temperature: never the baseline deviation `exploreSeries` returns.
+    func testWristTemperatureIsTheAbsoluteNeverTheDeviation() {
+        XCTAssertEqual(MetricInsightMetric.skinTemp.series, .absoluteSkinTemp)
+        let days = [
+            row("2026-10-01", skinC: 33.6, skinDev: 0.2),    // strap night: absolute and deviation
+            row("2026-10-02", skinDev: -0.4),                // scored before skinTempC shipped: deviation only
+            row("2026-10-03", skinDev: 34.1),                // a WHOOP CSV import: an absolute in the deviation column
+            row("2026-10-04", skinC: 33.9),                  // calibrating: absolute only
+            row("2026-10-05"),
+        ]
+        let series = V.absoluteSkinTemp(days)
+        XCTAssertEqual(series.map(\.day), ["2026-10-01", "2026-10-03", "2026-10-04"])
+        XCTAssertEqual(series.map(\.value), [33.6, 34.1, 33.9])
+        XCTAssertTrue(series.allSatisfy { VitalBands.isAbsoluteSkinTemp($0.value) }, "no deviation leaks in")
+    }
+
+    func testSDNNComesFromTheNightlySDNNIndexNotRMSSD() {
+        let days = [row("2026-10-02", hrv: 48, sdnn: 71), row("2026-10-01", hrv: 52, sdnn: 66),
+                    row("2026-10-03", hrv: 50), row("2026-10-04", sdnn: 0)]
+        let series = V.sdnn(days)
+        XCTAssertEqual(series.map(\.day), ["2026-10-01", "2026-10-02", "2026-10-04"], "ascending, SDNN nights only")
+        XCTAssertEqual(series.map(\.value), [66, 71, 0])
+        XCTAssertEqual(H.measured(series, for: .hrvSdnn, today: "2026-10-07").map(\.value), [66, 71],
+                       "a zero SDNN is a placeholder")
+    }
+
+    func testBloodOxygenFillsOnlyTheNightsItLacksFromTheCandidate() {
+        XCTAssertEqual(MetricInsightMetric.spo2.series, .spo2WithCandidate)
+        let filled = V.filling([("2026-10-02", 96), ("2026-10-04", 97)],
+                               from: [("2026-10-01", 94), ("2026-10-02", 91), ("2026-10-03", 95)])
+        XCTAssertEqual(filled.map(\.day), ["2026-10-01", "2026-10-02", "2026-10-03", "2026-10-04"])
+        XCTAssertEqual(filled.map(\.value), [94, 96, 95, 97], "a calibrated night is never replaced by the candidate")
+        XCTAssertEqual(V.filling([], from: []).count, 0)
+    }
+
+    /// Zero steps on a worn day is a real 0; for every other metric zero is a placeholder.
+    func testStepsKeepARealZeroDayAndOtherMetricsDropIt() {
+        let series: [(day: String, value: Double)] = [("2026-10-01", 8123), ("2026-10-02", 0), ("2026-10-03", -5),
+                                                      ("2026-10-04", .nan), ("2026-10-05", 4200)]
+        XCTAssertTrue(MetricInsightMetric.steps.keepsZero)
+        XCTAssertEqual(MetricInsightMetric.steps.series, .resolved, "the Steps page's own read, not exploreSeries")
+        XCTAssertEqual(H.measured(series, for: .steps, today: "2026-10-07").map(\.day),
+                       ["2026-10-01", "2026-10-02", "2026-10-05"])
+        XCTAssertEqual(H.measured(series, for: .steps, today: "2026-10-07")[1].value, 0)
+        XCTAssertEqual(H.runs(H.measured(series, for: .steps, today: "2026-10-07")).map(\.count), [2, 1],
+                       "the zero day joins the line; the unmeasured days break it")
+        for metric in MetricInsightMetric.allCases where metric != .steps {
+            XCTAssertFalse(metric.keepsZero, metric.rawValue)
+            XCTAssertEqual(H.measured(series, for: metric, today: "2026-10-07").map(\.day), ["2026-10-01", "2026-10-05"],
+                           metric.rawValue)
+        }
+    }
+
+    /// A day metric's headline is the latest COMPLETE local day; a night metric keeps last night, which is keyed by
+    /// the day it ends (today).
+    func testADayMetricShowsTheLatestCompleteDayNeverToday() throws {
+        let series: [(day: String, value: Double)] = [("2026-10-05", 7100), ("2026-10-06", 9400), ("2026-10-07", 1200),
+                                                      ("2026-10-08", 300)]
+        for metric in [MetricInsightMetric.steps, .calories, .heartRate] {
+            let shown = H.measured(series, for: metric, today: "2026-10-07")
+            let latest = try XCTUnwrap(shown.last, metric.rawValue)
+            XCTAssertEqual(latest.day, "2026-10-06", "\(metric.rawValue): today is still running")
+            XCTAssertEqual(latest.value, 9400)
+            XCTAssertEqual(shown.map(\.day), ["2026-10-05", "2026-10-06"], "the chart ends there too")
+        }
+        let nights = Array(series.prefix(3))
+        for metric in [MetricInsightMetric.restingHeartRate, .hrvRmssd, .hrvSdnn, .skinTemp, .respRate, .spo2] {
+            XCTAssertEqual(H.measured(nights, for: metric, today: "2026-10-07").last?.day, "2026-10-07",
+                           "\(metric.rawValue): last night ends today")
+        }
+        XCTAssertEqual(H.latestMeasured(series, before: "2026-10-07")?.day, "2026-10-06")
+        XCTAssertNil(H.latestMeasured([("2026-10-07", 500)], before: "2026-10-07"), "only today: nothing complete yet")
+    }
+
+    // MARK: - Stable awake heart rate (context history)
+
+    private func dv(_ day: String, _ value: Double, series: String = V.stableAwakeHeartRateSeries,
+                    mode: PhysiologyContext.ProcessingMode = .retrospective, regime: String = "r1",
+                    support: Int = 4, seconds: Int = 1200) -> PhysiologyContext.DailyValue {
+        PhysiologyContext.DailyValue(day: day, seriesKey: series, regimeKey: regime, metric: .heartRate, value: value,
+                                     units: "bpm", supportCount: support, supportUnit: "window", supportS: seconds,
+                                     mode: mode, finality: .final)
+    }
+
+    func testStableAwakeHeartRateIsOneValuePerDayPreferringTheRetrospective() {
+        let values = [
+            dv("2026-10-04", 61, mode: .causalLive), dv("2026-10-04", 63),                  // both modes: retrospective
+            dv("2026-10-05", 66, mode: .causalLive),                                         // live only
+            dv("2026-10-03", 70, support: 2), dv("2026-10-03", 64, regime: "r2", support: 6), // two regimes: most support
+            dv("2026-10-02", 58, series: "heart_rate.stable_awake_5min.band_06_12"),          // a time-band stratum
+            dv("2026-10-02", 49, series: "hrv_rmssd.stable_awake_5min"),                       // another metric
+            dv("2026-10-01", 0), dv("2026-10-06", .nan),                                        // not readings
+        ]
+        let series = V.contextDaily(values, seriesKey: V.stableAwakeHeartRateSeries)
+        XCTAssertEqual(series.map(\.day), ["2026-10-03", "2026-10-04", "2026-10-05"])
+        XCTAssertEqual(series.map(\.value), [64, 63, 66])
+        // Order-independent, and a tie in mode and support goes to the first regime key, whatever the input order.
+        XCTAssertEqual(V.contextDaily(values.reversed(), seriesKey: V.stableAwakeHeartRateSeries).map(\.value), [64, 63, 66])
+        let tie = [dv("2026-10-04", 70, regime: "r9"), dv("2026-10-04", 60, regime: "r1")]
+        XCTAssertEqual(V.contextDaily(tie, seriesKey: V.stableAwakeHeartRateSeries).map(\.value), [60])
+        XCTAssertEqual(V.contextDaily(tie.reversed(), seriesKey: V.stableAwakeHeartRateSeries).map(\.value), [60])
+        XCTAssertTrue(V.contextDaily([], seriesKey: V.stableAwakeHeartRateSeries).isEmpty, "no context: the empty state")
+    }
+
+    /// One retrospective read over the route's longest range and one live read of the last week, both ending at the
+    /// latest complete day.
+    func testTheContextReadsCoverTheRoutesRangeAndTheLastWeekLive() {
+        let reads = V.contextReads(through: "2026-10-06")
+        XCTAssertEqual(reads, [V.ContextRead(from: "2026-06-09", to: "2026-10-06", mode: .retrospective),
+                               V.ContextRead(from: "2026-09-30", to: "2026-10-06", mode: .causalLive)])
+        XCTAssertEqual(PhysiologyContextDates.inclusiveDays(from: reads[0].from, to: reads[0].to),
+                       PhysiologyContextRepository.maxHistoryDays, "the route's longest range, never refused")
+        XCTAssertEqual(PhysiologyContextDates.inclusiveDays(from: reads[1].from, to: reads[1].to), V.liveContextDays)
+    }
+
+    // MARK: - Format
+
+    private func formatter(_ metric: MetricInsightMetric, key: String, temperature: TemperatureUnit = .celsius,
+                           locale: String = "en_US") -> KeyMetricFormatter {
+        KeyMetricFormatter(metric: metric, descriptor: MetricCatalog.metric(key: key, source: "my-whoop")!,
+                           system: .metric, temperature: temperature, locale: Locale(identifier: locale))
+    }
+
+    func testStepsAndCaloriesReadWithAThousandsSeparator() {
+        let steps = formatter(.steps, key: "steps")
+        XCTAssertEqual(steps.text(8123), "8,123 steps")
+        XCTAssertEqual(steps.text(0), "0 steps")
+        XCTAssertEqual(steps.parts(8123).number, "8,123")
+        XCTAssertEqual(steps.parts(8123).unit, "steps")
+        let kcal = formatter(.calories, key: "energy_kcal")
+        XCTAssertEqual(kcal.text(2350.4), "2,350 kcal")
+        XCTAssertEqual(kcal.parts(2350).number, "2,350")
+        XCTAssertEqual(kcal.parts(2350).unit, "kcal")
+        XCTAssertEqual(formatter(.calories, key: "energy_kcal", locale: "de_DE").parts(2350).number, "2.350",
+                       "the app language's grouping")
+    }
+
+    func testTheVitalsReadInTheirOwnUnits() {
+        XCTAssertEqual(formatter(.restingHeartRate, key: "rhr").text(52), "52 bpm")
+        XCTAssertEqual(formatter(.hrvSdnn, key: "hrv").text(71.4), "71 ms", "SDNN reads in the HRV descriptor's ms")
+        XCTAssertEqual(formatter(.respRate, key: "resp_rate").text(15.24), "15.2 rpm")
+        XCTAssertEqual(formatter(.spo2, key: "spo2").text(96), "96 %")
+        XCTAssertEqual(formatter(.heartRate, key: "stable_awake_hr").parts(64).number, "64")
+        XCTAssertEqual(formatter(.heartRate, key: "stable_awake_hr").parts(64).unit, "bpm")
+    }
+
+    /// The absolute wrist temperature follows the reader's °C / °F choice, on the headline and on the chart's axis.
+    func testWristTemperatureFollowsTheTemperatureUnitOnTheAxisToo() {
+        let celsius = formatter(.skinTemp, key: "skin_temp")
+        XCTAssertEqual(celsius.text(34.2), "34.2 °C")
+        XCTAssertEqual(celsius.parts(34.2).number, "34.2")
+        XCTAssertEqual(celsius.parts(34.2).unit, "°C")
+        XCTAssertEqual(celsius.plotted(34.2), 34.2)
+        let fahrenheit = formatter(.skinTemp, key: "skin_temp", temperature: .fahrenheit)
+        XCTAssertEqual(fahrenheit.text(34.2), "93.6 °F")
+        XCTAssertEqual(fahrenheit.parts(34.2).unit, "°F")
+        XCTAssertEqual(fahrenheit.plotted(34.2), 93.56, accuracy: 1e-9)
+        XCTAssertEqual(formatter(.restingHeartRate, key: "rhr", temperature: .fahrenheit).plotted(52), 52,
+                       "only a temperature is converted")
+    }
+
+    /// Narrow-range signals keep a fitted axis instead of a line squashed by a bpm-sized pad.
+    func testNarrowRangeSignalsGetAFittedAxis() throws {
+        let temperature = try XCTUnwrap(H.valueDomain([33.4, 33.6, 34.0], minimumPad: MetricInsightMetric.skinTemp.minimumPad))
+        XCTAssertEqual(temperature.lowerBound, 33.1, accuracy: 1e-9)
+        XCTAssertEqual(temperature.upperBound, 34.3, accuracy: 1e-9)
+        let oxygen = try XCTUnwrap(H.valueDomain([93, 96, 98], minimumPad: MetricInsightMetric.spo2.minimumPad))
+        XCTAssertEqual(oxygen.lowerBound, 92, accuracy: 1e-9)
+        XCTAssertEqual(oxygen.upperBound, 99, accuracy: 1e-9)
+        let breathing = try XCTUnwrap(H.valueDomain([14.8, 15.2], minimumPad: MetricInsightMetric.respRate.minimumPad))
+        XCTAssertEqual(breathing.upperBound - breathing.lowerBound, 1.4, accuracy: 1e-9)
+        // Steps sit on a zero floor, never below it.
+        let steps = try XCTUnwrap(H.valueDomain([0, 8123, 12000], minimumPad: MetricInsightMetric.steps.minimumPad))
+        XCTAssertEqual(steps.lowerBound, 0)
+        XCTAssertEqual(steps.upperBound, 13800, accuracy: 1e-9)
+        for metric in MetricInsightMetric.allCases { XCTAssertGreaterThan(metric.minimumPad, 0, metric.rawValue) }
+    }
+
+    // MARK: - Night and day wording
+
+    func testNightMetricsSpeakOfNightsAndDayMetricsOfFullDays() {
+        XCTAssertEqual(KeyMetricCopy.latest(.night), "Latest measured night")
+        XCTAssertEqual(KeyMetricCopy.latest(.day), "Latest full day")
+        XCTAssertEqual(KeyMetricCopy.measured(5, of: 7, .night), "5 of 7 nights measured")
+        XCTAssertEqual(KeyMetricCopy.measured(1, of: 30, .night), "1 of 30 nights measured")
+        XCTAssertEqual(KeyMetricCopy.measured(5, of: 7, .day), "5 of 7 days measured")
+        XCTAssertEqual(KeyMetricCopy.measured(1, of: 30, .day), "1 of 30 days measured")
+        XCTAssertEqual(KeyMetricCopy.axis(.night), "Night")
+        XCTAssertEqual(KeyMetricCopy.axis(.day), "Day")
+        XCTAssertEqual(KeyMetricCopy.noneYet(.day), "No measured days yet")
+        XCTAssertEqual(KeyMetricCopy.nothingToChart(.night), "No measured nights to chart yet.")
+        // The first half is the night copy, the second the day copy; neither borrows the other's word.
+        let all = KeyMetricCopy.allPeriodText
+        XCTAssertFalse(all.prefix(all.count / 2).contains { $0.lowercased().contains("day") }, "\(all)")
+        XCTAssertFalse(all.suffix(all.count / 2).contains { $0.lowercased().contains("night") }, "\(all)")
+        XCTAssertEqual(all.count, Set(all).count, "every string is distinct")
     }
 
     // MARK: - Headline value
@@ -67,7 +348,7 @@ final class KeyMetricDetailTests: XCTestCase {
         let series: [(day: String, value: Double)] = [("2026-10-06", 52), ("2026-09-30", 58), ("2026-10-06", 99),
                                                       ("not-a-day", 50)]
         XCTAssertEqual(H.latestMeasured(series)?.value, 52, "the first reading of a day is kept")
-        XCTAssertEqual(H.measuredNights(series).map(\.day), ["2026-09-30", "2026-10-06"])
+        XCTAssertEqual(H.measured(series).map(\.day), ["2026-09-30", "2026-10-06"])
     }
 
     func testThereIsNoHeadlineWhenNothingWasMeasured() {
@@ -78,7 +359,7 @@ final class KeyMetricDetailTests: XCTestCase {
     // MARK: - Chart gaps
 
     func testMissingNightsSplitTheLineAndNothingIsPlottedAtZero() {
-        let nights = H.measuredNights([
+        let nights = H.measured([
             ("2026-10-01", 54), ("2026-10-02", 53), ("2026-10-03", 0),     // the 3rd is missing
             ("2026-10-04", 55), ("2026-10-05", 56),
             ("2026-10-08", 52),                                           // 6th and 7th never arrived
@@ -96,10 +377,10 @@ final class KeyMetricDetailTests: XCTestCase {
     }
 
     func testConsecutiveNightsAreOneLine() {
-        let nights = H.measuredNights((1...9).map { (day: "2026-10-0\($0)", value: 50 + Double($0)) })
+        let nights = H.measured((1...9).map { (day: "2026-10-0\($0)", value: 50 + Double($0)) })
         XCTAssertEqual(H.runs(nights).count, 1)
         // Across a month and a year boundary too.
-        let boundary = H.measuredNights([("2025-12-31", 50), ("2026-01-01", 51), ("2026-01-31", 52),
+        let boundary = H.measured([("2025-12-31", 50), ("2026-01-01", 51), ("2026-01-31", 52),
                                          ("2026-02-01", 53)])
         XCTAssertEqual(H.runs(boundary).map(\.count), [2, 2])
         XCTAssertTrue(H.runs([]).isEmpty)
@@ -108,7 +389,7 @@ final class KeyMetricDetailTests: XCTestCase {
     // MARK: - Windows
 
     func testAFiniteRangeEndsAtTheLatestMeasuredNight() throws {
-        let nights = H.measuredNights([("2026-08-01", 60), ("2026-09-20", 55), ("2026-10-01", 54),
+        let nights = H.measured([("2026-08-01", 60), ("2026-09-20", 55), ("2026-10-01", 54),
                                        ("2026-10-06", 52)])
         let week = try XCTUnwrap(H.domain(nights, range: .week))
         XCTAssertEqual(week.lowerBound, date("2026-09-30"))
@@ -127,7 +408,7 @@ final class KeyMetricDetailTests: XCTestCase {
     }
 
     func testASingleNightStillHasAnAxisAndNoHistoryHasNoWindow() throws {
-        let one = H.measuredNights([("2026-10-06", 52)])
+        let one = H.measured([("2026-10-06", 52)])
         let all = try XCTUnwrap(H.domain(one, range: .all))
         XCTAssertEqual(H.dayCount(all), 7)
         XCTAssertEqual(H.window(one, domain: all).map(\.day), ["2026-10-06"])
@@ -154,7 +435,7 @@ final class KeyMetricDetailTests: XCTestCase {
         XCTAssertEqual(ExploreRangeGating.coerced(selection: .year,
                                                   isUnlocked: { H.isUnlocked($0, spanDays: 40, hasHistory: true) }),
                        .quarter)
-        XCTAssertEqual(H.spanDays(H.measuredNights([("2026-10-01", 50), ("2026-10-11", 51)])), 10)
+        XCTAssertEqual(H.spanDays(H.measured([("2026-10-01", 50), ("2026-10-11", 51)])), 10)
     }
 
     func testTheValueAxisFitsTheReadingsAndNeverStartsAtZeroForThem() throws {
@@ -294,15 +575,37 @@ final class KeyMetricDetailTests: XCTestCase {
         XCTAssertEqual(MetricInsightCopy.observed, "What we noticed")
         XCTAssertEqual(MetricInsightCopy.interpretation, "What may be behind it")
         XCTAssertEqual(MetricInsightCopy.uncertainty, "What we can't tell yet")
-        XCTAssertEqual(MetricInsightCopy.writtenBy, "Written by AI from your measured nights.")
+        XCTAssertEqual(MetricInsightCopy.writtenBy(.night), "Written by AI from your measured nights.")
+        XCTAssertEqual(MetricInsightCopy.writtenBy(.day), "Written by AI from your measured days.")
         XCTAssertFalse(MetricInsightCopy.allFixedText.contains { $0.localizedCaseInsensitiveContains("medical advice") },
                        "\(MetricInsightCopy.allFixedText)")
         XCTAssertEqual(MetricInsightCopy.allFixedText.count, Set(MetricInsightCopy.allFixedText).count,
                        "every fixed string is distinct")
     }
 
+    /// The card's lines with no explanation to read a period from speak of the screen metric's period.
+    func testTheCardsWaitingLinesFollowThePeriod() {
+        XCTAssertEqual(MetricInsightCopy.preparing(.night), "Looking at your recent nights…")
+        XCTAssertEqual(MetricInsightCopy.preparing(.day), "Looking at your recent days…")
+        XCTAssertEqual(MetricInsightCopy.notEnoughData(.night), "Not enough measured nights yet")
+        XCTAssertEqual(MetricInsightCopy.notEnoughData(.day), "Not enough measured days yet")
+        XCTAssertEqual(MetricInsightCopy.signedOut(.day), "Sign in to see an explanation of your recent days.")
+        for period in MetricInsightPeriod.allCases {
+            let other = period == .night ? "day" : "night"
+            for text in [MetricInsightCopy.preparing(period), MetricInsightCopy.notEnoughData(period),
+                         MetricInsightCopy.signedOut(period), MetricInsightCopy.writtenBy(period)] {
+                XCTAssertFalse(text.lowercased().contains(other), text)
+            }
+        }
+    }
+
     func testTheCardsOwnCopyPassesTheWordingGuard() {
-        for text in MetricInsightCopy.allFixedText {
+        // The screen's own words too: its titles, the period copy and the estimate labels sit right above the
+        // explanation (and the server writes about the same metrics by the same names).
+        let screen = KeyMetricCopy.allPeriodText + MetricInsightMetric.allCases.compactMap(\.measurement.label)
+            + MetricInsightMetric.allCases.flatMap { [$0.title, $0.switchLabel] }
+            + KeyMetricCatalog.entries.compactMap { MetricCatalog.metric(key: $0.catalogKey, source: $0.source)?.title }
+        for text in MetricInsightCopy.allFixedText + screen {
             XCTAssertNil(PhysiologyContextWording.containsForbiddenTerm(text), text)
             XCTAssertNil(MetricInsightWordingGuard.violation(in: text), text)
             XCTAssertFalse(text.isEmpty)
@@ -340,6 +643,16 @@ final class KeyMetricDetailTests: XCTestCase {
 
         let oneNight = try XCTUnwrap(MetricInsight.decode(F.insight(basis: ["nights": 1])))
         XCTAssertTrue(MetricInsightCopy.basis(oneNight, locale: gb)?.hasPrefix("Based on 1 night through ") == true)
+
+        // A day metric's explanation counts days (the basis keeps its shape: `nights` holds the count).
+        let days = try XCTUnwrap(MetricInsight.decode(F.insight(extra: ["period": "day", "metric": "steps"])))
+        XCTAssertEqual(MetricInsightCopy.basis(days, locale: us), "Based on 28 days through Oct 6, 2026")
+        let oneDay = try XCTUnwrap(MetricInsight.decode(F.insight(basis: ["nights": 1], extra: ["period": "day"])))
+        XCTAssertTrue(MetricInsightCopy.basis(oneDay, locale: gb)?.hasPrefix("Based on 1 day through ") == true)
+        let undatedDays = try XCTUnwrap(MetricInsight.decode(F.insight(basis: ["nights": 9],
+                                                                       extra: ["period": "day",
+                                                                               "data_through": NSNull()])))
+        XCTAssertEqual(MetricInsightCopy.basis(undatedDays, locale: us), "Based on 9 days")
         let undated = try XCTUnwrap(MetricInsight.decode(F.insight(extra: ["data_through": NSNull(),
                                                                            "generated_at": NSNull()])))
         XCTAssertEqual(MetricInsightCopy.footerLines(undated, locale: us), ["Based on 28 nights through Oct 6, 2026"],

@@ -4,18 +4,26 @@ import StrandDesign
 
 /// The key-metric screen's one history chart.
 ///
-/// Each run of consecutive measured nights is its own line (`KeyMetricHistory.runs`), so a night with no reading is
-/// a gap rather than a line drawn across it, and nothing is ever plotted at zero. A night with no measured
-/// neighbour is drawn as a dot. Dragging sideways (hovering on the Mac) selects a night and the readout above the
-/// plot shows its value and date; at rest the readout says how many nights in the range were measured.
+/// Each run of consecutive measured nights or days is its own line (`KeyMetricHistory.runs`), so a period with no
+/// reading is a gap rather than a line drawn across it, and nothing is ever plotted at zero that was not measured
+/// as zero. A reading with no measured neighbour is drawn as a dot. Dragging sideways (hovering on the Mac) selects
+/// a period and the readout above the plot shows its value and date; at rest the readout says how many periods in
+/// the range were measured.
 struct KeyMetricHistoryChart: View {
-    /// The window's measured nights, ascending.
-    let nights: [KeyMetricHistory.Night]
+    /// The window's readings, ascending.
+    let readings: [KeyMetricHistory.Reading]
     /// The calendar days the range spans (`KeyMetricHistory.domain`).
     let domain: ClosedRange<Date>
     let tint: Color
-    /// `metric.format` with the reader's unit preferences.
+    /// The value as text, with the reader's unit preferences (`KeyMetricFormatter.text`).
     let format: (Double) -> String
+    /// Where a value sits on the value axis (`KeyMetricFormatter.plotted`): the axis labels are plain numbers, so a
+    /// value shown in another unit than it is stored in is plotted in the shown one.
+    var plotValue: (Double) -> Double = { $0 }
+    /// The least air above and below the readings, in plotted units (`MetricInsightMetric.minimumPad`).
+    var minimumPad: Double = 3
+    /// Nights or days, for the captions and VoiceOver.
+    var period: MetricInsightPeriod = .night
     /// The metric's name, for VoiceOver.
     let metricTitle: String
     var height: CGFloat = NoopMetrics.chartHeight
@@ -23,25 +31,25 @@ struct KeyMetricHistoryChart: View {
     @State private var selectedDay: String?
 
     private struct Mark: Identifiable {
-        let night: KeyMetricHistory.Night
+        let reading: KeyMetricHistory.Reading
         let run: String
         /// No measured neighbour on either side, so the run is a single point.
         let isolated: Bool
-        var id: String { night.day }
+        var id: String { reading.day }
     }
 
     private var marks: [Mark] {
-        KeyMetricHistory.runs(nights).enumerated().flatMap { index, run in
-            run.map { Mark(night: $0, run: "run-\(index)", isolated: run.count == 1) }
+        KeyMetricHistory.runs(readings).enumerated().flatMap { index, run in
+            run.map { Mark(reading: $0, run: "run-\(index)", isolated: run.count == 1) }
         }
     }
 
-    /// Dots on every night while they can be told apart; past that only lone nights get one.
-    private var showsAllDots: Bool { nights.count <= 45 }
+    /// Dots on every reading while they can be told apart; past that only lone readings get one.
+    private var showsAllDots: Bool { readings.count <= 45 }
 
-    private var selected: KeyMetricHistory.Night? {
+    private var selected: KeyMetricHistory.Reading? {
         guard let selectedDay else { return nil }
-        return nights.first { $0.day == selectedDay }
+        return readings.first { $0.day == selectedDay }
     }
 
     private static let utc: Calendar = PhysiologyContextDates.calendar
@@ -67,20 +75,17 @@ struct KeyMetricHistoryChart: View {
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(Text("\(metricTitle) history"))
         .accessibilityValue(Text(accessibilityValue))
-        .accessibilityHint(Text("Swipe up or down to move through the nights."))
+        .accessibilityHint(Text(KeyMetricCopy.adjustHint(period)))
         .accessibilityAdjustableAction { direction in
             moveSelection(direction == .increment ? 1 : -1)
         }
-        .onChangeCompat(of: nights.map(\.day)) { _ in selectedDay = nil }
+        .onChangeCompat(of: readings.map(\.day)) { _ in selectedDay = nil }
     }
 
     // MARK: Readout
 
     private var measuredCaption: String {
-        let total = KeyMetricHistory.dayCount(domain)
-        return nights.count == 1
-            ? String(localized: "1 of \(total) nights measured")
-            : String(localized: "\(nights.count) of \(total) nights measured")
+        KeyMetricCopy.measured(readings.count, of: KeyMetricHistory.dayCount(domain), period)
     }
 
     private var readout: some View {
@@ -89,7 +94,7 @@ struct KeyMetricHistoryChart: View {
                 Text(format(selected.value))
                     .font(StrandFont.number(17))
                     .foregroundStyle(StrandPalette.textPrimary)
-                Text(KeyMetricDates.shortNight(selected.date, includeYear: spansYears))
+                Text(KeyMetricDates.short(selected.date, includeYear: spansYears))
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textSecondary)
             } else {
@@ -108,30 +113,32 @@ struct KeyMetricHistoryChart: View {
     private var chart: some View {
         let marks = self.marks
         let showsAllDots = self.showsAllDots
+        let axis = KeyMetricCopy.axis(period)
         return Chart {
             ForEach(marks) { m in
-                LineMark(x: .value("Night", m.night.date), y: .value("Value", m.night.value),
+                LineMark(x: .value(axis, m.reading.date), y: .value("Value", plotValue(m.reading.value)),
                          series: .value("Run", m.run))
                     .foregroundStyle(tint)
                     .interpolationMethod(.monotone)
                     .lineStyle(StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
                 if showsAllDots || m.isolated {
-                    PointMark(x: .value("Night", m.night.date), y: .value("Value", m.night.value))
+                    PointMark(x: .value(axis, m.reading.date), y: .value("Value", plotValue(m.reading.value)))
                         .foregroundStyle(tint)
                         .symbolSize(showsAllDots ? 22 : 30)
                 }
             }
             if let selected {
-                RuleMark(x: .value("Night", selected.date))
+                RuleMark(x: .value(axis, selected.date))
                     .foregroundStyle(StrandPalette.textTertiary.opacity(0.6))
                     .lineStyle(StrokeStyle(lineWidth: 1))
-                PointMark(x: .value("Night", selected.date), y: .value("Value", selected.value))
+                PointMark(x: .value(axis, selected.date), y: .value("Value", plotValue(selected.value)))
                     .foregroundStyle(tint)
                     .symbolSize(90)
             }
         }
         .chartXScale(domain: plotDomain)
-        .modifier(ValueScale(domain: KeyMetricHistory.valueDomain(nights.map(\.value))))
+        .modifier(ValueScale(domain: KeyMetricHistory.valueDomain(readings.map { plotValue($0.value) },
+                                                                  minimumPad: minimumPad)))
         .chartPlotStyle { $0.clipped() }
         .chartXAxis {
             AxisMarks(values: axisDays) { value in
@@ -201,7 +208,7 @@ struct KeyMetricHistoryChart: View {
         guard plot.width > 0 else { return }
         let clamped = min(max(x, plot.minX), plot.maxX)
         guard let date: Date = proxy.value(atX: clamped - plot.minX) else { return }
-        let nearest = nights.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
+        let nearest = readings.min { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) }
         if nearest?.day != selectedDay { selectedDay = nearest?.day }
     }
 
@@ -209,18 +216,18 @@ struct KeyMetricHistoryChart: View {
 
     private var accessibilityValue: String {
         if let selected {
-            return "\(format(selected.value)), \(KeyMetricDates.shortNight(selected.date, includeYear: spansYears))"
+            return "\(format(selected.value)), \(KeyMetricDates.short(selected.date, includeYear: spansYears))"
         }
-        guard let last = nights.last else { return measuredCaption }
-        return "\(measuredCaption). \(format(last.value)), \(KeyMetricDates.shortNight(last.date, includeYear: spansYears))"
+        guard let last = readings.last else { return measuredCaption }
+        return "\(measuredCaption). \(format(last.value)), \(KeyMetricDates.short(last.date, includeYear: spansYears))"
     }
 
-    /// VoiceOver's adjustable action steps through the nights (starting from the latest).
+    /// VoiceOver's adjustable action steps through the readings (starting from the latest).
     private func moveSelection(_ step: Int) {
-        guard !nights.isEmpty else { return }
-        let current = selectedDay.flatMap { day in nights.firstIndex { $0.day == day } } ?? nights.count
-        let next = min(max(current + step, 0), nights.count - 1)
-        selectedDay = nights[next].day
+        guard !readings.isEmpty else { return }
+        let current = selectedDay.flatMap { day in readings.firstIndex { $0.day == day } } ?? readings.count
+        let next = min(max(current + step, 0), readings.count - 1)
+        selectedDay = readings[next].day
     }
 }
 

@@ -390,7 +390,8 @@ struct CompareView: View {
     private var addMenu: some View {
         Menu {
             ForEach(MetricCatalog.categories, id: \.self) { category in
-                let metrics = MetricCatalog.inCategory(category)
+                // A metric the phone stores no series for (stable awake heart rate) has nothing to overlay.
+                let metrics = MetricCatalog.inCategory(category).filter(KeyMetricCatalog.hasLocalSeries)
                 if !metrics.isEmpty {
                     // Section title localized at the render site only; `category` stays the
                     // raw English identifier that `inCategory` filters on.

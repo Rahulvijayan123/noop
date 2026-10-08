@@ -5,13 +5,29 @@ import StrandDesign
 // chart on `KeyMetricDetailView`. Optional by design: every state that has no explanation says so in one quiet
 // line, and nothing here can hold up the rest of the screen.
 
-/// The card's fixed copy, in one place so the wording checks can read every string it may show.
+/// The card's fixed copy, in one place so the wording checks can read every string it may show. A night metric's
+/// card speaks of nights, a day metric's of days (`MetricInsightPeriod`).
 enum MetricInsightCopy {
     static var title: String { String(localized: "Explanation") }
-    static var preparing: String { String(localized: "Looking at your recent nights…") }
-    static var notEnoughData: String { String(localized: "Not enough measured nights yet") }
+    static func preparing(_ period: MetricInsightPeriod) -> String {
+        switch period {
+        case .night: return String(localized: "Looking at your recent nights…")
+        case .day: return String(localized: "Looking at your recent days…")
+        }
+    }
+    static func notEnoughData(_ period: MetricInsightPeriod) -> String {
+        switch period {
+        case .night: return String(localized: "Not enough measured nights yet")
+        case .day: return String(localized: "Not enough measured days yet")
+        }
+    }
     static var unavailable: String { String(localized: "Explanation unavailable right now") }
-    static var signedOut: String { String(localized: "Sign in to see an explanation of your recent nights.") }
+    static func signedOut(_ period: MetricInsightPeriod) -> String {
+        switch period {
+        case .night: return String(localized: "Sign in to see an explanation of your recent nights.")
+        case .day: return String(localized: "Sign in to see an explanation of your recent days.")
+        }
+    }
     static var updating: String { String(localized: "Updating…") }
     static var earlier: String { String(localized: "Earlier explanation") }
     // The three section labels, in plain words for patients: what was observed, the likely interpretation, and the
@@ -22,19 +38,30 @@ enum MetricInsightCopy {
     static var related: String { String(localized: "Related signals") }
     static var estimated: String { String(localized: "Estimated") }
     static var sources: String { String(localized: "Sources") }
-    static var writtenBy: String { String(localized: "Written by AI from your measured nights.") }
+    static func writtenBy(_ period: MetricInsightPeriod) -> String {
+        switch period {
+        case .night: return String(localized: "Written by AI from your measured nights.")
+        case .day: return String(localized: "Written by AI from your measured days.")
+        }
+    }
 
-    /// "Based on 38 nights through Oct 6, 2026", from what the insight carries; nil when it carries neither.
+    /// "Based on 38 nights through Oct 6, 2026" (or days, by the insight's period), from what the insight carries;
+    /// nil when it carries neither.
     static func basis(_ insight: MetricInsight, locale: Locale = AppLanguage.activeLocale) -> String? {
-        let nights = insight.basis?.nights
+        let count = insight.basis?.nights
         let through = (insight.dataThrough ?? insight.basis?.to).flatMap { KeyMetricDates.day($0, locale: locale) }
-        switch (nights, through) {
-        case (1?, let through?): return String(localized: "Based on 1 night through \(through)")
-        case (let n?, let through?): return String(localized: "Based on \(n) nights through \(through)")
-        case (nil, let through?): return String(localized: "Based on nights through \(through)")
-        case (1?, nil): return String(localized: "Based on 1 night")
-        case (let n?, nil): return String(localized: "Based on \(n) nights")
-        case (nil, nil): return nil
+        switch (insight.period, count, through) {
+        case (.night, 1?, let through?): return String(localized: "Based on 1 night through \(through)")
+        case (.night, let n?, let through?): return String(localized: "Based on \(n) nights through \(through)")
+        case (.night, nil, let through?): return String(localized: "Based on nights through \(through)")
+        case (.night, 1?, nil): return String(localized: "Based on 1 night")
+        case (.night, let n?, nil): return String(localized: "Based on \(n) nights")
+        case (.day, 1?, let through?): return String(localized: "Based on 1 day through \(through)")
+        case (.day, let n?, let through?): return String(localized: "Based on \(n) days through \(through)")
+        case (.day, nil, let through?): return String(localized: "Based on days through \(through)")
+        case (.day, 1?, nil): return String(localized: "Based on 1 day")
+        case (.day, let n?, nil): return String(localized: "Based on \(n) days")
+        case (_, nil, nil): return nil
         }
     }
 
@@ -62,10 +89,10 @@ enum MetricInsightCopy {
         c.year.map { "\(c.title) (\($0))" } ?? c.title
     }
 
-    /// Every fixed string above (for the copy checks).
+    /// Every fixed string above, for both periods (for the copy checks).
     static var allFixedText: [String] {
-        [title, preparing, notEnoughData, unavailable, signedOut, updating, earlier, observed, interpretation,
-         uncertainty, related, estimated, sources, writtenBy]
+        [title, unavailable, updating, earlier, observed, interpretation, uncertainty, related, estimated, sources]
+            + MetricInsightPeriod.allCases.flatMap { [preparing($0), notEnoughData($0), signedOut($0), writtenBy($0)] }
     }
 }
 
@@ -73,13 +100,14 @@ enum MetricInsightCopy {
 enum MetricInsightMarker: Equatable, Sendable {
     /// A newer analysis is being prepared: "Updating…".
     case updating
-    /// The explanation describes earlier nights and nothing newer is on its way right now: "Earlier explanation".
+    /// The explanation describes earlier nights (or days) and nothing newer is on its way right now: "Earlier
+    /// explanation".
     case earlier
 }
 
 extension MetricInsightStore.State {
-    /// The marker for the shown explanation given the phone's latest measured night (`isCurrent(latestMeasuredDay:)`);
-    /// nil when there is no explanation or it is current.
+    /// The marker for the shown explanation given the phone's latest measured night or day
+    /// (`isCurrent(latestMeasuredDay:)`); nil when there is no explanation or it is current.
     func marker(latestMeasuredDay: String?) -> MetricInsightMarker? {
         guard insight != nil, !isCurrent(latestMeasuredDay: latestMeasuredDay) else { return nil }
         return phase == .pending || phase == .loading ? .updating : .earlier
@@ -92,9 +120,15 @@ struct MetricInsightCard: View {
     /// Nil before the first request has started: shown as the quiet placeholder.
     let state: MetricInsightStore.State?
     var tint: Color? = nil
-    /// The latest night the screen's own series has measured (`yyyy-MM-dd`). An explanation through an earlier day is
-    /// marked as not current.
+    /// The latest night or day the screen's own series has measured (`yyyy-MM-dd`). An explanation through an earlier
+    /// day is marked as not current.
     var latestMeasuredDay: String? = nil
+    /// The screen metric's period, for the lines shown while there is no explanation to read one from. A shown
+    /// explanation speaks of its own period (`MetricInsight.period`).
+    var period: MetricInsightPeriod = .night
+
+    /// The period the card speaks of.
+    private var shownPeriod: MetricInsightPeriod { state?.insight?.period ?? period }
 
     var body: some View {
         NoopCard(tint: tint) {
@@ -118,9 +152,9 @@ struct MetricInsightCard: View {
     /// The one quiet line for a state with nothing (or nothing current) to show; nil while preparing or ready.
     private var statusLine: String? {
         switch state?.phase {
-        case .notEnoughData?: return MetricInsightCopy.notEnoughData
+        case .notEnoughData?: return MetricInsightCopy.notEnoughData(shownPeriod)
         case .unavailable?: return MetricInsightCopy.unavailable
-        case .signedOut?: return MetricInsightCopy.signedOut
+        case .signedOut?: return MetricInsightCopy.signedOut(shownPeriod)
         case nil, .loading?, .pending?, .ready?, .hidden?: return nil
         }
     }
@@ -159,7 +193,7 @@ struct MetricInsightCard: View {
         VStack(alignment: .leading, spacing: NoopMetrics.space2) {
             HStack(spacing: NoopMetrics.space2) {
                 ProgressView().controlSize(.small)
-                Text(MetricInsightCopy.preparing)
+                Text(MetricInsightCopy.preparing(shownPeriod))
                     .font(StrandFont.subhead)
                     .foregroundStyle(StrandPalette.textSecondary)
             }
@@ -194,7 +228,7 @@ struct MetricInsightCard: View {
         }
     }
 
-    /// A section label in the hero's overline style ("Latest measured night").
+    /// A section label in the hero's overline style ("Latest measured night", "Latest full day").
     private func label(_ text: String) -> some View {
         Text(text)
             .strandOverline()
@@ -293,7 +327,7 @@ struct MetricInsightCard: View {
     private func notes(_ insight: MetricInsight) -> some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
             ForEach(MetricInsightCopy.footerLines(insight), id: \.self) { Text($0) }
-            Text(MetricInsightCopy.writtenBy)
+            Text(MetricInsightCopy.writtenBy(insight.period))
         }
         .font(StrandFont.footnote)
         .foregroundStyle(StrandPalette.textTertiary)
