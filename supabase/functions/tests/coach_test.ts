@@ -10,7 +10,11 @@ const OTHER_SOURCE = '44444444-4444-4444-8444-444444444444';
 
 const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-test-key', COACH_DAILY_CALL_LIMIT: '3', NOOP_ALLOW_LEGACY_ENROLLMENT: 'true' });
 
-/** makeMemRest for the auth tables; the coach tables get just enough PostgREST semantics (eq/in/order/limit/offset). */
+/**
+ * makeMemRest for the auth tables; the coach tables get just enough PostgREST semantics (eq/in/order/limit/offset),
+ * and the two RPCs every write now goes through get just enough of their contract (docs/COACH_MEMORY.md §3).
+ * Threads, folders, the context library and the curator are covered over the fuller fake in coach_fake.ts.
+ */
 async function fixture() {
   const base = makeMemRest() as any;
   await base.upsert('noop_ingest_tokens', [
@@ -20,7 +24,10 @@ async function fixture() {
   ]);
   await base.upsert('noop_app_installations', [{ user_id: USER, source_id: SOURCE }, { user_id: OTHER, source_id: OTHER_SOURCE }]);
 
-  const coach = new Map<string, any[]>([['coach_memory_items', []], ['coach_messages', []], ['profiles', []], ['user_settings', []]]);
+  const coach = new Map<string, any[]>([
+    ['coach_memory_items', []], ['coach_messages', []], ['profiles', []], ['user_settings', []],
+    ['coach_threads', []], ['coach_thread_tombstones', []], ['coach_user_state', []],
+  ]);
   const usage = new Map<string, number>();
   const query = (table: string, q = '') => {
     const params = new URLSearchParams(q);
@@ -45,6 +52,32 @@ async function fixture() {
     return rows.slice(offset, limit === undefined ? undefined : offset + limit);
   };
   let seq = 0;
+  // coach_messages_save_v1: upsert on (user_id, client_id), first created_at kept, meta merged.
+  const saveRows = (user: string, rows: any[]) => {
+    const list = coach.get('coach_messages')!;
+    for (const r of rows) {
+      const prior = list.find((x) => x.user_id === user && x.client_id === r.client_id);
+      if (prior) Object.assign(prior, { content: r.content, role: r.role, meta: { ...prior.meta, ...r.meta } });
+      else list.push({ id: crypto.randomUUID(), user_id: user, client_id: r.client_id, thread_id: r.thread_id, role: r.role, content: r.content, meta: r.meta, created_at: r.created_at });
+    }
+    return { saved: rows.length, rejected: [], threads: [] };
+  };
+  // coach_memory_apply_v1: the ops these routes send.
+  const applyOps = (user: string, ops: any[]) => ops.map((op) => {
+    const list = coach.get('coach_memory_items')!;
+    const row = list.find((x) => x.user_id === user && x.id === op.id);
+    if (op.op === 'add') {
+      const added = { id: crypto.randomUUID(), user_id: user, content: op.content, topic: op.topic, importance: op.importance, confirmations: 1, created_at: new Date(Date.UTC(2026, 8, 30, 0, 0, seq++)).toISOString() };
+      list.push(added);
+      return { op: 'add', id: added.id, applied: true };
+    }
+    if (op.op === 'forget_all') coach.set('coach_memory_items', list.filter((x) => x.user_id !== user));
+    else if (!row) return { op: op.op, id: op.id, applied: false, reason: 'not_found' };
+    else if (op.op === 'confirm') row.confirmations += 1;
+    else if (op.op === 'update') Object.assign(row, { content: op.content ?? row.content, topic: op.topic ?? row.topic, importance: op.importance ?? row.importance });
+    else if (op.op === 'forget') coach.set('coach_memory_items', list.filter((x) => x !== row));
+    return { op: op.op, id: op.id ?? null, applied: true };
+  });
   const rest = {
     ...base,
     coach,
@@ -71,7 +104,22 @@ async function fixture() {
       }
       return saved;
     },
+    async patch(table: string, body: any, q: string) {
+      if (!coach.has(table)) return base.patch(table, body, q);
+      const rows = query(table, q);
+      for (const r of rows) Object.assign(r, body);
+      return rows;
+    },
     async rpc(name: string, args: any) {
+      if (name === 'coach_messages_save_v1') return saveRows(args.p_user, args.p_rows);
+      if (name === 'coach_memory_apply_v1') return applyOps(args.p_user, args.p_ops);
+      // coach_thread_delete_v1 with no thread: every thread and message of the owner.
+      if (name === 'coach_thread_delete_v1' && args.p_thread == null) {
+        const threads = coach.get('coach_threads')!.filter((r) => r.user_id === args.p_user).length;
+        coach.set('coach_messages', coach.get('coach_messages')!.filter((r) => r.user_id !== args.p_user));
+        coach.set('coach_threads', coach.get('coach_threads')!.filter((r) => r.user_id !== args.p_user));
+        return { deleted: threads };
+      }
       assertEquals(name, 'coach_take_quota');
       const used = (usage.get(args.p_user_id) ?? 0) + 1;
       if (used > args.p_limit) return false;
@@ -261,7 +309,9 @@ Deno.test('coach memories: save, dedupe, rank, cap, forget, and isolation betwee
   assertEquals((await save({ content: '   ' })).status, 400);
   assertEquals((await (await save({ content: 'Odd topic', topic: 'nonsense', importance: 99 })).json()).memory.importance, 5);
 
-  for (let i = 0; i < 60; i++) await save({ content: `fact ${i}`, importance: 2 });
+  // Distinct facts: `fact ${i}` would now be one fact whose number keeps changing (a number-aware supersede, §6).
+  const word = (i: number) => `${'abcdefghij'[i % 10]}${'abcdefghij'[Math.floor(i / 10)]}q`;
+  for (let i = 0; i < 60; i++) await save({ content: `fact ${word(i)}`, importance: 2 });
   const listed = (await (await handleCoachRequest(call('memories'), deps)).json()).memories;
   assertEquals(listed.length, 50);
   assertEquals(listed[0].importance, 5);
@@ -294,7 +344,8 @@ Deno.test('coach messages: idempotent by clientId, ordered oldest-first, bounded
   await post([msg(1, { content: 'm1 edited', meta: { pending: 'accepted' } }), msg(2)]);
   const got = (await (await handleCoachRequest(call('messages?limit=10'), deps)).json()).messages;
   assertEquals(got.map((m: any) => m.content), ['m0', 'm1 edited', 'm2']);
-  assertEquals(got[1].meta, { pending: 'accepted' });
+  // A re-save merges meta (coach_messages.meta || excluded.meta) instead of replacing it.
+  assertEquals(got[1].meta, { toolNames: ['Recovery'], pending: 'accepted' });
   assertEquals((await (await handleCoachRequest(call('messages', { token: 'noop_other' }), deps)).json()).messages, []);
 
   for (const bad of [{ ...msg(0), clientId: 'nope' }, { ...msg(0), role: 'system' }, { ...msg(0), content: 5 }]) {
@@ -305,7 +356,8 @@ Deno.test('coach messages: idempotent by clientId, ordered oldest-first, bounded
   for (let batch = 0; batch < 13; batch++) {
     await post(Array.from({ length: 40 }, (_, i) => ({ clientId: crypto.randomUUID(), role: 'user', content: 'bulk', createdAt: new Date(Date.UTC(2026, 8, 30, 11, 0, batch * 40 + i)).toISOString() })));
   }
-  assertEquals(rest.coach.get('coach_messages').length, 500);
+  // Every save goes through coach_messages_save_v1, which owns retention now (50,000 rows, not 500).
+  assertEquals(rest.coach.get('coach_messages').length, 523);
   assertEquals((await handleCoachRequest(call('messages', { method: 'DELETE' }), deps)).status, 200);
   assertEquals((await (await handleCoachRequest(call('messages'), deps)).json()).messages, []);
 });

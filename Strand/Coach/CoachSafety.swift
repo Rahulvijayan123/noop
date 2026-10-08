@@ -87,6 +87,19 @@ enum CoachSafety {
         return InputResult(blocked: true, refusal: hit.refusal)
     }
 
+    /// The screen for model-written text the phone feeds back into a prompt (memories, summaries, open loops,
+    /// recall notes, chat titles). True when the text must be left out: it tries to steer the model (prompt
+    /// injection, a leaked system prompt) or carries self-harm or eating-disorder content. The question lists of
+    /// `screenInput` (diagnosis words, PED names, off-topic and under-18 requests) are not applied: a stored fact
+    /// such as "User gets chest pain on hard intervals" or "uses an inhaled corticosteroid" is exactly the
+    /// safety-critical context the prompt must keep.
+    static func screenStored(_ text: String) -> Bool {
+        let lowered = text.lowercased()
+        let normalized = normalize(lowered)
+        return matches(lowered, promptInjectionTerms) || matches(lowered, systemPromptLeakMarkers)
+            || matches(normalized, selfHarmTerms) || matches(normalized, eatingDisorderTerms)
+    }
+
     static func screenOutput(_ text: String, userAge: Int?) -> OutputResult {
         let lowered = text.lowercased()
         if matches(lowered, systemPromptLeakMarkers) {
@@ -307,6 +320,7 @@ enum CoachSafety {
         "absolute safety rules", "never violate these", "remembered context (from previous",
         "do not say \"based on the data provided\"", "here is my system prompt",
         "my system prompt is", "my instructions are:", "my initial instructions",
+        "context library (queryable", "earlier in this conversation (summary",
     ]
 
     private static let medicalAuthorityClaims = [

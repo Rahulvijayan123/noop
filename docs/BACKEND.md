@@ -61,6 +61,87 @@ through the `coach_take_quota` function, and the conversation and memory live in
 `coach_messages`, `coach_memories` and `coach_memory_items`. All five are created by
 `supabase/migrations/20260930235900_coach_harness.sql`, and deleting an account removes them.
 
+#### Threads and memory
+
+Chat threads, folders, durable memories and the context library are specified in
+[COACH_MEMORY.md](COACH_MEMORY.md); that document is the contract for the routes, RPCs and JSON shapes.
+They are created by `supabase/migrations/20261007160000_coach_threads_memory.sql`:
+
+| Table | Holds |
+| --- | --- |
+| `coach_threads` | One row per chat: title and its source, folder, pin, origin, live stats kept by the `coach_messages` triggers (`message_count`, `last_message_at`, `preview`), the rolling summary and the maintenance lease (with `maintenance_claimed_at`, which fences a pass against forgets that land while it runs). |
+| `coach_folders` | The owner's chat folders. A thread can only sit in its owner's folder: the composite key `coach_threads_folder_fkey (folder_id, user_id)`, so another owner's folder fails like a missing one (409). |
+| `coach_thread_tombstones` | Deleted thread ids. A later save for one is rejected with `thread_deleted`; kept 90 days. |
+| `coach_memory_events` | Audit trail of every memory change. `forget` rows are the tombstones the curator checks (tokens only, no content). |
+| `coach_user_state` | One row per owner: the starter-suggestion cache, recent searches, the consolidation lease, `memory_revision` and `memory_floor_at`. |
+
+The migration also adds `thread_id` (a composite key to the owner's thread), and the generated columns
+`blocked` and `search` to `coach_messages`; lifecycle columns (`updated_at`, `last_confirmed_at`,
+`confirmations`, `source`, `version`, `retired_at`, `merged_into`, `search`) to `coach_memory_items`; and
+`utility_calls` and `utility_tokens` to `coach_usage`. Search is lexical (`tsvector`, indexed together with
+`user_id` through `btree_gin`); there is no vector index. The existing conversation is grouped into threads when
+the migration runs: a new thread wherever consecutive messages are more than 3 hours apart, titled from the first
+question that was not refused. Builds before threads never marked refused turns, so the migration (and every
+later save) recognises the refusal texts `CoachSafety` has shipped (`internal.coach_is_refusal`) and marks the
+refusal and the question saved at most 3 seconds before it as blocked, which keeps them out of titles, summaries,
+memory, search and recall.
+
+Every new table is service-role only (RLS with a single `service_role` policy, nothing granted to `anon` or
+`authenticated`), and so are its RPCs, which the `coach` function calls with the owner taken from the
+installation credential:
+
+| RPC | Purpose |
+| --- | --- |
+| `coach_messages_save_v1` | Stores a batch of messages under the owner's thread lock (a transaction advisory lock it shares with `coach_thread_delete_v1`): creates missing threads, assigns rows from app builds without threads, rejects tombstoned (`thread_deleted`) and foreign (`thread_conflict`) threads, merges `meta`, keeps the first `created_at`, marks saved refusals (and the question right before them) blocked, names an old build's untitled thread after its first question, and once a user is 2% over 50,000 messages prunes the oldest back to 50,000 (deleting the threads that leaves empty). |
+| `coach_thread_delete_v1` | Deletes one chat (tombstoned even when the id is unknown, so a save still on its way is refused) or, with no thread, every chat and every message of the owner, under the same lock as the save. Returns `{deleted}`, the number of threads deleted. |
+| `coach_search_v1` | Ranked full-text search over the owner's non-blocked messages and thread titles and summaries, grouped by thread; with an empty query, browses the threads active in a date window. Every match is counted, but only the newest 5,000 are ranked, so a very broad query should be narrowed with a date window. `p_light` (the manifest and the sidebar) ranks only the newest 500 matches and skips the counts, months and hit list. |
+| `coach_memories_ranked_v1` | The active memories for one question: safety pins first, then lexical relevance, importance, recency and confirmations. |
+| `coach_context_manifest_v1` | What the context library holds for one turn (ranked memories, the thread summary, the earlier chats without the current one, recent and relevant chats, open loops), never message contents. |
+| `coach_thread_claim_v1`, `coach_thread_publish_v1` | The maintenance lease, and the summary patch and curator memory ops published together while it is held. When a forget or forget-all landed after the claim, publish keeps the summary but drops the ops (`memory_reset`), so a pass that started before a forget cannot bring the fact back. |
+| `coach_memory_apply_v1` | Memory ops (`add`, `update`, `confirm`, `retire`, `merge`, `forget`, `forget_all`) with the 200-memory cap, the audit events and the retention rules. Ops resolved from an earlier read carry version guards and are skipped as `stale` when a row moved meanwhile; forgetting a memory also deletes the rows merged into it. |
+| `coach_consolidation_claim_v1` | Claims the owner's periodic memory consolidation when it is due. |
+| `coach_take_utility_quota`, `coach_add_utility_tokens` | The cheap-model budget, separate from the chat quota (`coach_take_quota`). |
+
+The cheap model used for titles, follow-ups, starter suggestions, summaries, memory curation and recall is
+configured with optional function secrets:
+
+| Secret | Default | Purpose |
+| --- | --- | --- |
+| `COACH_MODEL_UTILITY` | `COACH_MODEL_CHAT` | The cheap model. It must return clean JSON with `response_format: json_object`. |
+| `COACH_UTILITY_REASONING` | `none` | Sent as `reasoning_effort`; an empty value omits the parameter, for models that reject `none`. |
+| `COACH_UTILITY_API_KEY` | `FIREWORKS_AI_API_KEY` | A separate key for the cheap model, if wanted. |
+| `COACH_DAILY_UTILITY_LIMIT` | `600` | Cheap-model calls per user per UTC day. When it runs out, every pass falls back to its deterministic result. |
+| `COACH_THREADS_DISABLED` | unset | The rollback switch: `1` (or `true`) makes `GET status` stop announcing `features`, so thread-aware apps go back to one conversation. Every route and data rule stays on. |
+
+To roll it out, apply the migration to production as described in Migrations below:
+
+```bash
+psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261007160000_coach_threads_memory.sql
+supabase migration repair --status applied 20261007160000
+```
+
+Then deploy `coach`, then ship the app. Messages the previous `coach` function writes between the
+migration and the deploy have no thread, so re-apply the migration once after the deploy (it is safe to
+re-run): it groups only the rows that still have no thread and changes nothing else. An app without
+threads keeps working against the new function: its messages land in `legacy_client` threads. Deleting an
+account removes every new table's rows (`DELETION_TABLES` in `supabase/functions/_shared/workers.ts`, and the
+`auth.users` cascade).
+
+To roll back, set the switch rather than redeploying older code:
+
+```bash
+supabase secrets set COACH_THREADS_DISABLED=1     # thread-aware apps fall back to one conversation
+supabase secrets unset COACH_THREADS_DISABLED     # threads on again
+```
+
+Never redeploy the `coach` function from before this migration. It would prune every user to the newest 500
+messages, hard-delete the memories beyond 50 (counting retired rows), show retired and merged memories again,
+and ignore the forget tombstones. The migration's tables and functions can stay in place.
+
+The SQL is tested against a throwaway database with
+`EDGE_TEST_ARTIFACTS=<short external dir> deno test -A --no-lock tests/coach_threads_sql_test.ts` from
+`supabase/functions/` (`startLocalPostgres({ coachMemory: true })` applies the coach migrations).
+
 #### Profile
 
 `GET` and `PUT /functions/v1/coach/profile` read and write the owner's row in `profiles`: name
