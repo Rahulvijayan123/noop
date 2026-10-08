@@ -88,7 +88,7 @@ struct CoachTurnContext {
 
 /// The dynamic tail of the context-aware system prompt: remembered context, the summary of the older part of a
 /// long thread, and the context library manifest. The library names what exists and which tool inspects it,
-/// never its contents. Every model-written line passes `CoachSafety.screenInput` first.
+/// never its contents. Every model-written line passes `CoachSafety.screenStored` first.
 enum CoachContextPrompt {
     /// The phone sends this many recent messages; a longer thread also gets its summary.
     static let historyWindow = 28
@@ -203,8 +203,10 @@ enum CoachContextPrompt {
 
     // MARK: Helpers
 
+    /// A stored, model-written line that may go back into a prompt: not empty and passing
+    /// `CoachSafety.screenStored`. The question screen is not used here, so a pinned injury or health fact stays.
     static func isSafe(_ text: String, userAge: Int?) -> Bool {
-        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !CoachSafety.screenInput(text, userAge: userAge).blocked
+        !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty && !CoachSafety.screenStored(text)
     }
 
     /// A summary split into sentences, so one line that trips the screen drops alone instead of the whole summary.

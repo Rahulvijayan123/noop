@@ -92,7 +92,7 @@ struct CoachToolExecutor {
              ["query": ("string", "Distinctive keywords, e.g. 'knee physio'; empty to browse by date"),
               "days": ("integer", "Only the last N days"),
               "from": ("string", "Start date, YYYY-MM-DD"),
-              "to": ("string", "End date, YYYY-MM-DD (exclusive)")]),
+              "to": ("string", "End date, YYYY-MM-DD (inclusive)")]),
         tool("read_conversation",
              "Read one earlier chat: its summary and a capped window of its messages, the recent ones or those around a query. Page with the cursor a result gives.",
              ["thread_id": ("string", "The chat's id, e.g. t1 or the UUID from a search result"),
@@ -104,7 +104,7 @@ struct CoachToolExecutor {
              ["question": ("string", "What you need to know from past chats"),
               "keywords": ("string", "Optional: distinctive keywords to find the chats"),
               "from": ("string", "Optional: start date, YYYY-MM-DD"),
-              "to": ("string", "Optional: end date, YYYY-MM-DD (exclusive)")],
+              "to": ("string", "Optional: end date, YYYY-MM-DD (inclusive)")],
              required: ["question"]),
         tool("query_metric_history",
              "One metric over the long term, from every synced day (years of data): grouped by day, week, month or year, with coverage and the whole-window mean, min and max. For trends beyond the last few weeks and 'how does this year compare with last'.",
@@ -418,7 +418,7 @@ struct CoachToolExecutor {
         }
     }
 
-    /// Model-written memory lines feed back into the prompt, so each passes the input screen first.
+    /// Model-written memory lines feed back into the prompt, so each passes `CoachSafety.screenStored` first.
     private func memories(_ args: [String: Any]) async -> String {
         let query = Self.text(args["query"]), topic = Self.text(args["topic"])?.lowercased()
         let items = (try? await api.memories(query: query, topic: topic, limit: query == nil && topic == nil ? nil : 20)) ?? []
@@ -496,7 +496,7 @@ struct CoachToolExecutor {
 // MARK: - Context tool results
 
 /// The text the history tools hand back to the model: capped, dated, every chat named `[t1 <uuid>]`, and every
-/// model-written line (titles, summaries, snippets, recall notes) passed through the input screen.
+/// model-written line (titles, summaries, recall notes) passed through `CoachSafety.screenStored`.
 enum CoachContextToolText {
     static func search(_ r: CoachContextSearchResult, query: String, currentThreadId: String?,
                        refs: CoachThreadRefs, userAge: Int?) -> String {

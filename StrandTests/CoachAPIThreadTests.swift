@@ -157,6 +157,51 @@ final class CoachAPIThreadTests: XCTestCase {
         XCTAssertEqual(legacy, CoachSaveResult(saved: 1), "an old server's reply has no rejections")
     }
 
+    func testASaveIsSentOnlyUnderItsOwnAccountsCredential() async throws {
+        route(["POST messages": .json(["saved": 1])])
+        let row = CoachStoredMessage(clientId: "c1", role: "user", content: "hi", meta: nil,
+                                     createdAt: "2026-10-07T08:00:00.000Z", threadId: thread)
+        let saved = try await api.saveMessages([row], asOwner: owner.uppercased())
+        XCTAssertEqual(saved.saved, 1)
+        do {
+            // The outbox of the account that signed out, flushing after another account signed in.
+            try await api.saveMessages([row], asOwner: "22222222-2222-4222-8222-222222222222")
+            XCTFail("expected unauthorized")
+        } catch let error as CoachAPIError {
+            XCTAssertEqual(error, .unauthorized)
+        }
+        XCTAssertEqual(CoachURLProtocolStub.requests("POST", "messages").count, 1, "nothing was sent with the wrong credential")
+    }
+
+    func testFollowUpsCanSayTheTitleIsPending() async throws {
+        route(["POST followups": .json(["followUps": ["What next?"], "titlePending": true])])
+        let pending = try await api.followUps(threadId: thread, question: "q", answer: "a", wantTitle: true)
+        XCTAssertTrue(pending.titlePending)
+        XCTAssertNil(pending.title)
+        route(["POST followups": .json(["followUps": ["What next?"], "title": "Knee plan"])])
+        let titled = try await api.followUps(threadId: thread, question: "q", answer: "a", wantTitle: true)
+        XCTAssertFalse(titled.titlePending, "an older server never says it")
+    }
+
+    func testCachedManifestsDropDeletedThreadsAndStandInWithoutTheirRankedList() {
+        let other = "bbbbbbbb-0000-4000-8000-00000000000b"
+        let manifest = CoachContextManifest(
+            thread: .init(id: other, summary: "Another chat's summary", messageCount: 40),
+            library: .init(threadCount: 3, recent: [.init(id: thread, title: "Knee")], relevant: [.init(id: thread, title: "Knee"), .init(id: other)]),
+            openLoops: [.init(threadId: thread, title: "Knee", text: "Book the physio"), .init(threadId: other, text: "Decide the day")])
+        let scrubbed = manifest.removingThread(id: thread.uppercased())
+        XCTAssertEqual(scrubbed.library.recent, [])
+        XCTAssertEqual(scrubbed.library.relevant.map(\.id), [other])
+        XCTAssertEqual(scrubbed.openLoops.map(\.text), ["Decide the day"])
+        XCTAssertNil(manifest.removingThread(id: other).thread)
+
+        let standIn = manifest.asFallback(for: thread)
+        XCTAssertEqual(standIn.library.relevant, [], "ranked for another question")
+        XCTAssertNil(standIn.thread, "another thread's summary and message count")
+        XCTAssertEqual(manifest.asFallback(for: other).thread?.id, other, "its own summary stays")
+        XCTAssertEqual(standIn.openLoops.count, 2)
+    }
+
     // MARK: Memory
 
     func testMemoryListQueryAndLenientRows() async throws {

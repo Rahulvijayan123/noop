@@ -107,6 +107,18 @@ final class CoachThreadsTests: XCTestCase {
         XCTAssertEqual(page.nextCursor, "abc")
     }
 
+    func testNeedsMaintenanceDecodesAndFallsBackToPendingMessages() throws {
+        let json = """
+        {"threads":[{"id":"t1","pendingMessages":2,"needsMaintenance":false},{"id":"t2","pendingMessages":0,"needsMaintenance":true},
+                    {"id":"t3","pendingMessages":3},{"id":"t4","pendingMessages":0}]}
+        """
+        let page = try JSONDecoder().decode(CoachThreadPage.self, from: Data(json.utf8))
+        XCTAssertEqual(page.threads.map(\.wantsMaintenance), [false, true, true, false],
+                       "the server's flag wins; an older server's pendingMessages is the fallback")
+        let cached = try JSONDecoder().decode(CoachThread.self, from: JSONEncoder().encode(page.threads[0]))
+        XCTAssertEqual(cached.needsMaintenance, false, "the flag survives the threads.json cache")
+    }
+
     func testMessageMetaDecodesFieldByField() throws {
         let json = #"{"toolNames":["Sleep"],"viz":{"type":"line"},"followUps":["Why?", 3],"blocked":true,"imageContext":"oats"}"#
         let meta = try JSONDecoder().decode(CoachMessageMeta.self, from: Data(json.utf8))
@@ -201,6 +213,20 @@ final class CoachThreadsTests: XCTestCase {
         XCTAssertTrue(files.contains("t12.json"), "the most recently written thread is always kept")
     }
 
+    func testRewritingManifestsKeepsTheNewestOneNewest() throws {
+        let store = try XCTUnwrap(CoachLocalStore(ownerId: ownerA, base: base))
+        store.saveManifest(CoachContextManifest(memoryCount: 1), threadId: "t1")
+        store.saveManifest(CoachContextManifest(memoryCount: 2), threadId: "t2")
+        let dir = store.root.appendingPathComponent("manifests")
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_000)],
+                                              ofItemAtPath: dir.appendingPathComponent("t1.json").path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2_000)],
+                                              ofItemAtPath: dir.appendingPathComponent("t2.json").path)
+        XCTAssertEqual(store.latestManifest()?.memoryCount, 2)
+        store.updateManifests { $0.removingMemory(id: "gone") }
+        XCTAssertEqual(store.latestManifest()?.memoryCount, 2, "a forget never makes the oldest manifest the newest")
+    }
+
     func testCorruptCacheReadsAsEmpty() throws {
         let store = try XCTUnwrap(CoachLocalStore(ownerId: ownerA, base: base))
         try FileManager.default.createDirectory(at: store.root, withIntermediateDirectories: true)
@@ -232,10 +258,103 @@ final class CoachThreadsTests: XCTestCase {
 
         store.setTitle(id: id, title: "Knee Rehab Plan")
         XCTAssertEqual(store.threads[0].title, "Knee Rehab Plan")
+        store.flushWrites()
         XCTAssertEqual(local.loadThreads()?.threads.first?.title, "Knee Rehab Plan", "the list is cached per owner")
 
         let other = CoachThreadStore(api: api)
         other.reset(local: CoachLocalStore(ownerId: ownerB, base: base), features: CoachFeatures(threads: true, context: true))
         XCTAssertTrue(other.threads.isEmpty)
+    }
+
+    /// A store on the URLProtocol stub; `handler` answers every request.
+    @MainActor
+    private func stubbedStore(_ handler: @escaping (CoachURLProtocolStub.Recorded) -> CoachURLProtocolStub.Reply) throws
+        -> (CoachThreadStore, CoachLocalStore, CoachAPI) {
+        CoachURLProtocolStub.reset()
+        CoachURLProtocolStub.handler = handler
+        let owner = ownerA
+        let api = CoachURLProtocolStub.api(owner: { owner })
+        let local = try XCTUnwrap(CoachLocalStore(ownerId: ownerA, base: base))
+        let store = CoachThreadStore(api: api)
+        store.reset(local: local, features: CoachFeatures(threads: true, context: true))
+        return (store, local, api)
+    }
+
+    @MainActor
+    func testRefreshKeepsANewThreadWhoseSaveLandedWhileThePageWasInFlight() async throws {
+        defer { CoachURLProtocolStub.reset() }
+        let (store, _, _) = try stubbedStore { r in
+            r.route == "threads" ? .json(["threads": [], "folders": [], "hasMore": false], delay: 0.4) : .json([:])
+        }
+        let id = "aaaaaaaa-0000-4000-8000-000000000009"
+        store.touch(id: id, title: "Knee pain", titleSource: "fallback", preview: "My knee hurts", at: Date().addingTimeInterval(-5))
+        let refresh = Task { await store.refresh() }
+        try await Task.sleep(nanoseconds: 150_000_000)
+        // The first save returns (and clears localOnly) after the server read its list, before the list arrives.
+        store.markSaved(id: id)
+        await refresh.value
+        XCTAssertEqual(store.threads.map(\.id), [id], "the row stays until a page lists it")
+    }
+
+    @MainActor
+    func testALocalOnlyChatIsDeletedOnTheServerTooAndAFailedDeleteIsRetriedNotRevived() async throws {
+        defer { CoachURLProtocolStub.reset() }
+        let id = "aaaaaaaa-0000-4000-8000-000000000009"
+        final class Status: @unchecked Sendable { var delete = 503 }
+        let status = Status()
+        // The server has the chat: its first save landed even though the phone never heard back.
+        let (store, local, api) = try stubbedStore { r in
+            switch (r.method, r.route) {
+            case ("DELETE", "threads/\(id)"): return .json(["deleted": true], status: status.delete)
+            case ("GET", "threads"): return .json(["threads": [["id": id, "title": "Knee pain", "lastMessageAt": CoachDates.string(Date())]],
+                                                   "folders": [], "hasMore": false])
+            default: return .json([:])
+            }
+        }
+        store.touch(id: id, title: "Knee pain", titleSource: "fallback", preview: "My knee hurts", at: Date())
+        XCTAssertEqual(store.thread(id: id)?.localOnly, true)
+        let gone = await store.delete(id: id)
+        XCTAssertTrue(gone, "the chat is gone for the user")
+        XCTAssertEqual(CoachURLProtocolStub.requests("DELETE", "threads/\(id)").count, 1, "a local-only chat is deleted on the server too")
+        XCTAssertEqual(store.pendingDeletes, [id])
+        store.touch(id: id, title: nil, preview: "A late answer", at: Date())
+        XCTAssertNil(store.thread(id: id), "a deleted chat is never brought back")
+        store.flushWrites()
+        XCTAssertEqual(local.loadThreads()?.pendingDeletes, [id])
+
+        // The next launch: the server still lists it until the retried DELETE lands.
+        let next = CoachThreadStore(api: api)
+        next.reset(local: local, features: CoachFeatures(threads: true, context: true))
+        await next.refresh()
+        XCTAssertNil(next.thread(id: id), "a pending delete is kept out of every page")
+        status.delete = 200
+        await next.retryPendingDeletes()
+        XCTAssertTrue(next.pendingDeletes.isEmpty)
+        XCTAssertEqual(CoachURLProtocolStub.requests("DELETE", "threads/\(id)").count, 2)
+        next.flushWrites()
+        XCTAssertNil(local.loadThreads()?.pendingDeletes)
+    }
+
+    @MainActor
+    func testTheSidebarsRenameGoesThroughTheHookWhenOneIsSet() async throws {
+        let api = CoachAPI(session: CoachURLProtocolStub.session(), endpoint: { nil }, identity: { nil })
+        let store = CoachThreadStore(api: api)
+        var renamed: [(String, String)] = []
+        store.onRename = { renamed.append(($0, $1)) }
+        store.requestRename(id: "AAAA", title: "Race prep")
+        XCTAssertEqual(renamed.map(\.0), ["aaaa"])
+        XCTAssertEqual(renamed.map(\.1), ["Race prep"])
+    }
+
+    func testSectionsParseEachDateOnce() {
+        // 2,000 threads used to cost seconds per rebuild (two ISO parses per comparison).
+        let base = CoachDates.parse("2026-10-07T12:00:00Z")!
+        let threads = (0..<2_000).map { i in
+            CoachThread(id: String(format: "t%04d", i), lastMessageAt: CoachDates.string(base.addingTimeInterval(Double(-i * 3_600))))
+        }
+        let started = Date()
+        let sections = CoachThreadSections.sections(threads: threads.shuffled(), folders: [], now: base, calendar: utc)
+        XCTAssertLessThan(Date().timeIntervalSince(started), 0.5)
+        XCTAssertEqual(sections.flatMap(\.threads).map(\.id), threads.map(\.id), "newest first, as before")
     }
 }

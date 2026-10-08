@@ -3,17 +3,19 @@ import Combine
 
 /// The chat list behind the sidebar: threads, folders, the precomputed sections, search, and the optimistic
 /// edits (`docs/COACH_MEMORY.md` §7.1). The sidebar observes this store and never the view model, so a streaming
-/// reply does not redraw the drawer. Actions that touch the open conversation (open, new chat, delete) go through
-/// the `onOpen`, `onNewChat` and `onDelete` hooks, which `CoachChatViewModel` sets.
+/// reply does not redraw the drawer. Actions that touch the open conversation (open, new chat, delete, rename)
+/// go through the `onOpen`, `onNewChat`, `onDelete` and `onRename` hooks, which `CoachChatViewModel` sets; the
+/// sidebar calls `select`, `requestNewChat`, `requestDelete` and `requestRename`.
 ///
 /// Every edit is applied locally first and rolled back if the server refuses it. The list is cached per owner
-/// in `threads.json`, so the drawer draws before the network answers.
+/// in `threads.json`, so the drawer draws before the network answers; the file is written once per main-actor
+/// turn, off the main thread.
 @MainActor
 final class CoachThreadStore: ObservableObject {
     enum Phase: Equatable { case idle, loading, ready, failed }
 
-    @Published private(set) var threads: [CoachThread] = [] { didSet { rebuildSections() } }
-    @Published private(set) var folders: [CoachFolder] = [] { didSet { rebuildSections() } }
+    @Published private(set) var threads: [CoachThread] = [] { didSet { if !batching { rebuildSections() } } }
+    @Published private(set) var folders: [CoachFolder] = [] { didSet { if !batching { rebuildSections() } } }
     @Published private(set) var sections: [CoachThreadSection] = []
     /// Nil while no search is active; otherwise the local title matches, replaced by the server's ranked hits.
     @Published private(set) var searchResults: [CoachThread]?
@@ -38,6 +40,8 @@ final class CoachThreadStore: ObservableObject {
     var onOpen: ((CoachThread) -> Void)?
     var onNewChat: (() -> Void)?
     var onDelete: ((String) -> Void)?
+    /// `(id, title)`: the view model renames, so the header follows the row and is restored if the server refuses.
+    var onRename: ((String, String) -> Void)?
 
     static let pageSize = 50
     static let searchDebounce: TimeInterval = 0.3
@@ -49,7 +53,17 @@ final class CoachThreadStore: ObservableObject {
     private var searchTask: Task<Void, Never>?
     /// Deleted this session: a server page that races the delete must not bring them back.
     private var deletedIds = Set<String>()
+    /// Deletes the server has not confirmed (a local-only chat's DELETE failed). Persisted with the list, kept out
+    /// of every page, and retried by `retryPendingDeletes()` before the next flush.
+    private(set) var pendingDeletes = Set<String>()
+    private var retryingDeletes = false
     private var generation = 0
+    /// Set while one change assigns both `threads` and `folders`, so the sections are rebuilt once.
+    private var batching = false
+    /// The coalesced `threads.json` write for this main-actor turn.
+    private var writeScheduled = false
+    /// One serial queue for every store's writes: they land in order, and `flushWrites()` can wait for them.
+    private static let writer = DispatchQueue(label: "noop.coach.threads-writer", qos: .utility)
 
     init(api: CoachAPI = .shared, now: @escaping () -> Date = Date.init) {
         self.api = api
@@ -58,14 +72,15 @@ final class CoachThreadStore: ObservableObject {
 
     // MARK: Owner
 
-    /// Empties the store and loads `local`'s cached list: a sign-in as another account never shows the last one's chats.
-    func reset(local: CoachLocalStore?, features: CoachFeatures) {
+    /// Empties the store and loads `local`'s cached list (`snapshot` when the caller has already read it): a sign-in
+    /// as another account never shows the last one's chats. The previous owner's pending write lands first.
+    func reset(local: CoachLocalStore?, features: CoachFeatures, snapshot preloaded: CoachThreadsSnapshot?? = nil) {
+        flushWrites()
         generation += 1
         searchTask?.cancel()
         self.local = local
         self.features = features
         isEnabled = features.threads
-        deletedIds = []
         nextCursor = nil
         hasMore = false
         isLoadingMore = false
@@ -75,9 +90,13 @@ final class CoachThreadStore: ObservableObject {
         currentThreadId = nil
         phase = .idle
         if query != "" { query = "" }
-        let snapshot = local?.loadThreads()
-        folders = snapshot?.folders ?? []
-        threads = snapshot?.threads ?? []
+        let snapshot = preloaded ?? local?.loadThreads()
+        pendingDeletes = Set(snapshot?.pendingDeletes ?? [])
+        deletedIds = pendingDeletes
+        batch {
+            folders = snapshot?.folders ?? []
+            threads = (snapshot?.threads ?? []).filter { !pendingDeletes.contains($0.id) }
+        }
         nextCursor = snapshot?.nextCursor
         hasMore = snapshot?.hasMore ?? false
     }
@@ -97,18 +116,27 @@ final class CoachThreadStore: ObservableObject {
 
     // MARK: Loading
 
-    /// The first page from the server. Rows the phone created that the server does not list yet are kept.
+    /// The first page from the server. Rows the phone created that the server does not list yet are kept: those
+    /// still local-only, and those that were local-only or touched when the request went out (a save can land,
+    /// and clear `localOnly`, after the server read its list).
     func refresh() async {
         guard isEnabled else { return }
         let gen = generation
+        let pendingAtRequest = Set(threads.filter { $0.localOnly == true }.map(\.id))
+        let requestedAt = now()
         phase = threads.isEmpty ? .loading : phase
         do {
             let page = try await api.threads(limit: Self.pageSize)
             guard gen == generation else { return }
             let listed = Set(page.threads.map(\.id))
-            let pending = threads.filter { $0.localOnly == true && !listed.contains($0.id) }
-            folders = page.folders
-            threads = page.threads.filter { !deletedIds.contains($0.id) }.map(screened) + pending
+            let pending = threads.filter { t in
+                guard !listed.contains(t.id), !deletedIds.contains(t.id) else { return false }
+                return t.localOnly == true || pendingAtRequest.contains(t.id) || (t.activityDate ?? .distantPast) >= requestedAt
+            }
+            batch {
+                folders = page.folders
+                threads = page.threads.filter { !deletedIds.contains($0.id) }.map(screened) + pending
+            }
             nextCursor = page.nextCursor
             hasMore = page.hasMore && page.nextCursor != nil
             phase = .ready
@@ -172,12 +200,12 @@ final class CoachThreadStore: ObservableObject {
 
     func localMatches(_ q: String) -> [CoachThread] {
         let needle = q.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil)
-        return threads.filter { t in
+        let hits = threads.filter { t in
             [t.title, t.preview].compactMap { $0 }.contains {
                 $0.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: nil).contains(needle)
             }
         }
-        .sorted { ($0.activityDate ?? .distantPast) > ($1.activityDate ?? .distantPast) }
+        return CoachThreadSections.newestFirstWithDates(hits).map(\.thread)
     }
 
     // MARK: Intents (sidebar → view model)
@@ -194,6 +222,16 @@ final class CoachThreadStore: ObservableObject {
     }
 
     func requestDelete(id: String) { onDelete?(id.lowercased()) }
+
+    /// The sidebar's rename. Through the view model when it is listening (the header follows, and is restored if
+    /// the server refuses); otherwise straight to `rename`.
+    func requestRename(id: String, title: String) {
+        if let onRename {
+            onRename(id.lowercased(), title)
+        } else {
+            Task { await rename(id: id, title: title) }
+        }
+    }
 
     // MARK: Optimistic edits
 
@@ -220,23 +258,41 @@ final class CoachThreadStore: ObservableObject {
         await edit(id: id, change: { $0.pinned = pinned }) { try await $0.updateThread(id: id, pinned: pinned) }
     }
 
-    /// Removes the row at once and on the server. A thread the server never saw needs no call.
+    /// Removes the row at once and on the server. The server is asked even for a chat still marked local-only:
+    /// its save may already have landed (a lost response, a launch flush of an earlier session's rows) or still be
+    /// in flight, and the server tombstones an id it has never seen, so a late save can't bring the chat back.
+    /// True when the chat is gone for the user: deleted, or local-only with the DELETE left in `pendingDeletes`
+    /// to retry. False (the row is put back) when the server still has a chat it refused to delete.
     @discardableResult
     func delete(id: String) async -> Bool {
         let key = id.lowercased()
+        let gen = generation, local = self.local
         deletedIds.insert(key)
         let removed = threads.first { $0.id == key }
         threads.removeAll { $0.id == key }
         searchResults?.removeAll { $0.id == key }
-        local?.removeThread(id: key)
         persist()
-        guard isEnabled, removed?.localOnly != true else { return true }
+        guard isEnabled else {
+            local?.removeThread(id: key)
+            return true
+        }
         do {
             try await api.deleteThread(id: key)
+            local?.removeThread(id: key)
             return true
         } catch let error as CoachRouteError where error.status == 404 || error.status == 410 {
+            local?.removeThread(id: key)
             return true
         } catch {
+            guard gen == generation else { return false }
+            if removed?.localOnly == true {
+                // Nothing to put back: the user deleted a chat that only this phone knew for sure.
+                pendingDeletes.insert(key)
+                local?.removeThread(id: key)
+                persist()
+                return true
+            }
+            // The server still has the chat: it comes back, with its cached messages untouched.
             deletedIds.remove(key)
             if let removed, !threads.contains(where: { $0.id == key }) {
                 threads.append(removed)
@@ -247,17 +303,45 @@ final class CoachThreadStore: ObservableObject {
         }
     }
 
-    /// Local only: the row of a thread the server refused to save.
-    func remove(id: String) {
-        let key = id.lowercased()
-        threads.removeAll { $0.id == key }
+    /// Sends the deletes that failed earlier. Each leaves `pendingDeletes` once the server confirms it (or never
+    /// had the chat); the rest wait for the next flush.
+    func retryPendingDeletes() async {
+        guard isEnabled, !pendingDeletes.isEmpty, !retryingDeletes else { return }
+        retryingDeletes = true
+        defer { retryingDeletes = false }
+        let gen = generation
+        for key in pendingDeletes.sorted() {
+            do {
+                try await api.deleteThread(id: key)
+            } catch let error as CoachRouteError where error.status == 404 || error.status == 410 {
+            } catch {
+                continue
+            }
+            guard gen == generation else { return }
+            pendingDeletes.remove(key)
+        }
         persist()
     }
 
-    /// The optimistic row a send creates or moves to the top: new threads are `localOnly` until the server lists them.
-    func touch(id: String, title: String?, titleSource: String? = nil, preview: String?, at date: Date,
-               addedMessages: Int = 1) {
+    /// Local only: the row of a thread the server refused to save, or deleted elsewhere.
+    func remove(id: String) {
         let key = id.lowercased()
+        deletedIds.insert(key)
+        threads.removeAll { $0.id == key }
+        searchResults?.removeAll { $0.id == key }
+        persist()
+    }
+
+    /// Deleted on this phone this session (or waiting for the server to confirm a delete).
+    func isDeleted(_ id: String) -> Bool { deletedIds.contains(id.lowercased()) }
+
+    /// The optimistic row a send creates or moves to the top: a new thread is `localOnly` until the server lists
+    /// it, unless `knownOnServer` (a server thread opened from search that the loaded pages do not hold). A thread
+    /// deleted this session is never brought back.
+    func touch(id: String, title: String?, titleSource: String? = nil, preview: String?, at date: Date,
+               addedMessages: Int = 1, knownOnServer: Bool = false) {
+        let key = id.lowercased()
+        guard !deletedIds.contains(key) else { return }
         let stamp = CoachDates.string(date)
         if let i = threads.firstIndex(where: { $0.id == key }) {
             var t = threads[i]
@@ -267,15 +351,15 @@ final class CoachThreadStore: ObservableObject {
             t.updatedAt = stamp
             t.messageCount += addedMessages
             t.pendingMessages += addedMessages
+            if t.needsMaintenance != nil { t.needsMaintenance = true }
             threads[i] = t
         } else {
             threads.append(CoachThread(id: key, title: title, titleSource: titleSource ?? (title == nil ? "none" : "fallback"),
                                        origin: "app", createdAt: stamp, updatedAt: stamp, lastMessageAt: stamp,
                                        messageCount: addedMessages,
                                        preview: preview.map { String(CoachModelText.collapsed($0).prefix(160)) },
-                                       pendingMessages: addedMessages, localOnly: true))
+                                       pendingMessages: addedMessages, localOnly: knownOnServer ? nil : true))
         }
-        deletedIds.remove(key)
         persist()
     }
 
@@ -285,13 +369,17 @@ final class CoachThreadStore: ObservableObject {
         guard let i = threads.firstIndex(where: { $0.id == key }), threads[i].localOnly == true else { return }
         threads[i].localOnly = nil
         persist()
-        // Edits made before the server knew the thread were local only; send them now.
+        // Edits made before the server knew the thread were local only; send them now, and take the server's row
+        // back (a refresh that raced them may have put the server's older copy in the list).
         let t = threads[i]
         guard isEnabled, t.hasUserTitle || t.pinned || t.folderId != nil else { return }
         let api = self.api
-        Task {
-            _ = try? await api.updateThread(id: key, title: t.hasUserTitle ? t.title : nil,
-                                            folderId: t.folderId.map { .some($0) }, pinned: t.pinned ? true : nil)
+        let gen = generation
+        Task { [weak self] in
+            guard let saved = try? await api.updateThread(id: key, title: t.hasUserTitle ? t.title : nil,
+                                                          folderId: t.folderId.map { .some($0) }, pinned: t.pinned ? true : nil),
+                  let self, gen == self.generation else { return }
+            self.apply(saved)
         }
     }
 
@@ -322,6 +410,7 @@ final class CoachThreadStore: ObservableObject {
         let key = id.lowercased()
         guard let i = threads.firstIndex(where: { $0.id == key }) else { return }
         threads[i].pendingMessages = 0
+        if threads[i].needsMaintenance != nil { threads[i].needsMaintenance = false }
         persist()
     }
 
@@ -437,9 +526,42 @@ final class CoachThreadStore: ObservableObject {
         sections = CoachThreadSections.sections(threads: threads, folders: folders, now: now())
     }
 
-    private func persist() {
-        guard isEnabled, let local else { return }
-        local.saveThreads(CoachThreadsSnapshot(threads: threads, folders: folders, nextCursor: nextCursor, hasMore: hasMore,
-                                               savedAt: now(), features: features))
+    /// Assigns `threads` and `folders` together with a single rebuild of the sections.
+    private func batch(_ change: () -> Void) {
+        batching = true
+        change()
+        batching = false
+        rebuildSections()
     }
+
+    /// Marks the cached list dirty. Every change in one main-actor turn shares one write, which is encoded and
+    /// written on the background writer.
+    private func persist() {
+        guard isEnabled, local != nil, !writeScheduled else { return }
+        writeScheduled = true
+        let gen = generation
+        Task { @MainActor [weak self] in
+            guard let self, self.writeScheduled, gen == self.generation else { return }
+            self.writeNow()
+        }
+    }
+
+    private func writeNow() {
+        writeScheduled = false
+        guard isEnabled, let local else { return }
+        let snapshot = CoachThreadsSnapshot(threads: threads, folders: folders, nextCursor: nextCursor, hasMore: hasMore,
+                                            savedAt: now(), features: features,
+                                            pendingDeletes: pendingDeletes.isEmpty ? nil : pendingDeletes.sorted())
+        Self.writer.async { local.saveThreads(snapshot) }
+    }
+
+    /// Writes a pending change now and waits until every queued write has reached the disk (owner change,
+    /// sign-out, tests).
+    func flushWrites() {
+        if writeScheduled { writeNow() }
+        Self.waitForWrites()
+    }
+
+    /// Waits until every store's queued `threads.json` write has landed (before an account's folder is deleted).
+    static func waitForWrites() { writer.sync {} }
 }

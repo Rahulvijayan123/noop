@@ -15,12 +15,18 @@ import WhoopStore
 //              the history tools), canSwitchThreads (false while a reply streams).
 //   Sidebar    `threadStore` (observe it directly; never observe the view model from the drawer).
 //   Lifecycle  attach(repo:engine:profile:) then `await start()`; both are safe to repeat. attach() also notices a
-//              change of account and resets everything to that account's caches.
+//              change of account and resets everything to that account's caches; a first credential (no owner →
+//              an owner) keeps the open conversation and saves it as that account's. A repeated start() refreshes
+//              the starter set when the cached one is not from today. `removeAccountData(ownerId:)` (sign-out)
+//              detaches every live chat from the account, then deletes its caches and outbox.
+//              DEBUG: `--coach-thread <uuid>` opens that thread at launch (the sidebar's path), and a
+//              `--coach-prompt` given with it is asked there.
 //   Chat       send(_:) -> Bool (false: nothing sent, keep the draft), stop(), retryStalled(),
 //              followUps(for:) -> [String] (the pills under an answer), selectSuggestion(_:),
 //              queuePrompt(_:) -> Bool (Today launcher, Siri, --coach-prompt: a new chat, after any running reply;
 //              clear `pendingPrompt` only when it returns true), noteUserInteraction().
-//   Threads    newChat(), open(_:) async, loadEarlier() async, deleteThread(id:) async,
+//   Threads    newChat(), open(_:) async, loadEarlier() async, deleteThread(id:) async (the server first; a
+//              refused delete leaves the chat usable),
 //              renameThread(id:title:) async, moveThread(id:folderId:) async, setPinned(id:_:) async,
 //              createFolder(name:) async, renameFolder(id:name:) async, deleteFolder(id:) async.
 //   Memory     refreshMemories() async (up to 200), forget(_:) async, forgetAllMemories() async.
@@ -236,13 +242,22 @@ final class CoachChatViewModel: ObservableObject {
     private var threadTitleSource: String?
     private var launchThread: CoachThread?
     private var deletedThreads = Set<String>()
-    /// Which thread each queued client id belongs to, to mark threads saved after a flush.
-    private var rowThreads: [String: String] = [:]
     private var manifestCache: [String: CoachContextManifest] = [:]
     private var queuedPrompts: [String] = []
+    /// First answers whose title the server could not make yet (the thread was not saved): asked from
+    /// `threads/:id/title` once the thread's rows are saved.
+    private var pendingTitles: [String: (question: String, answer: String)] = [:]
+    /// Threads whose maintain pass came back `skipped` this launch, with the `lastMessageAt` they had then; the
+    /// start-up catch-up leaves them out until a new message arrives.
+    private var maintainSkipped: [String: String] = [:]
 
-    private var suggestionsShownAt = Date.distantPast
     private var lastSuggestionPrefetch = Date.distantPast
+    /// The welcome screen shows a server set (cached from today, or swapped in); the local chips stop following
+    /// the wearable data.
+    private var serverStartersShown = false
+    /// This start pass has asked for the personalised set.
+    private var startersRequested = false
+    private var daysSubscription: AnyCancellable?
     private var userTouched = false
     private var workoutCount: Int?
     private var journalDayCount: Int?
@@ -263,11 +278,16 @@ final class CoachChatViewModel: ObservableObject {
         threadStore.onOpen = { [weak self] thread in Task { await self?.open(thread) } }
         threadStore.onNewChat = { [weak self] in self?.newChat() }
         threadStore.onDelete = { [weak self] id in Task { await self?.deleteThread(id: id) } }
+        threadStore.onRename = { [weak self] id, title in Task { await self?.renameThread(id: id, title: title) } }
         // A rename from the sidebar retitles the header too.
         threadStore.$threads
             .sink { [weak self] threads in self?.syncTitle(from: threads) }
             .store(in: &cancellables)
+        Self.live.add(self)
     }
+
+    /// Every view model alive, so a sign-out can detach them before their account's caches are deleted.
+    private static let live = NSHashTable<CoachChatViewModel>.weakObjects()
 
     /// Age drives the stricter under-18 rules; the profile always holds a date of birth.
     private var userAge: Int? { profile?.age }
@@ -279,6 +299,10 @@ final class CoachChatViewModel: ObservableObject {
     // MARK: Lifecycle
 
     func attach(repo: Repository, engine: AICoachEngine, profile: ProfileStore) {
+        if self.repo !== repo {
+            // `$days` fires before the value changes, so the new days come in as the argument.
+            daysSubscription = repo.$days.dropFirst().sink { [weak self] days in self?.daysChanged(days) }
+        }
         self.repo = repo
         self.engine = engine
         self.profile = profile
@@ -293,15 +317,23 @@ final class CoachChatViewModel: ObservableObject {
     private func attachOwner() {
         let owner = api.ownerId?.lowercased()
         if attached, owner == ownerId { return }
-        if attached { resetForOwnerChange() }
+        // No owner → an owner: the credential arrived while the chat was on screen (a first sign-in still
+        // provisioning, or the next sign-in after a sign-out). Nothing shown belongs to another account.
+        let adopting = attached && ownerId == nil && owner != nil
+        if attached, !adopting { resetForOwnerChange() }
         attached = true
         ownerId = owner
         local = owner.flatMap { CoachLocalStore(ownerId: $0, base: baseDirectory) }
         outbox = owner.map { CoachOutbox(ownerId: $0, fileURL: local?.outboxURL) }
+        threadStore.flushWrites()
         let snapshot = local?.loadThreads()
         features = snapshot?.features ?? .none
-        threadStore.reset(local: local, features: features)
+        threadStore.reset(local: local, features: features, snapshot: .some(snapshot))
 
+        if adopting, userTouched || !messages.isEmpty {
+            adoptOpenConversation()
+            return
+        }
         if features.threads, let pick = CoachThreadLaunch.pick(threads: threadStore.threads, now: now()) {
             show(pick)
             launchThread = pick
@@ -311,8 +343,29 @@ final class CoachChatViewModel: ObservableObject {
         showStarters()
     }
 
-    /// Another account signed in: nothing of the last one's stays on screen or in flight.
+    /// The conversation typed before the owner was known becomes the new owner's: its rows go into the outbox
+    /// (they were kept nowhere), and the list gets its row.
+    private func adoptOpenConversation() {
+        threadStore.currentThreadId = threadKey
+        let rows = messages.filter { !$0.isStreaming && !$0.content.isEmpty }
+        guard let last = rows.last else { return }
+        var title = threadTitleSource == "fallback" ? threadTitle : nil
+        if title == nil, threadTitle == nil, features.threads,
+           let first = rows.first(where: { $0.role == .user && !$0.blocked }) {
+            title = CoachThreadTitle.fallback(from: first.content)
+            threadTitle = title
+            threadTitleSource = "fallback"
+        }
+        threadStore.touch(id: threadKey, title: title, titleSource: title == nil ? nil : "fallback",
+                          preview: last.content, at: last.createdAt, addedMessages: rows.count,
+                          knownOnServer: threadOnServer)
+        persist(rows.map(\.id), threadTitle: title)
+    }
+
+    /// Another account signed in: nothing of the last one's stays on screen or in flight. Its outbox stops
+    /// sending (what it holds stays on disk for that account's next sign-in).
     private func resetForOwnerChange() {
+        if let old = outbox { Task { await old.retire() } }
         streamTask?.cancel()
         watchdog?.cancel()
         for (_, side) in visualTasks { side.task.cancel() }
@@ -328,8 +381,11 @@ final class CoachChatViewModel: ObservableObject {
         manifestCache = [:]
         queuedPrompts = []
         deletedThreads = []
-        rowThreads = [:]
+        pendingTitles = [:]
+        maintainSkipped = [:]
         launchThread = nil
+        serverStartersShown = false
+        startersRequested = false
         userTouched = false
         workoutCount = nil
         journalDayCount = nil
@@ -337,11 +393,45 @@ final class CoachChatViewModel: ObservableObject {
         threadStore.canSwitchThreads = true
     }
 
+    /// The account signed out: nothing of it stays on screen, in memory or in flight, and its outbox never writes
+    /// again, so its folder can be deleted. The chat waits, owner-less, for the next sign-in.
+    private func detach(owner: String) async {
+        guard ownerId == owner else { return }
+        let old = outbox
+        resetForOwnerChange()
+        outbox = nil
+        local = nil
+        ownerId = nil
+        features = .none
+        threadStore.reset(local: nil, features: .none, snapshot: .some(nil))
+        startNewChat()
+        showStarters()
+        await old?.discard()
+    }
+
+    /// Sign-out or account reset (`docs/COACH_MEMORY.md` §7.1): every live chat lets go of the account first, so
+    /// nothing in flight can write its files again, then its caches and outbox (unsent turns included) are
+    /// deleted. `base` is the tests' cache directory.
+    static func removeAccountData(ownerId: String, base: URL? = nil) async {
+        let owner = ownerId.lowercased()
+        for vm in live.allObjects where vm.baseDirectory == base { await vm.detach(owner: owner) }
+        CoachThreadStore.waitForWrites()
+        CoachLocalStore.removeAll(ownerId: owner, base: base)
+    }
+
     func start() async {
         attachOwner()
-        guard !started else { return }
+        guard !started else {
+            // The tab came back (perhaps on a new day): today's personalised set, if the cached one is older.
+            refreshStartersIfStale()
+            return
+        }
         started = true
+        startersRequested = false
         if messages.isEmpty, !userTouched { showStarters() }
+        // With the cached features saying threads, the personalised set is asked before the status round trip,
+        // so it can still replace the local chips on this welcome screen.
+        requestStarters()
         await checkConnection()
         guard connection == .online else {
             started = false
@@ -352,7 +442,7 @@ final class CoachChatViewModel: ObservableObject {
 
         if readsDeviceHistory, workoutCount == nil { await loadDeviceHistory() }
         if features.threads {
-            Task { [weak self] in await self?.refreshStarters(swap: true) }
+            requestStarters(force: true)
             if let pick = launchThread {
                 launchThread = nil
                 let token = openToken
@@ -362,6 +452,9 @@ final class CoachChatViewModel: ObservableObject {
         async let memoriesLoaded: Void = refreshMemories()
         if features.threads {
             await threadStore.refresh()
+            #if DEBUG
+            openDebugThread()
+            #endif
             maintainQuietThreads()
         }
         await flushOutbox()
@@ -385,8 +478,25 @@ final class CoachChatViewModel: ObservableObject {
     }
 
     private func apply(features new: CoachFeatures) {
+        let lostThreads = features.threads && !new.threads
         if features != new { features = new }
         threadStore.setFeatures(new)
+        if lostThreads { leaveThreadMode() }
+    }
+
+    /// The server no longer has threads (the `coach` function was rolled back): the launch thread is never
+    /// reconciled, so the welcome screen comes back unless the user is mid-conversation, and the header drops the
+    /// title an old server knows nothing about.
+    private func leaveThreadMode() {
+        launchThread = nil
+        if !isGenerating, !userTouched || messages.isEmpty {
+            startNewChat()
+            showStarters()
+        } else {
+            threadPhase = .ready
+            threadTitle = nil
+            threadTitleSource = nil
+        }
     }
 
     /// The user tapped, typed or scrolled: a late server set of starter suggestions no longer replaces the local one.
@@ -411,6 +521,9 @@ final class CoachChatViewModel: ObservableObject {
             // A cached manifest must never put a forgotten fact back into a prompt.
             manifestCache = manifestCache.mapValues { $0.removingMemory(id: memory.id) }
             local?.updateManifests { $0.removingMemory(id: memory.id) }
+            // The cached starter set may quote it too: the local chips show until a fresh set arrives.
+            local?.removeSuggestions()
+            if messages.isEmpty { showStarters() }
         } catch {
             errorMessage = Self.userFacing(error)
         }
@@ -439,6 +552,11 @@ final class CoachChatViewModel: ObservableObject {
         followUpTasks = [:]
         await outbox?.removeAll()
         for thread in threadStore.threads { local?.removeThread(id: thread.id); threadStore.remove(id: thread.id) }
+        // Nothing cached may point at, or quote, a chat that is gone: no manifests, no `continue` chips.
+        manifestCache = [:]
+        local?.removeAllManifests()
+        local?.removeSuggestions()
+        pendingTitles = [:]
         startNewChat()
         showStarters()
         do { try await api.clearMessages() } catch { errorMessage = Self.userFacing(error) }
@@ -449,6 +567,8 @@ final class CoachChatViewModel: ObservableObject {
     /// Returns false when nothing was sent (empty, or a reply is already streaming) so the composer keeps its text.
     @discardableResult
     func send(_ raw: String) -> Bool {
+        // A credential that arrived while the chat was open is adopted before anything is kept.
+        attachOwner()
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         let image = pendingImage
         guard !text.isEmpty || image != nil, !isGenerating else { return false }
@@ -479,7 +599,7 @@ final class CoachChatViewModel: ObservableObject {
         messages.append(user)
         threadStore.currentThreadId = key
         threadStore.touch(id: key, title: fallbackTitle, titleSource: fallbackTitle == nil ? nil : "fallback",
-                          preview: user.content, at: user.createdAt)
+                          preview: user.content, at: user.createdAt, knownOnServer: threadOnServer)
 
         if let refusal {
             var reply = CoachChatMessage(role: .assistant, content: refusal)
@@ -487,7 +607,7 @@ final class CoachChatViewModel: ObservableObject {
             reply.createdAt = nextStamp()
             messages.append(reply)
             persist([user.id, reply.id])
-            threadStore.touch(id: key, title: nil, preview: refusal, at: reply.createdAt)
+            threadStore.touch(id: key, title: nil, preview: refusal, at: reply.createdAt, knownOnServer: threadOnServer)
             wasScrubbed = false
             return true
         }
@@ -504,6 +624,7 @@ final class CoachChatViewModel: ObservableObject {
     func stop() { streamTask?.cancel() }
 
     func retryStalled() {
+        attachOwner()
         guard !isGenerating, let last = messages.last, last.role == .assistant, last.didStall,
               let user = messages.last(where: { $0.role == .user }) else { return }
         messages.removeLast()
@@ -522,6 +643,10 @@ final class CoachChatViewModel: ObservableObject {
     func queuePrompt(_ raw: String) -> Bool {
         let text = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !text.isEmpty, repo != nil else { return false }
+        attachOwner()
+        #if DEBUG
+        if askInDebugThread(text) { return true }
+        #endif
         launchThread = nil
         if isGenerating {
             queuedPrompts.append(text)
@@ -531,17 +656,21 @@ final class CoachChatViewModel: ObservableObject {
         return true
     }
 
-    /// A welcome chip. A `continue` chip reopens its earlier chat and asks there; the rest ask in this one.
+    /// A welcome chip. A `continue` chip reopens its earlier chat and asks there; the rest ask in this one. A
+    /// `continue` chip whose chat was deleted, or is not in the list, asks in this chat too: a deleted chat is never
+    /// reopened (nothing sent there could be kept).
     func selectSuggestion(_ suggestion: CoachStarterSuggestion) {
         userTouched = true
-        guard suggestion.kind == .continue, let id = suggestion.threadId, features.threads, !isGenerating else {
+        guard suggestion.kind == .continue, let id = suggestion.threadId?.lowercased(), features.threads, !isGenerating,
+              !deletedThreads.contains(id), !threadStore.isDeleted(id), let thread = threadStore.thread(id: id) else {
             send(suggestion.text)
             return
         }
-        let thread = threadStore.thread(id: id) ?? CoachThread(id: id)
         Task { [weak self] in
             guard let self else { return }
             await self.open(thread)
+            // The user may have opened another chat, or started a new one, while this one loaded.
+            guard self.threadKey == id else { return }
             self.send(suggestion.text)
         }
     }
@@ -556,8 +685,9 @@ final class CoachChatViewModel: ObservableObject {
         return CoachFollowUps.forAnswer(message.content)
     }
 
+    /// An outside question never carries the composer's state (a photo attached and not sent, say).
     private func sendInNewChat(_ text: String) {
-        if !messages.isEmpty || threadOnServer { startNewChat() }
+        if !messages.isEmpty || threadOnServer { startNewChat() } else { clearThreadUI() }
         userTouched = true
         send(text)
     }
@@ -820,7 +950,8 @@ final class CoachChatViewModel: ObservableObject {
             $0.role == .assistant && $0.id != reply.id && !$0.blocked && !$0.didStall && !$0.content.isEmpty
         }
         let titleOpen = threadTitleSource == nil || ["none", "fallback", "legacy"].contains(threadTitleSource ?? "")
-        threadStore.touch(id: turn.threadId, title: nil, preview: reply.content, at: reply.createdAt)
+        threadStore.touch(id: turn.threadId, title: nil, preview: reply.content, at: reply.createdAt,
+                          knownOnServer: threadOnServer)
         persist([reply.id], afterSave: { [weak self] in self?.afterSave(threadId: turn.threadId) })
         if let answer {
             startVisual(for: reply.id, threadId: turn.threadId, question: user.content, answer: answer, evidence: evidence)
@@ -875,9 +1006,11 @@ final class CoachChatViewModel: ObservableObject {
     }
 
     /// A fresh manifest if it arrives within 1.2 s, otherwise the cached one (this thread's, else the newest of
-    /// any). A late answer still lands in the cache for the next turn.
+    /// any), without its `relevant` list (ranked for an earlier question), without another thread's summary, and
+    /// without any chat deleted this session. A late answer still lands in the cache for the next turn.
     private func manifest(for threadId: String, fetch: Task<CoachContextManifest?, Never>?) async -> CoachContextManifest? {
-        let cached = manifestCache[threadId] ?? local?.loadManifest(threadId: threadId) ?? local?.latestManifest()
+        let cached = (manifestCache[threadId] ?? local?.loadManifest(threadId: threadId) ?? local?.latestManifest())
+            .map { manifest in deletedThreads.reduce(manifest.asFallback(for: threadId)) { $0.removingThread(id: $1) } }
         guard let fetch else { return cached }
         if let fresh = await Self.value(of: fetch, within: Self.manifestWait) {
             store(fresh, threadId: threadId)
@@ -940,7 +1073,7 @@ final class CoachChatViewModel: ObservableObject {
             let result = try? await api.maintain(threadId: threadId)
             guard let self, !self.deletedThreads.contains(threadId) else { return }
             if let status = result?.status, ["queued", "done", "skipped"].contains(status) {
-                self.threadStore.markMaintained(id: threadId)
+                self.noteMaintained(threadId, status: status)
             }
             if self.features.context { self.prefetchManifest(threadId: threadId) }
             if self.now().timeIntervalSince(self.lastSuggestionPrefetch) >= Self.suggestionPrefetchInterval {
@@ -953,6 +1086,8 @@ final class CoachChatViewModel: ObservableObject {
     private func startFollowUps(for id: UUID, threadId: String, question: String, answer: String, wantTitle: Bool) {
         guard features.threads else { return }
         let asked = Array(messages.filter { $0.role == .user && !$0.blocked }.map(\.content).suffix(12))
+        // The server can only title a thread it has a row for; one still local-only now may not be saved in time.
+        let unsaved = threadStore.thread(id: threadId)?.localOnly == true
         let age = userAge
         let api = self.api
         let delay = followUpFallbackDelay
@@ -979,6 +1114,9 @@ final class CoachChatViewModel: ObservableObject {
                 }
                 if wantTitle, let title = CoachModelText.title(result.title, userAge: age) {
                     self.applyGeneratedTitle(title, threadId: threadId)
+                } else if wantTitle, result.title == nil, result.titlePending || unsaved {
+                    // The thread was not saved when the server looked: ask the title route once its rows are.
+                    self.awaitTitle(threadId: threadId, question: question, answer: answer)
                 }
             } catch {
                 // The title still comes from its own route when the combined call fails.
@@ -992,6 +1130,34 @@ final class CoachChatViewModel: ObservableObject {
         followUpTasks[id] = (threadId, task)
     }
 
+    /// Holds a first answer's title request until the thread's rows are saved (`flushOutbox` asks then), or asks
+    /// now when nothing of the thread is waiting in the outbox any more.
+    private func awaitTitle(threadId: String, question: String, answer: String) {
+        guard !deletedThreads.contains(threadId) else { return }
+        pendingTitles[threadId] = (question, String(answer.prefix(3_000)))
+        let outbox = self.outbox
+        Task { [weak self] in
+            let waiting = await outbox?.pending(threadId: threadId).isEmpty == false
+            guard let self, !waiting, self.threadStore.thread(id: threadId)?.localOnly != true else { return }
+            self.generatePendingTitle(threadId: threadId)
+        }
+    }
+
+    /// The one `threads/:id/title` call for a title the follow-ups route could not make. The server regenerates
+    /// only a `none`, `fallback` or `legacy` title, so a rename made meanwhile wins.
+    private func generatePendingTitle(threadId: String) {
+        guard let asked = pendingTitles.removeValue(forKey: threadId), features.threads,
+              !deletedThreads.contains(threadId) else { return }
+        let api = self.api, age = userAge
+        Task { [weak self] in
+            guard let reply = try? await api.generateTitle(threadId: threadId, question: asked.question, answer: asked.answer,
+                                                           locale: Self.locale),
+                  reply.generated != false,
+                  let title = CoachModelText.title(reply.title, userAge: age) else { return }
+            self?.applyGeneratedTitle(title, threadId: threadId)
+        }
+    }
+
     private func applyGeneratedTitle(_ title: String, threadId: String) {
         guard !deletedThreads.contains(threadId) else { return }
         threadStore.setTitle(id: threadId, title: title, source: "auto")
@@ -1001,12 +1167,13 @@ final class CoachChatViewModel: ObservableObject {
         }
     }
 
-    /// The header follows the list: a rename in the sidebar, or a newer title the server sent with a refresh.
-    /// A title the user typed here is only replaced by another one the user typed.
+    /// The header follows the list: a rename in the sidebar, a newer title the server sent with a refresh, or the
+    /// row a refused rename was rolled back to. A generated title never replaces one the user typed, because the
+    /// store never puts one over a user title on the row.
     private func syncTitle(from threads: [CoachThread]) {
         guard features.threads, let current = threads.first(where: { $0.id == threadKey }),
-              let title = current.title, !title.isEmpty, title != threadTitle,
-              current.hasUserTitle || threadTitleSource != "user" else { return }
+              let title = current.title, !title.isEmpty,
+              title != threadTitle || current.titleSource != threadTitleSource else { return }
         threadTitle = title
         threadTitleSource = current.titleSource
     }
@@ -1096,23 +1263,31 @@ final class CoachChatViewModel: ObservableObject {
         earlierCursor = page.nextCursor
     }
 
-    /// Cancels the thread's work, empties its outbox rows, and removes it here and on the server. Deleting the
-    /// open thread starts a new chat (stopping a reply in progress).
+    /// Cancels the thread's work and removes it on the server, then here: its outbox rows, its cached messages and
+    /// every cached manifest or starter chip that names it. Deleting the open thread starts a new chat (stopping a
+    /// reply in progress). If the server refuses to delete a chat it has, the chat comes back in the list and stays
+    /// fully usable: nothing local was dropped.
     func deleteThread(id: String) async {
         let key = id.lowercased()
         deletedThreads.insert(key)
+        pendingTitles[key] = nil
         for (msg, side) in visualTasks where side.thread == key { side.task.cancel(); visualTasks[msg] = nil }
         for (msg, side) in followUpTasks where side.thread == key { side.task.cancel(); followUpTasks[msg] = nil }
         if key == threadKey {
             if isGenerating { streamTask?.cancel() }
             startNewChat()
-            showStarters()
+        }
+        forgetStarters(for: key)
+        if messages.isEmpty { showStarters() }
+        guard await threadStore.delete(id: key) else {
+            deletedThreads.remove(key)
+            return
         }
         manifestCache[key] = nil
-        rowThreads = rowThreads.filter { $0.value != key }
+        manifestCache = manifestCache.mapValues { $0.removingThread(id: key) }
+        local?.updateManifests { $0.removingThread(id: key) }
         await outbox?.purge(threadId: key)
         local?.removeThread(id: key)
-        await threadStore.delete(id: key)
     }
 
     func renameThread(id: String, title: String) async {
@@ -1226,61 +1401,121 @@ final class CoachChatViewModel: ObservableObject {
             .map(\.1)
     }
 
+    /// The start-up catch-up: maintain for up to 3 quiet threads (no message for 10 minutes) that a pass would
+    /// change, newest first: the server's `needsMaintenance`, else `pendingMessages > 0`, leaving out any that
+    /// came back `skipped` this launch and have had no message since.
     private func maintainQuietThreads() {
         guard features.threads else { return }
         let cutoff = now().addingTimeInterval(-Self.quietBeforeMaintain)
-        let quiet = threadStore.threads
-            .filter { $0.pendingMessages > 0 && $0.localOnly != true && ($0.activityDate ?? .distantFuture) < cutoff }
-            .sorted { ($0.activityDate ?? .distantPast) > ($1.activityDate ?? .distantPast) }
+        let candidates = threadStore.threads.filter { t in
+            t.wantsMaintenance && t.localOnly != true && maintainSkipped[t.id] != (t.lastMessageAt ?? "")
+        }
+        let quiet = CoachThreadSections.newestFirstWithDates(candidates)
+            .filter { $0.thread.activityDate != nil && $0.date < cutoff }
             .prefix(3)
+            .map(\.thread)
         let api = self.api
         for thread in quiet {
             Task { [weak self] in
                 guard let status = (try? await api.maintain(threadId: thread.id))?.status,
                       ["queued", "done", "skipped"].contains(status) else { return }
-                self?.threadStore.markMaintained(id: thread.id)
+                self?.noteMaintained(thread.id, status: status)
             }
         }
     }
 
+    private func noteMaintained(_ threadId: String, status: String) {
+        if status == "skipped" { maintainSkipped[threadId] = threadStore.thread(id: threadId)?.lastMessageAt ?? "" }
+        threadStore.markMaintained(id: threadId)
+    }
+
     // MARK: Starter suggestions
 
-    private func localStarters() -> [CoachStarterSuggestion] {
-        let days = repo?.days ?? []
+    private func localStarters(days: [DailyMetric]? = nil) -> [CoachStarterSuggestion] {
+        let days = days ?? repo?.days ?? []
         return CoachStarterSuggestions.local(today: days.last, recent: days, userAge: userAge)
+    }
+
+    /// Server chips that can still be followed: none for a chat deleted here, and a `continue` chip for a chat the
+    /// list does not hold (once there is a list) asks in the open chat instead.
+    private func liveStarters(_ items: [CoachStarterSuggestion]) -> [CoachStarterSuggestion] {
+        let listed = threadStore.threads.isEmpty && threadStore.phase != .ready ? nil : Set(threadStore.threads.map(\.id))
+        return CoachStarterSuggestions.live(items, known: listed, deleted: deletedThreads.union(threadStore.pendingDeletes))
     }
 
     /// The cached server set when it is from today, otherwise the phone's own.
     private func showStarters() {
         let own = localStarters()
         if features.threads, let cached = local?.loadSuggestions(), cached.day == CoachDates.day(now()) {
-            starterSuggestions = CoachStarterSuggestions.merge(server: cached.suggestions, local: own, userAge: userAge)
+            let server = liveStarters(cached.suggestions)
+            starterSuggestions = CoachStarterSuggestions.merge(server: server, local: own, userAge: userAge)
+            serverStartersShown = !server.isEmpty
         } else {
             starterSuggestions = own
+            serverStartersShown = false
         }
-        suggestionsShownAt = now()
     }
 
-    /// Asks the server for a personalised set. It is always cached for the next new chat; `swap` also shows it,
-    /// but only within 1.5 s of the welcome screen appearing and before the user has touched anything.
+    /// Takes the `continue` chips for a deleted chat out of the cached server set.
+    private func forgetStarters(for key: String) {
+        guard var cached = local?.loadSuggestions(), cached.suggestions.contains(where: { $0.threadId == key }) else { return }
+        cached.suggestions.removeAll { $0.threadId == key }
+        local?.saveSuggestions(cached)
+    }
+
+    /// The wearable days arrived or changed. Until the user touches anything or a server set shows, the local
+    /// chips follow them (the first welcome screen is drawn before the repository has loaded); the personalised
+    /// set, if not asked yet this start, is asked now that there is state to send.
+    private func daysChanged(_ days: [DailyMetric]) {
+        if !userTouched, messages.isEmpty, !serverStartersShown {
+            starterSuggestions = localStarters(days: days)
+        }
+        guard !days.isEmpty else { return }
+        // `repo.days` holds the new value once this turn ends.
+        Task { [weak self] in self?.requestStarters() }
+    }
+
+    /// Asks once per start pass for the personalised set (it replaces the welcome chips if it arrives before the
+    /// user touches anything). Without `force` it waits for the wearable days, so the server sees real state.
+    private func requestStarters(force: Bool = false) {
+        guard started, !startersRequested, features.threads, api.isAvailable,
+              force || !(repo?.days.isEmpty ?? true) else { return }
+        startersRequested = true
+        lastSuggestionPrefetch = now()
+        Task { [weak self] in await self?.refreshStarters(swap: true) }
+    }
+
+    /// A repeated `start()` (the tab came back, perhaps the next day): today's set when the cached one is older.
+    private func refreshStartersIfStale() {
+        guard features.threads, connection == .online, local?.loadSuggestions()?.day != CoachDates.day(now()),
+              now().timeIntervalSince(lastSuggestionPrefetch) >= Self.suggestionPrefetchInterval else { return }
+        lastSuggestionPrefetch = now()
+        Task { [weak self] in await self?.refreshStarters(swap: true) }
+    }
+
+    /// Asks the server for a personalised set. It is always cached for the next new chat; `swap` also shows it
+    /// while the welcome screen is up and the user has not touched anything.
     private func refreshStarters(swap: Bool) async {
         guard features.threads else { return }
         let own = localStarters()
-        let shownAt = suggestionsShownAt
         let wd = engine?.baseline?.watchdogResult
         let state = CoachUserStateSnapshot.make(days: repo?.days ?? [], workouts: workoutStamps,
                                                 watchdogSeverity: wd?.severity.rawValue, watchdogHeadline: wd?.headline,
                                                 now: now())
-        guard let result = try? await api.suggestions(state: state, fallback: own.map(\.text), locale: Self.locale) else { return }
-        let server = CoachStarterSuggestions.screened(result.suggestions, userAge: userAge)
-        guard !server.isEmpty else { return }
+        guard let result = try? await api.suggestions(state: state, fallback: own.map(\.text), locale: Self.locale),
+              features.threads else { return }
+        let deleted = deletedThreads.union(threadStore.pendingDeletes)
+        let screened = CoachStarterSuggestions.live(CoachStarterSuggestions.screened(result.suggestions, userAge: userAge),
+                                                    known: nil, deleted: deleted)
+        guard !screened.isEmpty else { return }
         if result.source != "fallback" {
-            local?.saveSuggestions(CoachCachedSuggestions(suggestions: server, day: CoachDates.day(now()),
+            local?.saveSuggestions(CoachCachedSuggestions(suggestions: screened, day: CoachDates.day(now()),
                                                           source: result.source, savedAt: now()))
         }
-        guard swap, messages.isEmpty,
-              CoachStarterSuggestions.shouldSwap(shownAt: shownAt, arrivedAt: now(), userTouched: userTouched) else { return }
-        starterSuggestions = CoachStarterSuggestions.merge(server: server, local: own, userAge: userAge)
+        guard swap, CoachStarterSuggestions.shouldSwap(userTouched: userTouched, welcomeShowing: messages.isEmpty) else { return }
+        let server = liveStarters(screened)
+        starterSuggestions = CoachStarterSuggestions.merge(server: server, local: localStarters(), userAge: userAge)
+        serverStartersShown = !server.isEmpty
     }
 
     // MARK: Persistence
@@ -1302,7 +1537,6 @@ final class CoachChatViewModel: ObservableObject {
                              content: m.content, meta: m.meta, createdAt: CoachDates.string(m.createdAt),
                              threadTitle: threadTitle)
         }
-        for entry in entries { rowThreads[entry.clientId] = threadId }
         let ids = Set(entries.map(\.clientId))
         Task { [weak self] in
             await outbox.enqueue(entries)
@@ -1312,18 +1546,43 @@ final class CoachChatViewModel: ObservableObject {
         }
     }
 
+    /// Sends any delete still waiting for the server, then the outbox, every row pinned to the outbox's own
+    /// account. Each saved thread (rows queued in an earlier session included) is marked saved, so its edits and
+    /// delete reach the server; a waiting title is asked for; a thread the server has deleted is let go.
     @discardableResult
     private func flushOutbox() async -> Set<String> {
         guard let outbox else { return [] }
+        if !threadStore.pendingDeletes.isEmpty { await threadStore.retryPendingDeletes() }
         let api = self.api
-        let saved = await outbox.flush(ownerId: api.ownerId) { rows in try await api.saveMessages(rows) }
-        var threads = Set<String>()
-        for id in saved { if let t = rowThreads.removeValue(forKey: id) { threads.insert(t) } }
-        for thread in threads {
+        let owner = outbox.ownerId
+        let report = await outbox.flushReport(ownerId: api.ownerId) { rows in try await api.saveMessages(rows, asOwner: owner) }
+        guard outbox === self.outbox else { return report.savedIds }
+        for thread in report.savedThreads {
             threadStore.markSaved(id: thread)
             if thread == threadKey { threadOnServer = true }
+            if pendingTitles[thread] != nil { generatePendingTitle(threadId: thread) }
         }
-        return saved
+        for thread in report.deletedThreads { threadWasDeleted(thread) }
+        return report.savedIds
+    }
+
+    /// The server refused rows because their thread is deleted (on another device, or here while a save was in
+    /// flight). Its row, caches and chips go; if it is the open chat, a new chat starts with a notice, instead of
+    /// later turns being shown and never kept.
+    private func threadWasDeleted(_ key: String) {
+        let known = deletedThreads.contains(key)
+        deletedThreads.insert(key)
+        pendingTitles[key] = nil
+        threadStore.remove(id: key)
+        manifestCache[key] = nil
+        local?.removeThread(id: key)
+        forgetStarters(for: key)
+        if let outbox { Task { await outbox.purge(threadId: key) } }
+        guard !known, key == threadKey else { return }
+        if isGenerating { streamTask?.cancel() }
+        startNewChat()
+        showStarters()
+        errorMessage = "This chat was deleted on another device, so it can't be continued here. Ask again in this new chat."
     }
 
     /// The open thread's newest messages, for an instant reopen.
@@ -1333,6 +1592,50 @@ final class CoachChatViewModel: ObservableObject {
         guard !rows.isEmpty else { return }
         local.saveMessages(rows, threadId: threadKey)
     }
+
+    // MARK: DEBUG launch arguments
+
+    #if DEBUG
+    /// The process arguments read for `--coach-thread <uuid>` and `--coach-prompt <text>`; tests replace them.
+    var debugLaunchArguments = CommandLine.arguments
+    private var debugThreadOpened = false
+    private var debugPromptAsked = false
+
+    private func debugArgument(_ name: String) -> String? {
+        guard let i = debugLaunchArguments.firstIndex(of: name), i + 1 < debugLaunchArguments.count else { return nil }
+        return debugLaunchArguments[i + 1]
+    }
+
+    /// `--coach-thread <uuid>`, lowercased.
+    private var debugThreadId: String? {
+        debugArgument("--coach-thread").flatMap(UUID.init(uuidString:)).map { $0.uuidString.lowercased() }
+    }
+
+    /// Opens the `--coach-thread` thread once, through the sidebar's path (`CoachThreadStore.select`).
+    private func openDebugThread() {
+        guard !debugThreadOpened, let id = debugThreadId else { return }
+        debugThreadOpened = true
+        threadStore.select(threadStore.thread(id: id) ?? CoachThread(id: id))
+    }
+
+    /// The `--coach-prompt` question, when `--coach-thread` is also given, is asked in that thread (opened first)
+    /// instead of a new chat. True when it was taken.
+    private func askInDebugThread(_ text: String) -> Bool {
+        guard !debugPromptAsked, !isGenerating, let id = debugThreadId,
+              debugArgument("--coach-prompt")?.trimmingCharacters(in: .whitespacesAndNewlines) == text else { return false }
+        debugPromptAsked = true
+        debugThreadOpened = true
+        launchThread = nil
+        let thread = threadStore.thread(id: id) ?? CoachThread(id: id)
+        Task { [weak self] in
+            guard let self else { return }
+            await self.open(thread)
+            guard self.threadKey == id else { return }
+            self.send(text)
+        }
+        return true
+    }
+    #endif
 
     private static func userFacing(_ error: Error) -> String {
         if let known = error as? CoachAPIError { return known.errorDescription ?? "" }

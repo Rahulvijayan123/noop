@@ -9,15 +9,18 @@ struct CoachThreadsSnapshot: Codable, Equatable, Sendable {
     var savedAt: Date
     /// The server's features when the list was saved, so a launch knows them before `status` answers.
     var features: CoachFeatures?
+    /// Threads deleted here whose `DELETE threads/:id` has not been confirmed yet; retried before the next flush.
+    var pendingDeletes: [String]?
 
     init(threads: [CoachThread] = [], folders: [CoachFolder] = [], nextCursor: String? = nil, hasMore: Bool = false,
-         savedAt: Date = Date(), features: CoachFeatures? = nil) {
+         savedAt: Date = Date(), features: CoachFeatures? = nil, pendingDeletes: [String]? = nil) {
         self.threads = threads
         self.folders = folders
         self.nextCursor = nextCursor
         self.hasMore = hasMore
         self.savedAt = savedAt
         self.features = features
+        self.pendingDeletes = pendingDeletes
     }
 }
 
@@ -53,7 +56,8 @@ struct CoachLocalStore: Sendable {
         return support.appendingPathComponent("OpenWhoop", isDirectory: true).appendingPathComponent("Coach", isDirectory: true)
     }
 
-    /// Deletes every cache and the outbox for `ownerId`. Runs on sign-out and account reset.
+    /// Deletes every cache and the outbox for `ownerId`. Runs on sign-out and account reset, through
+    /// `CoachChatViewModel.removeAccountData(ownerId:)`, which first makes every live chat let go of them.
     static func removeAll(ownerId: String, base: URL? = nil) {
         guard let store = CoachLocalStore(ownerId: ownerId, base: base) else { return }
         try? FileManager.default.removeItem(at: store.root)
@@ -135,9 +139,10 @@ struct CoachLocalStore: Sendable {
         newestFirst(in: manifestsDir).lazy.compactMap { self.read(CoachContextManifest.self, at: $0) }.first
     }
 
-    /// Rewrites every cached manifest through `transform` (dropping a forgotten memory, say).
+    /// Rewrites every cached manifest through `transform` (dropping a forgotten memory, say). Oldest first, so
+    /// the files keep their order and `latestManifest()` still returns the newest.
     func updateManifests(_ transform: (CoachContextManifest) -> CoachContextManifest) {
-        for url in newestFirst(in: manifestsDir) {
+        for url in newestFirst(in: manifestsDir).reversed() {
             guard let manifest = read(CoachContextManifest.self, at: url) else { continue }
             write(transform(manifest), to: url)
         }

@@ -189,6 +189,71 @@ final class CoachOutboxTests: XCTestCase {
         XCTAssertEqual(all.first?.meta?.toolNames, ["A"])
     }
 
+    func testAPurgeWhileAChunkWaitsToRetryKeepsItsCopyFromBeingSent() async {
+        let outbox = CoachOutbox(ownerId: owner, fileURL: nil, retryDelays: [0.3])
+        await outbox.enqueue([entry(1), entry(2)])
+        let server = Server { _ in throw CoachRouteError(status: 503, code: nil) }
+        async let flushed = outbox.flush(ownerId: owner) { try await server.save($0) }
+        try? await Task.sleep(nanoseconds: 100_000_000)
+        // The user deletes the chat while the first attempt's retry is waiting.
+        await outbox.purge(threadId: threadA)
+        let saved = await flushed
+        XCTAssertTrue(saved.isEmpty)
+        let batches = await server.batches
+        XCTAssertEqual(batches.count, 1, "the chunk taken before the purge is not retried")
+        let pending = await outbox.pendingCount
+        XCTAssertEqual(pending, 0)
+    }
+
+    func testTheReportNamesEachSavedRowsThreadAndTheThreadsTheServerDeleted() async {
+        let outbox = CoachOutbox(ownerId: owner, fileURL: nil)
+        await outbox.enqueue([entry(1), entry(2, thread: threadB)])
+        let deleted = threadB
+        let server = Server { rows in
+            CoachSaveResult(saved: 1, rejected: rows.filter { $0.threadId == deleted }
+                .map { .init(clientId: $0.clientId, reason: "thread_deleted") })
+        }
+        let report = await outbox.flushReport(ownerId: owner) { try await server.save($0) }
+        XCTAssertEqual(report.saved, ["c001": threadA], "rows queued in any session map to their thread")
+        XCTAssertEqual(report.deletedThreads, [threadB])
+        let all = await outbox.all
+        XCTAssertTrue(all.isEmpty)
+    }
+
+    func testAnAccountSwitchMidFlushStopsThePassWithTheRestStillQueued() async {
+        let outbox = CoachOutbox(ownerId: owner, fileURL: nil)
+        await outbox.enqueue((0..<25).map { entry($0) })
+        // `saveMessages(_:asOwner:)` throws `.unauthorized` once the live credential is another account's.
+        let server = Server { rows in
+            if rows.contains(where: { $0.clientId == "c020" }) { throw CoachAPIError.unauthorized }
+            return CoachSaveResult(saved: rows.count)
+        }
+        let saved = await outbox.flush(ownerId: owner) { try await server.save($0) }
+        XCTAssertEqual(saved.count, 20)
+        let all = await outbox.all
+        XCTAssertEqual(all.count, 5)
+        XCTAssertFalse(all.contains(where: \.quarantined), "nothing is quarantined: the rows wait for their own account")
+    }
+
+    func testARetiredOutboxSendsNothingAndADiscardedOneNeverWritesItsFile() async throws {
+        let url = directory.appendingPathComponent("outbox.json")
+        let outbox = CoachOutbox(ownerId: owner, fileURL: url)
+        await outbox.enqueue([entry(1)])
+        await outbox.retire()
+        let server = Server { CoachSaveResult(saved: $0.count) }
+        let saved = await outbox.flush(ownerId: owner) { try await server.save($0) }
+        XCTAssertTrue(saved.isEmpty)
+        let batches = await server.batches
+        XCTAssertTrue(batches.isEmpty)
+        let kept = await CoachOutbox(ownerId: owner, fileURL: url).all
+        XCTAssertEqual(kept.count, 1, "a retired outbox keeps its rows on disk")
+
+        try FileManager.default.removeItem(at: url)
+        await outbox.discard()
+        await outbox.enqueue([entry(2)])
+        XCTAssertFalse(FileManager.default.fileExists(atPath: url.path), "a signed-out account's outbox is never written again")
+    }
+
     // MARK: Storage
 
     func testPersistsPerOwnerAndPurgesAThread() async {

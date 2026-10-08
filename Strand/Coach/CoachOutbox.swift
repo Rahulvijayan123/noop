@@ -68,16 +68,36 @@ struct CoachOutboxEntry: Codable, Equatable, Sendable {
     }
 }
 
+/// What one flush did: the client ids the server saved, each with its thread, and the threads whose rows it
+/// dropped because the server has deleted them (`thread_deleted` or 410).
+struct CoachFlushReport: Equatable, Sendable {
+    var saved: [String: String] = [:]
+    var deletedThreads = Set<String>()
+
+    var savedIds: Set<String> { Set(saved.keys) }
+    var savedThreads: Set<String> { Set(saved.values) }
+
+    mutating func absorb(_ other: CoachFlushReport) {
+        saved.merge(other.saved) { a, _ in a }
+        deletedThreads.formUnion(other.deletedThreads)
+    }
+}
+
 /// The persistent queue of unsent coach messages for one account (`<root>/outbox.json`).
 ///
 /// - Entries merge by `clientId`, field by field, so a later re-save (the visual, the follow-ups) never loses
 ///   what an earlier one carried.
 /// - One flush runs at a time; a flush asked for while another runs waits for it, then makes its own pass.
 /// - Rows go in chunks of at most 20, one thread per chunk.
+/// - Before every attempt (retries and bisected halves included) a chunk drops the rows no longer queued, so a
+///   thread purged by a delete is never sent from a copy taken earlier.
 /// - Network errors, 5xx and 429 are retried with backoff, then left for the next flush.
 /// - Rows the server lists as rejected, or a chunk failing with 400, 409, 410 or 413, are bisected down to the
 ///   offending row, which is quarantined; a 410 or `thread_deleted` drops it instead.
-/// - The file is capped at 2 MB, dropping quarantined rows first, then the oldest.
+/// - The file is capped at 2 MB, dropping quarantined rows first, then the oldest. It is read on first use, not
+///   when the actor is made.
+/// - `retire()` (another account signed in) stops sending; `discard()` (this account signed out) also empties it
+///   and never writes the file again.
 actor CoachOutbox {
     typealias Saver = @Sendable ([CoachStoredMessage]) async throws -> CoachSaveResult
 
@@ -87,24 +107,53 @@ actor CoachOutbox {
     let ownerId: String
     private let fileURL: URL?
     private let retryDelays: [UInt64]
-    private var entries: [CoachOutboxEntry]
-    private var tail: Task<Set<String>, Never>?
+    private var stored: [CoachOutboxEntry]?
+    private var tail: Task<CoachFlushReport, Never>?
+    private var retired = false
+    private var discarded = false
 
     /// `fileURL` nil keeps the queue in memory only. `retryDelays` are the waits between attempts of one chunk.
     init(ownerId: String, fileURL: URL?, retryDelays: [TimeInterval] = [1, 4]) {
         self.ownerId = ownerId.lowercased()
         self.fileURL = fileURL
         self.retryDelays = retryDelays.map { UInt64(max(0, $0) * 1_000_000_000) }
-        let owner = ownerId.lowercased()
-        let stored = fileURL.flatMap { try? Data(contentsOf: $0) }
-            .flatMap { try? JSONDecoder().decode([CoachOutboxEntry].self, from: $0) } ?? []
-        self.entries = stored.filter { $0.ownerId == owner && !$0.threadId.isEmpty }
     }
+
+    /// The queue, read from the file the first time it is needed (off the caller's thread).
+    private var entries: [CoachOutboxEntry] {
+        get {
+            if let stored { return stored }
+            let owner = ownerId
+            let loaded = (fileURL.flatMap { try? Data(contentsOf: $0) }
+                .flatMap { try? JSONDecoder().decode([CoachOutboxEntry].self, from: $0) } ?? [])
+                .filter { $0.ownerId == owner && !$0.threadId.isEmpty }
+            stored = loaded
+            return loaded
+        }
+        set { stored = newValue }
+    }
+
+    /// Stops sending for good: a pass in progress ends before its next request. What is queued stays (and is still
+    /// written) for the account's next sign-in.
+    func retire() {
+        retired = true
+    }
+
+    /// The account signed out: stops sending, empties the queue and never writes the file again, so nothing in
+    /// flight can recreate it after the account's caches are deleted.
+    func discard() {
+        retired = true
+        discarded = true
+        stored = []
+    }
+
+    var isRetired: Bool { retired }
 
     // MARK: Queue
 
     /// Adds or merges rows. Rows stamped with another owner, or without a thread, are refused.
     func enqueue(_ new: [CoachOutboxEntry]) {
+        guard !discarded else { return }
         var changed = false
         for entry in new where entry.ownerId == ownerId && !entry.threadId.isEmpty && !entry.clientId.isEmpty {
             if let i = entries.firstIndex(where: { $0.clientId == entry.clientId }) {
@@ -150,36 +199,45 @@ actor CoachOutbox {
     /// ids the server has saved, including any saved by a flush that was already running.
     @discardableResult
     func flush(ownerId current: String?, save: @escaping Saver) async -> Set<String> {
+        await flushReport(ownerId: current, save: save).savedIds
+    }
+
+    /// `flush`, also saying which thread each saved row belongs to and which threads the server has deleted.
+    @discardableResult
+    func flushReport(ownerId current: String?, save: @escaping Saver) async -> CoachFlushReport {
         let previous = tail
-        let task = Task { () -> Set<String> in
+        let task = Task { () -> CoachFlushReport in
             _ = await previous?.value
             return await self.pass(ownerId: current, save: save)
         }
         tail = task
-        let mine = await task.value
-        let earlier = await previous?.value ?? []
-        return mine.union(earlier)
+        var report = await task.value
+        if let earlier = await previous?.value { report.absorb(earlier) }
+        return report
     }
 
     private struct Outcome {
         var saved = Set<String>()
         var dropped = Set<String>()
         var quarantined = Set<String>()
+        var deletedThreads = Set<String>()
         var stop = false
 
         mutating func absorb(_ other: Outcome) {
             saved.formUnion(other.saved)
             dropped.formUnion(other.dropped)
             quarantined.formUnion(other.quarantined)
+            deletedThreads.formUnion(other.deletedThreads)
             stop = stop || other.stop
         }
     }
 
-    private func pass(ownerId current: String?, save: Saver) async -> Set<String> {
-        guard let current, current.lowercased() == ownerId else { return [] }
+    private func pass(ownerId current: String?, save: Saver) async -> CoachFlushReport {
+        guard !retired, let current, current.lowercased() == ownerId else { return CoachFlushReport() }
         let ready = entries.filter { !$0.quarantined }
-        guard !ready.isEmpty else { return [] }
+        guard !ready.isEmpty else { return CoachFlushReport() }
         let sent = Dictionary(ready.map { ($0.clientId, $0.revision) }, uniquingKeysWith: { a, _ in a })
+        let threadOf = Dictionary(ready.map { ($0.clientId, $0.threadId) }, uniquingKeysWith: { a, _ in a })
 
         var outcome = Outcome()
         for chunk in Self.chunks(sortedByTime(ready)) {
@@ -192,12 +250,21 @@ actor CoachOutbox {
         entries.removeAll { finished.contains($0.clientId) && sent[$0.clientId] == $0.revision }
         for i in entries.indices where outcome.quarantined.contains(entries[i].clientId) { entries[i].quarantined = true }
         persist()
-        return outcome.saved
+        var report = CoachFlushReport()
+        for id in outcome.saved { if let thread = threadOf[id] { report.saved[id] = thread } }
+        report.deletedThreads = Set(outcome.deletedThreads)
+        return report
     }
 
-    private func send(_ chunk: [CoachOutboxEntry], save: Saver) async -> Outcome {
+    private func send(_ captured: [CoachOutboxEntry], save: Saver) async -> Outcome {
         var attempt = 0
         while true {
+            // The chunk is a copy taken when the pass began; a purge (a deleted thread) or `removeAll` since then
+            // must win over it, on the first attempt and on every retry.
+            guard !retired, !Task.isCancelled else { return Outcome(stop: true) }
+            let queued = Set(entries.lazy.filter { !$0.quarantined }.map(\.clientId))
+            let chunk = captured.filter { queued.contains($0.clientId) }
+            guard !chunk.isEmpty else { return Outcome() }
             do {
                 let result = try await save(chunk.map(\.row))
                 var reasons: [String: String] = [:]
@@ -206,7 +273,9 @@ actor CoachOutbox {
                 for entry in chunk {
                     switch reasons[entry.clientId] {
                     case nil: out.saved.insert(entry.clientId)
-                    case "thread_deleted": out.dropped.insert(entry.clientId)
+                    case "thread_deleted":
+                        out.dropped.insert(entry.clientId)
+                        out.deletedThreads.insert(entry.threadId)
                     default: out.quarantined.insert(entry.clientId)
                     }
                 }
@@ -216,6 +285,7 @@ actor CoachOutbox {
                     var out = Outcome()
                     if error.status == 410 || error.code == "thread_deleted" {
                         out.dropped.insert(chunk[0].clientId)
+                        out.deletedThreads.insert(chunk[0].threadId)
                     } else {
                         out.quarantined.insert(chunk[0].clientId)
                     }
@@ -262,7 +332,7 @@ actor CoachOutbox {
     // MARK: Storage
 
     private func persist() {
-        guard let fileURL else { return }
+        guard let fileURL, !discarded else { return }
         var data = (try? JSONEncoder().encode(entries)) ?? Data()
         while data.count > Self.byteCap, !entries.isEmpty {
             if let i = entries.firstIndex(where: \.quarantined) { entries.remove(at: i) } else { entries.removeFirst() }

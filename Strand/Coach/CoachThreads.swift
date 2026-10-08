@@ -22,6 +22,9 @@ struct CoachThread: Codable, Identifiable, Equatable, Sendable {
     var topics: [String]
     /// `message_count - summary_messages`: turns the server has not folded into the summary yet.
     var pendingMessages: Int
+    /// Whether `POST threads/:id/maintain` would do work now (the server's own rule). Nil from a server that
+    /// predates it; `wantsMaintenance` then falls back to `pendingMessages > 0`.
+    var needsMaintenance: Bool?
     /// Search hit context, `«term»`-marked, only on search results.
     var snippet: String?
     /// Set on a row the phone created optimistically and the server has not confirmed yet. Never sent.
@@ -30,7 +33,7 @@ struct CoachThread: Codable, Identifiable, Equatable, Sendable {
     init(id: String, title: String? = nil, titleSource: String? = nil, folderId: String? = nil, pinned: Bool = false,
          origin: String? = nil, createdAt: String? = nil, updatedAt: String? = nil, lastMessageAt: String? = nil,
          messageCount: Int = 0, preview: String? = nil, topics: [String] = [], pendingMessages: Int = 0,
-         snippet: String? = nil, localOnly: Bool? = nil) {
+         needsMaintenance: Bool? = nil, snippet: String? = nil, localOnly: Bool? = nil) {
         self.id = id.lowercased()
         self.title = title
         self.titleSource = titleSource
@@ -44,13 +47,14 @@ struct CoachThread: Codable, Identifiable, Equatable, Sendable {
         self.preview = preview
         self.topics = topics
         self.pendingMessages = pendingMessages
+        self.needsMaintenance = needsMaintenance
         self.snippet = snippet
         self.localOnly = localOnly
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, title, titleSource, folderId, pinned, origin, createdAt, updatedAt, lastMessageAt
-        case messageCount, preview, topics, pendingMessages, snippet, localOnly
+        case messageCount, preview, topics, pendingMessages, needsMaintenance, snippet, localOnly
     }
 
     init(from decoder: Decoder) throws {
@@ -68,6 +72,7 @@ struct CoachThread: Codable, Identifiable, Equatable, Sendable {
         preview = c.lossy(String.self, .preview)
         topics = c.lossy([String].self, .topics) ?? []
         pendingMessages = c.lossy(Int.self, .pendingMessages) ?? 0
+        needsMaintenance = c.lossy(Bool.self, .needsMaintenance)
         snippet = c.lossy(String.self, .snippet)
         localOnly = c.lossy(Bool.self, .localOnly)
     }
@@ -86,6 +91,10 @@ struct CoachThread: Codable, Identifiable, Equatable, Sendable {
 
     /// A title the user typed is never replaced by a generated one.
     var hasUserTitle: Bool { titleSource == "user" }
+
+    /// A maintain pass would change something: the server's `needsMaintenance`, else (an older server)
+    /// unsummarised turns.
+    var wantsMaintenance: Bool { needsMaintenance ?? (pendingMessages > 0) }
 }
 
 struct CoachFolder: Codable, Identifiable, Equatable, Sendable {
@@ -184,10 +193,9 @@ enum CoachThreadSections {
     /// exists falls back to its date group. Each group is newest first; empty date groups are left out.
     static func sections(threads: [CoachThread], folders: [CoachFolder], now: Date = Date(),
                          calendar: Calendar = .current) -> [CoachThreadSection] {
-        let newestFirst = threads.sorted { a, b in
-            let da = a.activityDate ?? .distantPast, db = b.activityDate ?? .distantPast
-            return da != db ? da > db : a.id < b.id
-        }
+        // Each thread's date is parsed once, not twice per comparison.
+        let byDate = newestFirstWithDates(threads)
+        let newestFirst = byDate.map(\.thread)
         let folderIds = Set(folders.map(\.id))
         var out: [CoachThreadSection] = []
 
@@ -206,8 +214,8 @@ enum CoachThreadSections {
 
         var buckets: [CoachThreadSection.Kind: [CoachThread]] = [:]
         let today = calendar.startOfDay(for: now)
-        for thread in newestFirst where !thread.pinned && !(thread.folderId.map(folderIds.contains) ?? false) {
-            let day = calendar.startOfDay(for: thread.activityDate ?? .distantPast)
+        for (thread, activity) in byDate where !thread.pinned && !(thread.folderId.map(folderIds.contains) ?? false) {
+            let day = calendar.startOfDay(for: activity)
             let age = calendar.dateComponents([.day], from: day, to: today).day ?? Int.max
             let kind: CoachThreadSection.Kind
             switch age {
@@ -230,6 +238,13 @@ enum CoachThreadSections {
             }
         }
         return out
+    }
+
+    /// Newest activity first (ties by id), each thread with its parsed activity date (`distantPast` when it has none).
+    static func newestFirstWithDates(_ threads: [CoachThread]) -> [(thread: CoachThread, date: Date)] {
+        threads.map { ($0, $0.activityDate ?? .distantPast) }
+            .sorted { a, b in a.1 != b.1 ? a.1 > b.1 : a.0.id < b.0.id }
+            .map { (thread: $0.0, date: $0.1) }
     }
 }
 
@@ -280,6 +295,11 @@ enum CoachThreadLaunch {
 // MARK: - Dates
 
 enum CoachDates {
+    /// The fast path: the shape the server (`toISOString`) and `string(_:)` write. About 40 times cheaper than
+    /// `ISO8601DateFormatter`, which matters because every sidebar rebuild parses each thread's date.
+    private static let fastFractional = Date.ISO8601FormatStyle(includingFractionalSeconds: true)
+    private static let fastWhole = Date.ISO8601FormatStyle()
+
     private static let fractional: ISO8601DateFormatter = {
         let f = ISO8601DateFormatter()
         f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
@@ -298,6 +318,7 @@ enum CoachDates {
         if s.count > 10, s[s.index(s.startIndex, offsetBy: 10)] == " " {
             s.replaceSubrange(s.index(s.startIndex, offsetBy: 10)...s.index(s.startIndex, offsetBy: 10), with: "T")
         }
+        if s.count >= 20, let d = (try? fastFractional.parse(s)) ?? (try? fastWhole.parse(s)) { return d }
         if let d = fractional.date(from: s) ?? whole.date(from: s) { return d }
         // More than millisecond precision (`.123456`), which the formatter rejects: trim to three digits.
         if let dot = s.firstIndex(of: "."), let end = s[dot...].firstIndex(where: { !$0.isNumber && $0 != "." }) {

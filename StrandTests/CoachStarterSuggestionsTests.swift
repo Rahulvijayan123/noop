@@ -100,11 +100,24 @@ final class CoachStarterSuggestionsTests: XCTestCase {
         XCTAssertTrue(JSONSerialization.isValidJSONObject(try JSONSerialization.jsonObject(with: JSONEncoder().encode(snap))))
     }
 
-    func testServerSetSwapsInOnlyWithinTheWindowAndUntouched() {
-        let shown = Date(timeIntervalSince1970: 1_000)
-        XCTAssertTrue(CoachStarterSuggestions.shouldSwap(shownAt: shown, arrivedAt: shown.addingTimeInterval(1.4), userTouched: false))
-        XCTAssertFalse(CoachStarterSuggestions.shouldSwap(shownAt: shown, arrivedAt: shown.addingTimeInterval(1.6), userTouched: false))
-        XCTAssertFalse(CoachStarterSuggestions.shouldSwap(shownAt: shown, arrivedAt: shown.addingTimeInterval(0.2), userTouched: true))
+    func testServerSetSwapsInWhileTheWelcomeScreenIsUntouched() {
+        XCTAssertTrue(CoachStarterSuggestions.shouldSwap(userTouched: false, welcomeShowing: true),
+                      "a set that takes seconds to arrive still personalises an untouched welcome screen")
+        XCTAssertFalse(CoachStarterSuggestions.shouldSwap(userTouched: true, welcomeShowing: true))
+        XCTAssertFalse(CoachStarterSuggestions.shouldSwap(userTouched: false, welcomeShowing: false))
+    }
+
+    func testContinueChipsForDeletedOrUnknownChatsAreNotFollowed() {
+        let items = [CoachStarterSuggestion(text: "Pick up the knee plan", kind: .continue, threadId: "AAAA"),
+                     CoachStarterSuggestion(text: "Back to the taper", kind: .continue, threadId: "bbbb"),
+                     CoachStarterSuggestion(text: "Plan a lighter week", kind: .state)]
+        let live = CoachStarterSuggestions.live(items, known: ["bbbb"], deleted: ["aaaa"])
+        XCTAssertEqual(live.map(\.text), ["Back to the taper", "Plan a lighter week"], "a deleted chat's chip goes")
+        XCTAssertEqual(live.first?.kind, .continue)
+        let unknown = CoachStarterSuggestions.live(items, known: [], deleted: [])
+        XCTAssertEqual(unknown.map(\.kind), [.explore, .explore, .state], "a chat the list doesn't hold asks in the open chat")
+        XCTAssertTrue(unknown.allSatisfy { $0.threadId == nil })
+        XCTAssertEqual(CoachStarterSuggestions.live(items, known: nil, deleted: []), items, "no list yet: only deletions count")
     }
 
     // MARK: Model text

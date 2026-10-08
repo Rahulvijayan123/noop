@@ -173,9 +173,6 @@ struct CoachUserStateSnapshot: Codable, Equatable, Sendable {
 enum CoachStarterSuggestions {
     static let limit = 4
     static let maxContinue = 2
-    /// The local set shows first; the server set replaces it only if it arrives within this window and the user
-    /// has not touched anything.
-    static let swapWindow: TimeInterval = 1.5
 
     /// The phone's own chips: the banded `CoachSuggestions` first (contextual when there is data), then the
     /// generic `CoachPrompts`.
@@ -213,8 +210,24 @@ enum CoachStarterSuggestions {
         return out
     }
 
-    static func shouldSwap(shownAt: Date, arrivedAt: Date, userTouched: Bool) -> Bool {
-        !userTouched && arrivedAt.timeIntervalSince(shownAt) <= swapWindow
+    /// The local set shows first. The server set replaces it whenever it arrives while the welcome screen is up and
+    /// before the user has touched anything (tapped, typed, scrolled, opened or started a chat): the model call
+    /// takes seconds, so a fixed window after the screen appeared would almost never personalise the day's first
+    /// welcome screen.
+    static func shouldSwap(userTouched: Bool, welcomeShowing: Bool) -> Bool {
+        !userTouched && welcomeShowing
+    }
+
+    /// The chips that can still be followed: a `continue` chip for a deleted chat is dropped (its text may quote
+    /// it); one for a chat `known` does not hold becomes `explore` and asks in the open chat. `known` nil (no list
+    /// yet) checks deletions only.
+    static func live(_ items: [CoachStarterSuggestion], known: Set<String>?, deleted: Set<String>) -> [CoachStarterSuggestion] {
+        items.compactMap { item in
+            guard item.kind == .continue, let id = item.threadId?.lowercased() else { return item }
+            if deleted.contains(id) { return nil }
+            if let known, !known.contains(id) { return CoachStarterSuggestion(text: item.text, kind: .explore) }
+            return item
+        }
     }
 }
 

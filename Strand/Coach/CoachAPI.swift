@@ -371,18 +371,23 @@ struct CoachMaintainResult: Decodable, Equatable, Sendable {
 struct CoachFollowUpsResult: Decodable, Equatable, Sendable {
     var followUps: [String]
     var title: String?
+    /// A title was asked for, but the server has no row for the thread yet; the phone asks `threads/:id/title`
+    /// once the thread's rows are saved. False from a server that predates it.
+    var titlePending: Bool
 
-    private enum CodingKeys: String, CodingKey { case followUps, title }
+    private enum CodingKeys: String, CodingKey { case followUps, title, titlePending }
 
-    init(followUps: [String], title: String? = nil) {
+    init(followUps: [String], title: String? = nil, titlePending: Bool = false) {
         self.followUps = followUps
         self.title = title
+        self.titlePending = titlePending
     }
 
     init(from decoder: Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         followUps = c.lossyList(String.self, .followUps)
         title = c.lossy(String.self, .title)
+        titlePending = c.lossy(Bool.self, .titlePending) ?? false
     }
 }
 
@@ -588,6 +593,27 @@ struct CoachContextManifest: Codable, Equatable, Sendable {
         copy.memoryCount = max(0, copy.memoryCount - (memories.count - copy.memories.count))
         return copy
     }
+
+    /// Drops every mention of a deleted thread (its summary, its library rows and its open loops), so a cached
+    /// manifest can never bring a deleted chat back into a prompt.
+    func removingThread(id: String) -> CoachContextManifest {
+        let key = id.lowercased()
+        var copy = self
+        if copy.thread?.id == key { copy.thread = nil }
+        copy.library.recent.removeAll { $0.id == key }
+        copy.library.relevant.removeAll { $0.id == key }
+        copy.openLoops.removeAll { $0.threadId == key }
+        return copy
+    }
+
+    /// This manifest standing in for a fresh one (the fetch missed its wait): `relevant` was ranked for another
+    /// question, so it goes; another thread's summary goes too (`thread` nil) when it is not `threadId`'s own.
+    func asFallback(for threadId: String) -> CoachContextManifest {
+        var copy = self
+        copy.library.relevant = []
+        if let own = copy.thread?.id, own != threadId.lowercased() { copy.thread = nil }
+        return copy
+    }
 }
 
 /// `POST context/search`.
@@ -784,9 +810,13 @@ final class CoachAPI: @unchecked Sendable {
         }
     }
 
+    /// `expectedOwner` pins the request to one account: when the signed-in credential is someone else's (an
+    /// account switch mid-flush), nothing is sent and `.unauthorized` is thrown.
     private func request(_ path: String, method: String = "GET", query: [URLQueryItem] = [],
-                         body: Any? = nil, timeout: TimeInterval = Timeout.standard) throws -> URLRequest {
+                         body: Any? = nil, timeout: TimeInterval = Timeout.standard,
+                         expectedOwner: String? = nil) throws -> URLRequest {
         guard let base = endpoint(), let id = identity() else { throw CoachAPIError.notConfigured }
+        if let expectedOwner, id.ownerId.lowercased() != expectedOwner.lowercased() { throw CoachAPIError.unauthorized }
         var components = URLComponents(url: base.appendingPathComponent(path), resolvingAgainstBaseURL: false)
         if !query.isEmpty { components?.queryItems = query }
         guard let url = components?.url else { throw CoachAPIError.notConfigured }
@@ -980,12 +1010,13 @@ final class CoachAPI: @unchecked Sendable {
     }
 
     /// Saves up to 40 rows. A 2xx can still list rows the server refused (`thread_deleted`, `thread_conflict`);
-    /// any other answer throws `CoachRouteError` with its status.
+    /// any other answer throws `CoachRouteError` with its status. With `owner`, the rows go only under that
+    /// account's credential (`CoachAPIError.unauthorized` otherwise), checked as each request is built.
     @discardableResult
-    func saveMessages(_ messages: [CoachStoredMessage]) async throws -> CoachSaveResult {
+    func saveMessages(_ messages: [CoachStoredMessage], asOwner owner: String? = nil) async throws -> CoachSaveResult {
         guard !messages.isEmpty else { return CoachSaveResult(saved: 0) }
         let rows = try messages.map { try JSONSerialization.jsonObject(with: JSONEncoder().encode($0)) }
-        let data = try await call(try request("messages", method: "POST", body: ["messages": rows]))
+        let data = try await call(try request("messages", method: "POST", body: ["messages": rows], expectedOwner: owner))
         return (try? JSONDecoder().decode(CoachSaveResult.self, from: data)) ?? CoachSaveResult(saved: messages.count)
     }
 
