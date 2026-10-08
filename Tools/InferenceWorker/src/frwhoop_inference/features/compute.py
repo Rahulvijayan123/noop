@@ -30,7 +30,7 @@ import yasa
 from . import ALGORITHM_VERSION, SCHEMA_VERSION
 from .config import CONFIG, CONFIG_VERSION
 from .contract import SleepFeaturesRequest, fmt_utc
-from . import architecture, continuity, physiology, regularity, respiration, settling, thermal
+from . import architecture, continuity, physiology, prv_nonlinear, regularity, respiration, settling, thermal
 from .timeline import Timeline, actual_sleep_onset, build_timeline, final_sleep_end
 
 try:  # the shadow report is optional at import time; a broken import must not
@@ -159,6 +159,9 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
             ("settling", settling.compute_night),
             ("thermal", thermal.compute_night),
             ("respiratory_variability", respiration.compute_night),
+            # spec-02 §1 / CONTRACT §5.3 (cardiac): secondary SampEn + DFA alpha-1 on
+            # equal-length true-adjacent segments of the main night (naps: not_applicable).
+            ("prv_nonlinear", prv_nonlinear.compute_night),
         ):
             block, err = _isolated(fn, req, tl, CONFIG)
             blocks[key] = block
