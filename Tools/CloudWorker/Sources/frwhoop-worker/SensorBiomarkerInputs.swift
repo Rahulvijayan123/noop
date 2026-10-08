@@ -640,7 +640,8 @@ enum SensorBiomarkerInputs {
     enum PpgGrid: String, Equatable {
         /// anchor + 24 deltas = 25 distinct consecutive samples per record, on a uniform 1/25 s grid.
         /// Recorded v26 continuity shows the next record's anchor is the 26th sample, one ordinary
-        /// step after the 25th, not a repeat of it. Nothing is dropped and no point belongs to the
+        /// step after the 25th, not a repeat of it, and the v20 optical frame carries the same 25
+        /// samples per record as absolute values. Nothing is dropped and no point belongs to the
         /// next record. A documented deviation from the spec text "first 24 at ts + i/24".
         case uniform25 = "uniform-25hz-v26-continuity"
         /// The pre-Spec-01 convention: the first 24 of the 25 points at ts + i/24, the 25th handed
@@ -659,7 +660,8 @@ enum SensorBiomarkerInputs {
     /// limits (one corpus, one firmware, no independent check of the strap clock) are in the doc.
     static let ppgGridEvidence = "frwhoop-v26-corpus fw=50.35.2.0 records=3645 pairs=3528 "
         + "exact-zero-boundary=1.8% boundary-median=18 delta-median=18 "
-        + "corr(boundary,last)=0.77 corr(boundary,next)=0.84 corr(adjacent)=0.80"
+        + "corr(boundary,last)=0.77 corr(boundary,next)=0.84 corr(adjacent)=0.80 "
+        + "v20-same-samples=823/824 next-anchor=next-v20-first 782/782"
 
     /// Side-channel optical configuration (v20-style source/drive/range/offset).
     /// The v26 wire records never carry it; when a caller supplies it, the

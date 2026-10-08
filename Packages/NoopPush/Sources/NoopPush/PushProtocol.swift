@@ -41,6 +41,12 @@ public enum PushProtocol {
     public static let maxObjectWindowSeconds: Int64 = 48 * 60 * 60
     /// Sender-preferred list for capability negotiation (`GET`); see PUSH_PROTOCOL.md.
     public static let capabilitiesAcceptVersions = "1.5,1.4,1.3,1.2,1.1,1.0"
+    /// The pre-1.5 offer. A receiver that advertises 1.5 negotiates it for every stream of the lane that
+    /// offered it, so a sender offers 1.5 only while it is willing to upload anchored PPG.
+    public static let acceptVersionsWithoutPPGAnchor = "1.4,1.3,1.2,1.1,1.0"
+    public static func acceptVersions(offeringPPGAnchor: Bool) -> String {
+        offeringPPGAnchor ? capabilitiesAcceptVersions : acceptVersionsWithoutPPGAnchor
+    }
     public static let forbiddenRemoteControlMembers: Set<String> = [
         "command", "commands", "endpoint", "url", "cadence", "schema", "fields",
     ]

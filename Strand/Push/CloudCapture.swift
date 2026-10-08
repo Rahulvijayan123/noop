@@ -436,10 +436,16 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _objectTransport: ImuObjectTransport?
     private var _objectProgress: ImuPushProgressStore?
     private var _objectSource: ImuObjectSource?
+    /// The anchored PPG source (`PpgObjectUploadFeature`, default off), on the same transport and progress.
+    private var _ppgObjectSource: PpgObjectSource?
     private var _objectLoopTask: Task<Void, Never>?
     private var _objectCapabilities: PushCapabilities?
+    /// Whether the cached capabilities were negotiated with 1.5 on offer; a flag flip renegotiates at once.
+    private var _objectCapabilitiesOfferedPpgAnchor = false
     /// Cloud id → the local id the IMU store files that strap's seconds under, refreshed every lane pass.
     private var _objectStoreIds: [String: String] = [:]
+    /// The same for the history store's PPG rows (the registry's active strap), refreshed every PPG pass.
+    private var _ppgStoreIds: [String: String] = [:]
     private var _objectCapabilitiesAt: Int = 0
     /// The D2 retry: restarts the cloud path when protected data becomes available after a locked
     /// launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
@@ -586,7 +592,8 @@ public final class CloudPushRuntime: @unchecked Sendable {
         // block the typed capture path. The raw IMU files on this phone belong to the account that
         // owns its local data (`CloudLocalDataBinding`), so no other account ever uploads them.
         let objectProgress = try? ImuPushProgressStore(directory: directory)
-        let objectTransport = ImuObjectTransport(endpoint: endpoint, identity: provider)
+        let objectTransport = ImuObjectTransport(endpoint: endpoint, identity: provider,
+                                                 offersPpgAnchor: { PpgObjectUploadFeature.isEnabled })
         let objectSource = ImuObjectSource(store: ImuSessionFileStoreReader(),
                                            deviceId: { [weak self] in self?.deviceIdValue },
                                            storeDeviceId: { [weak self] cloudId in
@@ -596,6 +603,20 @@ public final class CloudPushRuntime: @unchecked Sendable {
                                                CloudPushSettings.isEnabled
                                                    && CloudLocalDataBinding.isOwner(scope.ownerId)
                                            })
+        let ppgObjectSource = objectProgress.map { progress in
+            PpgObjectSource(store: WhoopStorePpgReader(store: { await PpgObjectSource.historyStore?() }),
+                            deviceId: { [weak self] in self?.deviceIdValue },
+                            storeDeviceId: { [weak self] cloudId in
+                                self?.ppgStoreDeviceId(forCloudId: cloudId) ?? cloudId
+                            },
+                            sentThrough: { cloudId in
+                                try await progress.binaryCursor(table: .ppgWaveformSample, deviceId: cloudId)?.rowId
+                            },
+                            uploadAllowed: {
+                                PpgObjectUploadFeature.isEnabled && CloudPushSettings.isEnabled
+                                    && CloudLocalDataBinding.isOwner(scope.ownerId)
+                            })
+        }
         lock.lock()
         _journal = journal
         _coordinator = coordinator
@@ -606,6 +627,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
             _objectTransport = objectTransport
             _objectProgress = objectProgress
             _objectSource = objectSource
+            _ppgObjectSource = ppgObjectSource
             // Started under the lock so a failed activation's `releaseIfCurrent` always sees it.
             _objectLoopTask = Task { [weak self] in await self?.runObjectLaneLoop() }
         }
@@ -658,9 +680,11 @@ public final class CloudPushRuntime: @unchecked Sendable {
         _objectTransport = nil
         _objectProgress = nil
         _objectSource = nil
+        _ppgObjectSource = nil
         _objectCapabilities = nil
         _objectCapabilitiesAt = 0
         _objectStoreIds = [:]
+        _ppgStoreIds = [:]
         return loop
     }
 
@@ -672,6 +696,11 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private func objectStoreDeviceId(forCloudId cloudId: String) -> String? {
         lock.lock(); defer { lock.unlock() }
         return _objectStoreIds[cloudId]
+    }
+
+    private func ppgStoreDeviceId(forCloudId cloudId: String) -> String? {
+        lock.lock(); defer { lock.unlock() }
+        return _ppgStoreIds[cloudId]
     }
 
     private func abandon(coordinator: CloudTransportCoordinator, scope: CloudDataScope) async {
@@ -870,6 +899,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
         /// Bounded drain per pass so a backlog (e.g. after an offline day) catches up in bounded
         /// steps instead of one unbounded run.
         static let maxObjectsPerPass = 8
+        /// The same bound for anchored PPG: at most this many optical hours per pass, so a first upload of the
+        /// phone's banked history catches up over passes instead of in one burst.
+        static let maxPpgObjectsPerPass = 4
         /// Capabilities are cheap but still a network call; renegotiate at most every 5 minutes.
         static let capabilitiesRefreshSeconds = 300
     }
@@ -892,6 +924,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
         let transport = _objectTransport
         let progress = _objectProgress
         let source = _objectSource
+        let ppgSource = _ppgObjectSource
         lock.unlock()
         guard let transport, let progress, let source, let scope = runningScope,
               let identity = Self.credentialProvider(for: scope, store: identityStore)() else { return }
@@ -899,16 +932,30 @@ public final class CloudPushRuntime: @unchecked Sendable {
         // by the BLE layer's local id (the registry's active device), which is not the runtime's account-level
         // fallback id; reading under that one found nothing, so no raw motion ever left the phone.
         let devices = await Self.objectLaneDevices()
-        guard !devices.isEmpty else { return }
+        // With anchored PPG off this is the lane's old early exit, unchanged.
+        guard !devices.isEmpty || (ppgSource != nil && PpgObjectUploadFeature.isEnabled) else { return }
         lock.lock()
         _objectStoreIds = Dictionary(devices.map { ($0.cloudId, $0.localId) }, uniquingKeysWith: { first, _ in first })
         lock.unlock()
 
         let caps = await negotiatedObjectCapabilities(transport: transport)
-        guard let caps, PushProtocol.isObjectVersion(caps.protocolVersion),
-              let lane = caps.objectLane, lane.streams.contains(.rawImuSession),
+        guard let caps, PushProtocol.isObjectVersion(caps.protocolVersion), let lane = caps.objectLane,
               let receiptOwner = try? AccountScope(projectURL: CloudPushSettings.canonicalProjectURL,
                                                    userID: identity.ownerId) else { return }
+        if !devices.isEmpty, lane.streams.contains(.rawImuSession) {
+            await runImuObjectLanePass(source: source, transport: transport, progress: progress, caps: caps,
+                                       lane: lane, devices: devices, identity: identity, scope: scope,
+                                       receiptOwner: receiptOwner)
+        }
+        await runPpgObjectLanePass(source: ppgSource, transport: transport, progress: progress, caps: caps,
+                                   lane: lane, identity: identity, scope: scope, receiptOwner: receiptOwner)
+    }
+
+    private func runImuObjectLanePass(source: ImuObjectSource, transport: ImuObjectTransport,
+                                      progress: ImuPushProgressStore, caps: PushCapabilities,
+                                      lane: PushObjectLane, devices: [(localId: String, cloudId: String)],
+                                      identity: CloudPushIdentity, scope: CloudDataScope,
+                                      receiptOwner: AccountScope) async {
 
         // The coordinator is the state machine; the transport is the HTTP layer. A fresh wake
         // budget bounds one pass. `associateReceipt` is intentionally empty: the receipt is
@@ -936,6 +983,43 @@ public final class CloudPushRuntime: @unchecked Sendable {
         }
     }
 
+    /// The anchored PPG half of a lane pass: only with the flag on and a receiver that negotiated 1.5, for the
+    /// active strap's banked v26 rows, through its own coordinator over the same transport and progress store
+    /// (the coordinator takes one source) and its own bounded drain.
+    private func runPpgObjectLanePass(source: PpgObjectSource?, transport: ImuObjectTransport,
+                                      progress: ImuPushProgressStore, caps: PushCapabilities,
+                                      lane: PushObjectLane, identity: CloudPushIdentity, scope: CloudDataScope,
+                                      receiptOwner: AccountScope) async {
+        guard let source, PpgObjectUploadFeature.laneOpen(featureEnabled: PpgObjectUploadFeature.isEnabled,
+                                                         capabilities: caps),
+              let store = await PpgObjectSource.historyStore?() else { return }
+        let devices = PpgObjectSource.laneDevices(store: store)
+        guard !devices.isEmpty else { return }
+        lock.lock()
+        _ppgStoreIds = Dictionary(devices.map { ($0.cloudId, $0.localId) }, uniquingKeysWith: { first, _ in first })
+        lock.unlock()
+        let coordinator = PushCoordinator(
+            source: source,
+            transport: transport,
+            progress: progress,
+            sourceId: identity.sourceId,
+            destinationStillCurrent: { [weak self] in self?.runningScope == scope },
+            receiptOwner: receiptOwner,
+            objectProtocolVersion: caps.protocolVersion,
+            associateReceipt: { _, _, _ in },
+            wakeBudget: PushWakeBudget(duration: 20)
+        )
+        var drained = 0
+        for device in devices {
+            var result = await coordinator.pushObjects(.ppgWaveformSample, deviceId: device.cloudId, lane: lane)
+            while case .accepted(_, _, let hasMore, _) = result, hasMore,
+                  drained < ObjectLaneCadence.maxPpgObjectsPerPass {
+                result = await coordinator.pushObjects(.ppgWaveformSample, deviceId: device.cloudId, lane: lane)
+                drained += 1
+            }
+        }
+    }
+
     /// The straps with raw IMU on this phone: the store's local id and the cloud id its rows go out under
     /// (`CloudStrapSerialStore`, the same mapping the heart-rate and gravity journal uses).
     static func objectLaneDevices() async -> [(localId: String, cloudId: String)] {
@@ -948,7 +1032,13 @@ public final class CloudPushRuntime: @unchecked Sendable {
     /// transient outage does not stop already-advertised uploads.
     private func negotiatedObjectCapabilities(transport: ImuObjectTransport) async -> PushCapabilities? {
         let now = Int(Date().timeIntervalSince1970)
+        let offersPpgAnchor = PpgObjectUploadFeature.isEnabled
         lock.lock()
+        // Capabilities negotiated under the other offer are not this lane's: 1.5 is negotiated only when offered.
+        if _objectCapabilitiesOfferedPpgAnchor != offersPpgAnchor {
+            _objectCapabilities = nil
+            _objectCapabilitiesAt = 0
+        }
         let cached = _objectCapabilities
         let cachedAt = _objectCapabilitiesAt
         lock.unlock()
@@ -957,6 +1047,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
             guard case .available(let caps) = try await transport.capabilities() else { return cached }
             lock.lock()
             _objectCapabilities = caps
+            _objectCapabilitiesOfferedPpgAnchor = offersPpgAnchor
             _objectCapabilitiesAt = now
             lock.unlock()
             return caps
