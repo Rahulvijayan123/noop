@@ -421,13 +421,22 @@ struct TreatmentMonthGrid: View {
                         Button { onSelect(day) } label: {
                             Text("\(Int(day.split(separator: "-").last ?? "0") ?? 0)")
                                 .font(StrandFont.captionNumber)
-                                .frame(maxWidth: .infinity, minHeight: 28)
+                                .frame(maxWidth: .infinity, minHeight: NoopMetrics.minimumHitTarget)
                                 .background(cellFill(day), in: RoundedRectangle(cornerRadius: 6, style: .continuous))
+                                .overlay(alignment: .bottom) {
+                                    // A day with an entry is also marked by a dot, so the fill is not the only cue.
+                                    if markedDays.contains(day) {
+                                        Circle().fill(StrandPalette.statusPositive).frame(width: 5, height: 5).padding(.bottom, 5)
+                                    }
+                                }
                                 .foregroundStyle(day == selectedDay ? StrandPalette.textPrimary : StrandPalette.textSecondary)
                         }
                         .buttonStyle(.plain)
+                        .accessibilityLabel(Text(verbatim: day))
+                        .accessibilityValue(markedDays.contains(day) ? Text("Has an entry") : Text(""))
+                        .accessibilityAddTraits(day == selectedDay ? .isSelected : [])
                     } else {
-                        Color.clear.frame(minHeight: 28)
+                        Color.clear.frame(minHeight: NoopMetrics.minimumHitTarget)
                     }
                 }
             }
