@@ -580,7 +580,15 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
                 windows: sim.windows, streams: before, sleep: [], inBed: [], exercise: [], dayStart: dayStart,
                 sleepKnownOutsideSessions: true, encoderVersion: "hart-activity-1")
             let built = ActivityContextDays.dayDocumentAndTrack(input: day, generatedAt: dayEnd, lookback: lookback)
-            if built.track.events.contains(where: { $0.ts < dayStart }) { leakedIntoTheTrack += 1 }
+            // The scenario is exercised when the resumed day re-emits a pre-midnight event, or when the lookback's
+            // own decode flagged one within the event hold before midnight (the event its snapshot carries).
+            // Since the decoder drains its history at peak probability (WP2), the day track itself no longer
+            // re-emits them; the document filter still guards the publish.
+            let warm = try XCTUnwrap(lookback.map { ActivityContextTrackBuilder.build($0) })
+            if built.track.events.contains(where: { $0.ts < dayStart })
+                || warm.events.contains(where: { $0.ts >= dayStart - 60 && $0.ts < dayStart }) {
+                leakedIntoTheTrack += 1
+            }
             XCTAssertTrue(built.document.events.allSatisfy { $0.ts >= dayStart && $0.ts < dayEnd },
                           "walking ending \(endsBefore) s before midnight")
             let payload = try ActivityContextDays.build(
