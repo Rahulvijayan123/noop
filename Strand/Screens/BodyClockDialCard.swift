@@ -47,7 +47,7 @@ struct BodyClockDialCard: View {
         // circle with no ideal arc beside it would state something false about the night, so the card
         // stands down instead. Twin of the Kotlin guard.
         if ideal != nil {
-            NoopCard(tint: hue) {
+            NoopCard {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     header
                     dial
@@ -74,12 +74,10 @@ struct BodyClockDialCard: View {
 
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text("Body clock").strandOverline()
-                Text("Last night against your clock")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-            }
+            Text("Timing")
+                .font(StrandFont.headline)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .accessibilityAddTraits(.isHeader)
             Spacer()
         }
     }

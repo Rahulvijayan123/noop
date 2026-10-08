@@ -173,9 +173,9 @@ struct SleepAnalyticsCards: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Sleep analytics", overline: "Estimated from staged sleep")
+            SectionHeader("Sleep analytics")
 
-            NoopCard(padding: 0, tint: StrandPalette.restColor) {
+            NoopCard(padding: 0) {
                 VStack(alignment: .leading, spacing: 0) {
                     ForEach(model.rows) { row in
                         hairline
@@ -188,6 +188,9 @@ struct SleepAnalyticsCards: View {
                 }
             }
         }
+        // The night page stacks this above its About card with no gap of its own (the host renders nothing
+        // until a document loads), so the section brings the page's section gap with it.
+        .padding(.bottom, NoopMetrics.sectionGap)
         .accessibilityElement(children: .contain)
     }
 
@@ -238,10 +241,10 @@ struct SleepAnalyticsCards: View {
             } label: {
                 HStack(spacing: 12) {
                     Image(systemName: group.icon)
-                        .font(.system(size: 14, weight: .semibold))
-                        .foregroundStyle(StrandPalette.restBright)
-                        .frame(width: 30, height: 30)
-                        .background(StrandPalette.restBright.opacity(0.14), in: Circle())
+                        .font(StrandFont.icon(.row))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .frame(width: 28)
+                        .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
                         Text(group.title)
                             .font(StrandFont.subhead.weight(.semibold))
@@ -254,7 +257,7 @@ struct SleepAnalyticsCards: View {
                     }
                     Spacer(minLength: 8)
                     Image(systemName: "chevron.down")
-                        .font(.system(size: 11, weight: .semibold))
+                        .font(StrandFont.icon(.inline))
                         .foregroundStyle(StrandPalette.textTertiary)
                         .rotationEffect(.degrees(isOpen ? 180 : 0))
                 }
@@ -272,7 +275,7 @@ struct SleepAnalyticsCards: View {
                         detailRow(row.label, row.value)
                     }
                 }
-                .padding(.leading, NoopMetrics.cardPadding + 42)
+                .padding(.leading, NoopListDivider.iconRowInset)
                 .padding(.trailing, NoopMetrics.cardPadding)
                 .padding(.bottom, 14)
                 .transition(.opacity)

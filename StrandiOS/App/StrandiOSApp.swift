@@ -664,6 +664,8 @@ enum DemoScreens {
         case "liquidtoday": return AnyView(LiquidTodayView())
         case "trends":   return AnyView(TrendsView())
         case "sleep":    return AnyView(SleepView())
+        case "alarms":   return AnyView(SmartAlarmView())
+        case "sleepcards": return AnyView(SleepHostedCardsDemo())
         case "live":     return AnyView(LiveView())
         case "stress":   return AnyView(StressView())
         case "workouts": return AnyView(WorkoutsView())

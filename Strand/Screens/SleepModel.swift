@@ -46,6 +46,20 @@ struct Night {
     /// the hero and the analytics rollup did, for a shift/late sleeper too. nil = cold-start band. (#547)
     var habitualMidsleepSec: Int? = nil
 
+    /// The same per-epoch MOTION as `motionEpochs`, kept per fragment with the fragment's detected window so
+    /// the night timeline can place each epoch at its own clock time (a gap between fragments stays a gap).
+    /// Display plumbing only: filled alongside `motionEpochs` in `mergeDay`, never read by any metric.
+    var motionFragments: [MotionFragment] = []
+
+    /// One fragment's persisted per-epoch motion and the detected window it was recorded over.
+    struct MotionFragment {
+        /// The SleepStager's epoch grid (`motionJSON` is on the same 30 s grid as `stagesJSON`).
+        static let epochSeconds: TimeInterval = 30
+        let startTs: Int
+        let endTs: Int
+        let values: [Double]
+    }
+
     /// The real stored block a sleep-time edit writes against — the day's MAIN block, resolved by the
     /// SAME shared selector (`SleepView.mainNightSession` → `SleepStageTotals.mainNightIndex`) the hero,
     /// the naps card, and `AnalyticsEngine.analyzeDay` use, so all of them and the edit affordance agree
@@ -312,6 +326,7 @@ extension SleepModel {
         var stages = Stages(awake: 0, light: 0, deep: 0, rem: 0)
         var segs: [SleepInterval] = []
         var motion: [Double] = []
+        var motionFragments: [Night.MotionFragment] = []
         for frag in group {
             if let seg = SleepView.decodeSegments(frag.stagesJSON, sessionStart: frag.effectiveStartTs), seg.stages.total > 0 {
                 stages.awake += seg.stages.awake; stages.light += seg.stages.light
@@ -324,7 +339,10 @@ extension SleepModel {
                 stages.awake += st.awake; stages.light += st.light
                 stages.deep  += st.deep;  stages.rem   += st.rem
             }
-            if let m = motionByStart[frag.startTs] { motion.append(contentsOf: m) }
+            if let m = motionByStart[frag.startTs] {
+                motion.append(contentsOf: m)
+                motionFragments.append(Night.MotionFragment(startTs: frag.startTs, endTs: frag.endTs, values: m))
+            }
         }
         let orderedFrags = Array(group)
         for (prev, next) in zip(orderedFrags, orderedFrags.dropFirst()) {
@@ -340,7 +358,8 @@ extension SleepModel {
                                        restingHr: nil, avgHrv: nil, stagesJSON: nil)
         let realSegs = segs.count >= 2 ? segs.sorted { $0.start < $1.start } : nil
         return Night(session: synth, stages: stages, realSegments: realSegs, sourceBlocks: sessions,
-                     motionEpochs: motion, habitualMidsleepSec: habitualMidsleepSec)
+                     motionEpochs: motion, habitualMidsleepSec: habitualMidsleepSec,
+                     motionFragments: motionFragments)
     }
 
     /// The merged Night for the DAY `offset` stops back from the most recent (0 = last night).
@@ -599,5 +618,52 @@ extension SleepModel {
             typicalLightMin: typicalStageMin(days: inputs.days, \.lightMin),
             trendPoints: durationTrendPoints(days: inputs.days),
             sleepDebtLedger: debtLedger(days: inputs.days, napSleepMinByDay: napSleepMinByDay))
+    }
+}
+
+// MARK: - Display helpers (presentation only)
+//
+// Small pure reads the Sleep surfaces share. None of them feeds a score or a stored value; they lift what
+// the tab's renderers used to compute inline (and twice: SleepView and StagesCard each had a copy) into one
+// place, byte for byte.
+extension SleepModel {
+
+    /// Per-stage typical minutes over the trailing 30 scored days: the 25th–75th percentile band plus the
+    /// mean (the "typical range"). `stage: nil` is total asleep. nil below 5 scored nights (no fabricated
+    /// range from a few days). Verbatim of the former `SleepView.stageTypical` / `StageDetailView.stageTypical`.
+    static func stageTypical(days: [DailyMetric], stage: SleepStage?) -> (lo: Double, hi: Double, mean: Double)? {
+        let values: [Double] = days.suffix(30).compactMap { d in
+            switch stage {
+            case nil:     return d.totalSleepMin
+            case .light?: return d.lightMin
+            case .deep?:  return d.deepMin
+            case .rem?:   return d.remMin
+            case .awake?:
+                // Awake isn't a stored daily column; derive from in-bed minus asleep via efficiency.
+                guard let asleep = d.totalSleepMin, asleep > 0, var e = d.efficiency, e > 0 else { return nil }
+                if e > 1.5 { e /= 100 }   // efficiency arrives as % on some import paths
+                guard e > 0.3, e <= 1 else { return nil }
+                return asleep * (1 - e) / e
+            }
+        }.filter { $0 > 0 }.sorted()
+        guard values.count >= 5 else { return nil }
+        func pct(_ p: Double) -> Double {
+            let idx = p * Double(values.count - 1)
+            let l = Int(idx.rounded(.down)), u = Int(idx.rounded(.up))
+            let frac = idx - Double(l)
+            return values[l] * (1 - frac) + values[u] * frac
+        }
+        let mean = values.reduce(0, +) / Double(values.count)
+        return (pct(0.25), pct(0.75), mean)
+    }
+
+    /// The index into `navDays` of the day whose local wake-day key is `wakeDay` ("2026-10-07"), the key the
+    /// night page is routed by. A carousel index is not stable (it shifts whenever a newer night lands), the
+    /// wake day is. nil when no stored day carries that key.
+    static func navIndex(wakeDay: String, navDays: [[CachedSleepSession]]) -> Int? {
+        navDays.firstIndex { blocks in
+            guard let endTs = blocks.first?.endTs else { return false }
+            return Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(endTs))) == wakeDay
+        }
     }
 }
