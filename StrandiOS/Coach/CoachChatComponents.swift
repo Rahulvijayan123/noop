@@ -78,100 +78,88 @@ struct CoachCameraPicker: UIViewControllerRepresentable {
 
 // MARK: - Bubbles
 
+/// One turn of the conversation. The user's words sit in an accent bubble at the trailing edge; Sana's reply is
+/// plain text on the page at full width, so a chart under it is the only card in the turn. Who is speaking is
+/// carried by alignment, not by an avatar.
 struct CoachBubble: View {
     let message: CoachChatMessage
     let phase: CoachThinkingPhase
-    let phaseLabel: String
     var onRetry: (() -> Void)?
     var followUps: [String] = []
+    var followUpsEnabled = true
     var onFollowUp: (String) -> Void = { _ in }
     @State private var containerWidth: CGFloat = 560
-    /// Set once this bubble has shown the loading mosaic, so the visual that follows dissolves out of it.
-    /// Visuals restored from history never saw it and appear plainly.
-    @State private var vizWasGenerating = false
 
+    /// The user bubble's widest; replies use the whole column.
     private var maxBubbleWidth: CGFloat { min(containerWidth * 0.82, 560) }
     private var isUser: Bool { message.role == .user }
     private var hasText: Bool { !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            if isUser {
-                Spacer(minLength: 0)
-            } else {
-                avatar
-            }
-
-            VStack(alignment: isUser ? .trailing : .leading, spacing: 6) {
-                if isUser { photo }
-                if !isUser {
-                    CoachThinkingTrace(message: message, phase: phase, phaseLabel: phaseLabel)
-                        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                }
-                if hasText { textBubble }
-                if !isUser, !message.isStreaming {
-                    if message.vizPhase == .generating {
-                        CoachVizGeneratingView()
-                            .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                            .transition(.opacity)
-                    } else if let viz = message.viz {
-                        Group {
-                            CoachVizView(viz: viz)
-                                .equatable()
-                        }
-                        .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) {
-                            vizWasGenerating = false
-                        }
-                        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-                        .transition(.opacity)
-                    }
-                }
-                if !isUser, message.didStall, let onRetry { retryButton(onRetry) }
-                if !isUser, !message.isStreaming, !message.didStall, hasText, !followUps.isEmpty { followUpList }
-            }
-
-            if !isUser { Spacer(minLength: 0) }
+        Group {
+            if isUser { userTurn } else { assistantTurn }
         }
+        .frame(maxWidth: .infinity, alignment: isUser ? .trailing : .leading)
         .background(GeometryReader { geo in
             Color.clear.preference(key: CoachBubbleWidthKey.self, value: geo.size.width)
         })
         .onPreferenceChange(CoachBubbleWidthKey.self) { containerWidth = $0 }
-        .onAppear { if message.vizPhase == .generating { vizWasGenerating = true } }
-        .onChange(of: message.vizPhase) { _, phase in if phase == .generating { vizWasGenerating = true } }
     }
 
-    private var avatar: some View {
-        BrandMark(size: 26, style: .tile)
-            .padding(.top, 2)
-            .accessibilityHidden(true)
-    }
-
-    private var followUpList: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text("Follow-ups").strandOverline()
-            ForEach(followUps, id: \.self) { prompt in
-                Button { onFollowUp(prompt) } label: {
-                    HStack(spacing: 8) {
-                        Image(systemName: "arrow.turn.down.right")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
-                        Text(prompt)
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .multilineTextAlignment(.leading)
-                        Spacer(minLength: 0)
-                    }
-                    .padding(.horizontal, 10)
-                    .padding(.vertical, 8)
-                    .background(StrandPalette.surfaceInset, in: RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityLabel("Follow-up question: \(prompt)")
+    private var userTurn: some View {
+        VStack(alignment: .trailing, spacing: NoopMetrics.space2) {
+            photo
+            if hasText {
+                Text(message.content)
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.goldDeepText)
+                    .multilineTextAlignment(.leading)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(StrandPalette.accent,
+                                in: RoundedRectangle(cornerRadius: CoachChatMetrics.bubbleRadius, style: .continuous))
+                    .frame(maxWidth: maxBubbleWidth, alignment: .trailing)
+                    .modifier(CoachMessageActions(text: message.content, spoken: "You said: \(message.content)"))
             }
         }
-        .frame(maxWidth: maxBubbleWidth, alignment: .leading)
-        .padding(.top, 2)
+    }
+
+    private var assistantTurn: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            CoachThinkingTrace(message: message, phase: phase, part: .working)
+            if hasText {
+                Markdown(message.content)
+                    .markdownTheme(.strand)
+                    .fixedSize(horizontal: false, vertical: true)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .modifier(CoachMessageActions(text: message.content, spoken: "Sana said: \(message.content)"))
+            }
+            if !message.isStreaming {
+                if message.vizPhase == .generating {
+                    CoachVizGeneratingView()
+                        .transition(.opacity)
+                } else if let viz = message.viz {
+                    CoachVizView(viz: viz)
+                        .equatable()
+                        .transition(.opacity)
+                }
+            }
+            if message.didStall, let onRetry {
+                Button(action: onRetry) {
+                    Label("Retry", systemImage: "arrow.clockwise")
+                        .font(StrandFont.subhead.weight(.medium))
+                        .foregroundStyle(StrandPalette.accent)
+                        .frame(minHeight: NoopMetrics.minimumHitTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+            }
+            CoachThinkingTrace(message: message, phase: phase, part: .summary)
+            if !message.isStreaming, !message.didStall, hasText, !followUps.isEmpty {
+                CoachPromptList(prompts: followUps, isEnabled: followUpsEnabled, accessibilityPrefix: "Follow-up question", onSend: onFollowUp)
+            }
+        }
+        .animation(.easeOut(duration: 0.25), value: message.vizPhase)
     }
 
     @ViewBuilder
@@ -181,55 +169,35 @@ struct CoachBubble: View {
                 .resizable()
                 .scaledToFill()
                 .frame(maxWidth: min(maxBubbleWidth, 240), maxHeight: 180)
-                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
-                .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).strokeBorder(StrandPalette.accent.opacity(0.35), lineWidth: 0.5))
+                .clipShape(RoundedRectangle(cornerRadius: CoachChatMetrics.bubbleRadius, style: .continuous))
                 .accessibilityLabel("Photo you sent")
         } else if message.hadImage {
             Label("Photo", systemImage: "photo")
-                .font(StrandFont.caption)
+                .font(StrandFont.footnote)
                 .foregroundStyle(StrandPalette.textTertiary)
         }
     }
+}
 
-    private var textBubble: some View {
-        Group {
-            if isUser {
-                Text(message.content)
-                    .font(StrandFont.body)
-                    .foregroundStyle(StrandPalette.surfaceBase)
-                    .multilineTextAlignment(.leading)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 10)
-                    .background(StrandPalette.accent, in: RoundedRectangle(cornerRadius: 16, style: .continuous))
-            } else {
-                Markdown(message.content)
-                    .markdownTheme(.strand)
-                    .fixedSize(horizontal: false, vertical: true)
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 11)
-                    .frostedCardSurface(tint: StrandPalette.chargeColor, cornerRadius: 16)
+enum CoachChatMetrics {
+    /// One radius for the user's bubble and photos (kit candidate `NoopMetrics.bubbleRadius`).
+    static let bubbleRadius: CGFloat = 18
+}
+
+/// Copy / share on a long press, text selection, and one VoiceOver element saying who spoke.
+private struct CoachMessageActions: ViewModifier {
+    let text: String
+    let spoken: String
+
+    func body(content: Content) -> some View {
+        content
+            .textSelection(.enabled)
+            .contextMenu {
+                Button { UIPasteboard.general.string = text } label: { Label("Copy", systemImage: "doc.on.doc") }
+                ShareLink(item: text) { Label("Share", systemImage: "square.and.arrow.up") }
             }
-        }
-        .textSelection(.enabled)
-        .frame(maxWidth: maxBubbleWidth, alignment: isUser ? .trailing : .leading)
-        .contextMenu {
-            Button { UIPasteboard.general.string = message.content } label: { Label("Copy", systemImage: "doc.on.doc") }
-            ShareLink(item: message.content) { Label("Share", systemImage: "square.and.arrow.up") }
-        }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel(isUser ? "You said: \(message.content)" : "Sana said: \(message.content)")
-    }
-
-    private func retryButton(_ action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Label("Retry", systemImage: "arrow.clockwise")
-                .font(StrandFont.caption)
-                .foregroundStyle(StrandPalette.accent)
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
-                .background(StrandPalette.accent.opacity(0.12), in: Capsule())
-        }
-        .buttonStyle(.plain)
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(spoken)
     }
 }
 
@@ -238,67 +206,43 @@ private struct CoachBubbleWidthKey: PreferenceKey {
     static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = nextValue() }
 }
 
-/// Long answers can take a minute or two; a single static label reads as a hang, so the wording keeps moving.
-struct CoachElapsedLabel: View {
-    let base: String
-    @State private var seconds = 0
-    @State private var timer: Timer?
+// MARK: - Suggested prompts
 
-    private var text: String {
-        switch seconds {
-        case ..<15: return base
-        case ..<40: return "\(base) Reviewing your data."
-        case ..<75: return "\(base) Working through a detailed answer."
-        default: return "\(base) Still working (\(seconds)s)."
-        }
-    }
-
-    var body: some View {
-        Text(text)
-            .font(StrandFont.caption)
-            .foregroundStyle(StrandPalette.textTertiary)
-            .onAppear {
-                seconds = 0
-                timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { _ in seconds += 1 }
-            }
-            .onDisappear { timer?.invalidate(); timer = nil }
-    }
-}
-
-// MARK: - Suggestions
-
-struct CoachSuggestionStack: View {
+/// Questions to ask, as rows of one list card: the four suggestions on an empty chat and the follow-ups under
+/// an answer. A tap sends the question as written.
+struct CoachPromptList: View {
     let prompts: [String]
+    var isEnabled = true
+    var accessibilityPrefix = "Suggested prompt"
     let onSend: (String) -> Void
 
-    private static let icons = ["moon", "waveform.path.ecg", "heart", "chart.bar"]
-
     var body: some View {
-        VStack(spacing: 10) {
-            ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
-                Button { onSend(prompt) } label: {
-                    HStack(spacing: 12) {
-                        Image(systemName: Self.icons[index % Self.icons.count])
-                            .font(.system(size: 16))
-                            .foregroundStyle(StrandPalette.accent)
-                            .frame(width: 24)
-                        Text(prompt)
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                            .lineLimit(2)
-                            .multilineTextAlignment(.leading)
-                        Spacer(minLength: 4)
-                        Image(systemName: "chevron.right")
-                            .font(.system(size: 11, weight: .semibold))
-                            .foregroundStyle(StrandPalette.textTertiary)
+        NoopCard(padding: 0) {
+            VStack(alignment: .leading, spacing: 0) {
+                ForEach(Array(prompts.enumerated()), id: \.offset) { index, prompt in
+                    if index > 0 { NoopListDivider() }
+                    Button { onSend(prompt) } label: {
+                        HStack(spacing: NoopMetrics.space3) {
+                            Text(prompt)
+                                .font(StrandFont.body)
+                                .foregroundStyle(isEnabled ? StrandPalette.textPrimary : StrandPalette.textTertiary)
+                                .multilineTextAlignment(.leading)
+                                .lineLimit(3)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                            Image(systemName: "chevron.right")
+                                .font(StrandFont.icon(.inline))
+                                .foregroundStyle(StrandPalette.textTertiary)
+                                .accessibilityHidden(true)
+                        }
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .padding(.vertical, NoopMetrics.space3)
+                        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
+                        .contentShape(Rectangle())
                     }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 16)
-                    .contentShape(Rectangle())
-                    .frostedCardSurface(cornerRadius: 16)
+                    .buttonStyle(.plain)
+                    .disabled(!isEnabled)
+                    .accessibilityLabel("\(accessibilityPrefix): \(prompt)")
                 }
-                .buttonStyle(LiquidPressStyle())
-                .accessibilityLabel("Suggested prompt: \(prompt)")
             }
         }
     }

@@ -4,86 +4,24 @@ import SwiftUI
 
 // MARK: - Design tokens
 
+/// The type roles a Sana visual uses, all from the app's scale (docs/DESIGN_SYSTEM.md, Type).
 enum CoachVizFont {
-    static let title2 = StrandFont.title2
-    static let bodySmall = Font.system(size: 14, design: .rounded)
-    static let bodySmallMedium = Font.system(size: 14, weight: .medium, design: .rounded)
-    static let caption = StrandFont.caption
-    static let caption2 = Font.system(size: 11, design: .rounded)
-    static let micro = Font.system(size: 10, design: .rounded)
-    static let monoSmall = Font.system(size: 11, design: .monospaced)
+    static let title2 = StrandFont.number(20)
+    static let bodySmall = StrandFont.subhead
+    static let bodySmallMedium = StrandFont.subhead.weight(.medium)
+    static let caption = StrandFont.footnote
+    static let caption2 = StrandFont.footnote
+    static let micro = StrandFont.caption
+    static let monoSmall = StrandFont.captionNumber
 }
 
 enum CoachVizMetric {
-    static let radiusSM: CGFloat = 10
-    static let radiusMD: CGFloat = 14
-    static let spaceXS: CGFloat = 4
-    static let spaceSM: CGFloat = 8
-    static let spaceMD: CGFloat = 12
-    static let spaceLG: CGFloat = 16
-}
-
-// MARK: - Palette
-
-// MARK: - Build-up
-
-/// How much of a visual has been drawn, 0 to 1. The image-generation reveal raises it while the pixels dissolve,
-/// so the chart is seen being constructed; everywhere else it stays 1 and nothing is held back.
-private struct CoachVizBuildKey: EnvironmentKey { static let defaultValue: Double = 1 }
-
-extension EnvironmentValues {
-    var coachVizBuild: Double {
-        get { self[CoachVizBuildKey.self] }
-        set { self[CoachVizBuildKey.self] = newValue }
-    }
-}
-
-enum CoachVizBuild {
-    /// `progress` remapped so it rises from 0 to 1 over the slice that starts at `delay` and lasts `span`.
-    static func slice(_ progress: Double, delay: Double = 0, span: Double = 1) -> Double {
-        min(1, max(0, (progress - delay) / span))
-    }
-
-    static func easeOut(_ x: Double) -> Double { 1 - pow(1 - min(1, max(0, x)), 3) }
-}
-
-/// Uncovers its content along an axis with a soft leading edge, so lines draw in and cards fill in.
-private struct CoachVizWipe: ViewModifier {
-    @Environment(\.coachVizBuild) private var build
-    let axis: Axis
-    var delay: Double = 0
-    var span: Double = 1
-
-    func body(content: Content) -> some View {
-        let soft = 0.14
-        let front = CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: delay, span: span)) * (1 + soft)
-        content.mask(
-            LinearGradient(
-                stops: [
-                    .init(color: .black, location: min(1, max(0, front - soft))),
-                    .init(color: .clear, location: min(1, max(0, front)))
-                ],
-                startPoint: axis == .horizontal ? .leading : .top,
-                endPoint: axis == .horizontal ? .trailing : .bottom
-            )
-        )
-    }
-}
-
-/// A clockwise sweep from 12 o'clock, used to draw a pie in.
-private struct CoachVizSweep: Shape {
-    var progress: Double
-
-    func path(in rect: CGRect) -> Path {
-        var path = Path()
-        let center = CGPoint(x: rect.midX, y: rect.midY)
-        let start = Angle.degrees(-90)
-        path.move(to: center)
-        path.addArc(center: center, radius: max(rect.width, rect.height), startAngle: start,
-                    endAngle: start + .degrees(360 * min(1, max(0, progress))), clockwise: false)
-        path.closeSubpath()
-        return path
-    }
+    static let radiusSM: CGFloat = NoopMetrics.insetRadius
+    static let radiusMD: CGFloat = NoopMetrics.cardRadius
+    static let spaceXS: CGFloat = NoopMetrics.space1
+    static let spaceSM: CGFloat = NoopMetrics.space2
+    static let spaceMD: CGFloat = NoopMetrics.space3
+    static let spaceLG: CGFloat = NoopMetrics.cardPadding
 }
 
 enum CoachVizPalette {
@@ -140,9 +78,12 @@ enum CoachVizFormat {
         return indices
     }
 
+    /// In the reader's locale, grouped ("12,400"); one decimal only when the value has one.
     static func number(_ value: Double) -> String {
-        if abs(value) >= 10_000 { return String(format: "%.0f", value) }
-        return value == value.rounded() ? String(format: "%.0f", value) : String(format: "%.1f", value)
+        if abs(value) >= 1_000 || value == value.rounded() {
+            return value.formatted(.number.precision(.fractionLength(0)).grouping(.automatic))
+        }
+        return value.formatted(.number.precision(.fractionLength(1)))
     }
 
     static func reading(_ value: Double, unit: String?) -> String {
@@ -191,11 +132,11 @@ enum CoachVizFormat {
 
 // MARK: - Card container
 
+/// The one card a Sana visual sits in: the app's `NoopCard`, a headline title, an optional one-line subtitle
+/// and the source in the metadata role.
 private struct CoachVizCard<Content: View>: View {
     let viz: CoachViz
     let content: Content
-
-    @Environment(\.coachVizBuild) private var build
 
     init(viz: CoachViz, @ViewBuilder content: () -> Content) {
         self.viz = viz
@@ -203,39 +144,31 @@ private struct CoachVizCard<Content: View>: View {
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: CoachVizMetric.spaceSM) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(viz.title)
-                    .font(CoachVizFont.bodySmallMedium)
-                    .foregroundColor(StrandPalette.textPrimary)
-                    .fixedSize(horizontal: false, vertical: true)
-                if let subtitle = viz.subtitle, !subtitle.isEmpty {
-                    Text(subtitle)
-                        .font(CoachVizFont.caption2)
-                        .foregroundColor(StrandPalette.textTertiary)
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                    Text(viz.title)
+                        .font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
+                    if let subtitle = viz.subtitle, !subtitle.isEmpty {
+                        Text(subtitle)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+
+                content
+
+                if let source = viz.source, !source.isEmpty {
+                    Text(source)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .lineLimit(2)
                 }
             }
-            .opacity(CoachVizBuild.slice(build, span: 0.2))
-
-            content
-
-            if let source = viz.source, !source.isEmpty {
-                Text(source)
-                    .font(CoachVizFont.micro)
-                    .foregroundColor(StrandPalette.textTertiary)
-                    .lineLimit(1)
-                    .opacity(CoachVizBuild.slice(build, delay: 0.8, span: 0.2))
-            }
         }
-        .padding(CoachVizMetric.spaceLG)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(StrandPalette.surfaceRaised)
-        .clipShape(RoundedRectangle(cornerRadius: CoachVizMetric.radiusMD, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: CoachVizMetric.radiusMD, style: .continuous)
-                .stroke(StrandPalette.hairline.opacity(0.5), lineWidth: 0.5)
-        )
         .accessibilityElement(children: .contain)
         .accessibilityLabel(viz.title)
     }
@@ -243,21 +176,27 @@ private struct CoachVizCard<Content: View>: View {
 
 // MARK: - Entry point
 
-/// Renders a validated `CoachViz` beneath an assistant answer.
+/// Renders a validated `CoachViz` beneath an assistant answer. A visual appears complete when it is ready:
+/// nothing is built up, swept or dissolved in.
 struct CoachVizView: View, Equatable {
     let viz: CoachViz
 
     var body: some View {
         CoachVizCard(viz: viz) {
             switch viz.layout {
-            case .chart: CoachVizChartBody(viz: viz)
-            case .progress: CoachVizProgressBody(viz: viz).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .timeline: CoachVizTimelineBody(viz: viz).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .facts: CoachVizFactsBody(facts: viz.facts ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .table: CoachVizTableBody(columns: viz.columns ?? [], rows: viz.rows ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .comparison: CoachVizComparisonBody(options: viz.options ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .list: CoachVizListBody(items: viz.items ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
-            case .alerts: CoachVizAlertsBody(alerts: viz.alerts ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .chart:
+                if let daily = CoachVizDailyChart(viz: viz) {
+                    daily
+                } else {
+                    CoachVizChartBody(viz: viz)
+                }
+            case .progress: CoachVizProgressBody(viz: viz)
+            case .timeline: CoachVizTimelineBody(viz: viz)
+            case .facts: CoachVizFactsBody(facts: viz.facts ?? [])
+            case .table: CoachVizTableBody(columns: viz.columns ?? [], rows: viz.rows ?? [])
+            case .comparison: CoachVizComparisonBody(options: viz.options ?? [])
+            case .list: CoachVizListBody(items: viz.items ?? [])
+            case .alerts: CoachVizAlertsBody(alerts: viz.alerts ?? [])
             case .unsupported: EmptyView()
             }
         }
@@ -266,143 +205,132 @@ struct CoachVizView: View, Equatable {
 
 // MARK: - Generating placeholder
 
-/// Placeholder the size of the visual it stands in for: the img-fx pixel mosaic (slowed under Reduce Motion).
-/// Falls back to a dot field with a slow accent sweep only when Metal is unavailable.
+/// Stands in for a visual while it is drawn and checked: the card it will land in, with the kit's static
+/// chart placeholder and one quiet line. Nothing moves; the visual replaces it when it is ready.
 struct CoachVizGeneratingView: View {
-    var label: String = "Generating"
-    var height: CGFloat = 220
-
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private let spacing: CGFloat = 18
-    private let sweepPeriod: Double = 2.6
+    var height: CGFloat = NoopMetrics.chartHeightSecondary
 
     var body: some View {
-        ZStack(alignment: .bottomLeading) {
-            if ImageFXMosaicView.isSupported {
-                ImageFXMosaicView()
-            } else if reduceMotion {
-                dotField(phase: 0.5, animated: false)
-            } else {
-                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                    let t = context.date.timeIntervalSinceReferenceDate
-                    let phase = (t.truncatingRemainder(dividingBy: sweepPeriod)) / sweepPeriod
-                    dotField(phase: phase, animated: true)
-                }
+        NoopCard {
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                Text("Drawing a visual…")
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                ChartPlaceholder(height: height)
             }
-
-            CoachShimmerLabel(text: label)
-                .padding(.horizontal, 10)
-                .padding(.vertical, 5)
-                .background(Capsule().fill(StrandPalette.surfaceOverlay))
-                .overlay(Capsule().stroke(StrandPalette.hairline.opacity(0.6), lineWidth: 0.5))
-                .padding(12)
         }
-        .frame(maxWidth: .infinity)
-        .frame(height: height)
-        .background(StrandPalette.surfaceRaised)
-        .clipShape(RoundedRectangle(cornerRadius: CoachVizMetric.radiusMD, style: .continuous))
-        .overlay(
-            RoundedRectangle(cornerRadius: CoachVizMetric.radiusMD, style: .continuous)
-                .stroke(StrandPalette.hairline.opacity(0.5), lineWidth: 0.5)
-        )
         .accessibilityElement(children: .ignore)
         .accessibilityLabel("Drawing a visual")
-        .accessibilityAddTraits(.updatesFrequently)
-    }
-
-    private func dotField(phase: Double, animated: Bool) -> some View {
-        Canvas { context, size in
-            let columns = Int(size.width / spacing) + 1
-            let rows = Int(size.height / spacing) + 1
-            let xOffset = (size.width - CGFloat(columns - 1) * spacing) / 2
-            let yOffset = (size.height - CGFloat(rows - 1) * spacing) / 2
-            // The sweep is a diagonal band travelling left to right past the card edges.
-            let skew: CGFloat = 0.55
-            let travel = size.width + size.height
-            let center = (phase * 1.5 - 0.25) * travel
-            let band = travel * 0.2
-
-            if animated {
-                // Soft accent wash that rides the same band, so the whole card shimmers, not just the dots.
-                var wash = Path()
-                wash.move(to: CGPoint(x: center - band, y: size.height))
-                wash.addLine(to: CGPoint(x: center + band, y: size.height))
-                wash.addLine(to: CGPoint(x: center + band - skew * size.height, y: 0))
-                wash.addLine(to: CGPoint(x: center - band - skew * size.height, y: 0))
-                wash.closeSubpath()
-                let mid = CGPoint(x: center - skew * size.height / 2, y: size.height / 2)
-                let t = band / (1 + skew * skew)
-                context.fill(
-                    wash,
-                    with: .linearGradient(
-                        Gradient(colors: [
-                            StrandPalette.accent.opacity(0),
-                            StrandPalette.accent.opacity(0.16),
-                            StrandPalette.accent.opacity(0)
-                        ]),
-                        startPoint: CGPoint(x: mid.x - t, y: mid.y + skew * t),
-                        endPoint: CGPoint(x: mid.x + t, y: mid.y - skew * t)
-                    )
-                )
-            }
-
-            for column in 0..<columns {
-                for row in 0..<rows {
-                    let x = xOffset + CGFloat(column) * spacing
-                    let y = yOffset + CGFloat(row) * spacing
-                    let along = x + (size.height - y) * skew
-                    let lift = animated ? max(0, 1 - abs(along - center) / band) : 0
-                    let eased = lift * lift * (3 - 2 * lift)
-                    let radius = 1.5 + eased * 1.6
-                    let dot = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
-                    let tint = StrandPalette.accent.opacity(0.24 + eased * 0.76)
-                    context.fill(Path(ellipseIn: dot), with: .color(tint))
-                }
-            }
-        }
-        .drawingGroup(opaque: false)
     }
 }
 
-private struct CoachShimmerLabel: View {
-    let text: String
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
+// MARK: - Daily charts (date axis)
+
+/// A line, area or single-series bar chart whose every x is a calendar day, drawn with the app's chart kit on
+/// a real date axis: a skipped day is a gap, not an evenly spaced category, and the scrub and axes are the
+/// same as on every metric page. Nil for any other visual, which keeps the category chart below.
+private struct CoachVizDailyChart: View {
+    let viz: CoachViz
+    private let series: [DailyLineChart.Series]
+    private let window: ClosedRange<Date>
+    private let isBar: Bool
+    private let unit: String?
+    private let axis: ChartValueAxis
+    @State private var selected: Date?
+
+    init?(viz: CoachViz) {
+        guard ["line", "area", "bar"].contains(viz.type), viz.horizontal != true else { return nil }
+        let pts = viz.points ?? []
+        guard pts.count >= 2 else { return nil }
+        var parsed: [(day: Date, value: Double, series: String)] = []
+        for p in pts {
+            guard let x = p.x, let day = ChartDay.date(forKey: x), p.y.isFinite else { return nil }
+            parsed.append((day, p.y, p.series ?? ""))
+        }
+        var names: [String] = []
+        for p in parsed where !names.contains(p.series) { names.append(p.series) }
+        if viz.type == "bar" && names.count > 1 { return nil }
+        let calendar = Calendar.current
+        self.series = names.enumerated().map { index, name in
+            // One point per day per series: the last one wins, as the category chart would draw it on top.
+            var byDay: [Date: Double] = [:]
+            for p in parsed where p.series == name { byDay[p.day] = p.value }
+            let points = byDay.map { DailyPoint(day: $0.key, value: $0.value) }.sorted { $0.day < $1.day }
+            let label = name.isEmpty ? (CoachVizAxisTitle.clean(viz.yLabel) ?? viz.title) : name
+            return DailyLineChart.Series(id: name.isEmpty ? "value" : name, name: label,
+                                         color: CoachVizPalette.color(index), points: points)
+        }
+        let days = parsed.map(\.day)
+        guard let first = days.min(), let last = days.max() else { return nil }
+        let end = calendar.dateInterval(of: .day, for: last)?.end ?? last
+        self.window = calendar.startOfDay(for: first)...end
+        self.viz = viz
+        self.isBar = viz.type == "bar"
+        let unit = CoachVizFormat.unit(from: viz.yLabel)
+        self.unit = unit
+        let values = parsed.map(\.value) + (viz.reference.map { [$0] } ?? [])
+        let hi = values.map(abs).max() ?? 1
+        let span = (values.max() ?? 0) - (values.min() ?? 0)
+        let whole = values.allSatisfy { $0 == $0.rounded() }
+        let format = whole || span >= 20 ? ChartValueAxis.integer : ChartValueAxis.decimals(1)
+        let minSpan = max(hi * 0.1, 1e-3)
+        let includeZero = viz.type != "line"
+        self.axis = ChartValueAxis(unit: unit, domain: .fitted(minSpan: minSpan, includeZero: includeZero),
+                                   format: format)
+    }
+
+    private var reference: ChartReference? {
+        viz.reference.map { ChartReference($0, label: CoachVizFormat.reading($0, unit: unit)) }
+    }
 
     var body: some View {
-        if reduceMotion {
-            label(highlight: 0.5)
-        } else {
-            TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
-                let t = context.date.timeIntervalSinceReferenceDate
-                label(highlight: (t.truncatingRemainder(dividingBy: 2.8)) / 2.8)
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            readout
+            if isBar, let only = series.first {
+                DailyBarChart(points: only.points, fill: .single(only.color), bin: .day, aggregation: .mean,
+                              reference: reference, legend: [], window: window, xStyle: .dayOfMonth, y: axis,
+                              selection: $selected, height: NoopMetrics.chartHeightSecondary + 40,
+                              accessibilityTitle: viz.title)
+            } else {
+                DailyLineChart(series: series, cadence: .daily, reference: reference,
+                               legend: series.count > 1 ? nil : [], window: window, xStyle: .dayOfMonth, y: axis,
+                               selection: $selected, height: NoopMetrics.chartHeightSecondary + 40,
+                               accessibilityTitle: viz.title)
             }
         }
     }
 
-    private func label(highlight: Double) -> some View {
-        Text(text)
-            .font(CoachVizFont.caption2)
-            .foregroundColor(.clear)
-            .overlay(
-                GeometryReader { proxy in
-                    let width = proxy.size.width
-                    LinearGradient(
-                        stops: [
-                            .init(color: StrandPalette.textTertiary, location: 0.0),
-                            .init(color: StrandPalette.textTertiary, location: 0.38),
-                            .init(color: StrandPalette.accent, location: 0.5),
-                            .init(color: StrandPalette.textTertiary, location: 0.62),
-                            .init(color: StrandPalette.textTertiary, location: 1.0)
-                        ],
-                        startPoint: .leading,
-                        endPoint: .trailing
-                    )
-                    .frame(width: width * 2.2)
-                    .offset(x: -width * 1.3 + width * 1.4 * highlight)
-                }
-                .mask(Text(text).font(CoachVizFont.caption2))
-            )
+    /// The selected day's values (the latest day's when nothing is selected), one line, fixed height.
+    private var readout: some View {
+        let calendar = Calendar.current
+        let day = selected ?? series.compactMap { $0.points.last?.day }.max()
+        let values: [(name: String, value: Double)] = day.map { d in
+            series.compactMap { s in
+                s.points.first { calendar.isDate($0.day, inSameDayAs: d) }.map { (s.name, $0.value) }
+            }
+        } ?? []
+        let text: String
+        if values.count == 1, let only = values.first {
+            text = CoachVizFormat.reading(only.value, unit: unit)
+        } else if values.isEmpty {
+            text = "—"
+        } else {
+            text = values.prefix(3).map { "\($0.name) \(CoachVizFormat.number($0.value))" }.joined(separator: " · ")
+        }
+        return HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+            Text(day.map { ReadoutContent.dateLine($0, period: .day) } ?? "")
+                .font(StrandFont.footnote)
+                .foregroundStyle(StrandPalette.textSecondary)
+                .lineLimit(1)
+            Spacer(minLength: NoopMetrics.space1)
+            Text(text)
+                .font(StrandFont.captionNumber)
+                .foregroundStyle(StrandPalette.textPrimary)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
+        }
+        .frame(minHeight: 18)
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -418,7 +346,6 @@ private struct CoachVizChartBody: View {
     private let yDomain: ClosedRange<Double>?
 
     @State private var selected: String?
-    @Environment(\.coachVizBuild) private var build
 
     struct IndexedPoint: Identifiable {
         let id: Int
@@ -504,16 +431,17 @@ private struct CoachVizChartBody: View {
             if let readout = readout {
                 HStack(alignment: .firstTextBaseline, spacing: CoachVizMetric.spaceSM) {
                     Text(readout.title)
-                        .font(CoachVizFont.caption)
-                        .foregroundColor(StrandPalette.textTertiary)
+                        .font(StrandFont.footnote)
+                        .foregroundColor(StrandPalette.textSecondary)
                         .lineLimit(1)
                     Spacer(minLength: CoachVizMetric.spaceXS)
                     Text(readout.value)
-                        .font(CoachVizFont.monoSmall)
-                        .foregroundColor(StrandPalette.accent)
-                        .monospacedDigit()
+                        .font(StrandFont.captionNumber)
+                        .foregroundColor(StrandPalette.textPrimary)
                         .lineLimit(1)
+                        .minimumScaleFactor(0.8)
                 }
+                .frame(minHeight: 18)
                 .accessibilityElement(children: .combine)
             }
 
@@ -537,12 +465,13 @@ private struct CoachVizChartBody: View {
                 heatmapLegend
             }
         }
+        .strandHaptic(.selection, trigger: selected)
     }
 
     private func referenceLegend(_ value: Double) -> some View {
         HStack(spacing: 6) {
             CoachVizDashLine()
-                .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+                .stroke(NaraChartStyle.referenceColor, style: NaraChartStyle.reference)
                 .frame(width: 18, height: 2)
             Text("Reference \(CoachVizFormat.reading(value, unit: unit))")
                 .font(CoachVizFont.caption2)
@@ -608,42 +537,26 @@ private struct CoachVizChartBody: View {
     private var chart: some View {
         switch viz.type {
         case "bar", "stacked_bar": barChart
-        case "line": lineChart(filled: false).modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
-        case "area": lineChart(filled: true).modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
-        case "pie": pieChart.mask(CoachVizSweep(progress: CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: 0.05, span: 0.95))))
-        case "scatter", "bubble": scatterChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
-        case "heatmap": heatmapChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
-        case "waterfall": waterfallChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
-        case "range": rangeChart.modifier(CoachVizWipe(axis: .horizontal, delay: 0.05, span: 0.95))
+        case "line": lineChart(filled: false)
+        case "area": lineChart(filled: true)
+        case "pie": pieChart
+        case "scatter", "bubble": scatterChart
+        case "heatmap": heatmapChart
+        case "waterfall": waterfallChart
+        case "range": rangeChart
         default: EmptyView()
         }
     }
 
-    private var goldFill: LinearGradient {
-        LinearGradient(
-            colors: [StrandPalette.accent.opacity(0.95), StrandPalette.accent.opacity(0.55)],
-            startPoint: .top,
-            endPoint: .bottom
-        )
-    }
+    /// Bars are one flat colour, as everywhere else in the app.
+    private var barFill: Color { StrandPalette.accent }
 
     private var barChart: some View {
         let stacked = viz.type == "stacked_bar"
         let horizontal = isHorizontalBars
-        let extent = barExtent(stacked: stacked)
         return Chart {
             ForEach(indexed) { item in
-                barMark(grown(item.point), horizontal: horizontal, stacked: stacked)
-            }
-            // While the bars grow, invisible marks at the final extremes keep the axis where it will end up.
-            if build < 1 {
-                if horizontal {
-                    RuleMark(x: .value(yTitle, extent.upperBound)).opacity(0)
-                    RuleMark(x: .value(yTitle, extent.lowerBound)).opacity(0)
-                } else {
-                    RuleMark(y: .value(yTitle, extent.upperBound)).opacity(0)
-                    RuleMark(y: .value(yTitle, extent.lowerBound)).opacity(0)
-                }
+                barMark(item.point, horizontal: horizontal, stacked: stacked)
             }
         }
         .chartForegroundStyleScale(domain: hasSeries ? seriesNames : [], range: seriesColors)
@@ -658,61 +571,33 @@ private struct CoachVizChartBody: View {
         .modifier(CoachVizSelection(enabled: isSelectable, selection: $selected))
     }
 
-    /// The lowest and highest edge any bar reaches, zero included.
-    private func barExtent(stacked: Bool) -> ClosedRange<Double> {
-        var high = 0.0, low = 0.0
-        if stacked {
-            var positive: [String: Double] = [:], negative: [String: Double] = [:]
-            for p in points {
-                let key = p.x ?? ""
-                if p.y >= 0 { positive[key, default: 0] += p.y } else { negative[key, default: 0] += p.y }
-            }
-            high = positive.values.max() ?? 0
-            low = negative.values.min() ?? 0
-        } else {
-            high = max(0, points.map(\.y).max() ?? 0)
-            low = min(0, points.map(\.y).min() ?? 0)
-        }
-        return low...max(high, low)
-    }
-
-    /// A bar part-way through growing: bars rise from the baseline one after another.
-    private func grown(_ p: CoachViz.Point) -> CoachViz.Point {
-        guard build < 1 else { return p }
-        let index = Double(labels.firstIndex(of: p.x ?? "") ?? 0)
-        let delay = 0.5 * index / Double(max(labels.count - 1, 1))
-        var q = p
-        q.y = p.y * CoachVizBuild.easeOut(CoachVizBuild.slice(build, delay: delay, span: 0.5))
-        return q
-    }
-
     @ChartContentBuilder
     private func barMark(_ p: CoachViz.Point, horizontal: Bool, stacked: Bool) -> some ChartContent {
         if horizontal {
             if hasSeries {
                 BarMark(x: .value(yTitle, p.y), y: .value("Category", p.x ?? ""))
                     .foregroundStyle(by: .value("Series", p.series ?? ""))
-                    .cornerRadius(3)
+                    .cornerRadius(NaraChartStyle.barCornerRadius)
             } else {
                 BarMark(x: .value(yTitle, p.y), y: .value("Category", p.x ?? ""))
-                    .foregroundStyle(goldFill)
-                    .cornerRadius(3)
+                    .foregroundStyle(barFill)
+                    .cornerRadius(NaraChartStyle.barCornerRadius)
             }
         } else if hasSeries {
             if stacked {
                 BarMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y))
                     .foregroundStyle(by: .value("Series", p.series ?? ""))
-                    .cornerRadius(2)
+                    .cornerRadius(NaraChartStyle.barCornerRadius)
             } else {
                 BarMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y))
                     .foregroundStyle(by: .value("Series", p.series ?? ""))
                     .position(by: .value("Series", p.series ?? ""))
-                    .cornerRadius(2)
+                    .cornerRadius(NaraChartStyle.barCornerRadius)
             }
         } else {
             BarMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y), width: .ratio(0.62))
-                .foregroundStyle(goldFill)
-                .cornerRadius(3)
+                .foregroundStyle(barFill)
+                .cornerRadius(NaraChartStyle.barCornerRadius)
         }
     }
 
@@ -723,12 +608,13 @@ private struct CoachVizChartBody: View {
             }
             if let reference = viz.reference {
                 RuleMark(y: .value("Reference", reference))
-                    .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    .foregroundStyle(Color.white.opacity(0.35))
+                    .lineStyle(NaraChartStyle.reference)
+                    .foregroundStyle(NaraChartStyle.referenceColor)
             }
             if let selected {
                 RuleMark(x: .value("Selected", selected))
-                    .foregroundStyle(StrandPalette.accent.opacity(0.35))
+                    .lineStyle(NaraChartStyle.selectionRule)
+                    .foregroundStyle(NaraChartStyle.selectionColor)
             }
         }
         .chartForegroundStyleScale(domain: hasSeries ? seriesNames : [], range: seriesColors)
@@ -745,34 +631,28 @@ private struct CoachVizChartBody: View {
         if hasSeries {
             LineMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y), series: .value("Series", seriesKey))
                 .foregroundStyle(by: .value("Series", seriesKey))
-                .lineStyle(StrokeStyle(lineWidth: 2.4, lineCap: .round, lineJoin: .round))
+                .lineStyle(NaraChartStyle.line)
                 .interpolationMethod(.monotone)
             if filled {
                 AreaMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y), series: .value("Series", seriesKey), stacking: .unstacked)
                     .foregroundStyle(by: .value("Series", seriesKey))
-                    .opacity(0.16)
+                    .opacity(NaraChartStyle.bandOpacity)
                     .interpolationMethod(.monotone)
             }
         } else {
             LineMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y))
                 .foregroundStyle(StrandPalette.accent)
-                .lineStyle(StrokeStyle(lineWidth: 2.6, lineCap: .round, lineJoin: .round))
+                .lineStyle(NaraChartStyle.line)
                 .interpolationMethod(.monotone)
             if filled {
                 AreaMark(x: .value("Category", p.x ?? ""), yStart: .value("Floor", 0), yEnd: .value(yTitle, p.y))
-                    .foregroundStyle(
-                        LinearGradient(
-                            colors: [StrandPalette.accent.opacity(0.30), StrandPalette.accent.opacity(0.0)],
-                            startPoint: .top,
-                            endPoint: .bottom
-                        )
-                    )
+                    .foregroundStyle(StrandPalette.accent.opacity(NaraChartStyle.bandOpacity))
                     .interpolationMethod(.monotone)
             }
             if points.count <= 14 || p.x == selected {
                 PointMark(x: .value("Category", p.x ?? ""), y: .value(yTitle, p.y))
                     .foregroundStyle(StrandPalette.accent)
-                    .symbolSize(p.x == selected ? 70 : 28)
+                    .symbolSize(p.x == selected ? NaraChartStyle.selectedPointSize : NaraChartStyle.pointSize)
             }
         }
     }
@@ -866,12 +746,12 @@ private struct CoachVizChartBody: View {
                 height: .ratio(0.94)
             )
             .foregroundStyle(by: .value("Value", p.y))
-            .cornerRadius(3)
+            .cornerRadius(NaraChartStyle.barCornerRadius)
             .annotation(position: .overlay) {
                 if showValues {
                     Text(CoachVizFormat.number(p.y))
                         .font(CoachVizFont.micro)
-                        .foregroundColor(high > low && (p.y - low) / (high - low) > 0.55 ? .black.opacity(0.8) : StrandPalette.textSecondary)
+                        .foregroundColor(high > low && (p.y - low) / (high - low) > 0.55 ? StrandPalette.goldDeepText : StrandPalette.textSecondary)
                         .monospacedDigit()
                         .minimumScaleFactor(0.6)
                         .lineLimit(1)
@@ -893,7 +773,7 @@ private struct CoachVizChartBody: View {
                 width: .ratio(0.62)
             )
             .foregroundStyle(color(for: step.kind))
-            .cornerRadius(3)
+            .cornerRadius(NaraChartStyle.barCornerRadius)
         }
         .chartLegend(.hidden)
         .modifier(CoachVizZeroBaseline(horizontal: false))
@@ -926,7 +806,8 @@ private struct CoachVizChartBody: View {
             }
             if p.x == selected {
                 RuleMark(x: .value("Selected", p.x ?? ""))
-                    .foregroundStyle(StrandPalette.accent.opacity(0.3))
+                    .lineStyle(NaraChartStyle.selectionRule)
+                    .foregroundStyle(NaraChartStyle.selectionColor)
             }
         }
         .chartLegend(.hidden)
@@ -950,14 +831,13 @@ private struct CoachVizChartBody: View {
     @AxisContentBuilder
     private func categoryAxis() -> some AxisContent {
         AxisMarks(values: tickLabels) { value in
-            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
-                .foregroundStyle(Color.white.opacity(0.06))
-            AxisTick().foregroundStyle(Color.white.opacity(0.22))
+            AxisGridLine(stroke: NaraChartStyle.grid)
+                .foregroundStyle(NaraChartStyle.gridColor)
             AxisValueLabel(anchor: .top) {
                 if let label = value.as(String.self) {
                     Text(label)
-                        .font(tickLabels.count > 5 && !isTimeAxis ? CoachVizFont.micro : CoachVizFont.caption2)
-                        .foregroundStyle(StrandPalette.textTertiary)
+                        .font(NaraChartStyle.axisFont)
+                        .foregroundStyle(NaraChartStyle.axisColor)
                         .lineLimit(isTimeAxis ? 1 : 2)
                         .multilineTextAlignment(.center)
                         .minimumScaleFactor(0.75)
@@ -986,14 +866,13 @@ private struct CoachVizChartBody: View {
     @AxisContentBuilder
     private func valueAxis(_ position: AxisMarkPosition) -> some AxisContent {
         AxisMarks(position: position, values: .automatic(desiredCount: 4)) { value in
-            AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
-                .foregroundStyle(Color.white.opacity(0.08))
+            AxisGridLine(stroke: NaraChartStyle.grid)
+                .foregroundStyle(NaraChartStyle.gridColor)
             AxisValueLabel {
                 if let number = value.as(Double.self) {
                     Text(CoachVizFormat.number(number))
-                        .font(CoachVizFont.caption2)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .monospacedDigit()
+                        .font(NaraChartStyle.axisFont)
+                        .foregroundStyle(NaraChartStyle.axisColor)
                 }
             }
         }
@@ -1027,8 +906,8 @@ private struct CoachVizAxisTitles: ViewModifier {
     private func title(_ text: String?) -> some View {
         if let text {
             Text(text)
-                .font(CoachVizFont.caption2.weight(.semibold))
-                .foregroundStyle(StrandPalette.textSecondary)
+                .font(NaraChartStyle.unitFont)
+                .foregroundStyle(NaraChartStyle.axisColor)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
@@ -1206,7 +1085,7 @@ private struct CoachVizProgressBody: View {
                     }
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.08))
+                            Capsule().fill(StrandPalette.surfaceInset)
                             Capsule()
                                 .fill(ratio >= 1 ? StrandPalette.statusPositive : StrandPalette.accent)
                                 .frame(width: max(6, proxy.size.width * min(max(ratio, 0), 1)))
@@ -1264,7 +1143,7 @@ private struct CoachVizTimelineBody: View {
         .chartLegend(groups.count > 1 && !(groups.first?.isEmpty ?? true) ? .visible : .hidden)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3)).foregroundStyle(Color.white.opacity(0.08))
+                AxisGridLine(stroke: NaraChartStyle.grid).foregroundStyle(NaraChartStyle.gridColor)
                 AxisValueLabel(format: .dateTime.month(.abbreviated).day(), anchor: .top)
                     .font(CoachVizFont.caption2)
                     .foregroundStyle(StrandPalette.textTertiary)
@@ -1301,7 +1180,7 @@ private struct CoachVizTimelineBody: View {
                     VStack(alignment: .leading, spacing: 2) {
                         Text(displayDate(task.start))
                             .font(CoachVizFont.caption2)
-                            .foregroundColor(StrandPalette.accent)
+                            .foregroundColor(StrandPalette.textSecondary)
                         Text(task.name)
                             .font(CoachVizFont.bodySmall)
                             .foregroundColor(StrandPalette.textPrimary)
@@ -1370,7 +1249,7 @@ private struct CoachVizTableBody: View {
         .clipShape(RoundedRectangle(cornerRadius: CoachVizMetric.radiusSM, style: .continuous))
         .overlay(
             RoundedRectangle(cornerRadius: CoachVizMetric.radiusSM, style: .continuous)
-                .stroke(StrandPalette.hairline.opacity(0.4), lineWidth: 0.5)
+                .stroke(StrandPalette.hairline, lineWidth: NoopMetrics.hairlineWidth)
         )
     }
 
@@ -1379,7 +1258,7 @@ private struct CoachVizTableBody: View {
             ForEach(Array(cells.enumerated()), id: \.offset) { index, cell in
                 Text(cell)
                     .font(isHeader ? CoachVizFont.caption : CoachVizFont.caption2)
-                    .foregroundColor(isHeader ? StrandPalette.accent : (index == 0 ? StrandPalette.textPrimary : StrandPalette.textSecondary))
+                    .foregroundColor(isHeader ? StrandPalette.textSecondary : (index == 0 ? StrandPalette.textPrimary : StrandPalette.textSecondary))
                     .frame(maxWidth: .infinity, alignment: index == 0 ? .leading : .trailing)
                     .multilineTextAlignment(index == 0 ? .leading : .trailing)
                     .fixedSize(horizontal: false, vertical: true)
@@ -1387,7 +1266,7 @@ private struct CoachVizTableBody: View {
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
-        .background(isHeader ? StrandPalette.accent.opacity(0.10) : (shaded ? StrandPalette.surfaceInset : Color.clear))
+        .background(isHeader || shaded ? StrandPalette.surfaceInset : Color.clear)
     }
 }
 
@@ -1406,19 +1285,14 @@ private struct CoachVizComparisonBody: View {
                             .lineLimit(2)
                         Spacer(minLength: 2)
                         if let badge = option.badge, !badge.isEmpty {
-                            Text(badge)
-                                .font(CoachVizFont.micro)
-                                .foregroundColor(StrandPalette.accent)
-                                .padding(.horizontal, 6)
-                                .padding(.vertical, 2)
-                                .background(Capsule().fill(StrandPalette.accent.opacity(0.14)))
+                            StatePill(LocalizedStringKey(badge), tone: .neutral, showsDot: false)
                         }
                     }
                     ForEach(option.facts) { fact in
                         VStack(alignment: .leading, spacing: 1) {
                             Text(fact.value)
                                 .font(CoachVizFont.bodySmallMedium)
-                                .foregroundColor(StrandPalette.accent)
+                                .foregroundColor(StrandPalette.textPrimary)
                                 .monospacedDigit()
                                 .lineLimit(1)
                                 .minimumScaleFactor(0.75)
@@ -1449,9 +1323,9 @@ private struct CoachVizListBody: View {
                 HStack(alignment: .top, spacing: 10) {
                     Text("\(index + 1)")
                         .font(CoachVizFont.micro)
-                        .foregroundColor(StrandPalette.accent)
-                        .frame(width: 20, height: 20)
-                        .background(Circle().fill(StrandPalette.accent.opacity(0.14)))
+                        .foregroundColor(StrandPalette.textSecondary)
+                        .frame(width: 22, height: 22)
+                        .background(Circle().fill(StrandPalette.surfaceInset))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(item.title)
                             .font(CoachVizFont.bodySmall)
@@ -1488,7 +1362,7 @@ private struct CoachVizAlertsBody: View {
             ForEach(alerts) { alert in
                 HStack(alignment: .top, spacing: 10) {
                     Image(systemName: CoachVizPalette.toneIcon(alert.tone))
-                        .font(.system(size: 14, weight: .semibold))
+                        .font(StrandFont.icon(.inline))
                         .foregroundColor(CoachVizPalette.tone(alert.tone))
                     VStack(alignment: .leading, spacing: 2) {
                         Text(alert.title)
@@ -1505,7 +1379,7 @@ private struct CoachVizAlertsBody: View {
                     Spacer(minLength: 0)
                 }
                 .padding(10)
-                .background(CoachVizPalette.tone(alert.tone).opacity(0.10))
+                .background(StrandPalette.surfaceInset)
                 .clipShape(RoundedRectangle(cornerRadius: CoachVizMetric.radiusSM, style: .continuous))
                 .accessibilityElement(children: .combine)
             }
