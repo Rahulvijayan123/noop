@@ -11,40 +11,56 @@ struct ExposureEventListView: View {
 
     @StateObject private var model = ExposureEventListModel()
     @State private var editing: EditorTarget?
+    /// The event a context-menu Remove is waiting to confirm.
+    @State private var removing: PhysiologyContext.ExposureEvent?
 
     init(window: PhysiologyContext.Interval) {
         self.window = window
     }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Recorded events")
-            NoopCard {
-                VStack(alignment: .leading, spacing: 10) {
-                    if model.events.isEmpty {
-                        Text(model.loaded ? "Nothing recorded for this time. Not recorded means unknown, not that it didn't happen."
-                                          : "Loading…")
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        ForEach(model.events, id: \.eventId) { event in
-                            row(event)
-                            if event.eventId != model.events.last?.eventId {
-                                Divider().overlay(StrandPalette.hairline)
-                            }
-                        }
+        ScreenScaffold(title: "Recorded events", titleDisplay: .navigationBar) {
+            NoopListSection(footer: model.loaded && model.events.isEmpty
+                            ? "Not recorded means unknown, not that it didn't happen." : nil) {
+                if !model.loaded {
+                    // The real row layout, redacted, so the card does not grow when the events land.
+                    ForEach(0..<2, id: \.self) { index in
+                        if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                        ExposureEventRow(symbol: "circle.dashed", title: "Medication", label: nil,
+                                         detail: "Oct 7, 2:05 PM · 200 mg", showsChevron: false)
                     }
-                    Divider().overlay(StrandPalette.hairline)
-                    Button {
-                        editing = EditorTarget(event: nil)
-                    } label: {
-                        Label("Add event", systemImage: "plus")
-                            .font(StrandFont.subhead)
+                    .loadingPlaceholder(true)
+                } else if model.events.isEmpty {
+                    Text("Nothing recorded for this time.")
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
+                } else {
+                    ForEach(Array(model.events.enumerated()), id: \.element.eventId) { index, event in
+                        if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
+                        row(event)
                     }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(StrandPalette.accent)
                 }
+                NoopListDivider(leadingInset: 0)
+                Button {
+                    editing = EditorTarget(event: nil)
+                } label: {
+                    HStack(spacing: NoopMetrics.space3) {
+                        Image(systemName: "plus")
+                            .font(StrandFont.icon(.row))
+                            .frame(width: 28)
+                            .accessibilityHidden(true)
+                        Text("Add event")
+                            .font(StrandFont.body)
+                        Spacer(minLength: 0)
+                    }
+                    .foregroundStyle(StrandPalette.accent)
+                    .padding(.horizontal, NoopMetrics.cardPadding)
+                    .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
             }
         }
         .task(id: window) { await model.load(window: window) }
@@ -53,6 +69,17 @@ struct ExposureEventListView: View {
                 editing = nil
                 Task { await model.load(window: window) }
             }
+            #if os(iOS)
+            .noopSheetPresentation(largeFirst: true)
+            #endif
+        }
+        .confirmationDialog("Remove this event?", isPresented: Binding(
+            get: { removing != nil }, set: { if !$0 { removing = nil } }
+        ), titleVisibility: .visible, presenting: removing) { event in
+            Button("Remove", role: .destructive) {
+                Task { await model.remove(event, window: window) }
+            }
+            Button("Cancel", role: .cancel) {}
         }
     }
 
@@ -66,40 +93,18 @@ struct ExposureEventListView: View {
     @ViewBuilder
     private func row(_ event: PhysiologyContext.ExposureEvent) -> some View {
         let editable = ExposureEventPresentation.isEditable(event)
-        let content = HStack(alignment: .firstTextBaseline, spacing: 8) {
-            VStack(alignment: .leading, spacing: 2) {
-                Text(event.kind.title)
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                if let label = ExposureEventPresentation.label(event) {
-                    Text(label)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
-                Text(ExposureEventPresentation.detail(event))
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-            }
-            Spacer(minLength: 8)
-            if editable {
-                Image(systemName: "chevron.right")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .accessibilityHidden(true)
-            }
-        }
-        .contentShape(Rectangle())
+        let content = ExposureEventRow(symbol: ExposureEventPresentation.symbol(event.kind),
+                                       title: event.kind.title,
+                                       label: ExposureEventPresentation.label(event),
+                                       detail: ExposureEventPresentation.detail(event),
+                                       showsChevron: editable)
         if editable {
             Button { editing = EditorTarget(event: event) } label: { content }
                 .buttonStyle(.plain)
                 .accessibilityHint("Edit")
                 .contextMenu {
                     Button("Edit") { editing = EditorTarget(event: event) }
-                    Button("Remove", role: .destructive) {
-                        Task { await model.remove(event, window: window) }
-                    }
+                    Button("Remove", role: .destructive) { removing = event }
                 }
         } else {
             content
@@ -109,6 +114,54 @@ struct ExposureEventListView: View {
     struct EditorTarget: Identifiable {
         let id = UUID()
         let event: PhysiologyContext.ExposureEvent?
+    }
+}
+
+/// One recorded event: the kind's icon, the kind, the person's own label, and what was recorded about its
+/// time and amount (several short facts, so the detail may wrap). Laid out like `NoopListRow`.
+private struct ExposureEventRow: View {
+    let symbol: String
+    let title: String
+    let label: String?
+    let detail: String
+    let showsChevron: Bool
+
+    var body: some View {
+        HStack(alignment: .center, spacing: NoopMetrics.space3) {
+            Image(systemName: symbol)
+                .font(StrandFont.icon(.row))
+                .foregroundStyle(StrandPalette.textSecondary)
+                .frame(width: 28)
+                .accessibilityHidden(true)
+            VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                Text(verbatim: title)
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1)
+                if let label {
+                    Text(verbatim: label)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                Text(verbatim: detail)
+                    .font(StrandFont.footnote)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            Spacer(minLength: NoopMetrics.space2)
+            if showsChevron {
+                Image(systemName: "chevron.right")
+                    .font(StrandFont.icon(.inline))
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .accessibilityHidden(true)
+            }
+        }
+        .padding(.horizontal, NoopMetrics.cardPadding)
+        .padding(.vertical, NoopMetrics.space2)
+        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
+        .contentShape(Rectangle())
+        .accessibilityElement(children: .combine)
     }
 }
 
@@ -139,6 +192,21 @@ enum ExposureEventPresentation {
     /// Journal answers are changed in the journal, imported entries in the app they came from.
     static func isEditable(_ e: PhysiologyContext.ExposureEvent) -> Bool {
         e.source == .userEntered
+    }
+
+    /// The row icon for a kind.
+    static func symbol(_ kind: PhysiologyContext.ExposureKind) -> String {
+        switch kind {
+        case .medication: return "pills"
+        case .supplement: return "leaf"
+        case .caffeine: return "cup.and.saucer"
+        case .alcohol: return "wineglass"
+        case .meal: return "fork.knife"
+        case .heat: return "thermometer.sun"
+        case .travel: return "airplane"
+        case .symptom: return "bandage"
+        case .other: return "circle.dashed"
+        }
     }
 
     /// The label when it says more than the kind does.

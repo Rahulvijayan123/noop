@@ -745,6 +745,12 @@ enum DemoScreens {
         case "weeklydigest": return AnyView(WeeklyDigestView())
         case "rhythmdemo": return AnyView(RhythmDemoScreen())
         case "labmarker": return AnyView(LabMarkerDemoScreen())
+        // The event editors (Strand/Screens/EventsDemoScreens.swift). `treatment` takes
+        // `--demo-treatment-sheet start|dose|end|edit` to open one of its sheets.
+        case "treatment": return AnyView(TreatmentCaregiverView())
+        case "exposurelist": return AnyView(EventsDemoScreens.exposureList())
+        case "exposureeditor": return AnyView(EventsDemoScreens.exposureEditor())
+        case "markereditor": return AnyView(EventsDemoScreens.markerEditor())
         default:         return nil
         }
     }

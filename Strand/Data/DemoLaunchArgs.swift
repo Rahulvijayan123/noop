@@ -40,8 +40,22 @@ enum DemoLaunch {
         case "layer1": return .layer1
         case "baselineCharts": return .baselineCharts
         case "pipelineDiagnostics": return .pipelineDiagnostics
+        // The Events tab's pages, against the sample events the tab shows: `event:first` (the event the tab
+        // features), `event:<id>` (`event:ev-1`), `allEvents`, `recoveryDetails:first`.
+        case "event": return sampleEvent(parts.count > 1 ? parts[1] : nil).map { .event($0, history: HealthEvent.sample) }
+        case "allEvents": return .allEvents(HealthEvent.sample)
+        case "recoveryDetails":
+            return sampleEvent(parts.count > 1 ? parts[1] : nil).map { .recoveryDetails($0, history: HealthEvent.sample) }
         default: return nil
         }
+    }
+
+    /// `first` is the newest sample event with physiology (the one the Events tab features); anything else
+    /// is a sample event id.
+    private static func sampleEvent(_ name: String?) -> HealthEvent? {
+        let events = HealthEvent.sample
+        guard let name, name != "first" else { return events.filter { $0.physiology != nil }.max { $0.date < $1.date } }
+        return events.first { $0.id == name }
     }
 
     /// `--demo-load-delay S`: every `Repository.refresh` waits until S seconds after launch, so the screens'

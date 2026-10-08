@@ -4,6 +4,11 @@ import StrandAnalytics
 import WhoopStore
 
 /// Caregiver tab: add / edit / calendar-log treatments. Shares `BaselineStore` with Baseline.
+///
+/// Top to bottom: the month calendar of logged days, the open course with its two actions (or the button
+/// that starts one), the watch list, the log (newest first; a row opens its editor), the Baseline link and
+/// the About card. Starting a treatment, logging a dose, ending a course and editing a log entry are the
+/// shared editor sheets (NavigationStack, Form, Cancel and the action in the toolbar).
 struct TreatmentCaregiverView: View {
     @EnvironmentObject var repo: Repository
     @EnvironmentObject var store: BaselineStore
@@ -20,32 +25,27 @@ struct TreatmentCaregiverView: View {
     @State private var formPrimaries: Set<LBSeries> = []
     @State private var formNotes = ""
     @State private var formSchedule: LBMedSchedule = .daily
+    @State private var showingStart = false
 
     private var days: [DailyMetric] { store.displayDays(from: repo.days) }
 
     var body: some View {
         ScreenScaffold(
             title: "Treatment",
-            subtitle: "Log a start to freeze non-treatment usual. Baseline reads this course.",
-            onRefresh: { await repo.refresh(); store.rescore(days: days) },
-            topBackground: liquidScaffoldSky()
+            titleDisplay: .navigationBar,
+            onRefresh: { await repo.refresh(); store.rescore(days: days) }
         ) {
-            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                ViewThatFits(in: .horizontal) {
-                    HStack(alignment: .top, spacing: NoopMetrics.sectionGap) {
-                        calendarCard
-                            .frame(width: 260)
-                        formAndLog
-                            .frame(maxWidth: .infinity, alignment: .leading)
-                    }
-                    VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-                        calendarCard
-                        formAndLog
-                    }
+            ViewThatFits(in: .horizontal) {
+                HStack(alignment: .top, spacing: NoopMetrics.sectionGap) {
+                    calendarCard
+                        .frame(width: 260)
+                    formAndLog
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                Text("Events stay on this device. Open any past day to edit it.")
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(StrandPalette.textTertiary)
+                VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                    calendarCard
+                    formAndLog
+                }
             }
         }
         .onAppear {
@@ -60,6 +60,10 @@ struct TreatmentCaregiverView: View {
                 formDay = selected
             }
             store.rescore(days: tape)
+            #if DEBUG
+            DemoTreatmentSeeder.seedIfRequested(into: store, days: tape)
+            openDemoSheetIfRequested()
+            #endif
         }
         .sheet(isPresented: Binding(
             get: { store.editingEventIndex != nil },
@@ -84,28 +88,19 @@ struct TreatmentCaregiverView: View {
                 .noopSheetPresentation(largeFirst: true)
                 #endif
         }
+        .sheet(isPresented: $showingStart) {
+            startSheet
+                #if os(iOS)
+                .noopSheetPresentation(largeFirst: true)
+                #endif
+        }
     }
 
     private var calendarCard: some View {
         NoopCard {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    Button { shiftMonth(-1) } label: {
-                        Image(systemName: "chevron.left")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(StrandPalette.accent)
-                    Spacer()
-                    Text(TreatmentStamp.monthTitle(month))
-                        .font(StrandFont.headline)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer()
-                    Button { shiftMonth(1) } label: {
-                        Image(systemName: "chevron.right")
-                    }
-                    .buttonStyle(.plain)
-                    .foregroundStyle(StrandPalette.accent)
-                }
+            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                PeriodStepper(title: TreatmentStamp.monthTitle(month), canGoBack: true, canGoForward: true,
+                              onBack: { shiftMonth(-1) }, onForward: { shiftMonth(1) })
                 TreatmentMonthGrid(month: month, selectedDay: selectedDay,
                                    markedDays: store.eventDays) { day in
                     selectedDay = day
@@ -119,311 +114,266 @@ struct TreatmentCaregiverView: View {
 
     private var formAndLog: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
-            baselineBridge
-            addForm
             if store.activeStart != nil {
-                activeCourseRow
-                watchListCard
+                activeCourseCard
             }
-            logCard
+            NoopButton("Start a treatment", systemImage: "plus",
+                       kind: store.activeStart == nil ? .primary : .secondary, fullWidth: true) {
+                showingStart = true
+            }
+            if store.activeStart != nil {
+                watchListSection
+            }
+            logSection
+            baselineLink
+            AboutDisclosure(paragraphs: [
+                String(localized: "Starting a treatment sets your usual without it from the nights before its start time. Baseline then reads the course against that usual."),
+                String(localized: "The watch list is ranked by how solid each usual is today (its trust and nights), not by how much it moved after the start. Unpinned series stay on Baseline as exploratory."),
+                String(localized: "Treatment logs stay on this device."),
+            ])
         }
     }
 
-    private var baselineBridge: some View {
-        NoopCard {
+    private var baselineLink: some View {
+        NoopListSection {
             Button { router.openBaseline() } label: {
-                HStack(alignment: .center, spacing: 12) {
-                    Image(systemName: "rectangle.split.2x1")
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.accent)
-                        .frame(width: 22)
-                        .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Baseline")
-                            .font(StrandFont.subhead)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Text("Read this course’s usuals, TRUST, and nights outside range.")
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textTertiary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-                    Spacer(minLength: 8)
-                    Text("Open")
-                        .font(StrandFont.caption.weight(.semibold))
-                        .foregroundStyle(StrandPalette.accent)
-                    Image(systemName: "chevron.right")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .accessibilityHidden(true)
-                }
+                NoopListRow(icon: "rectangle.split.2x1", title: "Baseline")
             }
-            .buttonStyle(.plain)
             .accessibilityLabel("Open Baseline")
         }
+        .buttonStyle(.plain)
     }
 
-    private var addForm: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 12) {
-                Text("Start a treatment")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("Nights before this clock time freeze the expected path without treatment. You can add another course after one has ended.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                TextField("Treatment name", text: $formName)
-                    .textFieldStyle(.roundedBorder)
-                Picker("Kind", selection: $formKind) {
-                    ForEach(LBTreatmentKind.allCases, id: \.self) { kind in
-                        Text(kind.rawValue.replacingOccurrences(of: "_", with: " ")).tag(kind)
+    /// The start form, as a sheet: the longest block on the page and used once per course.
+    private var startSheet: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    LabeledContent("Name") {
+                        TextField("Treatment name", text: $formName)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Picker("Kind", selection: $formKind) {
+                        ForEach(LBTreatmentKind.allCases, id: \.self) { kind in
+                            Text(kind.displayLabel).tag(kind)
+                        }
+                    }
+                    LabeledContent("Dose") {
+                        TextField("Optional", text: $formDose)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Picker("How you take it", selection: $formSchedule) {
+                        ForEach(LBMedSchedule.allCases, id: \.self) { sched in
+                            Text(sched.displayLabel).tag(sched)
+                        }
                     }
                 }
-                TextField("Dose (optional)", text: $formDose)
-                    .textFieldStyle(.roundedBorder)
-                Picker("How you take it", selection: $formSchedule) {
-                    ForEach(LBMedSchedule.allCases, id: \.self) { sched in
-                        Text(sched.displayLabel).tag(sched)
-                    }
+                .eventEditorRow()
+                Section {
+                    DatePicker("Start day", selection: $formDay, displayedComponents: .date)
+                    DatePicker("Clock time", selection: $formTime, displayedComponents: .hourAndMinute)
+                } footer: {
+                    Text("Nights before this time set your usual without treatment.")
                 }
-                DatePicker("Start day", selection: $formDay, displayedComponents: .date)
-                DatePicker("Clock time", selection: $formTime, displayedComponents: .hourAndMinute)
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("When I expect it to start working")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
+                .eventEditorRow()
+                Section {
                     Stepper(value: $formOnset, in: 1...60) {
-                        Text("\(formOnset) days")
-                            .font(StrandFont.captionNumber)
-                            .monospacedDigit()
+                        Text("Expected onset: \(formOnset) days")
                     }
-                }
-                VStack(alignment: .leading, spacing: 6) {
-                    Text("If I stop, how long until I expect it out of my system")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .fixedSize(horizontal: false, vertical: true)
                     Stepper(value: $formWashout, in: 1...60) {
-                        Text("\(formWashout) days")
-                            .font(StrandFont.captionNumber)
-                            .monospacedDigit()
+                        Text("Expected washout: \(formWashout) days")
+                    }
+                    LabeledContent("Notes") {
+                        TextField("From the clinic or label", text: $formNotes)
+                            .multilineTextAlignment(.trailing)
                     }
                 }
-                TextField("Notes from clinic / label (optional)", text: $formNotes)
-                    .textFieldStyle(.roundedBorder)
-                Text("What to watch (optional)")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                Text("You don’t need to know which biometric matters. Leave this blank and we’ll watch the three series with the most solid usuals at the start — ranked by how complete and stable the tape is, not by how much they moved after the drug.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textTertiary)
-                    .fixedSize(horizontal: false, vertical: true)
-                primaryPicker
-                NoopButton("Start treatment and freeze usual", systemImage: "plus") {
-                    let stamp = TreatmentStamp.split(day: formDay, time: formTime)
-                    store.logStart(name: formName.trimmingCharacters(in: .whitespaces),
-                                   dose: formDose.isEmpty ? nil : formDose,
-                                   civilDay: stamp.day, clockTime: stamp.clock,
-                                   enteredBy: .caregiver,
-                                   kind: formKind, days: days,
-                                   onsetDays: formOnset, washoutDays: formWashout,
-                                   primarySeries: Array(formPrimaries),
-                                   notes: formNotes.isEmpty ? nil : formNotes,
-                                   schedule: formSchedule)
-                    selectedDay = stamp.day
-                    formName = ""
-                    formDose = ""
-                    formNotes = ""
-                    formPrimaries = []
+                .eventEditorRow()
+                Section {
+                    primaryPicker
+                } header: {
+                    Text("Watch")
+                } footer: {
+                    Text("Optional. Leave blank and Nara watches the three steadiest.")
                 }
-                .disabled(formName.trimmingCharacters(in: .whitespaces).isEmpty)
+                .eventEditorRow()
+            }
+            .eventEditorForm()
+            .navigationTitle("Start a treatment")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { showingStart = false }
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("Save") {
+                        startTreatment()
+                        showingStart = false
+                    }
+                    .disabled(formName.trimmingCharacters(in: .whitespaces).isEmpty)
+                }
             }
         }
+        #if os(macOS)
+        .frame(minWidth: NoopMetrics.editorSheetMinWidth, minHeight: NoopMetrics.editorSheetMinHeight)
+        #endif
+    }
+
+    /// Logs the start exactly as the inline form did, then clears the form.
+    private func startTreatment() {
+        let stamp = TreatmentStamp.split(day: formDay, time: formTime)
+        store.logStart(name: formName.trimmingCharacters(in: .whitespaces),
+                       dose: formDose.isEmpty ? nil : formDose,
+                       civilDay: stamp.day, clockTime: stamp.clock,
+                       enteredBy: .caregiver,
+                       kind: formKind, days: days,
+                       onsetDays: formOnset, washoutDays: formWashout,
+                       primarySeries: Array(formPrimaries),
+                       notes: formNotes.isEmpty ? nil : formNotes,
+                       schedule: formSchedule)
+        selectedDay = stamp.day
+        formName = ""
+        formDose = ""
+        formNotes = ""
+        formPrimaries = []
     }
 
     private var primaryPicker: some View {
         let options = store.displayedSeries
-        return VStack(alignment: .leading, spacing: 6) {
-            ForEach(options, id: \.rawValue) { s in
-                let on = formPrimaries.contains(s)
-                Button {
-                    if on {
-                        formPrimaries.remove(s)
-                    } else if formPrimaries.count < 3 {
-                        formPrimaries.insert(s)
-                    }
-                } label: {
-                    HStack {
-                        Text(store.shortTitle(for: s))
-                            .font(StrandFont.caption)
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        Spacer()
-                        Image(systemName: on ? "checkmark.circle.fill" : "circle")
-                            .foregroundStyle(on ? StrandPalette.accent : StrandPalette.textTertiary)
-                    }
+        return ForEach(options, id: \.rawValue) { s in
+            let on = formPrimaries.contains(s)
+            Button {
+                if on {
+                    formPrimaries.remove(s)
+                } else if formPrimaries.count < 3 {
+                    formPrimaries.insert(s)
                 }
-                .buttonStyle(.plain)
+            } label: {
+                HStack {
+                    Text(store.shortTitle(for: s))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer()
+                    Image(systemName: on ? "checkmark.circle.fill" : "circle")
+                        .foregroundStyle(on ? StrandPalette.accent : StrandPalette.textTertiary)
+                }
+                .contentShape(Rectangle())
             }
+            .buttonStyle(.plain)
         }
     }
 
-    private var watchListCard: some View {
-        NoopCard {
-            VStack(alignment: .leading, spacing: 10) {
-                Text("Watch list")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Text("Ranked by how solid the usual is today (TRUST and nights), not by who moved after the start. Pin up to three. Unpinned series stay on Baseline as exploratory.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .fixedSize(horizontal: false, vertical: true)
-                ForEach(store.watchCandidates) { row in
+    private var watchListSection: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Watch list", trailing: String(localized: "Pin up to three"))
+            NoopListSection {
+                ForEach(Array(store.watchCandidates.enumerated()), id: \.element.id) { index, row in
+                    if index > 0 { NoopListDivider(leadingInset: NoopListDivider.iconRowInset) }
                     Button {
                         store.toggleWatch(row.series, days: days)
                     } label: {
-                        HStack(spacing: 10) {
-                            Image(systemName: row.pinned ? "pin.fill" : "pin")
-                                .foregroundStyle(row.pinned ? StrandPalette.accent : StrandPalette.textTertiary)
-                                .frame(width: 18)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(store.shortTitle(for: row.series))
-                                    .font(StrandFont.subhead)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                Text(row.established
-                                     ? "Usual established · TRUST \(row.trust)%"
-                                     : "Still building · TRUST \(row.trust)%")
-                                    .font(StrandFont.caption)
-                                    .foregroundStyle(StrandPalette.textTertiary)
-                            }
-                            Spacer()
-                            if row.pinned {
-                                Text("WATCHING")
-                                    .font(StrandFont.caption.weight(.semibold))
-                                    .foregroundStyle(StrandPalette.accent)
-                                    .tracking(0.6)
-                            }
-                        }
+                        NoopListRow(icon: row.pinned ? "pin.fill" : "pin",
+                                    iconColor: row.pinned ? StrandPalette.accent : StrandPalette.textTertiary,
+                                    title: verbatimKey(store.shortTitle(for: row.series)),
+                                    subtitle: row.established
+                                        ? String(localized: "Usual established · Trust \(row.trust)%")
+                                        : String(localized: "Still building · Trust \(row.trust)%"),
+                                    value: row.pinned ? String(localized: "Watching") : nil, valueTone: .accent,
+                                    showsChevron: false)
                     }
-                    .buttonStyle(.plain)
                     .disabled(!row.pinned && (store.activeStart?.primarySeries.count ?? 0) >= 3)
                 }
             }
+            .buttonStyle(.plain)
         }
     }
 
-    private var activeCourseRow: some View {
-        ViewThatFits(in: .horizontal) {
-            HStack(alignment: .firstTextBaseline, spacing: 12) {
-                activeCourseTitle
-                Spacer(minLength: 8)
-                activeCourseActions
-            }
-            VStack(alignment: .leading, spacing: 8) {
-                activeCourseTitle
-                activeCourseActions
-            }
-        }
-        .font(StrandFont.body)
-    }
-
-    @ViewBuilder private var activeCourseTitle: some View {
+    @ViewBuilder private var activeCourseCard: some View {
         if let start = store.activeStart {
-            Text("Open course · \(start.bannerName)")
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .fixedSize(horizontal: false, vertical: true)
+            NoopCard {
+                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+                    VStack(alignment: .leading, spacing: NoopMetrics.spaceHalf) {
+                        Text("Open course")
+                            .font(StrandFont.subhead)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                        Text(verbatim: start.bannerName)
+                            .font(StrandFont.headline)
+                            .foregroundStyle(StrandPalette.textPrimary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                    HStack(spacing: NoopMetrics.space3) {
+                        NoopButton("Log dose", kind: .secondary, fullWidth: true) { store.showDoseForm = true }
+                        NoopButton("End course", kind: .secondary, fullWidth: true) { store.showEndForm = true }
+                    }
+                }
+            }
         }
     }
 
-    private var activeCourseActions: some View {
-        HStack(spacing: 16) {
-            Button("Log dose") { store.showDoseForm = true }
-                .foregroundStyle(StrandPalette.accent)
-            Button("End course") { store.showEndForm = true }
-                .foregroundStyle(StrandPalette.statusWarning)
-        }
-    }
-
-    private var logCard: some View {
-        NoopCard(padding: 0) {
-            VStack(alignment: .leading, spacing: 0) {
-                Text("Log")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                    .padding(.horizontal, NoopMetrics.cardInnerSpacing)
-                    .padding(.top, NoopMetrics.cardInnerSpacing)
-                    .padding(.bottom, 8)
+    private var logSection: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+            SectionHeader("Log")
+            NoopListSection {
                 if store.events.isEmpty {
                     Text("Nothing logged yet.")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .padding(.horizontal, NoopMetrics.cardInnerSpacing)
-                        .padding(.bottom, NoopMetrics.cardInnerSpacing)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight, alignment: .leading)
                 } else {
+                    // Newest first, like every other list in the app; a row opens its editor.
                     let rows = store.events.enumerated().sorted {
-                        ($0.element.civilDay, $0.element.clockTime) < ($1.element.civilDay, $1.element.clockTime)
+                        ($0.element.civilDay, $0.element.clockTime) > ($1.element.civilDay, $1.element.clockTime)
                     }
                     ForEach(Array(rows.enumerated()), id: \.offset) { rowIdx, pair in
-                        eventRow(pair.element, index: pair.offset, showDivider: rowIdx < rows.count - 1)
+                        if rowIdx > 0 { NoopListDivider() }
+                        Button { store.beginEdit(index: pair.offset) } label: {
+                            NoopListRow(icon: nil, title: verbatimKey(pair.element.bannerName),
+                                        subtitle: "\(BaselinePlotScale.mediumDate(pair.element.civilDay)) · \(pair.element.clockTime)",
+                                        value: Self.typeLabel(pair.element.type))
+                        }
+                        .accessibilityHint("Edit")
                     }
                 }
             }
+            .buttonStyle(.plain)
         }
     }
 
-    private func eventRow(_ event: LBTreatmentEvent, index: Int, showDivider: Bool = false) -> some View {
-        VStack(spacing: 0) {
-            HStack(alignment: .center, spacing: 10) {
-                Text(Self.typeLabel(event.type))
-                    .font(StrandFont.caption.weight(.semibold))
-                    .foregroundStyle(StrandPalette.textSecondary)
-                    .padding(.horizontal, 8)
-                    .padding(.vertical, 4)
-                    .background(StrandPalette.surfaceInset, in: Capsule())
-                VStack(alignment: .leading, spacing: 2) {
-                    Text(event.bannerName)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Text("\(BaselinePlotScale.mediumDate(event.civilDay)) · \(event.clockTime)")
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.textTertiary)
-                        .monospacedDigit()
-                }
-                Spacer()
-                Button("Edit") { store.beginEdit(index: index) }
-                    .font(StrandFont.caption.weight(.semibold))
-                    .foregroundStyle(StrandPalette.accent)
-            }
-            .padding(.horizontal, NoopMetrics.cardInnerSpacing)
-            .padding(.vertical, 10)
-            .contentShape(Rectangle())
-            .onTapGesture {
-                selectedDay = event.civilDay
-                if let date = TreatmentStamp.date(fromISO: event.civilDay) {
-                    month = date
-                    formDay = date
-                }
-            }
-            if showDivider {
-                Rectangle()
-                    .fill(StrandPalette.hairline)
-                    .frame(height: 1)
-                    .padding(.leading, NoopMetrics.cardInnerSpacing)
-            }
-        }
-    }
-
-    private static func typeLabel(_ type: LBTreatmentEventType) -> String {
+    static func typeLabel(_ type: LBTreatmentEventType) -> String {
         switch type {
-        case .start: return "Start"
-        case .dose: return "Dose"
-        case .doseChange: return "Dose change"
-        case .stop: return "Ended"
-        case .interruption: return "Pause"
-        case .restart: return "Restart"
+        case .start: return String(localized: "Start")
+        case .dose: return String(localized: "Dose")
+        case .doseChange: return String(localized: "Dose change")
+        case .stop: return String(localized: "Ended")
+        case .interruption: return String(localized: "Pause")
+        case .restart: return String(localized: "Restart")
         }
     }
+
+    static func reasonLabel(_ reason: LBStopReason) -> String {
+        switch reason {
+        case .completed: return String(localized: "Completed")
+        case .doctorStopped: return String(localized: "Stopped by a doctor")
+        case .sideEffects: return String(localized: "Side effects")
+        case .missedSupply: return String(localized: "Ran out")
+        case .other: return String(localized: "Other")
+        }
+    }
+
+    #if DEBUG
+    /// `--demo-treatment-sheet start|dose|end|edit`: open one sheet for a screenshot (DEBUG only).
+    private func openDemoSheetIfRequested() {
+        switch DemoLaunch.stringArg("--demo-treatment-sheet") {
+        case "start": showingStart = true
+        case "dose": store.showDoseForm = true
+        case "end": store.showEndForm = true
+        case "edit" where !store.events.isEmpty: store.beginEdit(index: 0)
+        default: break
+        }
+    }
+    #endif
 
     private func shiftMonth(_ delta: Int) {
         if let next = Calendar.current.date(byAdding: .month, value: delta, to: month) {
@@ -458,7 +408,7 @@ struct TreatmentMonthGrid: View {
         let columns = Array(repeating: GridItem(.flexible(), spacing: 4), count: 7)
         VStack(spacing: 6) {
             LazyVGrid(columns: columns, spacing: 4) {
-                ForEach(Array(["S", "M", "T", "W", "T", "F", "S"].enumerated()), id: \.offset) { _, w in
+                ForEach(Array(Self.weekdaySymbols().enumerated()), id: \.offset) { _, w in
                     Text(w)
                         .font(StrandFont.caption)
                         .foregroundStyle(StrandPalette.textTertiary)
@@ -484,6 +434,16 @@ struct TreatmentMonthGrid: View {
         }
     }
 
+    /// The header letters in the calendar's own week order, so they sit over the columns the grid fills
+    /// (the grid starts its weeks on `firstWeekday`; a fixed Sunday-first row put every date under the
+    /// wrong letter in Monday-first locales).
+    static func weekdaySymbols(calendar: Calendar = .current) -> [String] {
+        let symbols = calendar.veryShortStandaloneWeekdaySymbols
+        guard symbols.count == 7 else { return symbols }
+        let shift = ((calendar.firstWeekday - 1) % 7 + 7) % 7
+        return Array(symbols[shift...] + symbols[..<shift])
+    }
+
     private func cellFill(_ day: String) -> Color {
         if day == selectedDay { return StrandPalette.accent.opacity(0.28) }
         if markedDays.contains(day) { return StrandPalette.statusPositive.opacity(0.22) }
@@ -500,34 +460,48 @@ struct TreatmentEditSheet: View {
     @State private var kind: LBTreatmentKind = .medication
     @State private var day = Date()
     @State private var time = Date()
+    @State private var confirmingDelete = false
 
     var body: some View {
         NavigationStack {
             Form {
-                if store.events.indices.contains(index) {
-                    Text(store.events[index].type.rawValue)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                }
-                TextField("Treatment name", text: $name)
-                Picker("Kind", selection: $kind) {
-                    ForEach(LBTreatmentKind.allCases, id: \.self) { k in
-                        Text(k.rawValue.replacingOccurrences(of: "_", with: " ")).tag(k)
+                Section {
+                    if store.events.indices.contains(index) {
+                        LabeledContent("Entry", value: TreatmentCaregiverView.typeLabel(store.events[index].type))
+                    }
+                    LabeledContent("Name") {
+                        TextField("Treatment name", text: $name)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    Picker("Kind", selection: $kind) {
+                        ForEach(LBTreatmentKind.allCases, id: \.self) { k in
+                            Text(k.displayLabel).tag(k)
+                        }
+                    }
+                    LabeledContent("Dose") {
+                        TextField("Optional", text: $dose)
+                            .multilineTextAlignment(.trailing)
                     }
                 }
-                TextField("Dose (optional)", text: $dose)
-                DatePicker("Day", selection: $day, displayedComponents: .date)
-                DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
+                .eventEditorRow()
+                Section {
+                    DatePicker("Day", selection: $day, displayedComponents: .date)
+                    DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
+                }
+                .eventEditorRow()
+                Section {
+                    Button("Delete entry", role: .destructive) { confirmingDelete = true }
+                }
+                .eventEditorRow()
             }
-            .scrollContentBackground(.hidden)
+            .eventEditorForm()
             .navigationTitle("Edit treatment")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { store.editingEventIndex = nil }
-                }
-                ToolbarItem(placement: .destructiveAction) {
-                    Button("Delete") {
-                        store.deleteEvent(at: index, days: store.displayDays(from: repo.days))
-                    }
                 }
                 ToolbarItem(placement: .confirmationAction) {
                     Button("Save") {
@@ -542,6 +516,12 @@ struct TreatmentEditSheet: View {
                     }
                     .disabled(name.trimmingCharacters(in: .whitespaces).isEmpty)
                 }
+            }
+            .confirmationDialog("Delete this entry?", isPresented: $confirmingDelete, titleVisibility: .visible) {
+                Button("Delete", role: .destructive) {
+                    store.deleteEvent(at: index, days: store.displayDays(from: repo.days))
+                }
+                Button("Cancel", role: .cancel) {}
             }
             .onAppear { load() }
         }
@@ -572,21 +552,27 @@ struct TreatmentDoseSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                TextField("Dose (optional)", text: $dose)
-                DatePicker("Day", selection: $day, displayedComponents: .date)
-                DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
-                Text("A dose stays on the same course. It does not start a new freeze.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                Section {
+                    LabeledContent("Dose") {
+                        TextField("Optional", text: $dose)
+                            .multilineTextAlignment(.trailing)
+                    }
+                    DatePicker("Day", selection: $day, displayedComponents: .date)
+                    DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
+                }
+                .eventEditorRow()
             }
-            .scrollContentBackground(.hidden)
+            .eventEditorForm()
             .navigationTitle("Log dose")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { store.showDoseForm = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("Log dose") {
+                    Button("Save") {
                         let stamp = TreatmentStamp.split(day: day, time: time)
                         store.logDose(civilDay: stamp.day, clockTime: stamp.clock,
                                       dose: dose.isEmpty ? nil : dose,
@@ -621,37 +607,49 @@ struct TreatmentEndSheet: View {
     var body: some View {
         NavigationStack {
             Form {
-                DatePicker("End day", selection: $day, displayedComponents: .date)
-                DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
-                Picker("Reason", selection: $reason) {
-                    ForEach(LBStopReason.allCases, id: \.self) { r in
-                        Text(r.rawValue.replacingOccurrences(of: "_", with: " ")).tag(r)
+                Section {
+                    DatePicker("End day", selection: $day, displayedComponents: .date)
+                    DatePicker("Clock time", selection: $time, displayedComponents: .hourAndMinute)
+                    Picker("Reason", selection: $reason) {
+                        ForEach(LBStopReason.allCases, id: \.self) { r in
+                            Text(TreatmentCaregiverView.reasonLabel(r)).tag(r)
+                        }
                     }
                 }
-                Toggle("Last dose time is later than this end", isOn: $useLastDose)
-                if useLastDose {
-                    DatePicker("Last dose day", selection: $lastDoseDay, displayedComponents: .date)
-                    DatePicker("Last dose clock", selection: $lastDoseTime, displayedComponents: .hourAndMinute)
+                .eventEditorRow()
+                Section {
+                    Toggle("Last dose time is later than this end", isOn: $useLastDose)
+                        .tint(StrandPalette.accent)
+                    if useLastDose {
+                        DatePicker("Last dose day", selection: $lastDoseDay, displayedComponents: .date)
+                        DatePicker("Last dose clock", selection: $lastDoseTime, displayedComponents: .hourAndMinute)
+                    }
                 }
-                HStack {
-                    Text("I expect washout to take (days)")
-                    Spacer()
-                    Stepper("\(washoutDays)", value: $washoutDays, in: 1...60)
+                .eventEditorRow()
+                Section {
+                    Stepper(value: $washoutDays, in: 1...60) {
+                        Text("Expected washout: \(washoutDays) days")
+                    }
+                    Toggle("I already feel it’s out of my system", isOn: $patientClear)
+                        .tint(StrandPalette.accent)
+                    Toggle("Still feeling effects", isOn: $stillFeeling)
+                        .tint(StrandPalette.accent)
+                } footer: {
+                    Text("Used only to label Settling in and Washing out.")
                 }
-                Toggle("I already feel it’s out of my system", isOn: $patientClear)
-                Toggle("Still feeling effects", isOn: $stillFeeling)
-                Text("These clocks label Settling in / Washing out. They do not change the expected path or z.")
-                    .font(StrandFont.caption)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                .eventEditorRow()
             }
-            .scrollContentBackground(.hidden)
+            .eventEditorForm()
             .navigationTitle("End treatment")
+            #if os(iOS)
+            .navigationBarTitleDisplayMode(.inline)
+            #endif
             .toolbar {
                 ToolbarItem(placement: .cancellationAction) {
                     Button("Cancel") { store.showEndForm = false }
                 }
                 ToolbarItem(placement: .confirmationAction) {
-                    Button("End treatment") {
+                    Button("Save") {
                         let stamp = TreatmentStamp.split(day: day, time: time)
                         store.logEnd(civilDay: stamp.day, clockTime: stamp.clock,
                                      reason: reason, days: store.displayDays(from: repo.days),
@@ -661,7 +659,6 @@ struct TreatmentEndSheet: View {
                                      patientSaysClear: patientClear,
                                      patientStillFeeling: stillFeeling && !patientClear)
                     }
-                    .foregroundStyle(StrandPalette.statusWarning)
                 }
             }
             .onAppear {
