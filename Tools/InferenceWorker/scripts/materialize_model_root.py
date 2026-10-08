@@ -82,6 +82,8 @@ MANIFEST_PATH = os.path.join(PACKAGE_ROOT, "models", "manifest.json")
 SCRIPT_PATH = os.path.abspath(__file__)
 
 REVISION_SCHEMA = "frwhoop-model-revision/1"
+#: Mode of the staging directory until it is sealed 0555: the owner writes, the probe user enters.
+STAGING_MODE = 0o755
 REVISIONS_DIR = "revisions"
 CURRENT_LINK = "current"
 LOCK_NAME = ".provision.lock"
@@ -498,6 +500,22 @@ def service_environment(*, unit_path: str | None, env_file: str | None) -> dict[
     return env
 
 
+def probe_identity(user: str | None) -> dict[str, Any]:
+    """``subprocess.run`` arguments that run the probe as ``user`` with only that user's groups.
+
+    ``user=`` alone keeps the caller's (root's) group and supplementary groups, which can read
+    what the service cannot. systemd's ``User=`` gives the service its primary group and the
+    user's supplementary groups; the probe gets exactly those."""
+    if not user:
+        return {}
+    import pwd
+    entry = pwd.getpwnam(user)
+    if entry.pw_uid == os.geteuid() and os.geteuid() != 0:
+        return {}  # already that user; changing groups would need privileges it does not have
+    return {"user": entry.pw_uid, "group": entry.pw_gid,
+            "extra_groups": sorted(set(os.getgrouplist(entry.pw_name, entry.pw_gid)))}
+
+
 def probe_readiness(root: str, *, service_env: Mapping[str, str], python: str | None = None,
                     user: str | None = None,
                     timeout_s: float = DEFAULT_PROBE_TIMEOUT_S) -> dict[str, Any]:
@@ -522,7 +540,7 @@ def probe_readiness(root: str, *, service_env: Mapping[str, str], python: str | 
         started = time.monotonic()
         try:
             proc = subprocess.run(command, env=env, cwd=home, capture_output=True, text=True,
-                                  timeout=timeout_s, user=user or None)
+                                  timeout=timeout_s, **probe_identity(user))
         except subprocess.TimeoutExpired:
             return {"ok": False, "error": f"readiness probe exceeded {timeout_s:g} s"}
         duration = round(time.monotonic() - started, 3)
@@ -686,6 +704,9 @@ def stage_revision(
                                previous=previous, current=previous)
         manifest_sha = hashlib.sha256(manifest_bytes).hexdigest()
         staging = tempfile.mkdtemp(prefix=STAGING_PREFIX, dir=revisions)
+        # mkdtemp makes it 0700: the probe runs as the service user, which must be able to
+        # enter the revision it is asked to prove (owner-writable until it is sealed).
+        os.chmod(staging, STAGING_MODE)
         try:
             report = _stage_into(staging, models_root, revisions, manifest, manifest_bytes,
                                  manifest_sha, plan, previous, mirrors=mirrors, fetcher=fetcher,
@@ -767,7 +788,9 @@ def _stage_into(staging: str, models_root: str, revisions: str, manifest: Mappin
         return rejected("required artifact failed verification: " + ", ".join(
             f"{c.entry_id}/{c.artifact_name} ({c.status})" for c in blocking), document)
 
-    # The probe reads the final permissions: everything but the top directory is sealed now.
+    # The probe reads the final permissions: everything but the top directory is sealed now, and
+    # the top directory is traversable by everyone (STAGING_MODE) so the service user can enter it.
+    os.chmod(staging, STAGING_MODE)
     for name in os.listdir(staging):
         path = os.path.join(staging, name)
         if os.path.isdir(path) and not os.path.islink(path):

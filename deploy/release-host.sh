@@ -99,6 +99,8 @@ cmd_install() {
   mkdir -p "$RELEASES"
   local incoming
   incoming="$(mktemp -d "$RELEASES/.incoming.XXXXXX")"
+  # mktemp makes it 0700; the service users (frwhoop, frwhoop-inf) run code from this tree.
+  chmod 0755 "$incoming"
   if ! tar xzf "$tarball" -C "$incoming" --strip-components=1 --no-same-owner; then
     rm -rf "$incoming"
     die "could not extract $tarball"
@@ -205,7 +207,8 @@ sys.exit(0 if identity.get("matches_release") is True and executable.get("sha256
     debug="$(swift build -c debug --package-path "$package" "${flags[@]}" --show-bin-path 2>/dev/null || true)"
     [ -n "$debug" ] && [ -d "$debug" ] && rm -rf "$debug"
   fi
-  chmod -R a-w "$rel"
+  # Readable and traversable by the service users, writable by nobody.
+  chmod -R a+rX,a-w "$rel"
   echo "built releases/$id: frwhoop-worker sha256 $sha (tests: $tests${summary:+, $summary})"
   echo "next: $rel/deploy/release-host.sh --root $ROOT switch $id"
 }

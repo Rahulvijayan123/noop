@@ -127,13 +127,17 @@ def test_the_release_stamp_is_compared_with_what_was_measured(staged_revision, t
     assert block["release"]["git_commit"] == "a" * 40
     assert block["release"]["stamp_sha256"] == hashlib.sha256(path.read_bytes()).hexdigest()
     assert block["code_revision"] == {"commit": "a" * 40, "dirty": False,
+                                      "release_claimed": None,
                                       "source_matches_release": True,
                                       "uv_lock_matches_release": True}
     assert block["manifest"]["matches_release"] is False, "the revision came from another manifest"
 
     stamp["trees"][identity.SOURCE_TREE_KEY] = "0" * 64
     _rewrite(path, json.dumps(stamp))
-    assert identity.runtime_identity(app)["code_revision"]["source_matches_release"] is False
+    mismatched = identity.runtime_identity(app)["code_revision"]
+    assert mismatched["source_matches_release"] is False
+    assert mismatched["commit"] is None, "a stamp the measured source contradicts proves nothing"
+    assert mismatched["release_claimed"] == "a" * 40
 
     monkeypatch.setenv("FRWHOOP_RELEASE_STAMP", str(tmp_path / "missing.json"))
     missing = identity.runtime_identity(app)
@@ -255,6 +259,7 @@ def test_healthz_reports_code_lock_manifest_loaded_digests_and_readiness_togethe
     # Code revision: from the stamp, confirmed by the measured source and lock, not the claim.
     assert block["claimed_source_revision"] == "0" * 40
     assert block["code_revision"] == {"commit": "d" * 40, "dirty": False,
+                                      "release_claimed": None,
                                       "source_matches_release": True,
                                       "uv_lock_matches_release": True}
     assert block["uv_lock_sha256"] == hashlib.sha256(

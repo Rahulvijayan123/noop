@@ -13,6 +13,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tarfile
@@ -258,6 +259,9 @@ def test_releases_install_fresh_switch_atomically_and_roll_back(repo, tmp_path):
     assert "tarball sha256 verified" in installed.stdout
     release = root / "releases" / first
     assert (release / "RELEASE.json").is_file()
+    # The services run as other users (frwhoop, frwhoop-inf): the tree must be open to them.
+    assert stat.S_IMODE(os.stat(release).st_mode) & 0o055 == 0o055, oct(os.stat(release).st_mode)
+    assert stat.S_IMODE(os.stat(release / "deploy").st_mode) & 0o055 == 0o055
     again = _host(root, "install", str(out / f"nara-release-{first}.tar.gz"))
     assert again.returncode == 1 and "never extracted over an existing tree" in again.stderr
     assert not [p for p in (root / "releases").iterdir() if p.name.startswith(".incoming")]
