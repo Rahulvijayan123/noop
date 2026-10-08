@@ -183,14 +183,21 @@ struct EventsView: View {
                     .buttonStyle(StrandPressableButtonStyle())
                 }
             }
-            VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-                SectionHeader("Timeline")
-                EventFilterControl(filter: $filterState.filter)
-            }
-            let days = EventGrouping.days(events, filter: filterState.filter, limit: 3)
-            if days.isEmpty {
-                ComingSoon(what: events.isEmpty ? "No events yet. Reactions you log or the band detects will appear here."
-                                                : filterState.filter.emptyText)
+            if events.isEmpty {
+                // Nothing feeds this tab yet: say so once, with no filter to operate on an empty list.
+                ComingSoon(what: "No events yet.")
+            } else {
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    SectionHeader("Timeline")
+                    EventFilterControl(filter: $filterState.filter)
+                }
+                let days = EventGrouping.days(events, filter: filterState.filter, limit: 3)
+                if days.isEmpty {
+                    ComingSoon(what: filterState.filter.emptyText)
+                }
+                ForEach(days) { day in
+                    EventDaySection(day: day, history: events)
+                }
             }
             #if DEBUG
             if DemoLaunch.showsSampleEvents {
@@ -199,9 +206,6 @@ struct EventsView: View {
                     .foregroundStyle(StrandPalette.textTertiary)
             }
             #endif
-            ForEach(days) { day in
-                EventDaySection(day: day, history: events)
-            }
             if !events.isEmpty {
                 NoopListSection {
                     NavigationLink(value: TabRoute.allEvents(events)) {
