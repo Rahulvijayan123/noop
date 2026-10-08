@@ -292,6 +292,52 @@ final class DayScoringAdapterTests: XCTestCase {
         XCTAssertEqual(slots.map { $0[0] as? Int }, [day + 1_800])
     }
 
+    // MARK: - Intraday HRV slot context (audit D6-14)
+
+    private func epochs(from start: Int, seconds: Int, motion: MotionLabel) -> [ActivityEpoch] {
+        stride(from: start, to: start + seconds, by: 30).map {
+            ActivityEpoch(startTs: $0, endTs: $0 + 30, motion: motion, posture: .unknown, exercise: .unknown,
+                          sleepState: .awake, exertion: .unknown, wear: .unknown,
+                          confidence: 0.9, observedS: 30, validS: 30)
+        }
+    }
+
+    func testMostlyLocomotionSlotIsFlaggedNotDropped() {
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let rr = beats(from: day, seconds: 1_800, channel: .whoop5Standard)            // two full slots
+        let readings = DayScorer.hrvSlotReadings(rr: rr, from: day, to: day + 86_400)
+        XCTAssertEqual(readings.map(\.slotStart), [day, day + 900])
+        XCTAssertEqual(readings.map { $0.point[0] as? Int }, DayScorer.hrvSlots(rr: rr, from: day, to: day + 86_400).map { $0[0] as? Int })
+        // Slot 0 still; slot 1 walking for 12 of its 15 minutes.
+        let activity = epochs(from: day, seconds: 900, motion: .stationary)
+            + epochs(from: day + 900, seconds: 180, motion: .stationary)
+            + epochs(from: day + 1_080, seconds: 720, motion: .walking)
+        let ctx = DayScorer.hrvSlotContext(readings: readings, epochs: activity)
+        XCTAssertEqual(ctx.count, 2, "every published point keeps its entry")
+        XCTAssertEqual(ctx[0]["weak"] as? Bool, false)
+        XCTAssertEqual(ctx[0]["reasons"] as? [String], [])
+        XCTAssertEqual(ctx[1]["slot_s"] as? Int, day + 900)
+        XCTAssertEqual(ctx[1]["weak"] as? Bool, true)
+        XCTAssertEqual(ctx[1]["reasons"] as? [String], ["movement"])
+        XCTAssertEqual(ctx[1]["moving_share"] as? Double ?? 0, 0.8, accuracy: 0.001)
+        XCTAssertEqual(ctx[0]["clean_coverage"] as? Double ?? 0, 1.0, accuracy: 0.05)
+    }
+
+    func testSlotWithoutActivityOrWithFewCleanBeatsIsFlagged() {
+        let day = 1_790_000_000 - 1_790_000_000 % 900
+        let rr = beats(from: day, seconds: 900, channel: .whoop5Standard)
+            + beats(from: day + 900, seconds: 120, channel: .whoop5Standard)             // two minutes of beats
+        let readings = DayScorer.hrvSlotReadings(rr: rr, from: day, to: day + 86_400)
+        XCTAssertEqual(readings.count, 2)
+        let noLane = DayScorer.hrvSlotContext(readings: readings, epochs: [])
+        XCTAssertEqual(noLane[0]["reasons"] as? [String], ["unknown_context"], "no activity is unknown, never still")
+        XCTAssertEqual(noLane[1]["reasons"] as? [String], ["unknown_context", "sparse_beats"])
+        let still = epochs(from: day, seconds: 1_800, motion: .stationary)
+        let ctx = DayScorer.hrvSlotContext(readings: readings, epochs: still)
+        XCTAssertEqual(ctx[0]["weak"] as? Bool, false)
+        XCTAssertEqual(ctx[1]["reasons"] as? [String], ["sparse_beats"])
+    }
+
     // MARK: - hrv_slots pinning for the attach path (audit P3-2)
 
     func testHrvSlotStartsFromPublishedPoints() {

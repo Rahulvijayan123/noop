@@ -285,6 +285,11 @@ final class ActivityContextCoordinator {
             previousRows.append(rows.map(ActivityContextInterval.init(row:)))
         }
         let previousIntervals = ActivityContextPersistence.merged(previousRows)
+        // The wearer's answers on these seconds ("not wearing", "it was a walk"), laid over the windows' lookup the
+        // same way `storedActivityContext` lays them over what it reads, so a stretch the wearer corrected never
+        // vouches for an HRV window. The saved intervals stay the decoder's own output.
+        let feedback = StretchFeedbackStore.shared.verdicts(
+            overlapping: day.start - ActivityContextPersistence.hrvIntervalLookbackS, to: day.end)
         let (built, hrvWindows) = await Task.detached(priority: .utility) {
             let events = ActivityContextPersistence.hrvEvents(day: document.events, previous: previousEvents,
                                                               dayStart: document.dayStart)
@@ -296,8 +301,9 @@ final class ActivityContextCoordinator {
             // `imuWindows` is left empty: the strap does not stream raw 100 Hz IMU continuously during normal
             // wear (only during an opt-in Raw Data collector session), so `motionRmsG` falls back to the 1 Hz
             // stream and `gyroRmsDps` stays honestly nil here rather than inventing a reading.
-            let lookup = ActivityContextLookup(intervals: ActivityContextPersistence.hrvIntervals(
-                day: intervals, previous: previousIntervals, dayStart: document.dayStart))
+            let lookup = ActivityContextLookup(intervals: ActivityContextCorrections.applying(
+                feedback, to: ActivityContextPersistence.hrvIntervals(
+                    day: intervals, previous: previousIntervals, dayStart: document.dayStart)))
             // The phone's day document carries runs, not per-epoch wear signal (that is server-only, in the
             // C10 epochs), so every window resolves wearSignal nil here. These windows only feed the
             // diagnostic line today; no score or baseline reads them yet.

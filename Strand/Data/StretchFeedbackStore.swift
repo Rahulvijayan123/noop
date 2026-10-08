@@ -84,10 +84,22 @@ final class StretchFeedbackStore: @unchecked Sendable {
             guard let i = rows.firstIndex(where: { $0.id == s.id }) else { continue }
             if rows[i].updatedAt <= s.updatedAt { rows[i].syncedAt = max(when, rows[i].updatedAt) }
         }
-        let cutoff = when.addingTimeInterval(-Double(Self.keepSyncedDays) * 86_400)
-        rows.removeAll { !$0.needsSync && $0.updatedAt < cutoff }
+        rows = Self.pruned(rows, cutoff: when.addingTimeInterval(-Double(Self.keepSyncedDays) * 86_400))
         saveLocked(rows)
         return rows
+    }
+
+    /// `rows` without the synced verdicts older than `cutoff`, except the ones the context overlay still needs: a
+    /// "wrong, it was actually X" answer is the wearer's ground truth for those seconds and is applied every time
+    /// the context is read, so it is kept for good (the file stays small: one row per answer). Any verdict that
+    /// overlaps a kept correction is kept too, so a newer "that was right" that withdrew it cannot be pruned out
+    /// from under it and let the older correction come back.
+    static func pruned(_ rows: [StretchFeedback], cutoff: Date) -> [StretchFeedback] {
+        let kept = rows.filter { $0.verdict == .incorrect && $0.correctedLabel != nil }
+        return rows.filter { row in
+            row.needsSync || row.updatedAt >= cutoff
+                || kept.contains { $0.endTs > row.startTs && $0.startTs < row.endTs }
+        }
     }
 
     func removeAll() {

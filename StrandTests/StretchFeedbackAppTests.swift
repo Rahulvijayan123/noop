@@ -119,6 +119,20 @@ final class StretchFeedbackAppTests: XCTestCase {
         XCTAssertEqual(store.all().map(\.id), [oldUnsent.id])
     }
 
+    func testOldSyncedCorrectionsAndTheAnswersOverlappingThemAreKept() {
+        let store = makeStore()
+        let longAgo = Date().addingTimeInterval(-Double(StretchFeedbackStore.keepSyncedDays + 5) * 86_400)
+        let correction = verdict(start: 1_000, .incorrect, at: longAgo)              // [1000, 1600)
+        let withdrawal = verdict(start: 1_300, .correct, at: longAgo.addingTimeInterval(60))
+        let unrelated = verdict(start: 5_000, .correct, at: longAgo)
+        for v in [correction, withdrawal, unrelated] { store.upsert(v) }
+
+        store.markSynced([correction, withdrawal, unrelated].map { (id: $0.id, updatedAt: $0.updatedAt) })
+
+        XCTAssertEqual(Set(store.all().map(\.id)), [correction.id, withdrawal.id],
+                       "the overlay's ground truth outlives the prune; a plain old confirmation does not")
+    }
+
     func testUnreadableFileReadsAsEmptyInsteadOfCrashing() throws {
         let url = tempDir.appendingPathComponent("stretch-feedback.json")
         try Data("not json".utf8).write(to: url)

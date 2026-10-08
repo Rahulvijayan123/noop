@@ -347,6 +347,11 @@ enum PhysiologyContextWording {
         "recent_locomotion_unobserved": String(localized: "no activity data for the minutes before it"),
         "recent_exertion_bout": String(localized: "an activity bout shortly before"),
         "exertion_history_exceeds_limit": String(localized: "a lot of walking or running in the past day"),
+        "recent_postural_transition": String(localized: "a change of position shortly before"),
+        "possible_postural_transition": String(localized: "possibly a change of position shortly before"),
+        "transition_events_partly_observed": String(localized: "activity data covers only part of the time before it"),
+        "low_activity_confidence": String(localized: "the activity reading was uncertain"),
+        "wear_signal_poor": String(localized: "the strap's signal was poor"),
         "not_asleep": String(localized: "it was not during sleep"),
         "sleep_evidence_unknown": String(localized: "it is unclear whether you were asleep"),
         "no_supported_exertion": String(localized: "no activity bout around it"),
@@ -456,6 +461,9 @@ enum PhysiologyContextWording {
         "invalid_dose_dropped": String(localized: "an amount that could not be read was left out"),
         // References
         "time_band_stratum": String(localized: "matched by time of day"),
+        "posture_stratum": String(localized: "matched by likely position"),
+        "posture_regimes_pooled": String(localized: "lying and upright readings are combined"),
+        "posture_mix_differs_from_history": String(localized: "your position differed from earlier days"),
         "degraded_validity_included": String(localized: "includes a signal usable with limitations"),
         "relative_use_only": String(localized: "for relative comparison only"),
         "no_history": String(localized: "no earlier data"),
@@ -522,7 +530,7 @@ enum PhysiologyContextWording {
     static let diagnosticsOnlyReasons: Set<String> = [
         // Declared target-dependent gates (shown in Diagnostics, never as a reason in the normal flow)
         "hr_plausible_band", "rr_kernel_range", "ectopic_rejection", "sleep_detector_hr_confirmation",
-        "wear_from_heart_rate_presence",
+        "wear_from_heart_rate_presence", "decoder_transition_events", "wear_signal_optical_quality",
         // Statistical internals added with the review repairs
         "autocorrelation_assumed_conservative", "frozen_created_after_day_ignored", "scale_floor_default",
         // Join and engine

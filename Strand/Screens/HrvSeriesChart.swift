@@ -7,6 +7,10 @@ import StrandDesign
 /// A run of consecutive slots is one line, so a gap in the data (strap off, phone not synced, a slot
 /// the worker rejected as movement noise) shows as a gap and not as a straight line drawn across it.
 /// Each reading is also a point, so a slot with no neighbour still shows.
+///
+/// A slot the worker flagged weak (`hrv_series.context`: mostly movement, mostly unknown activity, or few
+/// clean beats; audit D6-14) is still drawn, as a faded hollow point, but it is left out of the line and
+/// the "latest" read-out, so a walking slot never sets the shape of the day. See `HrvSeriesEmphasis`.
 struct HrvSeriesChart: View {
     let points: [HrvSeriesPoint]
     let slotSeconds: Int
@@ -17,15 +21,8 @@ struct HrvSeriesChart: View {
     }
 
     private var runs: [Run] {
-        var grouped: [[HrvSeriesPoint]] = []
-        for point in points {
-            if let previous = grouped.last?.last, point.startTs - previous.startTs <= slotSeconds {
-                grouped[grouped.count - 1].append(point)
-            } else {
-                grouped.append([point])
-            }
-        }
-        return grouped.enumerated().map { Run(id: $0.offset, points: $0.element) }
+        HrvSeriesEmphasis.lineRuns(points, slotSeconds: slotSeconds)
+            .enumerated().map { Run(id: $0.offset, points: $0.element) }
     }
 
     private func date(_ point: HrvSeriesPoint) -> Date {
@@ -33,10 +30,12 @@ struct HrvSeriesChart: View {
     }
 
     private var latestSummary: String? {
-        guard let latest = points.last else { return nil }
+        guard let latest = HrvSeriesEmphasis.latestSupported(points) else { return nil }
         let time = date(latest).formatted(date: .omitted, time: .shortened)
         return "\(Int(latest.rmssd.rounded())) ms at \(time)"
     }
+
+    private var weakNote: String? { HrvSeriesEmphasis.weakNote(points) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
@@ -61,9 +60,19 @@ struct HrvSeriesChart: View {
                     }
                 }
                 ForEach(points, id: \.startTs) { point in
-                    PointMark(x: .value("Time", date(point)), y: .value("HRV (ms)", point.rmssd))
-                        .foregroundStyle(StrandPalette.metricCyan)
-                        .symbolSize(16)
+                    if HrvSeriesEmphasis.emphasis(of: point) == .full {
+                        PointMark(x: .value("Time", date(point)), y: .value("HRV (ms)", point.rmssd))
+                            .foregroundStyle(StrandPalette.metricCyan)
+                            .symbolSize(16)
+                    } else {
+                        PointMark(x: .value("Time", date(point)), y: .value("HRV (ms)", point.rmssd))
+                            .symbol {
+                                Circle()
+                                    .strokeBorder(StrandPalette.metricCyan, lineWidth: 1)
+                                    .frame(width: 5, height: 5)
+                            }
+                            .opacity(StrandPalette.disabledOpacity)
+                    }
                 }
             }
             .chartYScale(domain: .automatic(includesZero: false))
@@ -77,10 +86,70 @@ struct HrvSeriesChart: View {
             .frame(height: 120)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Text("Heart rate variability through the day"))
-            .accessibilityValue(Text(latestSummary.map { "Latest \($0)" } ?? ""))
+            .accessibilityValue(Text([latestSummary.map { "Latest \($0)" }, weakNote]
+                .compactMap { $0 }.joined(separator: ". ")))
             Text("Daytime wrist readings are noisier than overnight ones.")
                 .font(StrandFont.caption)
                 .foregroundStyle(StrandPalette.textSecondary)
+            if let weakNote {
+                Text(weakNote)
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
+    }
+}
+
+/// How each intraday HRV point is drawn. Pure, so the mapping is unit-tested without rendering.
+enum HrvSeriesEmphasis: Equatable {
+    /// Drawn normally, joined into the line, eligible for the "latest" read-out.
+    case full
+    /// Drawn faded and hollow; never part of the line or the read-out.
+    case deemphasised
+
+    /// A point is de-emphasised only when the worker flagged it weak. A point without context (a snapshot
+    /// from before the flags existed) keeps its old look rather than guessing.
+    static func emphasis(of point: HrvSeriesPoint) -> HrvSeriesEmphasis {
+        point.context?.weak == true ? .deemphasised : .full
+    }
+
+    /// The line's runs: consecutive well-supported points. A weak point or a missing slot breaks the run, so
+    /// the line never bridges across a reading it does not trust.
+    static func lineRuns(_ points: [HrvSeriesPoint], slotSeconds: Int) -> [[HrvSeriesPoint]] {
+        var grouped: [[HrvSeriesPoint]] = []
+        var previous: HrvSeriesPoint?
+        for point in points {
+            defer { previous = point }
+            guard emphasis(of: point) == .full else { continue }
+            // A full `previous` is always the last point of the last run.
+            if let previous, emphasis(of: previous) == .full, point.startTs - previous.startTs <= slotSeconds {
+                grouped[grouped.count - 1].append(point)
+            } else {
+                grouped.append([point])
+            }
+        }
+        return grouped
+    }
+
+    /// The newest well-supported point, which the "latest" read-out names.
+    static func latestSupported(_ points: [HrvSeriesPoint]) -> HrvSeriesPoint? {
+        points.last { emphasis(of: $0) == .full }
+    }
+
+    /// One plain sentence on why some points are faded, or nil when none are.
+    static func weakNote(_ points: [HrvSeriesPoint]) -> String? {
+        let weak = points.filter { emphasis(of: $0) == .deemphasised }
+        guard !weak.isEmpty else { return nil }
+        let reasons = Set(weak.flatMap { $0.context?.reasons ?? [] })
+        var why: [String] = []
+        if reasons.contains(.movement) { why.append("you were moving") }
+        if reasons.contains(.unknownContext) { why.append("activity was unclear") }
+        if reasons.contains(.sparseBeats) { why.append("there were few clean beats") }
+        let count = weak.count == 1 ? "1 faded reading" : "\(weak.count) faded readings"
+        let joined = why.count <= 2 ? why.joined(separator: " or ")
+            : why.dropLast().joined(separator: ", ") + ", or " + why[why.count - 1]
+        let because = why.isEmpty ? "" : " because " + joined
+        return "\(count) left out of the line and latest value\(because)."
     }
 }
