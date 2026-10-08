@@ -216,10 +216,15 @@ class Service:
     seen = self._load_json(st, "seen.json")
     froms = {}
     for scorer in self.scorers:
+      W = cand.WINDOW_S
       floor = int(frame.minutes[0]) + getattr(scorer, "history_minutes", self.cfg.context_minutes) * 60
-      f = max(score_to - self.cfg.score_lookback_hours * 3600, floor)
+      floor += (-floor) % W                # first window start with a full model history
+      lookback = score_to - self.cfg.score_lookback_hours * 3600
+      f = max(lookback - lookback % W, floor)
       if wm is not None:
-        f = max(f, wm)                     # each window is scored once, when complete (windows() aligns down)
+        # A window [s, s+W) was scored by the previous job iff s + W ≤ wm: the first one not yet scored starts at wm
+        # aligned DOWN (the window that was still incomplete at wm). Each window is scored once.
+        f = max(f, wm - wm % W)
       refs = [st.load_ref(scorer.name, b) for b in BUCKETS]
       if any(r.shape[0] < MIN_REFERENCE for r in refs):
         done = 0 if all(r.size == 0 for r in refs) else int(seen.get(scorer.name, 0))   # 0: new / re-trained

@@ -42,14 +42,15 @@ def cfg(tmp):
                 max_jobs_per_cycle=1, dry_run=True)
 
 
-def make_frame(n_minutes, hr):
+def make_frame(n_minutes, hr, nights=False):
   m = np.arange(n_minutes, dtype=np.int64) * 60
   data = {k: np.full(n_minutes, np.nan) for k in TARGETS}
   data["hr"] = np.asarray(hr, dtype=float)
-  data.update({"dyn": np.full(n_minutes, 0.01), "steps": np.zeros(n_minutes), "asleep": np.zeros(n_minutes),
+  asleep = (((m // 60) % 1440) < 8 * 60).astype(float) if nights else np.zeros(n_minutes)
+  data.update({"dyn": np.full(n_minutes, 0.01), "steps": np.zeros(n_minutes), "asleep": asleep,
                "hr_n": np.full(n_minutes, 60.0), "rr_cov": np.ones(n_minutes), "wrist_off": np.zeros(n_minutes)})
-  return MinuteFrame(minutes=m, data=data, context=np.array(["still"] * n_minutes, dtype=object), family="t",
-                     counters={})
+  ctx = np.where(asleep == 1, "asleep", "still").astype(object)
+  return MinuteFrame(minutes=m, data=data, context=ctx, family="t", counters={})
 
 
 def view(f, hi):
@@ -58,8 +59,8 @@ def view(f, hi):
                      family=f.family, counters={})
 
 
-def run(tmp, hr, ticks_every=1800):
-  f = make_frame(len(hr), hr)
+def run(tmp, hr, ticks_every=1800, nights=False):
+  f = make_frame(len(hr), hr, nights)
   stub = StubScorer()
   svc = Service(cfg(tmp), scorers=[stub])
   st = UserState(str(tmp), UID, DID)
@@ -81,14 +82,20 @@ def test_no_candidates_while_calibrating_and_none_under_the_null(tmp_path):
   assert len(seen) <= 1                      # α = 1e-3 per window over ~200 calibrated windows
 
 
-def test_backfill_does_not_rescore_windows_already_considered(tmp_path):
+def test_every_window_is_scored_exactly_once(tmp_path):
+  # Both buckets fill (8 h nights), so after warm-up the thin-reference backfill path is off and only the
+  # watermark path schedules windows — the case where an unaligned watermark used to drop windows.
   rs = np.random.default_rng(2)
-  hr = 60 + rs.normal(size=4 * 1440)
-  stub, _, _ = run(tmp_path, hr)
-  starts, counts = np.unique(stub.asked, return_counts=True)
-  # Each window is scored once, when it completes; a thin reference must not make every job re-score 30 h.
-  assert counts.max() == 1, counts.max()
-  assert len(starts) >= 100                  # and every completed usable window was scored
+  n = 12 * 1440
+  hr = 60 + rs.normal(size=n)
+  for ticks_every in (1800, 600):
+    stub, _, st = run(tmp_path / str(ticks_every), hr, ticks_every=ticks_every, nights=True)
+    assert all(st.load_ref("stub", b).shape[0] >= 96 for b in ("rest", "sleep"))
+    starts, counts = np.unique(stub.asked, return_counts=True)
+    assert counts.max() == 1, counts.max()
+    expected = np.arange(3600 + 1800 * 0, n * 60 - 1800 - 300 + 1, 1800)      # history 60 min, settle 5 min
+    expected = expected[expected >= 3600]
+    assert len(starts) >= len(expected) - 2, (len(starts), len(expected))
 
 
 def test_sustained_shift_is_one_candidate_with_a_stable_key(tmp_path):
