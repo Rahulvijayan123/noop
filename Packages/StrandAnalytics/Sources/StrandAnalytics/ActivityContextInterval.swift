@@ -510,12 +510,14 @@ public enum ActivityContextIntervalBuilder {
     /// - a light-activity blip or a no-claim (`unknown`) reading on the wrist, under `foldFragmentS` (a reach,
     ///   the burst of a stand-up and sit-down, a few seconds the decoder could not read);
     /// - inside a still stretch (sitting, standing, still, lying awake), a still-family reading under `stillDwellS`:
-    ///   the posture head hedging between seated, upright and unresolved for a few ticks inside one situation.
+    ///   the posture head hedging between seated, upright and unresolved for a few ticks inside one situation;
+    ///   inside a night, a no-claim reading under `stillDwellS` (the stager said asleep throughout, only the body
+    ///   heads were unreadable).
     /// Several fragments in a row are absorbed together when their seconds stay under the same bound. Everything
     /// absorbed is recorded on the row (`absorbedClasses`, `absorbedSeconds`), and the changes themselves are
     /// kept as events (`transitionCount`).
     static func foldClose(_ merged: [Accumulation], from i: Int, after prev: Accumulation, config: Config) -> Int? {
-        let still = prev.activityClass.isStationaryAwake || prev.activityClass == .lyingDown
+        let still = prev.activityClass.isStationaryAwake || prev.activityClass.isRest
         let bound = still ? max(config.foldFragmentS, config.stillDwellS) : config.foldFragmentS
         var total = 0
         var lastEnd = prev.end
@@ -531,7 +533,9 @@ public enum ActivityContextIntervalBuilder {
                 return nil
             } else if c == .unknown {
                 guard f.wear == .onWrist else { return nil }
-                limit = config.foldFragmentS
+                // Inside a night the sleep stager said asleep throughout (the fragment's own context): only the
+                // body heads were unreadable, so the night's dwell applies.
+                limit = prev.activityClass == .sleeping ? bound : config.foldFragmentS
             } else if c == .lightActivity {
                 limit = config.foldFragmentS
             } else {

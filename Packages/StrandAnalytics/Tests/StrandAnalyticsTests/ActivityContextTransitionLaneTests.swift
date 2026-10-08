@@ -596,14 +596,16 @@ final class ActivityContextTransitionLaneTests: XCTestCase {
         XCTAssertEqual(iv.map(\.activityClass), [.sitting])
         XCTAssertEqual(iv.first?.absorbedClasses, [.unknown])
         XCTAssertEqual(iv.first?.absorbedSeconds, 5)
-        // Inside a night as well.
+        // Inside a night, where the stager said asleep throughout and only the body heads were unreadable, up to the
+        // still dwell (sleep seconds stored as unknown on capture-24: 205 -> 645 before this, mostly 10-30 s rows).
         let night = ActivityContextIntervalBuilder.build(runs: [
             run(0, 600, posture: lying, sleep: .asleep, inBed: true),
-            run(600, 605, posture: [.unknown: 1], locomotion: [.unknown: 1], sleep: .asleep, inBed: true, confidence: 0.1),
-            run(605, 1_200, posture: lying, sleep: .asleep, inBed: true)])
+            run(600, 620, posture: [.unknown: 1], locomotion: [.unknown: 1], sleep: .asleep, inBed: true, confidence: 0.1),
+            run(620, 1_200, posture: lying, sleep: .asleep, inBed: true)])
         XCTAssertEqual(night.map(\.activityClass), [.sleeping, .sleeping], "one night, cut at the 15-minute cap only")
         XCTAssertEqual(night.compactMap(\.absorbedClasses).flatMap { $0 }, [.unknown])
-        // Ten seconds or more of no claim is a row of its own.
+        XCTAssertEqual(night.compactMap(\.absorbedSeconds).reduce(0, +), 20)
+        // Awake, ten seconds or more of no claim is a row of its own.
         let longer = run(120, 130, posture: [.unknown: 1], locomotion: [.unknown: 1], confidence: 0.1)
         XCTAssertEqual(ActivityContextIntervalBuilder.build(runs: [run(0, 120, posture: seated), longer,
                                                                    run(130, 240, posture: seated)]).count, 3)
