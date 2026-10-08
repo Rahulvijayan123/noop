@@ -210,7 +210,8 @@ final class AppModel: ObservableObject {
     @Published var cyclePhase: CyclePhaseEngine.Result?
     /// The nightly fused-index curve (oldest→newest) feeding the cycle card's sparkline.
     @Published var cycleCurve: [Double] = []
-    /// Body-clock phase estimate (circadian). nil until a usable activity profile exists.
+    /// Observed HEART-RATE RHYTHM heuristic (cosinor over hourly mean HR; spec-02 §3). Not a measured
+    /// temperature minimum, melatonin onset, body clock or chronotype. nil until a usable profile exists.
     @Published var circadianPhase: CircadianEngine.PhaseEstimate?
 
     /// The L3 passive-nudge surface (haptic biofeedback "stress check-in"). The detector fires onto this
@@ -2961,16 +2962,17 @@ final class AppModel: ObservableObject {
         cycleCurve = curve
     }
 
-    /// Body-clock phase estimate. Builds a coarse per-hour activity profile from the last ~14 days of
-    /// downsampled HR buckets (HR amplitude is a usable rest/activity rhythm proxy when raw motion isn't
-    /// to hand), then fits the cosinor. nil when there isn't enough to read.
+    /// Observed heart-rate rhythm heuristic. Builds a per-hour MEAN HEART RATE profile from the last ~14
+    /// days of downsampled HR buckets, then fits the cosinor. The result describes when heart rate tends
+    /// to run high/low; it is not a temperature or melatonin phase (the measured skin-temperature rhythm
+    /// is a separate sidecar output). nil when there isn't enough to read.
     private func computeCircadianPhase() async {
         let now = Int(Date().timeIntervalSince1970)
         let from = now - 14 * 86_400
         let buckets = await repo.hrBuckets(from: from, to: now, bucketSeconds: 3_600)
         guard buckets.count >= 24 else { circadianPhase = nil; return }
         let tz = TimeZone.current.secondsFromGMT()
-        // Pool HR by LOCAL hour-of-day → mean bpm per hour as the activity proxy (higher HR ≈ more active).
+        // Pool HR by LOCAL hour-of-day → mean bpm per hour: the rhythm signal is heart rate itself.
         var sums = [Double](repeating: 0, count: 24)
         var counts = [Int](repeating: 0, count: 24)
         var daySet = Set<Int>()
