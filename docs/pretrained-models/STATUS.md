@@ -2,6 +2,8 @@
 
 Status as of 2026-10-08. Branch `feat/spec03-pretrained-models-20261007`, cut from `nara/main` at dab2124f3.
 
+For a handoff to another model, start with [HANDOFF.md](HANDOFF.md).
+
 Nothing is pushed, merged, deployed or registered. The two WIP commits on the branch (3651c3c08, 064e7538d) are checkpoints, and no independent reviewer has run on them yet. Spec 01's shared files are untouched: the branch only adds files and changes two of its own docs. Proposed changes to shared files are fragments under `docs/pretrained-models/integration/`.
 
 ## Summary
@@ -41,7 +43,7 @@ The repo's existing `actinet/harnet30-c24-mw` encoder uses a different file, the
 
 The bootstrap over subjects gives a 95% CI of [−0.011, 0.168] for ActiNet HMM minus Nara, with p = 0.061. That is not a significant difference. ActiNet is ahead on GOTOV and behind on PAMAP2.
 
-**Important deviation.** The comparator is `shadow-ncsa-primary-actc24`, the Capture-24 bundle. I had asked for the deployed `shadow-ncsa-primary-actukb` bundle. The comparison therefore does not describe production. The c24 bundle's test subjects are the held-out split used here.
+**Important deviation.** The comparator is `shadow-ncsa-primary-actc24`, the Capture-24 bundle. I had asked for the deployed `shadow-ncsa-primary-actukb` bundle. The comparison therefore does not describe production. The c24 and `actukb` bundles share one split manifest (sha256 `f96f41f6…`), so the same subjects are held out for both.
 
 **Resources** (this Mac, not the Droplet).
 - ActiNet: model load 3.2 s, RSS after load 341 MB. One continuous hour (120 epochs): 0.58 CPU-s, RSS 699 MB. A duty-cycled day (480 bursts, 960 epochs): 4.4 CPU-s.
@@ -88,6 +90,7 @@ Against the official `predict_on_folder` end-to-end path: 25 Hz agrees 960/960, 
 **Tests.**
 - `Tools/InferenceWorker`, full suite with no artifacts: 614 passed, 54 skipped.
 - The real-weights file, with the staged artifacts and the regenerated official references: 10 passed, 1 failed (see "Open problems").
+- `Tools/ActivityContext`, full suite: 677 passed, 47 skipped, 3 failed in `tests/inertia/test_inertia_golden.py`. The same three fail on `nara/main`, so they are not from this branch.
 
 **Activation gates, none met:** the Spec 01 PPG transport is deployed; overnight contiguous PPG is captured; WHOOP polarity is characterised; a PPG sleep-stage evaluation set exists; the Droplet's CPU and memory are measured; the shadow comparison consumer is built.
 

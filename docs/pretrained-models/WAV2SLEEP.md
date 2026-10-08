@@ -243,7 +243,7 @@ Details and evidence are in `wav2sleep_vendored/PROVENANCE.md` §3.
 
 | # | Deviation |
 | --- | --- |
-| D1 | No zero-padding to 10 h. The pinned grid ends at the run's last whole epoch. On the 8-h synthetic night, the official default padding agrees with the unpadded official run on only 395/960 epochs, because raw zeros next to a ~3.8e5-count DC dominate the z-score. |
+| D1 | No zero-padding to 10 h. The pinned grid ends at the run's last whole epoch. On the 8-h synthetic night, the official default padding agrees with the unpadded official run on only 398/960 epochs at both 24 and 25 Hz (the first reference run gave 395, when both fixtures wrote their official outputs to shared folders), because raw zeros next to a ~3.8e5-count DC dominate the z-score. |
 | D2 | Each contiguous run is its own recording. The official `dropna()` + interpolation would bridge gaps. |
 | D3 | `yaml.safe_load` + an allowlisted builder instead of `yaml.CLoader` + `hydra.instantiate`. The checkpoint gets an explicit key/shape check before the strict load. |
 | D4 | `np.interp` instead of the pandas interpolate path. Bitwise equal (tested). |
