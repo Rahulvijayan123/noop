@@ -37,7 +37,13 @@ public enum ActivityContextVersions {
     /// heuristic or erases a seen shift with a weak "none"; abstained encoder windows never open a specialist
     /// gate; a logged workout counts once; data gaps of 20–120 s flatten the belief; a pulseless, implausibly
     /// still strap reads unknown.
-    public static let decoder = "hsmm-1.8"
+    /// 1.9: posture confidence follows agreement, not presence. A sitting / standing / restless claim is capped
+    /// at the wrist-only ceiling unless the learned posture memory (HART's fine sit / stand rows, Inertia's
+    /// posture head, an adopted personal profile) leans the same way (`ActivityEvidenceSummary.learnedPosture`),
+    /// and then at a softer ceiling, never lifted; "Sitting, restless" / "Standing, restless" carry the mass of
+    /// the posture they name rather than seated + upright; the four postural-transition modes share one
+    /// heart-rate level (lying down was 0.15 against 0.20), so the rate cannot pick the path into a posture.
+    public static let decoder = "hsmm-1.9"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump
@@ -385,13 +391,23 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
     public var hartFine: Bool?
     public var transitionExpert: Bool?
     public var gaitExpert: Bool?
+    /// The stationary posture the decoder's LEARNED posture memory leans toward at this second (hsmm-1.9):
+    /// `.seatedLikely` or `.uprightStationary` when HART's fine sit / stand rows, Inertia's posture head or an
+    /// adopted personal profile have, over the recent past, favoured that posture by at least
+    /// `ActivityContextModel.learnedPostureAgreementLogOdds`; nil otherwise (no learned source, or one that is
+    /// undecided). Wrist cues (arm pattern, held forearm angle, a shift's direction) never set it, and neither
+    /// does the transition expert. `ActivityClassifier` lets a posture claim above the wrist-only ceiling only
+    /// when this AGREES with the posture claimed. Absent from the JSON when nil.
+    public var learnedPosture: PostureClass?
 
     public init(imu: Bool, encoder: Bool, dynAccel: Bool, gravity: Bool, steps: Bool,
                 heartRate: Bool, sleep: Bool, coverage: Double,
-                hartFine: Bool? = nil, transitionExpert: Bool? = nil, gaitExpert: Bool? = nil) {
+                hartFine: Bool? = nil, transitionExpert: Bool? = nil, gaitExpert: Bool? = nil,
+                learnedPosture: PostureClass? = nil) {
         self.imu = imu; self.encoder = encoder; self.dynAccel = dynAccel; self.gravity = gravity
         self.steps = steps; self.heartRate = heartRate; self.sleep = sleep; self.coverage = coverage
         self.hartFine = hartFine; self.transitionExpert = transitionExpert; self.gaitExpert = gaitExpert
+        self.learnedPosture = learnedPosture
     }
 
     /// Names of the experts behind this evidence, in a fixed order (provenance for runs and consumers).
@@ -407,6 +423,7 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
         case imu, encoder, steps, sleep, coverage
         case dynAccel = "dyn_accel", gravity, heartRate = "hr"
         case hartFine = "hart_fine", transitionExpert = "transition_expert", gaitExpert = "gait_expert"
+        case learnedPosture = "learned_posture"
     }
 }
 

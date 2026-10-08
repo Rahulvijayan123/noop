@@ -166,6 +166,11 @@ enum ActivityContextModel {
     /// from the active and exertion modes. (hsmm-1.7/1.8 used 0.06 / 0.08 / 0.12.) A personal profile never
     /// adapts it per posture (`profiles(for:)`, `ActivityPersonalProfileFitter.fitMode`).
     static let stationaryHrRel = 0.08
+    /// The same for the four postural-transition modes (sit-to-stand, stand-to-sit, lying down, getting up): one
+    /// level, so the rate cannot pick the path into one posture over another. hsmm-1.8 had lying down at 0.15
+    /// against 0.20: a lower rate leaned an ambiguous shift toward the lie-down path and so toward bed rest,
+    /// which made heart rate posture evidence by the back door (hsmm-1.9).
+    static let transitionHrRel = 0.20
 
     /// Index == `BodyMode.rawValue`.
     static let profiles: [ModeProfile] = [
@@ -277,7 +282,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.30...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.3, workout: 0.5),
         // standToSit
         ModeProfile(meanDwellS: 5, phases: 2,
@@ -285,7 +290,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.30...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.3, workout: 0.5),
         // lyingDown
         ModeProfile(meanDwellS: 8, phases: 2,
@@ -293,7 +298,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.25...0.85, moveIsBurst: true, gaitExpect: 0.05, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.15, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.6, workout: 0.3),
         // gettingUp
         ModeProfile(meanDwellS: 8, phases: 2,
@@ -301,7 +306,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.25...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.6, workout: 0.5),
     ]
 
@@ -506,11 +511,20 @@ enum ActivityContextModel {
     /// alone reaches at most its own source cap (ln 2.5, recumbent ≤ ~23 % of the stationary mass: a hedge,
     /// never a lying claim); a lie-down's direction and the staged night may go further.
     static let postureEvidenceCapRecumbent = log(200.0)
+    /// How far the learned posture memory (`PostureEvidence.learned`: HART's fine sit / stand rows, Inertia's
+    /// posture head, an adopted personal profile's channels) must lean, in log-odds of seated over upright, before
+    /// it counts as agreeing with a sitting or standing claim (`ActivityEvidenceSummary.learnedPosture`): 2:1. The
+    /// memory's own cap is ln 3, so a learned source that keeps naming one posture reaches it within seconds, and
+    /// one that wavers between sitting and standing does not.
+    static let learnedPostureAgreementLogOdds = log(2.0)
     /// The held orientation's recumbent cap for a wearer whose adopted profile carries their own lying row
-    /// (`ModeProfile.orientation`; the population cap is `PostureEvidence.caps[4]`, ln 2.5). Recumbent may then
-    /// reach 0.12 × 6 of sitting + standing (~42 % of the stationary mass): enough that the wearer's own lying
-    /// forearm stops reading as confident sitting (the seated head falls below the commit bar, "Stationary"),
-    /// still short of a lying claim, which keeps needing the night, the in-bed window or a lie-down's direction.
+    /// (`ModeProfile.orientation`; the population cap is `PostureEvidence.caps[4]`, ln 2.5). It is a ceiling, not
+    /// a push: recumbent may then hold up to 0.12 × 6 of sitting + standing (~42 % of the stationary mass), still
+    /// short of a lying claim, which keeps needing the night, the in-bed window or a lie-down's direction. The
+    /// bed-rest mass itself still comes from the likelihood, and the held orientation cannot open bed-rest entry
+    /// (`recumbentEntryEvidence`), so the wearer's lying row on its own never produces a lying claim
+    /// (`ActivityContextPersonalRecumbentCapTests`); the fitter's per-class wrong-claim guard refuses a profile
+    /// whose rows make a labelled mode read as another.
     static let recumbentOrientationCapPersonal = log(6.0)
     /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
     static let recumbentShareFloor = 0.12
@@ -692,6 +706,8 @@ enum ActivityContextModel {
         static let night = 6
         /// Index of the held-orientation recumbent source in `values`.
         static let recumbentOrientationIndex = 4
+        /// Index of the learned / personal heads' seated-over-upright source in `values`.
+        static let learnedIndex = 3
     }
 
     /// Every term the shared accelerometer budget bounds at one second, term by term, as the tempered, signed log

@@ -423,13 +423,17 @@ enum ActivityContextDays {
 
     /// What this worker build runs for a lane, as `reconcile_activity_context_versions` takes it: the decoder,
     /// ontology and feature schema the stored day documents are compared with, and a tag (folded into the day
-    /// fingerprints) that also carries the schema, publish interval, decoder-config recipe, lookback and — for
+    /// fingerprints) that also carries the schema, the activity taxonomy and interval versions (the stored runs
+    /// carry `activity_class` derived on write and intervals are built from them, so a taxonomy or interval bump
+    /// changes the stored day even when the decoder string does not), publish interval, decoder-config recipe,
+    /// lookback and — for
     /// the raw-IMU lane — the HART model and preprocessing the service reported. `ordinal` is
     /// `versionsOrdinal`: the registry refuses a lower one, so an older build left running during a rolling
     /// deploy cannot take the registration back and re-queue the recent days on every reconcile.
     static func lanesVersions(model: String? = nil, preprocessing: String? = nil) -> [String: String] {
         var parts = ["d=\(ActivityContextVersions.decoder)", "o=\(ActivityContextVersions.ontology)",
                      "f=\(ActivityContextVersions.featureSchema)", "s=\(ActivityContextVersions.schema)",
+                     "t=\(ActivityClassVersions.taxonomy)", "n=\(ActivityClassVersions.interval)",
                      "i=\(ActivityDecoderConfig().publishIntervalS)", "c=\(decoderConfigRecipe)",
                      "l=\(lookbackSeconds)"]
         var out = ["decoder": ActivityContextVersions.decoder, "ontology": ActivityContextVersions.ontology,
@@ -445,9 +449,10 @@ enum ActivityContextDays {
     }
 
     /// Increases whenever a build changes anything the versions tag names (decoder, ontology, feature schema,
-    /// document schema, publish interval, decoder-config recipe, lookback). Not part of the tag: equal builds
-    /// with different ordinals would otherwise fingerprint differently.
-    static let versionsOrdinal = 1
+    /// document schema, taxonomy, interval version, publish interval, decoder-config recipe, lookback). Not part
+    /// of the tag: equal builds with different ordinals would otherwise fingerprint differently.
+    /// 2: hsmm-1.9, and the tag names the taxonomy and interval versions.
+    static let versionsOrdinal = 2
 
     /// `parts` joined with ';', every character outside the registry's tag alphabet replaced, at most 256.
     static func versionsTag(_ parts: [String]) -> String {

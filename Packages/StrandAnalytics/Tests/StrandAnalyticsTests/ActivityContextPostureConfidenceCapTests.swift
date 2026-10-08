@@ -25,26 +25,27 @@ final class ActivityContextPostureConfidenceCapTests: XCTestCase {
         let classes = track.states.map(ActivityClassifier.classify(state:))
         let seated = classes.filter { [.sitting, .sittingDesk].contains($0.activityClass) }
         XCTAssertGreaterThan(seated.count, 100, "the scenario does commit sitting")
-        // Without the cap the heads put more than the cap on sitting here (the scenario is meaningful).
+        // With an agreeing learned source (the softer cap) the heads put more than the wrist-only cap on sitting
+        // here (the scenario is meaningful).
         let uncapped = track.states.map { s in
             ActivityClassifier.classify(posture: s.posture, locomotion: s.locomotion, armBehavior: s.armBehavior,
                                         sleep: s.sleep.state, inBed: s.sleep.inBed, wear: s.wear.state,
-                                        evidenceQuality: s.overallConfidence, learnedPostureEvidence: true)
+                                        evidenceQuality: s.overallConfidence, learnedPosture: .seatedLikely)
         }
         XCTAssertGreaterThan(uncapped.map(\.confidence).max() ?? 0, cap + 0.02)
 
-        for k in classes where [.sitting, .sittingDesk, .standing].contains(k.activityClass) {
+        for k in classes where [.sitting, .sittingDesk, .standing, .fidgeting].contains(k.activityClass) {
             XCTAssertLessThanOrEqual(k.confidence, cap + 1e-12)
         }
         for r in ActivityContextRuns.coalesce(track.states) {
             let k = ActivityClassifier.classify(run: r)
-            if [.sitting, .sittingDesk, .standing].contains(k.activityClass) {
+            if [.sitting, .sittingDesk, .standing, .fidgeting].contains(k.activityClass) {
                 XCTAssertLessThanOrEqual(k.confidence, cap + 1e-12)
             }
         }
         let intervals = ActivityContextIntervalBuilder.build(runs: ActivityContextRuns.coalesce(track.states))
         XCTAssertTrue(intervals.contains { $0.activityClass == .sitting || $0.activityClass == .sittingDesk })
-        for iv in intervals where [.sitting, .sittingDesk, .standing].contains(iv.activityClass) {
+        for iv in intervals where [.sitting, .sittingDesk, .standing, .fidgeting].contains(iv.activityClass) {
             XCTAssertLessThanOrEqual(iv.confidence, cap + 1e-9)
         }
     }
@@ -55,7 +56,7 @@ final class ActivityContextPostureConfidenceCapTests: XCTestCase {
             let capped = ActivityClassifier.classify(state: s)
             let free = ActivityClassifier.classify(posture: s.posture, locomotion: s.locomotion, armBehavior: s.armBehavior,
                                                    sleep: s.sleep.state, inBed: s.sleep.inBed, wear: s.wear.state,
-                                                   evidenceQuality: s.overallConfidence, learnedPostureEvidence: true)
+                                                   evidenceQuality: s.overallConfidence, learnedPosture: .seatedLikely)
             XCTAssertEqual(capped.activityClass, free.activityClass)
             XCTAssertEqual(capped.posture, free.posture)
             XCTAssertLessThanOrEqual(capped.confidence, free.confidence + 1e-12)

@@ -495,7 +495,7 @@ public struct ActivityContextDecoder: Sendable {
     /// Per-source memory caps (upper side): the population caps, except that a wearer whose adopted profile
     /// carries their own held-orientation row for lying (fitted and validated on their labelled lie-downs) lets
     /// the held orientation hedge further toward recumbent (`recumbentOrientationCapPersonal`).
-    private var postureEvidenceCaps: [Double] {
+    var postureEvidenceCaps: [Double] {
         var caps = Evidence.caps
         let bed = observationProfiles[BodyMode.bedRest.rawValue]
         if bed.orientation != nil || bed.orientationUnsigned != nil {
@@ -528,6 +528,19 @@ public struct ActivityContextDecoder: Sendable {
         guard seconds > 0, var e = tracking.postureEvidence else { return }
         for i in e.indices { e[i] *= exp(-Double(seconds) / Evidence.taus[i]) }
         tracking.postureEvidence = e
+    }
+
+    /// The posture the learned posture memory (`PostureEvidence.learned`) agrees with, when it leans at least
+    /// `learnedPostureAgreementLogOdds` one way (hsmm-1.9). Only learned sources feed that memory (HART's fine sit /
+    /// stand rows, Inertia's posture head, an adopted personal profile's channels): the arm pattern, the held
+    /// orientation and a shift's direction have their own sources, and the heart-rate level and the context gates
+    /// are kept out of it (`ActivityContextModel.score`).
+    var learnedPostureLean: PostureClass? {
+        guard let e = tracking.postureEvidence, e.count > Evidence.learnedIndex else { return nil }
+        let lean = e[Evidence.learnedIndex], bar = ActivityContextModel.learnedPostureAgreementLogOdds
+        if lean >= bar { return .seatedLikely }
+        if lean <= -bar { return .uprightStationary }
+        return nil
     }
 
     /// The recumbent memory without the held orientation (lie-down direction, the night): what may open entry.
@@ -1063,7 +1076,7 @@ public struct ActivityContextDecoder: Sendable {
         case .unknown: sleepState = .unknown
         }
         let sleep = SleepContext(state: sleepState, probability: nil, inBed: tracking.lastInBed)
-        let evidence = tracking.lastEvidence ?? ActivityEvidenceSummary(
+        var evidence = tracking.lastEvidence ?? ActivityEvidenceSummary(
             imu: false, encoder: false, dynAccel: false, gravity: false, steps: false,
             heartRate: false, sleep: false, coverage: 0)
 
@@ -1087,6 +1100,8 @@ public struct ActivityContextDecoder: Sendable {
                 history: ActivityHistorySummary(sinceLocomotionS: nil, stationaryForS: 0, recentEvents: []),
                 evidence: evidence, versions: versions)
         }
+
+        evidence.learnedPosture = learnedPostureLean
 
         let post = bodyPosterior()
         var posture: [PostureClass: Double] = [:]

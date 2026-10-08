@@ -754,6 +754,10 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
         XCTAssertTrue(tag.hasPrefix("d=\(ActivityContextVersions.decoder);o=\(ActivityContextVersions.ontology);"))
         XCTAssertTrue(tag.contains(";c=\(ActivityContextDays.decoderConfigRecipe);"))
         XCTAssertTrue(tag.contains(";l=\(ActivityContextDays.lookbackSeconds)"))
+        // Stored days from builds that differ only in the taxonomy or interval version must still differ.
+        XCTAssertTrue(tag.contains(";t=\(ActivityClassVersions.taxonomy);"), tag)
+        XCTAssertTrue(tag.contains(";n=\(ActivityClassVersions.interval);"), tag)
+        XCTAssertGreaterThanOrEqual(ActivityContextDays.versionsOrdinal, 2, "raised with hsmm-1.9")
 
         let hart = ActivityContextDays.lanesVersions(model: "hart wisdm/v0", preprocessing: "pre-1")
         XCTAssertEqual(hart["model"], "hart wisdm/v0", "the raw value is registered verbatim")
