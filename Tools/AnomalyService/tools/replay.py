@@ -85,7 +85,7 @@ def make_scorers(names: list[str], cfg: Config) -> list:
       out.append(TimesFMScorer(cfg))
     elif n == "units":
       from frwhoop_anomaly.models.units_scorer import UniTSScorer
-      out.append(UniTSScorer(cfg))
+      out.append(UniTSScorer(cfg, train_windows=cfg.units_train_windows, epochs=cfg.units_epochs))
     else:
       raise SystemExit(f"unknown model {n}")
   return out
@@ -103,6 +103,8 @@ def main() -> None:
   ap.add_argument("--step", type=int, default=30, help="minutes between ticks")
   ap.add_argument("--threads", type=int, default=4)
   ap.add_argument("--start_hours", type=float, default=24.0, help="first tick this many hours after the frame start")
+  ap.add_argument("--units_windows", type=int, default=400, help="UniTS prompt-tuning budget (VPS: 400 × 2)")
+  ap.add_argument("--units_epochs", type=int, default=2)
   a = ap.parse_args()
 
   state_dir = a.state or str(Path(a.out).with_suffix("")) + "_state"
@@ -113,7 +115,8 @@ def main() -> None:
                source_revision="replay", state_dir=state_dir, timesfm_src=env.get("TIMESFM_SRC"),
                timesfm_weights=env["TIMESFM_WEIGHTS"], units_src=env["UNITS_SRC"], units_ckpt=env["UNITS_CKPT"],
                threads=a.threads, poll_seconds=60, enqueue_limit=1, min_interval_minutes=10, lease_seconds=900,
-               context_minutes=1024, horizon_minutes=30, score_lookback_hours=6, max_jobs_per_cycle=1, dry_run=True)
+               context_minutes=1024, horizon_minutes=30, score_lookback_hours=6, max_jobs_per_cycle=1, dry_run=True,
+               units_train_windows=a.units_windows, units_epochs=a.units_epochs)
   t_load = time.time()
   scorers = make_scorers(a.models.split(","), cfg)
   load_s = time.time() - t_load
@@ -188,10 +191,12 @@ def main() -> None:
                                                  "model_p", "severity", "direction", "context")}
                              | {"first_seen": c["first_seen"], "delay_min": round((c["first_seen"] - ts(c["start_ts"])) / 60)})
 
+  res["windows"] = [{"model": m, "start": st_, "p": w["p"], "withheld": w["withheld_reason"], "bucket": w["context_kind"],
+                     "score": w["score"]} for (m, st_), w in sorted(windows.items(), key=lambda kv: kv[0][1])]
   if labels is not None:
     res["eval"] = evaluate(labels, cands, windows, ts, first)
   Path(a.out).write_text(json.dumps(res, indent=1, default=float))
-  print(json.dumps({k: v for k, v in res.items() if k not in ("candidates",)}, indent=1, default=float))
+  print(json.dumps({k: v for k, v in res.items() if k not in ("candidates", "windows")}, indent=1, default=float))
 
 
 def evaluate(labels: dict, cands: list[dict], windows: dict, ts, first: int) -> dict:

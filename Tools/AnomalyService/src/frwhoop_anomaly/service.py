@@ -63,6 +63,7 @@ class Service:
     self.counters = {"claimed": 0, "published": 0, "failed": 0, "candidates": 0, "windows": 0,
                      "read_ms": 0, "infer_ms": 0, "stale_publish": 0}
     self.last_error: str | None = None
+    self.current_job: tuple[str, int] | None = None   # (lease token, revision) while a job runs
 
   # ---- heartbeat ---------------------------------------------------------------------------------------------
   def heartbeat_loop(self) -> None:
@@ -115,6 +116,7 @@ class Service:
     t0 = time.time()
     done = threading.Event()
     threading.Thread(target=self._keepalive, args=(token, t0, done), name="lease", daemon=True).start()
+    self.current_job = (token, revision)
     try:
       payload = self.process(job)
       payload["run_ms"] = int((time.time() - t0) * 1000)
@@ -142,7 +144,21 @@ class Service:
         self.db.close()
       return True
     finally:
+      self.current_job = None
       done.set()
+
+  def release_current_job(self, reason: str) -> None:
+    """On shutdown: hand the running job back now instead of leaving it leased for up to lease_seconds."""
+    job = self.current_job
+    if job is None:
+      return
+    db = Database(self.cfg.db_url, self.cfg.db_sslmode, self.cfg.db_sslrootcert)
+    try:
+      db.rpc("fail_anomaly_job_v1", job[0], job[1], reason, timeout_ms=5000)
+    except Exception as e:
+      log.warning("could not release job on shutdown: %s", e)
+    finally:
+      db.close()
 
   def _keepalive(self, token: str, t0: float, done: threading.Event) -> None:
     """While a job runs (UniTS prompt-tuning can take minutes): renew its lease and feed the systemd watchdog, but
@@ -353,6 +369,9 @@ def main() -> None:
   def _stop(*_):
     svc.stop.set()
     sd_notify("STOPPING=1")
+    if svc.current_job is not None:     # mid-job (e.g. UniTS prompt-tuning): release the lease and exit now
+      svc.release_current_job("shutdown")
+      raise SystemExit(0)
   signal.signal(signal.SIGTERM, _stop)
   signal.signal(signal.SIGINT, _stop)
   svc.run()

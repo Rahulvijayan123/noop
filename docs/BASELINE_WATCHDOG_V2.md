@@ -178,43 +178,114 @@ A logged confounder day caps non-safety alerts at candidate. Escalation pushes k
 
 ## 5. Server models on the VPS (`Tools/AnomalyService`, `frwhoop-anomaly.service`)
 
-Filled in from the model prototype and the deploy, see §8:
+The models produce **candidates**, never notifications. A candidate reaches the phone through
+`scores/anomaly-candidates` → `AnomalyCandidateRepository` → `WatchdogDetectors.server`, and then passes the same
+five checks as every other candidate (§4). It must have ≥ 5 minutes in view and be ≤ 30 min fresh, otherwise it is
+suppressed.
 
-- the pinned TimesFM 3.0 and UniTS revisions, sha256 and licenses;
-- the data trigger: `scoring_jobs_v2` completions → `enqueue_anomaly_jobs_v1`, throttled to 10 min per owner;
-- minute features read from `noop_*`, `activity_context_runs` and `server_metric_series`;
-- per-model calibrated p from the owner's own history;
-- `anomaly_candidates` and `anomaly_window_scores`;
-- the `scores/anomaly-candidates` route;
-- the phone's `AnomalyCandidateRepository`.
+### Models (pinned; the host verifies sha256 at install)
+
+| | TimesFM 3.0 | UniTS x128 |
+|---|---|---|
+| Code | google-research/timesfm `e51928e2` (Apache-2.0) | mims-harvard/UniTS `0e028148` (MIT) |
+| Weights | HF `google/timesfm-3.0-pytorch` @ `43046b85`, `model.safetensors` sha256 `a7592b0a…7da` | release `ckpt`, `units_x128_pretrain_checkpoint.pth` sha256 `35d17336…474` |
+| Weights license | **TimesFM Non-Commercial License v1.0**: owner accepted the production risk; the weights stay on the VPS | MIT |
+| Size | 330.7 M params, 1.32 GB fp32 | 2.8 M params (+ ~10 k per-user prompt) |
+| Use | zero-shot forecast | per-user prompt tuning through UniTS' imputation path |
+
+**TimesFM recipe (lag 360).**
+- Context: 1024 minutes of the 5 targets (HR, ln RMSSD, skin temp, resp, SpO₂), ending 6 h before the scored 30-minute window.
+- Covariates (dyn, steps, asleep) are given through the window.
+- Each minute's residual is z = (obs − q50) / ((q90 − q10) / 2.563), with per-channel σ floors.
+- Why the lag: forecasting from the minutes right before the window absorbs a sustained shift within one window (AUROC 0.59–0.79 in the prototype); the 6 h lag keeps it visible (0.925).
+
+**UniTS recipe.**
+- The official AD recipe reconstructs a per-window-normalised input and misses level shifts (AUROC ≈ 0.5).
+- Instead: hide the targets in the last 384 minutes of a 1024-minute window, keep covariates visible, and score the last 30.
+- The per-user prompt is trained once ≥ 24 h of usable minutes exist. It is re-trained when history has grown 3× (early life) or weekly, and a re-train restarts that model's calibration.
+- VPS budget: 400 windows × 2 epochs.
+- Residuals are robust-standardized by the user's own post-training median / MAD.
+
+### Data path
+
+1. **Trigger.** `enqueue_anomaly_jobs_v1` reads `scoring_jobs_v2` completions (raw data has landed). There is no trigger on `noop_*` and no use of the scoring-inputs advisory lock. It is throttled to 10 min per (owner, device), and `p_users` limits it to listed owners (staged rollout: the owner only).
+2. **Lease.** Leased jobs with a revision fence. A keep-alive thread renews the lease and feeds the systemd watchdog for at most 25 min per job.
+3. **Features** (`features.py`): per-minute HR, R-R → RMSSD (one transport, de-duplicated, fills and suspects dropped, Malik 20 %, ≥ 20 pairs in 5 min), skin temp (W4 anchor or centidegrees), resp (`server_metric_series`), SpO₂ (strap estimates), dyn, steps and sleep.
+4. **Context.** From the server activity classifier's 30 s epochs (`activity_context_epochs`, latest revision, confidence ≥ 0.6), else from the sensors. Then the Layer 1 steady-state rule on bouts: 30 min after ≥ 3 active minutes, 10 min after a ≥ 2-minute walk, otherwise a 2-minute settle.
+5. **Minute cache.** 7 days, dense grid; a job re-reads only the last 3 h.
+6. **Windows.** 30 min, scored once when complete (5 min settle). A window is withheld for off-wrist, < 70 % HR coverage, or < 70 % still/asleep (activity or recovery). Bucket: sleep if ≥ 50 % asleep, else rest.
+7. **Calibration** (`calibration.py`).
+   - Each channel's directional window score gets an empirical p against the same user's own unflagged windows of the same bucket, with a conservative peaks-over-threshold tail: the 95 % upper bound of the exponential scale.
+   - Channels are combined by Bonferroni over observed channels, which is valid under any dependence.
+   - Nothing is flagged until a bucket has 96 reference windows.
+   - A window joins the reference only once ≥ 1 h old and unflagged.
+8. **Candidates.**
+   - A model flags a window at combined p < 1e-3.
+   - A run of consecutive flagged windows (either model) is one candidate, with a stable key across jobs and beyond the 12 h recent memory.
+   - Severity is "strong" when both models flag and min p < 1e-4.
+   - Publish is fenced, and candidates missing from a re-score are retracted.
+
+### Calibration under the null (40 references per cell, 5 channels; `tests/test_core.py` + simulation)
+
+| Reference windows | Gaussian | t4 (heavy tails) | ρ = 0.6, t5 |
+|---|---|---|---|
+| 96 | 0.24 × 10⁻³ | 1.06 × 10⁻³ | 0.97 × 10⁻³ |
+| 192 | 0.14 × 10⁻³ | 1.44 × 10⁻³ | 0.59 × 10⁻³ |
+| 400 | 0.07 × 10⁻³ | 1.39 × 10⁻³ | 0.48 × 10⁻³ |
+| 1400 | 0.04 × 10⁻³ | 1.90 × 10⁻³ | 0.83 × 10⁻³ |
+
+Values are the rate of p < 1e-3 (nominal 1 × 10⁻³). The first implementation re-calibrated min-p on the reference, which gave 4–16 × nominal with 96 windows. It ranked −min p, a bounded statistic, so even a 6 SD window could not go below p ≈ 1/(n+1). It was replaced.
+
+### Deploy (2026-10-08)
+
+- Unit `frwhoop-anomaly` (user `frwhoop-anom`) on frwhoop-worker-2: CPUQuota 100 %, MemoryHigh 2.8 G / Max 3.3 G, OOMScoreAdjust 500.
+- It is separate from `frwhoop-worker`, `frwhoop-worker-oura` and `frwhoop-inference`, none of which were touched. Host note: `/opt/DEPLOY-NOTE-anomaly-models.txt`.
+- Migration `20261007180000_anomaly_service` was applied to production and recorded in `schema_migrations`.
+- The `scores` function with the `/anomaly-candidates` route is **not deployed**: the deploy was not permitted from this session. Deployed v19 equals this branch minus the route.
 
 ---
 
 ## 6. Reliability (WatchdogService, notify policy, background)
 
-Filled in from the reliability branch:
-- device binding;
-- device family;
-- R-R de-duplication (one transport, live splice only after the stored range, 333 / 500 ms fills, pileups);
-- the quality feed;
-- the stale "queued" notify;
-- safety spacing;
-- background cold start;
-- single-flight ticks.
+Merged from the reliability branch (196 Watchdog tests, 664 WhoopStore tests):
+
+- **Device binding.** A tick reads only the bound strap's streams. The device family comes from the registry, not the legacy label.
+- **R-R de-duplication.**
+  - One transport per window (pinned channel).
+  - The live splice is used only after the stored range.
+  - 333 / 500 ms fill beats are dropped when HR < 100.
+  - Pile-ups are rejected.
+  - Measured on real windows: RMSSD 111.9 → 73.5 ms, where the duplicate beats had inflated it.
+- **Quality feed.** On-body, signal and motion are tri-state, with unknown kept as unknown (§4).
+- **Notify policy.**
+  - A queued notification older than 120 s is dropped, not delivered late.
+  - A safety re-notification waits ≥ 3600 s.
+  - Pushes are spaced by ≥ 600 s.
+  - Escalation keys on the verified alert level, so a corroborated episode notifies once.
+- **Background.** A cold start runs one tick. Ticks are single-flight, and heavy work is off the main actor.
 
 ---
 
-## 7. Consistency across features
+## 7. Consistency across features (`BaselineStandard.swift`)
 
-Filled in from the consistency branch (`BaselineStandard.swift`):
-- ln HRV;
-- causal folds;
-- confounder exclusion;
-- n ≥ 4;
-- shared floors;
-- device eras;
-- calendar windows;
-- Charge, Readiness, Illness, Cycle, Stress, Today and Coach.
+One standard for every place that compares a value with "your usual" (15 + 10 consistency tests on a 120-night tape with an SDNN night, confounded nights, a WHOOP 4.0 → 5.0 change and a missing week):
+
+1. HRV is modelled on ln, and SDNN nights never enter or get scored against an RMSSD reference.
+2. Causal folds: a day is judged only against days before it (no look-ahead).
+3. Confounded days (illness, alcohol, travel…) are scored but never folded, with the same key as Layer 1.
+4. No z under 4 usable days; "trusted" needs ≥ 14.
+5. Scale floors come from `PhysiologyContext.ReferenceConfig`, so a flat history cannot produce a huge z.
+6. Device eras: a confirmed family change and a manual Recalibrate open a new reference.
+7. Robust windows are median / 1.4826·MAD over calendar days.
+
+Charge (phone and server driver gating), Readiness, Illness, Cycle, Stress (daily and daytime), Today's insight and the Coach now use it. Measured on a realistic 90-night tape, phone Charge moved by a median |Δ| of 4.0 points (p90 9.1, max 12.5). Of that, ln vs ms alone accounts for a median of 0.8. The illness-night mean Charge went from 8.6 to 6.5.
+
+**Not yet on the standard** (follow-ups):
+- The worker's `DayScoring.loadBaselines` is still raw-ms HRV over the last 120 rows.
+- WeeklyDigest and ComparisonEngine still use raw ms.
+- The Kotlin/Android twins are not ported.
+
+A strap swap (4.0 ↔ 5.0) now resets Charge baselines, as rule 6 requires. People who alternate straps would sit in Calibrating; this needs an owner decision.
 
 ---
 
@@ -265,10 +336,13 @@ Synthetic, the real pipeline, one tick per minute (`WatchdogV2ScenarioTests`).
 
 ### Real data
 
-The owner's own WHOOP 5/MG phone history: 7.5 days, 2,143 five-minute ticks, 3.8 ms per tick.
+The owner's own WHOOP 5/MG phone history: 7.5 days, 2,143 five-minute ticks, 3.4 ms per tick.
 - 0 notifications and 0 candidates.
-- Every Layer 1 reference was still learning: 4 of 11 server nights fell inside the gapped 60-day window. So this checks quiet behaviour and quality gating, not detection power.
-- Minute quality: on body for 92% of minutes; signal good 40%, degraded 11%, poor 17%, unknown 31%. Motion was unknown for most of the history because dynAccel exists only in the last 24 h of the export.
+- Every Layer 1 reference was still learning: only 11 server nights exist (since 2026-09-20). So this checks quiet behaviour and quality gating, not detection power.
+- Minute quality marginals:
+  - on body 89.0 %, off 0.2 %, unknown 10.8 %;
+  - signal good 43.4 %, degraded 12.8 %, poor 17.9 %, unknown 25.9 %;
+  - motion still 10.7 %, moving 1.7 %, artifact 0.7 %, unknown 86.9 % (dynAccel exists only in the last 24 h of that export).
 
 Model results on real data and the TimesFM / UniTS contribution analysis: see §5 once deployed.
 

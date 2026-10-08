@@ -42,3 +42,21 @@ def test_round_trip(tmp_path, monkeypatch):
   job = db.rpc("claim_anomaly_job_v1", 60)
   assert not job or job[0].get("lease_token") is None          # completed: nothing due
   svc.hb_db.rpc("anomaly_service_heartbeat_v1", cfg.service_name, {"counters": svc.counters})
+
+
+def test_shutdown_releases_the_running_job(tmp_path):
+  cfg = Config(db_url=DB, db_sslrootcert=None, db_sslmode="disable", service_name="pytest-it", source_revision="it",
+               state_dir=str(tmp_path), timesfm_src=None, timesfm_weights="", units_src="", units_ckpt="", threads=1,
+               poll_seconds=60, enqueue_limit=10, min_interval_minutes=10, lease_seconds=600, context_minutes=60,
+               horizon_minutes=30, score_lookback_hours=6, max_jobs_per_cycle=2, dry_run=False, users=(OWNER,))
+  svc = Service(cfg, scorers=[StubScorer()])
+  db = svc.db
+  with db.conn().transaction():
+    db.conn().execute("truncate public.anomaly_jobs")
+    db.conn().execute("update public.scoring_jobs_v2 set last_completed_at = now()")
+  db.rpc("enqueue_anomaly_jobs_v1", 10, "10 minutes", [uuid.UUID(OWNER)])
+  job = db.rpc("claim_anomaly_job_v1", 600)[0]
+  svc.current_job = (str(job["lease_token"]), int(job["input_revision"]))
+  svc.release_current_job("shutdown")
+  row = db.conn().execute("select lease_token, last_error from public.anomaly_jobs").fetchone()
+  assert row["lease_token"] is None and row["last_error"] == "shutdown"
