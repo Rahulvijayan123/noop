@@ -855,7 +855,7 @@ final class AppModel: ObservableObject {
     func cloudWillResignActive() async {
         hostedRefreshTask?.cancel()
         hostedRefreshTask = nil
-        applyPowerSaving()   // off screen: the 15-minute offload cadence, not the minute one
+        applyPowerSaving()   // the minute offload cadence holds off screen too (see applyPowerSaving)
         CloudPushRuntime.shared.setAppIsActive(false)
         await CloudPushRuntime.shared.flushAndKick()
     }
@@ -1214,13 +1214,13 @@ final class AppModel: ObservableObject {
         let on = PuffinExperiment.powerSavingEnabled
         // Sub-option: only in effect while the Power-saving master is on, like the HRV-pause lever below.
         ble.setLowRefreshMode(on && PuffinExperiment.lowRefreshEnabled)
-        // The minute cadence only matters when the server is what reads the strap's history back, and only
-        // while the app is on screen. Off screen it meant two offloads a minute around the clock, each followed
-        // by a re-derivation of the day on the phone, for numbers nobody was looking at. The strap banks to
-        // flash either way; off screen it hands over on the 15-minute cadence, and opening the app asks for a
-        // sync at once (`requestSync(.foreground)`). Re-applied on every scene change (`cloudBecameActive`,
-        // `cloudWillResignActive`).
-        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative && Platform.appIsOnScreen)
+        // The minute cadence matters whenever the server reads the strap's history back, on screen or not: the
+        // server Watchdog is meant to catch a change as it happens, and a 15-minute off-screen cadence made it
+        // up to 15 minutes late. Offloads are small now that raw capture no longer banks optical (about 2 MB an
+        // hour), and the day re-derivation that made background minutes expensive is throttled off screen
+        // (`refreshAfterCompletedBackfill`). The empty-history, low-battery and low-refresh stretches still
+        // apply, so an off-wrist strap backs off. Re-applied on every scene change.
+        ble.setFreshSyncMode(PuffinExperiment.freshSyncEnabled && cloudScoringIsAuthoritative)
         ble.setLowBatteryOffloadThrottle(on ? PuffinExperiment.powerSavingBatteryPct : 0)
         // HRV pause is battery-%-aware like the offload lever — pass the same threshold.
         ble.setPauseCaptureOnPowerSave(on && PuffinExperiment.pauseHrvOnPowerSaveEnabled,
@@ -1417,6 +1417,10 @@ final class AppModel: ObservableObject {
         #endif
     }
 
+    /// Off screen, how often a completed offload may re-derive the day's activity context on the phone.
+    static let backgroundMaterializationSeconds: TimeInterval = 5 * 60
+    private var lastBackgroundMaterializationAt = Date.distantPast
+
     private func refreshAfterCompletedBackfill() async {
         // In cloud mode an offload writes only the stream tables, and nothing `refresh` reads comes from them: the
         // day's numbers arrive through `syncHostedResults`, which refreshes when it writes one. A 120-day refresh
@@ -1447,7 +1451,15 @@ final class AppModel: ObservableObject {
         // and hand it to a background-processing task when it cannot. A no-op on macOS, and on iOS a
         // foreground pass is never deferred.
         if routeAnalysisToCloud() {
-            activityContext.requestMaterialization()
+            // Off screen the offload now runs every minute; re-deriving the day on the phone after each one is
+            // the cost that made background minutes expensive, and nothing on screen is waiting for it. The
+            // server, which the Watchdog reads, gets the rows either way.
+            let now = Date()
+            if Platform.appIsOnScreen
+                || now.timeIntervalSince(lastBackgroundMaterializationAt) >= Self.backgroundMaterializationSeconds {
+                lastBackgroundMaterializationAt = now
+                activityContext.requestMaterialization()
+            }
             return
         }
         await RescoreBackgroundScheduler.run(passInProgress: intelligence.computing,
