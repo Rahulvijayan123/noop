@@ -81,7 +81,7 @@ only over contiguous pairs. Also computed, but not the headline number: SDNN (sa
 
 ### What it does not do
 
-- No frequency-domain HRV (HF, LF, LF/HF) in the shipped score. `HRVFreqDomain` exists but is not the nightly number.
+- No frequency-domain HRV (HF, LF, LF/HF) in the shipped score. `HRVFreqDomain` (method `lomb_scargle_psd_ms2_v2`, spec-02 §1) feeds only the Stress screen's descriptive optical-PRV band powers: Lomb–Scargle on each interval's true END time inside contiguous runs (a missing beat, wall-clock gap, re-stamped delivery or channel change splits the run; nothing is bridged), absolute one-sided PSD in ms²/Hz so band integrals are ms², 300 s windows with the existing band edges and span gates, and a span-weighted mean over full (≥ 250 s) windows only. It is not the nightly number.
 - `HRVReadiness` (log-RMSSD tiers) is an opt-in Test Centre readout. It does not move Charge.
 
 ---
@@ -596,7 +596,9 @@ staging, Rest/Charge, canonical RMSSD and recovery are UNCHANGED.
 
 ### Versions
 
-`schema_version` 1, `algorithm_version` `nara-sleep-analytics-1`, `config_version` `v1`
+`schema_version` 1, `algorithm_version` `nara-sleep-analytics-2`, `config_version` `v2` (spec-02: the
+thermal bins are built once so the post-wake slope exists; pNN50, stage-associated movement and the
+30-minute morning response were added; `-1` documents still decode)
 (versioned engineering gates in `SleepAnalyticsConfig`; fingerprint = SHA-256 over fragment
 ids/bounds/sources/edit lineage + stage source version + config gates + input revision).
 
@@ -622,9 +624,15 @@ alignment is established (`epochAlignmentEstablished`); a misaligned (edited) st
 |---|---|---|
 | `continuity` | Observed asleep/WASO (strictly inside the sleep period), the canonical inferred gap-awake contribution (reported separately) + the combined estimate (explicitly partial), onset delay from the window start (boundary estimate when the prefix is unobserved), REM/deep latency FROM SLEEP ONSET (YASA's recording-start convention documented; null `onset_not_observed`/`no_observed_rem`), longest observed sleep bout with censoring flags, complete awakenings vs censored wake stretches, all sleep→wake transitions incl. terminal wake | Complete stage: ≥95% label-supported; native also ≥95% input-supported. Primary per-hour rate also needs ≥30 min observed asleep; counts always exist below gates |
 | `stage_dynamics` | Per-label union seconds (totals-only fragments join as partial label summaries), per-label bouts (complete vs censored; median + nearest-rank p90 of complete bouts), the 4×4 native epoch transition matrix (rows origin/cols destination `[wake, light, deep, rem]`, self-transitions included, NULL probability rows for absent origins, eligible pairs, stage changes) | Quantiles need ≥3 complete bouts; matrix only for native, aligned sources; coarse sources expose real-resolution bout changes instead |
-| `movement` | Wrist movement from 1 Hz gravity adjacencies (same fragment, valid samples, consecutive seconds, not off-wrist): moving seconds/percentage, movement bouts, immobility bouts (complete vs censored), longest/median/p90 immobility | Primary rate: ≥80% eligible coverage + ≥30 observed minutes. Threshold = the shared stager stillness threshold (0.01 g). A device-specific movement proxy — never sleep/PLMI/posture, and NOT kRA/kAR/SFI |
-| `thermal` | Nightly minute-median temperature (median/IQR/p95−p05), pre-onset OLS slope `[onset−60 min, onset)` and post-wake slope `[end, end+30 min)` against elapsed unix time (DST-immune), equilibration exclusion after a verified re-wear event | ≥30 valid minutes + ≥80% eligible-minute coverage for the summary; slopes need ≥45/60 and ≥20/30 valid minutes, no missing run > 5 min; pre-onset needs an OBSERVED onset. Approximate wrist temperature — no core temperature/DLMO/circadian phase |
-| `prv_diagnostics` | Poincaré SD1/SD2 (direct pair space, ddof=1) per UTC-aligned 300-second window entirely inside one fragment; nightly values are the MEDIANS of eligible windows; ratio = ratio of the two summaries (null on zero SD2) | ≥200 valid adjacent pairs, ≥90% union interval-duration coverage (from beat-duration spans, not summed RR), ≤5% rejection over original deduped observations, resolved (ts, seq, ord) timing. PRV from an optical source — never ECG-equivalent; SD1 is usually redundant with RMSSD |
+| `movement` | Wrist movement from 1 Hz gravity adjacencies (same fragment, valid samples, consecutive seconds, not off-wrist): moving seconds/percentage, movement bouts, immobility bouts (complete vs censored), longest/median/p90 immobility. `stage_movement`: each classified adjacency joined to the normalized stage label at its second (unknown stays unknown; a bout counts toward the label of its first moving second), with `stage_movement_note = stages_may_depend_on_motion` | Primary rate: ≥80% eligible coverage + ≥30 observed minutes. Threshold = the shared stager stillness threshold (0.01 g). A device-specific movement proxy — never sleep/PLMI/posture, and NOT kRA/kAR/SFI |
+| `thermal` | Qualified UTC-minute bins are built ONCE over `[min(first fragment start, onset−60 min, end−30 min), end+30 min)`; the nightly minute-median temperature (median/IQR/p95−p05) uses only the in-fragment subset, the pre-onset OLS slope `[onset−60 min, onset)` and the post-wake slope `[end, end+30 min)` their own subsets, against elapsed unix time (mean-centred OLS; DST-immune), with equilibration exclusion after a verified re-wear event | ≥30 valid minutes + ≥80% eligible-minute coverage for the summary; slopes need ≥45/60 and ≥20/30 valid minutes, no missing run > 5 min; pre-onset needs an OBSERVED onset. Approximate wrist temperature — no core temperature/DLMO/circadian phase |
+| `prv_diagnostics` | Poincaré SD1/SD2 (direct pair space, ddof=1) per UTC-aligned 300-second window entirely inside one fragment; nightly values are the MEDIANS of eligible windows; ratio = ratio of the two summaries (null on zero SD2). pNN50 (`pnn50GapAware_original_adjacency_v1`) on exactly the SD1/SD2 pair set: per window and pooled nightly 100·ΣNN50/Σpairs, with the pair denominator | ≥200 valid adjacent pairs, ≥90% union interval-duration coverage (from beat-duration spans, not summed RR), ≤5% rejection over original deduped observations, resolved (ts, seq, ord) timing. PRV from an optical source — never ECG-equivalent; SD1 is usually redundant with RMSSD |
+
+`morning_response` (`morning-response-1`): one-minute HR (median of plausible seconds, ≥ 30 s),
+skin-temperature (the thermal group's own minute bins) and movement (moving 1 s gravity steps, ≥ 30
+adjacencies, no off-wrist) curves over `[end − 30 min, end + 30 min)` around the EFFECTIVE window end,
+each with its own coverage, before/after medians and a change that needs ≥ 20 valid minutes per side.
+A response around a detected boundary — not awakening physiology.
 
 ### Missing data
 
