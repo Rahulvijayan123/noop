@@ -145,8 +145,11 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
     // MARK: - Wire shape
 
     func testTheSharedTypesWriteTheContractKeys() throws {
+        // The engine now always computes both products (unavailable with reasons when the input is thin); clear
+        // them to check that an ABSENT product is omitted from the wire rather than written as a placeholder.
         var doc = builtDocument()
-        XCTAssertNil(doc.pulseEpisodes)
+        doc.pulseEpisodes = nil
+        doc.sleep.dayNightHeartRate = nil
         let old = try XCTUnwrap(try JSONSerialization.jsonObject(with: PC.encoder().encode(doc)) as? [String: Any])
         XCTAssertNil(old["pulse_episodes"], "an absent product is omitted, never an empty placeholder")
         XCTAssertNil((old["sleep"] as? [String: Any])?["day_night_heart_rate"])
@@ -297,7 +300,14 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
     // MARK: - Old documents and member failures
 
     func testAnOlderDocumentHasNoneOfTheNewSections() throws {
-        let contextDay = try makeContextDay(try documentJSON())
+        // A document stored before spec-02: the engine's output without the members spec-02 added.
+        var older = try documentJSON()
+        older["pulse_episodes"] = nil
+        if var sleep = older["sleep"] as? [String: Any] {
+            sleep["day_night_heart_rate"] = nil
+            older["sleep"] = sleep
+        }
+        let contextDay = try makeContextDay(older)
         XCTAssertNil(contextDay.document?.pulseEpisodes)
         XCTAssertNil(contextDay.document?.dayNightHeartRate)
         XCTAssertNotNil(contextDay.document?.full)
