@@ -50,4 +50,44 @@ final class UniTSPromptFallbackTests: XCTestCase {
         XCTAssertNil(none.daytimeHRV)
         XCTAssertFalse(none.daytimeHRVFallbackUsed)
     }
+
+    /// D4-08 review: the daytime fallback is AWAKE-only. A sleep-phase tick (a bound sleep interval open at now)
+    /// with only a sleep-HRV copy reconstructs at the sleep usual with the unscaled sleep MAD; the same window
+    /// awake uses the flagged 0.65x centre. Before the fix the sleep tick also seeded at 0.65 x 60 = 39 ms and the
+    /// prompt's MAD was narrowed by 0.65.
+    func testSleepPhaseUsesTheSleepUsualAndItsOwnMAD() throws {
+        let p = UniTSPrompt.from(evaluations: [shown(.sleepHRVLn, 60, spread: 3)])
+        // Unscaled sleep MAD: half-band (2 x 3) / k.
+        let ev = shown(.sleepHRVLn, 60, spread: 3)
+        XCTAssertEqual(p.scaleHRV, 6 / max(ev.kBandUsed, 1), accuracy: 1e-9)
+
+        let now = 99_000_000
+        let feed = Watchdog.syntheticFeed(now: now, hr: 55, hrv: 60, temp: 33.1, resp: 14, motion: 0)
+        guard case .success(var win) = WatchdogWindowBuilder.build(feed) else { return XCTFail("window") }
+        win.hrv = Array(repeating: nil, count: win.hrv.count)   // seed-only: no observed HRV to follow
+
+        let awake = UniTSRuntime.physicsResidual(window: win, prompt: p, occupancy: Array(repeating: 0, count: win.seqLen))
+        XCTAssertFalse(awake.sleepPhase)
+        XCTAssertEqual(UniTSRuntime.resolvedBases(window: win, prompt: p)[2] ?? 0,
+                       60 * UniTSPrompt.awakeToSleepHRVRatio, accuracy: 1e-9)
+        XCTAssertEqual(awake.reconstructedHRV.compactMap { $0 }.last ?? 0,
+                       60 * UniTSPrompt.awakeToSleepHRVRatio, accuracy: 1)
+
+        win.bindActivityContext(lastWorkoutEndUnix: 0,
+                                sleepIntervals: [WatchdogSleepInterval(startUnix: now - 3 * 3600, endUnix: now + 3600)])
+        XCTAssertTrue(UniTSRuntime.windowInSleep(win))
+        XCTAssertEqual(UniTSRuntime.resolvedBases(window: win, prompt: p)[2] ?? 0, 60, accuracy: 1e-9)
+        let asleep = UniTSRuntime.physicsResidual(window: win, prompt: p, occupancy: Array(repeating: 0, count: win.seqLen))
+        XCTAssertTrue(asleep.sleepPhase)
+        XCTAssertEqual(asleep.reconstructedHRV.compactMap { $0 }.last ?? 0, 60, accuracy: 1)
+        // The public entry point phases the same way (Core ML absent in tests -> physics prior).
+        let viaReconstruct = try UniTSRuntime().reconstruct(win, prompt: p)
+        XCTAssertTrue(viaReconstruct.sleepPhase)
+
+        var sleepPrompt = p
+        sleepPrompt.sleepPhase = true
+        XCTAssertEqual(sleepPrompt.hrvCentre ?? 0, 60, accuracy: 1e-9)
+        XCTAssertFalse(sleepPrompt.hrvCentreFallbackUsed)
+        XCTAssertTrue(p.hrvCentreFallbackUsed)
+    }
 }

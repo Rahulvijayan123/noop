@@ -7,8 +7,9 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var hrv: Double?
     /// Established awake-rest HRV (ms). Never averaged with sleep. Nil unless that copy is shown.
     public var hrvAwake: Double?
-    /// `hrv` came from overnight sleep HRV and no awake-rest copy is shown. Live daytime minutes are then compared
-    /// to `daytimeHRV`, the EXPLICIT sleep-scaled fallback (D4-08), with widened sigma; never silently the sleep usual.
+    /// `hrv` came from overnight sleep HRV and no awake-rest copy is shown. Live AWAKE minutes are then compared
+    /// to `daytimeHRV`, the EXPLICIT sleep-scaled fallback (D4-08), with a wider relative sigma (unscaled sleep MAD
+    /// on a 0.65x centre, plus the cold-start widening); never silently the sleep usual. Sleep-phase minutes use `hrv`.
     public var hrvAnchoredInSleep: Bool
     public var source: WatchdogPromptSource
     public var temp: Double?
@@ -21,6 +22,10 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var scaleTemp: Double
     public var scaleResp: Double
     public var scaleSpO2: Double
+    /// The tick is in the SLEEP phase (D4-08). Sleep-phase minutes compare to the overnight usual (`hrv`) with its
+    /// own MAD; only awake minutes use the `daytimeHRV` fallback. `UniTSRuntime.reconstruct` also sets this from
+    /// the window (a bound sleep interval open at `nowUnix`), so a caller that does not set it is still phased.
+    public var sleepPhase: Bool
 
     public init(hr: Double? = nil, rhr: Double? = nil, hrv: Double? = nil,
                 hrvAwake: Double? = nil, hrvAnchoredInSleep: Bool = false,
@@ -31,7 +36,8 @@ public struct UniTSPrompt: Equatable, Sendable {
                 scaleHRV: Double = WatchdogConfig.hrvScale,
                 scaleTemp: Double = WatchdogConfig.tempScale,
                 scaleResp: Double = WatchdogConfig.respScale,
-                scaleSpO2: Double = WatchdogConfig.spo2Scale) {
+                scaleSpO2: Double = WatchdogConfig.spo2Scale,
+                sleepPhase: Bool = false) {
         self.hr = hr
         self.rhr = rhr
         self.hrv = hrv
@@ -47,6 +53,7 @@ public struct UniTSPrompt: Equatable, Sendable {
         self.scaleTemp = scaleTemp
         self.scaleResp = scaleResp
         self.scaleSpO2 = scaleSpO2
+        self.sleepPhase = sleepPhase
     }
 
     /// One Layer 1 copy for both hat and TRUST. Long wins if shown; else week. Held copies older than 7 days are not current.
@@ -119,12 +126,11 @@ public struct UniTSPrompt: Equatable, Sendable {
                 ?? WatchdogConfig.hrScale,
             scaleRHR: displayMAD(evaluations, .sleepRHR, shownOnly: false)
                 ?? WatchdogConfig.hrScale,
-            // The sleep MAD rides the sleep-scaled fallback centre, so it is scaled by the same ratio (a
-            // log-domain dispersion is multiplicative in ms).
+            // The sleep MAD is carried UNSCALED in ms. In the sleep phase it is the overnight usual's own
+            // dispersion; on an awake tick it rides the 0.65x fallback centre, which makes it ~1.5x wider in
+            // relative terms (the intended widening for an unestablished regime), on top of the cold-start sigma.
             scaleHRV: (awakeHRV != nil ? displayMAD(evaluations, .awakeRestHRVLn, shownOnly: true) : nil)
-                ?? displayMAD(evaluations, .sleepHRVLn, shownOnly: false).map {
-                    awakeHRV == nil ? $0 * awakeToSleepHRVRatio : $0
-                }
+                ?? displayMAD(evaluations, .sleepHRVLn, shownOnly: false)
                 ?? WatchdogConfig.hrvScale,
             scaleTemp: displayMAD(evaluations, .sleepTemp, shownOnly: false) ?? WatchdogConfig.tempScale,
             scaleResp: displayMAD(evaluations, .sleepResp, shownOnly: false) ?? WatchdogConfig.respScale,
@@ -147,6 +153,24 @@ public struct UniTSPrompt: Equatable, Sendable {
 
     /// True when `daytimeHRV` is the sleep-scaled fallback rather than an awake-rest usual (provenance).
     public var daytimeHRVFallbackUsed: Bool { hrvAwake == nil && hrv != nil }
+
+    /// The phase-correct HRV centre for THIS tick: the overnight usual in the sleep phase (the awake usual only if
+    /// no sleep copy exists, as before); `daytimeHRV` on an awake tick. Every UniTS HRV seed / fill / coupling base
+    /// reads this, never `daytimeHRV` directly, so a sleeping RMSSD is never judged against the 0.65x daytime centre.
+    public var hrvCentre: Double? {
+        sleepPhase ? (hrv ?? hrvAwake) : daytimeHRV
+    }
+
+    /// True when this tick's HRV centre is the sleep-scaled daytime fallback (awake tick, no awake-rest copy).
+    public var hrvCentreFallbackUsed: Bool { !sleepPhase && daytimeHRVFallbackUsed }
+
+    /// Copy with `sleepPhase` set when either the caller or the window says the tick is asleep.
+    func phased(_ window: WatchdogWindow) -> UniTSPrompt {
+        guard !sleepPhase, UniTSRuntime.windowInSleep(window) else { return self }
+        var p = self
+        p.sleepPhase = true
+        return p
+    }
 
     /// Half the Layer 1 usual band in display units, divided by k → 1 MAD. Same copy as the prompt; never averaged.
     static func displayMAD(_ evaluations: [LBEvaluation], _ series: LBSeries, shownOnly: Bool) -> Double? {
@@ -188,6 +212,8 @@ public struct UniTSResidual: Equatable, Sendable {
     public var reconstructedSpO2: [Double?]
     public var modelVersion: String
     public var jointEnergy: Double
+    /// The residual was built for a sleep-phase tick (see `UniTSPrompt.sleepPhase`); `paintRanges` re-phases from it.
+    public var sleepPhase: Bool = false
 
     public func energy(for channel: WatchdogWindow.Channel) -> Double {
         energy[channel] ?? 0
@@ -217,6 +243,7 @@ public struct UniTSRuntime: Sendable {
 
     public func reconstruct(_ window: WatchdogWindow, prompt: UniTSPrompt,
                             tail: WatchdogLiveTail? = nil) throws -> UniTSResidual {
+        let prompt = prompt.phased(window)
         let live = tail ?? WatchdogLiveTail.resolve(window)
         let features = window.resolvedActivityFeatures()
         let occ = live.clipEffortOccupancy(Self.physiologyOccupancy(window, features: features))
@@ -293,6 +320,7 @@ public struct UniTSRuntime: Sendable {
     /// Physics prior used as Core ML input / load-fail fallback. Not the v2 detector.
     static func physicsResidual(window: WatchdogWindow, prompt: UniTSPrompt, occupancy: [Double],
                                 tail: WatchdogLiveTail? = nil) -> UniTSResidual {
+        let prompt = prompt.phased(window)
         let hatHR = reconstructHR(observed: window.hr, prompt: prompt.hr, occupancy: occupancy)
         let hatRHR = reconstructRHR(observed: window.rhr, prompt: prompt.rhr)
         let hatHRV = reconstructHRV(observed: window.hrv, prompt: prompt, occupancy: occupancy)
@@ -301,7 +329,7 @@ public struct UniTSRuntime: Sendable {
         let hatSpO2 = reconstructSpO2(observed: window.spo2, prompt: prompt.spo2, occupancy: occupancy)
 
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.hrvCentre ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let hrSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrMotionSmoothMinutes)
         let hrvSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
@@ -343,11 +371,17 @@ public struct UniTSRuntime: Sendable {
         )
     }
 
+    /// A bound sleep interval is open at the window's `nowUnix` (the Watchdog's `sleepNow` interval test).
+    static func windowInSleep(_ window: WatchdogWindow) -> Bool {
+        window.sleepIntervals.contains { $0.contains(window.nowUnix) }
+    }
+
     static func resolvedBases(window: WatchdogWindow, prompt: UniTSPrompt) -> [Double?] {
-        [
+        let prompt = prompt.phased(window)
+        return [
             prompt.hr ?? WatchdogPopulationPriors.hr,
             prompt.rhr ?? WatchdogPopulationPriors.rhr,
-            prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv,
+            prompt.hrvCentre ?? WatchdogPopulationPriors.hrv,
             prompt.temp ?? WatchdogPopulationPriors.temp,
             prompt.resp ?? WatchdogPopulationPriors.resp,
             prompt.spo2 ?? WatchdogPopulationPriors.spo2
@@ -446,7 +480,8 @@ public struct UniTSRuntime: Sendable {
             reconstructedResp: hatResp,
             reconstructedSpO2: hatSpO2,
             modelVersion: modelVersion,
-            jointEnergy: joint
+            jointEnergy: joint,
+            sleepPhase: prompt.sleepPhase
         )
     }
 
@@ -524,7 +559,7 @@ public struct UniTSRuntime: Sendable {
     /// A sleep usual may seed the first minutes; it is not a flat live line. TimesFM is not this line.
     static func reconstructHRV(observed: [Double?], prompt: UniTSPrompt, occupancy: [Double]) -> [Double?] {
         let smooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
-        let seed = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
+        let seed = prompt.hrvCentre ?? WatchdogPopulationPriors.hrv
         let center = shortTermHrvCenter(observed: observed, seed: seed)
         let target: [Double?] = zip(center, smooth).map { rest, occ in
             let drop = WatchdogConfig.hrvExerciseDropMs * occ * (rest / WatchdogConfig.hrvDropRefMs)
@@ -601,8 +636,10 @@ public struct UniTSRuntime: Sendable {
     public static func paintRanges(residual: UniTSResidual, occupancy: [Double],
                                   prompt: UniTSPrompt)
     -> (hr: [Double], rhr: [Double], hrv: [Double], temp: [Double], resp: [Double], spo2: [Double]) {
+        var prompt = prompt
+        if residual.sleepPhase { prompt.sleepPhase = true }
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.hrvCentre ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let hrSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrMotionSmoothMinutes)
         let hrvSmooth = trailingMean(occupancy, taps: WatchdogConfig.hrvMotionSmoothMinutes)
@@ -651,7 +688,7 @@ public struct UniTSRuntime: Sendable {
     -> (hr: [Double], hrv: [Double], temp: [Double], resp: [Double]) {
         let n = WatchdogConfig.seqLen
         let hrBase = prompt.hr ?? WatchdogPopulationPriors.hr
-        let hrvBase = prompt.daytimeHRV ?? WatchdogPopulationPriors.hrv
+        let hrvBase = prompt.hrvCentre ?? WatchdogPopulationPriors.hrv
         let respBase = prompt.resp ?? WatchdogPopulationPriors.resp
         let occ = occupancy.count >= n ? occupancy : occupancy + Array(repeating: occupancy.last ?? 0,
                                                                        count: max(0, n - occupancy.count))
