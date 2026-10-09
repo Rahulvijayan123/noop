@@ -506,6 +506,48 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     /// Where the live awake-rest anchor came from (phase usual key, still fallback, posture).
     /// Nil on unavailable / safety-only ticks and in results persisted by older builds.
     public var usualProvenance: WatchdogUsualProvenance? = nil
+    /// Exercise-session context of the newest minute (rule exercise-session-1). Nil when no evidence history was
+    /// available and in results persisted by older builds.
+    public var exercise: WatchdogExerciseSnapshot? = nil
+}
+
+/// What the Watchdog knew about exercise when it judged the newest minute: lineage for the ledger, the card and
+/// the server record.
+public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
+    public var rule: String
+    /// "session" | "recovery" | "none"
+    public var phase: String
+    public var sessionStartUnix: Int?
+    /// Start of the session's last movement minute (nil while the session is open).
+    public var sessionLastMovementUnix: Int?
+    public var restReference: Double
+    public var restBasis: String
+    public var ceilingBpm: Double
+    public var ceilingBasis: String
+    /// Personal exercise references: "established" or "learning".
+    public var sessionReference: String
+    public var recoveryReference: String
+    /// "weekday 21:50 (4 sessions)" when the session matches an active routine; display only.
+    public var routine: String?
+
+    public static func make(_ ex: WatchdogExerciseContext, evaluations: [LBEvaluation],
+                            nowUnix: Int) -> WatchdogExerciseSnapshot {
+        let phase = ex.phases.last ?? .none
+        let span = ExerciseSessionRule.span(at: nowUnix - nowUnix % WatchdogConfig.gridSeconds, in: ex.spans)
+        func state(_ s: LBSeries) -> String {
+            evaluations.contains { $0.series == s && $0.establishedLong && !$0.stale } ? "established" : "learning"
+        }
+        let routine = ex.routine.map { c in
+            String(format: "%@ %02d:%02d (%d sessions)", c.dayType, c.startMinute / 60, c.startMinute % 60, c.sessions)
+        }
+        return WatchdogExerciseSnapshot(
+            rule: ex.rule, phase: phase.rawValue, sessionStartUnix: phase == .none ? nil : span?.startUnix,
+            sessionLastMovementUnix: phase == .none || (span?.open ?? true) ? nil : span?.endUnix,
+            restReference: ex.restReference, restBasis: ex.restBasis,
+            ceilingBpm: ex.hrCeiling, ceilingBasis: ex.hrCeilingBasis,
+            sessionReference: state(.exerciseSessionHR), recoveryReference: state(.exerciseRecoveryHR),
+            routine: routine)
+    }
 }
 
 public enum Watchdog {
@@ -990,8 +1032,10 @@ public enum Watchdog {
             carry.quietAbsTemp = 0; carry.quietAbsResp = 0; carry.quietAbsSpO2 = 0
             carry.quietN = 0
         }
-        let recovering = carry.lastWorkoutEndUnix > 0
-            && nowUnix - carry.lastWorkoutEndUnix < WatchdogEventLabeler.postWorkoutSeconds
+        // An exercise session or its recovery (rule exercise-session-1) is never learned as a usual band.
+        let inExercise = (window.exercise?.phases.last).map { $0 != .none } ?? false
+        let recovering = inExercise || (carry.lastWorkoutEndUnix > 0
+            && nowUnix - carry.lastWorkoutEndUnix < WatchdogEventLabeler.postWorkoutSeconds)
         let presentMax = zip(absR, present).compactMap { $0.1 ? $0.0 : nil }.max() ?? 0
         let bandLearn = WatchdogBand.learnable(eventHint) && bandFam != .other && !safety
             && reconJ < WatchdogCalibration.tNote && !hot.contains("HR")
@@ -1206,7 +1250,7 @@ public enum Watchdog {
 
         let painted = UniTSRuntime.paintRanges(residual: adapted)
 
-        return WatchdogResult(
+        var result = WatchdogResult(
             severity: severity,
             episodeState: state,
             episodeId: carry.episodeId,
@@ -1275,6 +1319,20 @@ public enum Watchdog {
             physiologyOff: physiologyOff,
             verdicts: verdicts
         )
+        if let ex = window.exercise {
+            let snap = WatchdogExerciseSnapshot.make(ex, evaluations: evaluations, nowUnix: nowUnix)
+            result.exercise = snap
+            // The card and ledger name the context the minute was judged in, not the wrist's instantaneous class
+            // (lifting reads "still" to the strap).
+            if snap.phase == ExerciseSessionPhase.session.rawValue {
+                result.activityLabel = WatchdogMinuteContextKind.exerciseSession.rawValue
+                result.activityDetail = "Exercise session"
+            } else if snap.phase == ExerciseSessionPhase.recovery.rawValue {
+                result.activityLabel = WatchdogMinuteContextKind.recovery.rawValue
+                result.activityDetail = "Recovering from exercise"
+            }
+        }
+        return result
     }
 
     static func alertLevel(_ verdicts: [WatchdogVerdict]) -> Double {

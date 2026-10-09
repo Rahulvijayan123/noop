@@ -166,7 +166,8 @@ extension LongitudinalBaseline {
              .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
              .awakeUprightHR, .awakeUprightHRVLn:
             return .stillWaking
-        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR:
+        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR,
+             .exerciseSessionHR, .exerciseRecoveryHR:
             return .movingWaking
         case .sleepHR:
             return .overnightSleep
@@ -190,6 +191,14 @@ extension LongitudinalBaseline {
                                   worse: .higher)
         case .walkingHR:
             return LBSeriesParams(kBand: 2.2, span7: 7, nLongEstablished: 14, floor: 4,
+                                  worse: .higher)
+        // Session days, not calendar days: an exercise reference is established after 8 session days (owner rule:
+        // "learning" until real; audit 2026-10-09 proposed 7–8). Wider band: sessions vary more than rest.
+        case .exerciseSessionHR:
+            return LBSeriesParams(kBand: 2.6, span7: 7, nLongEstablished: 8, floor: 6,
+                                  worse: .higher)
+        case .exerciseRecoveryHR:
+            return LBSeriesParams(kBand: 2.4, span7: 7, nLongEstablished: 8, floor: 4,
                                   worse: .higher)
         case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn:
             return LBSeriesParams(kBand: 2.6, span7: 10, nLongEstablished: 14, floor: 0.08,

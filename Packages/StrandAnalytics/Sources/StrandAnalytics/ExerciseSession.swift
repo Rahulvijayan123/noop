@@ -278,6 +278,8 @@ public struct ExerciseRoutine: Equatable, Sendable, Codable {
         public var durationMinutesP50: Int
         public var hrP50: Double?
         public var hrP90: Double?
+        /// 90th percentile of the sessions' peak HR (the personal in-session ceiling's basis).
+        public var hrPeakP90: Double?
         /// Active: seen on ≥ 50 % of matching days in the last 14 days. A lapsed routine is kept but not described
         /// as usual.
         public var active: Bool
@@ -322,6 +324,7 @@ public struct ExerciseRoutine: Equatable, Sendable, Codable {
                 let durations = members.map(\.durationMinutes).sorted()
                 let p50s = members.compactMap(\.hrP50)
                 let p90s = members.compactMap(\.hrP90)
+                let peaks = members.compactMap(\.hrPeak).sorted()
                 // Recent share over matching days in the last 14 days.
                 let today = local(nowUnix).day
                 let since = local(historyStartUnix ?? done.map(\.startUnix).min() ?? nowUnix).day
@@ -336,6 +339,7 @@ public struct ExerciseRoutine: Equatable, Sendable, Codable {
                                         spreadMinutes: spread, sessions: members.count, recentShare: share,
                                         durationMinutesP50: durations[durations.count / 2],
                                         hrP50: ExerciseSessionRule.median(p50s), hrP90: ExerciseSessionRule.median(p90s),
+                                        hrPeakP90: ExerciseSessionRule.quantile(peaks, 0.9),
                                         active: share >= 0.5))
             }
         }

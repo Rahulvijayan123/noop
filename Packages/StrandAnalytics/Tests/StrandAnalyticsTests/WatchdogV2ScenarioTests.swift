@@ -16,6 +16,12 @@ final class WatchdogV2ScenarioTests: XCTestCase {
 
     enum State: String {
         case seated, walking, running, recovery, asleep, offWrist, artifact
+        /// Resistance set: arm moves (≈0.18 g), the strap's optics are in motion mode (sentinel on most seconds).
+        case liftSet
+        /// Between sets or leg work on an arm-worn strap: the strap is still while heart rate stays high.
+        case liftRest
+        /// Seated, with an isolated arm movement (≈0.07 g) every fourth minute.
+        case seatedFidget
     }
 
     struct Segment {
@@ -126,6 +132,12 @@ final class WatchdogV2ScenarioTests: XCTestCase {
             case .asleep: dyn = 0.002 + 0.001 * abs(r.n()); occ = 0.0
             case .artifact: dyn = 0.12 + 0.05 * abs(r.n()); occ = 0.2
             case .offWrist: dyn = 0; occ = 0
+            case .liftSet: dyn = 0.18 + 0.05 * abs(r.n()); occ = 0.45
+            case .liftRest: dyn = 0.008 + 0.003 * abs(r.n()); occ = 0.05
+            case .seatedFidget:
+                let fidget = (minute - seg.fromMin) % 4 == 3
+                dyn = fidget ? 0.07 + 0.01 * abs(r.n()) : 0.004 + 0.002 * abs(r.n())
+                occ = fidget ? 0.2 : 0.04
             }
             tape.imu.append(WatchdogIMUSample(ts: t, x: 0, y: 0, z: 1, dynAccel: dyn))
             tape.motion.append(WatchdogScalarSample(ts: t, value: occ))
@@ -138,7 +150,7 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                 stepCounter += 1
                 tape.steps.append(StepSample(ts: t, counter: stepCounter, activityClass: seg.state == .running ? 2 : 1))
             }
-            if seg.state == .artifact { tape.badMinutes.insert(minute) }
+            if seg.state == .artifact || seg.state == .liftSet { tape.badMinutes.insert(minute) }
         }
         var open: Int?
         for m in 0..<sc.minutes {
@@ -188,9 +200,30 @@ final class WatchdogV2ScenarioTests: XCTestCase {
         var decisions: [String]
     }
 
+    /// Per-minute evidence for rule exercise-session-1 from the tape (no decoder intervals in the synthetic tape).
+    static func evidenceMinutes(_ tape: Tape) -> [Int: ExerciseSessionMinute] {
+        var dyn: [Int: (Double, Int)] = [:], hr: [Int: (Double, Int)] = [:], walk: [Int: Int] = [:], steps: [Int: Int] = [:]
+        for g in tape.imu { if let d = g.dynAccel { let m = g.ts - g.ts % 60; dyn[m, default: (0, 0)].0 += d; dyn[m, default: (0, 0)].1 += 1 } }
+        for h in tape.hr { let m = h.ts - h.ts % 60; hr[m, default: (0, 0)].0 += Double(h.bpm); hr[m, default: (0, 0)].1 += 1 }
+        for st in tape.steps {
+            let m = st.ts - st.ts % 60
+            steps[m, default: 0] += 1
+            if st.activityClass == 1 || st.activityClass == 2 { walk[m, default: 0] += 1 }
+        }
+        var out: [Int: ExerciseSessionMinute] = [:]
+        for m in Set(dyn.keys).union(hr.keys) {
+            let d = dyn[m].map { $0.0 / Double($0.1) }
+            let h = hr[m].map { $0.0 / Double($0.1) }
+            out[m] = ExerciseSessionRule.minute(minuteUnix: m, hr: h, dynMean: d, walkRunTicks: walk[m] ?? 0,
+                                                stepTicks: steps[m] ?? 0, interval: nil)
+        }
+        return out
+    }
+
     static func run(_ sc: Scenario, models: [WatchdogModelCandidate]? = nil,
-                    refs: [LBEvaluation]) -> [TickOut] {
+                    refs: [LBEvaluation], exercise: Bool = true) -> [TickOut] {
         let tape = generate(sc)
+        let evidence = exercise ? evidenceMinutes(tape) : [:]
         let prompt = UniTSPrompt.from(evaluations: refs)
         var carry = WatchdogCarry.empty
         var out: [TickOut] = []
@@ -224,6 +257,13 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                     }
                 }
                 w.quality = q
+                if exercise {
+                    let hist = stride(from: max(t0, now - WatchdogExerciseContext.historySeconds), to: now, by: 60)
+                        .compactMap { evidence[$0] }
+                    w.exercise = WatchdogExerciseContext.build(minutes: hist, windowStart: w.startUnix,
+                                                               seqLen: w.hr.count, nowUnix: now, evaluations: refs,
+                                                               hrMax: 195, hrMaxFromFormula: true)
+                }
                 window = .success(w)
             }
             let sleepOpen = tape.sleep.contains { $0.contains(now) }
@@ -284,6 +324,13 @@ final class WatchdogV2ScenarioTests: XCTestCase {
             Segment(fromMin: a, toMin: b, state: s, hr: hr, hrEnd: end, rmssd: rmssd, spo2: spo2)
         }
         _ = normalSeated
+        /// Resistance training: 1-minute sets and 2-minute rests (strap still) from `a` to `b`.
+        func gym(_ a: Int, _ b: Int, set: Double, rest: Double) -> [Segment] {
+            stride(from: a, to: b, by: 3).flatMap { m -> [Segment] in
+                [Segment(fromMin: m, toMin: min(m + 1, b), state: .liftSet, hr: set, rmssd: 6),
+                 Segment(fromMin: min(m + 1, b), toMin: min(m + 3, b), state: .liftRest, hr: rest, rmssd: 10)]
+            }.filter { $0.toMin > $0.fromMin }
+        }
         let modelBoth = { (from: Int, to: Int, channels: [String]) -> WatchdogModelCandidate in
             WatchdogModelCandidate(candidateKey: "sim-\(from)", startUnix: t0 + from * 60, endUnix: t0 + to * 60,
                                    channels: channels, modelP: ["timesfm-3.0": 1e-4, "units-x128": 5e-4],
@@ -333,6 +380,35 @@ final class WatchdogV2ScenarioTests: XCTestCase {
             Scenario(name: "short_hr_spike_rest", minutes: 200, segments: [
                 seg(0, 100, .seated, 68), seg(100, 104, .seated, 135, rmssd: 10), seg(104, 200, .seated, 68)],
                 seed: 21),
+            // Real-shaped gym evenings (owner data 2026-10-06…08: 64–153 min sessions, HR p50 95–117, p90 115–146,
+            // half the minutes still to the strap). Sets and rests, a 12-minute still-arm leg block at 128–134 bpm,
+            // then a recovery tail.
+            Scenario(name: "gym_resistance_sets_with_leg_work", minutes: 300,
+                     segments: [seg(0, 60, .seated, 70)] + gym(60, 105, set: 136, rest: 116)
+                        + [seg(105, 117, .liftRest, 131, rmssd: 8)] + gym(117, 135, set: 138, rest: 118)
+                        + [seg(135, 175, .recovery, 112, end: 74, rmssd: 30), seg(175, 300, .seated, 71)],
+                     seed: 22),
+            Scenario(name: "gym_cardio_then_long_tail", minutes: 300,
+                     segments: [seg(0, 60, .seated, 72), seg(60, 125, .walking, 132, rmssd: 8),
+                                seg(125, 215, .recovery, 104, end: 80, rmssd: 30), seg(215, 300, .seated, 74)],
+                     seed: 23),
+            // Genuine problems during and after exercise must still reach the person.
+            Scenario(name: "gym_hr_above_ceiling", minutes: 240,
+                     segments: [seg(0, 60, .seated, 70)] + gym(60, 99, set: 140, rest: 118)
+                        + [seg(99, 108, .liftRest, 206, rmssd: 4)] + gym(108, 130, set: 140, rest: 118)
+                        + [seg(130, 170, .recovery, 112, end: 74, rmssd: 30), seg(170, 240, .seated, 71)],
+                     truth: [Truth(fromMin: 99, toMin: 108, label: "HR 206 sustained inside a session", expectAlert: true)],
+                     seed: 24),
+            Scenario(name: "post_gym_failure_to_recover", minutes: 260,
+                     segments: [seg(0, 60, .seated, 70)] + gym(60, 120, set: 136, rest: 116)
+                        + [seg(120, 200, .liftRest, 129, rmssd: 9), seg(200, 260, .seated, 75)],
+                     truth: [Truth(fromMin: 135, toMin: 200, label: "HR stays 129 at rest after the session", expectAlert: true)],
+                     seed: 25),
+            Scenario(name: "resting_tachy_132_with_fidgets", minutes: 220,
+                     segments: [seg(0, 80, .seated, 68), seg(80, 150, .seatedFidget, 132, rmssd: 10),
+                                seg(150, 220, .seated, 70)],
+                     truth: [Truth(fromMin: 80, toMin: 150, label: "resting HR 132 with isolated arm movement", expectAlert: true)],
+                     seed: 26),
         ]
     }
 

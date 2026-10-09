@@ -74,45 +74,11 @@ public enum WatchdogSignalQuality {
                 else if !tempOK { reasons.append("skin_temp_unconfirmed") }
             }
 
-            // Signal.
-            let sentinelFrac = v18.isEmpty ? nil : Double(v18.filter(\.sentinel).count) / Double(v18.count)
-            let coverage = q.rrCoverageByMinute[m]
-            let pileup = q.rrPileupSeconds.contains { $0 >= m && $0 < mEnd }
-            let saturated = q.saturationEvents.contains { abs($0 - m - grid / 2) <= grid }
-            let contactLost = q.contacts.last { $0.ts <= mEnd }?.state == "supported_not_detected"
-            var signal: WDSignal = .unknown
-            if pileup || saturated || contactLost
-                || (sentinelFrac.map { $0 > poorSentinelFrac } ?? false)
-                || (coverage.map { $0 < poorCoverageLo || $0 > overCount } ?? false) {
-                signal = .poor
-                if pileup { reasons.append("rr_pileup") }
-                if saturated { reasons.append("optical_saturation") }
-                if contactLost { reasons.append("contact_not_detected") }
-                if sentinelFrac.map({ $0 > poorSentinelFrac }) ?? false { reasons.append("optical_sentinel") }
-                if coverage.map({ $0 < poorCoverageLo }) ?? false { reasons.append("beat_coverage_low") }
-                if coverage.map({ $0 > overCount }) ?? false { reasons.append("beat_overcount") }
-            } else if let c = coverage, c >= goodCoverageLo, c <= goodCoverageHi,
-                      (sentinelFrac == nil && v18.isEmpty) || (v18.count >= minV18Rows && sentinelFrac == 0) {
-                signal = .good
-                if v18.isEmpty { reasons.append("beat_coverage_only") }
-            } else if coverage != nil || sentinelFrac != nil {
-                signal = .degraded
-            } else {
-                reasons.append("no_signal_metadata")
-            }
-
             // Motion.
             let dyn = window.imu.filter { $0.ts >= m && $0.ts < mEnd }.compactMap(\.dynAccel)
             var motion: WDMotion = .unknown
             if !dyn.isEmpty {
-                let mean = dyn.reduce(0, +) / Double(dyn.count)
-                if mean >= movingDyn {
-                    let badOptics = (sentinelFrac.map { $0 > artifactSentinelFrac } ?? false)
-                        || (coverage.map { $0 < 0.8 } ?? false)
-                    motion = badOptics ? .artifact : .moving
-                } else {
-                    motion = .still
-                }
+                motion = dyn.reduce(0, +) / Double(dyn.count) >= movingDyn ? .moving : .still
             } else if i < window.motion.count, let occ = window.motion[i] {
                 // No dynamic-acceleration samples (WHOOP 4.0 gravity, or an unfilled 5.0 minute): use the
                 // window's occupancy, the activity embedding's own motion scalar. WatchdogService leaves it nil
@@ -122,8 +88,57 @@ public enum WatchdogSignalQuality {
             } else {
                 reasons.append("no_motion_sample")
             }
-            out.append(WatchdogMinuteQuality(minuteUnix: m, onBody: onBody, signal: signal, motion: motion,
-                                             placement: q.placement, reasons: reasons))
+
+            // Signal, graded per channel. On the WHOOP 5/MG the optical amplitude marker ("sentinel") is set on
+            // ~96 % of the most active seconds and ~1 % of the stillest, and predicts missing beats (P(no beats)
+            // 0.92 with it vs 0.25 without) — a motion-mode marker, not evidence that the bpm is wrong (audit
+            // 2026-10-09). So it degrades the beat channel (R-R, HRV, beat respiration) and leaves bpm "unverified"
+            // while moving; neither turns movement into an artifact that erases the effort from the context.
+            let sentinelFrac = v18.isEmpty ? nil : Double(v18.filter(\.sentinel).count) / Double(v18.count)
+            let coverage = q.rrCoverageByMinute[m]
+            let pileup = q.rrPileupSeconds.contains { $0 >= m && $0 < mEnd }
+            let saturated = q.saturationEvents.contains { abs($0 - m - grid / 2) <= grid }
+            let contactLost = q.contacts.last { $0.ts <= mEnd }?.state == "supported_not_detected"
+            var beats: WDSignal = .unknown
+            if pileup || saturated || contactLost
+                || (sentinelFrac.map { $0 > poorSentinelFrac } ?? false)
+                || (coverage.map { $0 < poorCoverageLo || $0 > overCount } ?? false) {
+                beats = .poor
+                if pileup { reasons.append("rr_pileup") }
+                if saturated { reasons.append("optical_saturation") }
+                if contactLost { reasons.append("contact_not_detected") }
+                if sentinelFrac.map({ $0 > poorSentinelFrac }) ?? false {
+                    reasons.append(motion == .moving ? "motion_mode_optics" : "optical_sentinel")
+                }
+                if coverage.map({ $0 < poorCoverageLo }) ?? false { reasons.append("beat_coverage_low") }
+                if coverage.map({ $0 > overCount }) ?? false { reasons.append("beat_overcount") }
+            } else if let c = coverage, c >= goodCoverageLo, c <= goodCoverageHi,
+                      (sentinelFrac == nil && v18.isEmpty) || (v18.count >= minV18Rows && sentinelFrac == 0) {
+                beats = .good
+                if v18.isEmpty { reasons.append("beat_coverage_only") }
+            } else if coverage != nil || sentinelFrac != nil {
+                beats = .degraded
+            }
+            var signal: WDSignal = .unknown
+            if saturated || contactLost {
+                signal = .poor
+            } else if window.hr[i] == nil {
+                signal = .unknown
+            } else if motion == .moving {
+                signal = .degraded
+                reasons.append("hr_in_motion_unverified")
+            } else if sentinelFrac.map({ $0 > poorSentinelFrac }) ?? false {
+                signal = .degraded
+                reasons.append("optical_sentinel_at_rest")
+            } else if beats == .good {
+                signal = .good
+            } else if coverage != nil || sentinelFrac != nil || hrSecs >= minHrSecondsOn {
+                signal = .degraded
+            } else {
+                reasons.append("no_signal_metadata")
+            }
+            out.append(WatchdogMinuteQuality(minuteUnix: m, onBody: onBody, signal: signal, beats: beats,
+                                             motion: motion, placement: q.placement, reasons: reasons))
         }
         return out
     }
@@ -136,7 +151,14 @@ public enum WatchdogMinuteContextKind: String, Equatable, Sendable, Codable {
     case awakeStill = "awake_still"
     case walking
     case active
+    /// Inside an exercise session (rule exercise-session-1): still minutes between sets and during leg work included.
+    case exerciseSession = "exercise_session"
+    /// After a session's last movement, until heart rate returns or the cap.
+    case recovery
     case unknown
+
+    /// Compared with a resting reference (sleep or awake-still strata).
+    public var restReferenced: Bool { self == .asleep || self == .awakeStill }
 }
 
 public struct WatchdogMinuteContext: Equatable, Sendable, Codable {
@@ -149,6 +171,15 @@ public struct WatchdogMinuteContext: Equatable, Sendable, Codable {
     public var sinceWalkingS: Int?
     /// A posture change or a sleep edge within the last few minutes.
     public var recentTransition: Bool
+    /// Not at steady state for a resting reference: 2 minutes after an isolated movement minute, 10 minutes after a
+    /// movement bout (≥ 3 active minutes in 10) or after walking (Layer 1 steady-state rule).
+    public var settling: Bool = false
+    /// Recovery minutes: seconds since the session's last movement minute ended.
+    public var sinceSessionEndS: Int? = nil
+    /// The 10-minute settle after a movement bout or walking (not the 2-minute one after an isolated minute).
+    public var settlingAfterBout: Bool = false
+    /// An active minute that is not part of a bout (< 3 active minutes in the 10 before it): a fidget.
+    public var isolatedMovement: Bool = false
 }
 
 public enum WatchdogContextResolver {
@@ -160,6 +191,8 @@ public enum WatchdogContextResolver {
         let intervals = window.quality.contextIntervals.sorted { $0.startTs < $1.startTs }
         var lastEffortEnd = carryLastWorkoutEndUnix > 0 ? carryLastWorkoutEndUnix : nil
         var lastWalkEnd: Int? = nil
+        var activeMinutes: [Int] = []     // minute starts of recent active minutes (bout detection)
+        var lastBoutEnd: Int? = nil
         var prevPosture: LBPosture?? = nil
         var prevKind: WatchdogMinuteContextKind? = nil
         var lastTransitionAt: Int? = nil
@@ -175,12 +208,21 @@ public enum WatchdogContextResolver {
             let interval = intervals.last { $0.startTs <= mid && $0.endTs > mid }
             let loco = feat.isEmpty ? 0 : WatchdogActivityFeatures.stepLocomotion(feat)
             let motion = i < quality.count ? quality[i].motion : .unknown
+            let exercise = window.exercise?.phase(at: i) ?? .none
+            // Plain walking keeps the steady-walking reference wherever it happens; brisk walking and running are
+            // effort, never compared with it (Layer 1 learns walking HR from non-vigorous walking only).
+            let plainWalking = cls == .walk || loco >= 0.5 || interval?.locomotion == "walking"
+            let vigorousLocomotion = ["brisk_walking", "running"].contains(interval?.locomotion ?? "")
             var kind: WatchdogMinuteContextKind
             if asleep {
                 kind = .asleep
-            } else if WatchdogEventGeometry.isExercise(cls) && cls != .walk || motion == .artifact {
+            } else if exercise == .session && !plainWalking {
+                kind = .exerciseSession
+            } else if exercise == .recovery && !plainWalking && motion != .moving {
+                kind = .recovery
+            } else if WatchdogEventGeometry.isExercise(cls) && cls != .walk || motion == .artifact || vigorousLocomotion {
                 kind = cls == .artifact || motion == .artifact ? .unknown : .active
-            } else if cls == .walk || loco >= 0.5 || interval?.locomotion == "walking" {
+            } else if plainWalking {
                 kind = .walking
             } else if (cls == .still || cls == .stand || cls == .unknown) && motion == .still {
                 // An abstaining classifier with MEASURED stillness is still (same rule as WatchdogLiveTail);
@@ -193,8 +235,18 @@ public enum WatchdogContextResolver {
             } else {
                 kind = .unknown
             }
-            if kind == .active { lastEffortEnd = m + grid }
+            if kind == .active || kind == .exerciseSession {
+                lastEffortEnd = m + grid
+                activeMinutes.append(m)
+                activeMinutes.removeAll { m - $0 >= 10 * 60 }
+                if activeMinutes.count >= 3 { lastBoutEnd = m + grid }
+            }
             if kind == .walking { lastWalkEnd = m + grid }
+            let restLike = kind == .awakeStill || kind == .asleep || kind == .unknown
+            let afterBout = restLike && ((lastBoutEnd.map { m - $0 >= 0 && m - $0 < 600 } ?? false)
+                || (lastWalkEnd.map { m - $0 >= 0 && m - $0 < 600 } ?? false))
+            let settling = afterBout || (restLike && (lastEffortEnd.map { m - $0 >= 0 && m - $0 < 120 } ?? false))
+            let isolated = kind == .active && activeMinutes.count < 3
             let posture: LBPosture? = (kind == .awakeStill) ? interval.flatMap(LongitudinalBaseline.ContextMaterializer.posture(of:)) : nil
             if let pk = prevKind, pk != kind { lastTransitionAt = m }
             if kind == .awakeStill, let pp = prevPosture, pp != posture { lastTransitionAt = m }
@@ -203,7 +255,10 @@ public enum WatchdogContextResolver {
             out.append(WatchdogMinuteContext(
                 minuteUnix: m, kind: kind, posture: posture,
                 sinceEffortS: lastEffortEnd.map { m - $0 }, sinceWalkingS: lastWalkEnd.map { m - $0 },
-                recentTransition: lastTransitionAt.map { m - $0 < 3 * 60 } ?? false))
+                recentTransition: lastTransitionAt.map { m - $0 < 3 * 60 } ?? false,
+                settling: settling,
+                sinceSessionEndS: kind == .recovery ? window.exercise?.secondsSinceSessionEnd(at: m) : nil,
+                settlingAfterBout: afterBout, isolatedMovement: isolated))
         }
         return out
     }
@@ -241,6 +296,10 @@ public enum WatchdogLiveReferences {
             case nil: return [.awakeRestHRVLn]
             }
         case (.walking, "HR"): return [.walkingHR]
+        // Exercise context selects the person's own exercise references; while they are still learning the
+        // detector abstains (never falls back to a resting series).
+        case (.exerciseSession, "HR"): return [.exerciseSessionHR]
+        case (.recovery, "HR"): return [.exerciseRecoveryHR]
         default: return []
         }
     }
@@ -307,12 +366,14 @@ public enum WatchdogDetectors {
                 quality[$0].onBody != .off && quality[$0].signal != .poor && quality[$0].motion != .artifact
                     && !context[$0].recentTransition
             }
+            // HRV comes from beat timing: its minutes need a usable beat channel, not just usable bpm.
+            let usableBeats = usable.filter { quality[$0].beats != .poor }
             let hrs = usable.compactMap { window.hr[$0] }
             let hr = hrs.count >= 4 ? PhysiologyContext.RobustStats.median(hrs) : nil
-            let hrvAtEnd = usable.last.flatMap { i in i < window.hrv.count ? window.hrv[i] : nil }
+            let hrvAtEnd = usableBeats.last.flatMap { i in i < window.hrv.count ? window.hrv[i] : nil }
             let lnHrv = hrvAtEnd.flatMap { $0 > 0 ? log($0) : nil }
             out.append(Block(start: start, kind: kind, posture: context[idx[0]].posture, hr: hr,
-                             lnHrv: usable.count >= 4 ? lnHrv : nil, minuteIdx: idx))
+                             lnHrv: usableBeats.count >= 4 ? lnHrv : nil, minuteIdx: idx))
         }
         return out
     }
@@ -385,8 +446,18 @@ public enum WatchdogDetectors {
             return ((n - need)..<n).allSatisfy(pass)
         }
         let start10 = window.startUnix + (n - hrSustainMinutes) * WatchdogConfig.gridSeconds
-        if trailing(hrSustainMinutes, { i in
-            (window.hr[i] ?? 0) > tachyBpm && context[i].kind == .awakeStill }) {
+        // The resting rule: awake and still, or in an exercise recovery once its grace has passed (a heart rate that
+        // has not come down 15+ minutes after the last movement is exactly what this bound is for).
+        func restingForTachy(_ c: WatchdogMinuteContext) -> Bool {
+            c.kind == .awakeStill
+                || (c.kind == .recovery && (c.sinceSessionEndS ?? 0) >= ExerciseSessionRule.recoveryRestingRuleAfterSeconds)
+        }
+        // Up to two isolated movement minutes (fidgets) do not make a minute window "active"; a bout, walking or a
+        // session does. Otherwise a person sitting at 130 bpm who moves an arm every few minutes is never checked.
+        let tail10 = n >= hrSustainMinutes ? Array((n - hrSustainMinutes)..<n) : []
+        let fidgets = tail10.filter { context[$0].isolatedMovement }.count
+        if fidgets <= 2, trailing(hrSustainMinutes, { i in
+            (window.hr[i] ?? 0) > tachyBpm && (restingForTachy(context[i]) || context[i].isolatedMovement) }) {
             let v = (n - hrSustainMinutes..<n).compactMap { window.hr[$0] }.min() ?? 0
             out.append(WatchdogCandidate(kind: .safetyExtreme, id: "sx-tachy-\(start10)", channels: ["HR"],
                                          startUnix: start10, lastUnix: window.nowUnix, direction: 1,
@@ -399,6 +470,19 @@ public enum WatchdogDetectors {
             out.append(WatchdogCandidate(kind: .safetyExtreme, id: "sx-brady-\(start10)", channels: ["HR"],
                                          startUnix: start10, lastUnix: window.nowUnix, direction: -1,
                                          magnitude: v, reference: "hr_lt_\(Int(bradyAwakeBpm))_awake_\(Int(bradyAsleepBpm))_asleep"))
+        }
+        // Inside an exercise session: sustained heart rate above the in-session ceiling (the person's maximum, or their
+        // own session peaks + 10 once established). Context never removes a bound; it selects this one.
+        if let ex = window.exercise {
+            let need = WatchdogExerciseContext.ceilingSustainMinutes
+            if trailing(need, { i in (window.hr[i] ?? 0) > ex.hrCeiling && context[i].kind == .exerciseSession }) {
+                let s5 = window.startUnix + (n - need) * WatchdogConfig.gridSeconds
+                let v = (n - need..<n).compactMap { window.hr[$0] }.min() ?? 0
+                out.append(WatchdogCandidate(kind: .safetyExtreme, id: "sx-exercise-ceiling-\(s5)", channels: ["HR"],
+                                             startUnix: s5, lastUnix: window.nowUnix, direction: 1, magnitude: v,
+                                             reference: "exercise_hr_gt_\(Int(ex.hrCeiling.rounded()))",
+                                             detail: ["ceiling_basis": ex.hrCeilingBasis, "rule": ex.rule]))
+            }
         }
         let spo2Mins = (0..<n).filter { i in i < window.spo2.count && window.spo2[i] != nil }
         if spo2Mins.count >= spo2SustainMinutes {
@@ -517,23 +601,47 @@ public enum WatchdogAlertVerifier {
                                 reason: ok ? "established Layer 1 reference in channel family" : "no established reference"))
         }
 
-        // 2. Activity.
+        // 2. Activity: context selects the comparison; it never mutes one. A candidate compared with a resting
+        //    reference is not comparable when movement, an exercise session, a recovery or a settle is inside its span;
+        //    session and recovery minutes are compared with the person's own exercise references (or none yet).
         let ctx = idx.map { context[$0] }
         let unknownShare = ctx.isEmpty ? 1 : Double(ctx.filter { $0.kind == .unknown }.count) / Double(ctx.count)
-        let effortExplains: Bool = ctx.contains { $0.kind == .active || $0.kind == .walking && c.kind != .personalDeviation }
-            || ctx.contains { ($0.sinceEffortS.map { $0 >= 0 && $0 < 30 * 60 } ?? false) && c.direction > 0 && c.channels.contains("HR") }
-            || ctx.contains { ($0.sinceWalkingS.map { $0 >= 0 && $0 < 10 * 60 } ?? false) && $0.kind != .walking && c.channels.contains("HR") }
+        let activeCount = ctx.filter { $0.kind == .active }.count
+        let walking = ctx.contains { $0.kind == .walking }
+        let fidgetsOnly = activeCount > 0 && activeCount <= 2 && ctx.filter { $0.kind == .active }.allSatisfy(\.isolatedMovement)
+        // Safety bounds tolerate isolated fidgets (their detector already does); other comparisons do not.
+        let moving = walking || (activeCount > 0 && !(c.kind == .safetyExtreme && fidgetsOnly))
+        let inSession = ctx.contains { $0.kind == .exerciseSession }
+        let inRecovery = ctx.contains { $0.kind == .recovery }
+        let settling = ctx.contains { $0.settling }
         let transition = ctx.contains { $0.recentTransition }
+        let exerciseReferenced = c.kind == .personalDeviation
+            && (c.detail["context"] == WatchdogMinuteContextKind.exerciseSession.rawValue
+                || c.detail["context"] == WatchdogMinuteContextKind.recovery.rawValue)
+        let isCeiling = c.kind == .safetyExtreme && c.id.hasPrefix("sx-exercise-ceiling")
         if ctx.isEmpty {
             checks.append(.init(check: .activity, outcome: .unknown, reason: "no minutes in view"))
-        } else if effortExplains {
-            checks.append(.init(check: .activity, outcome: .fail, reason: "movement, exercise or recovery explains it"))
+        } else if isCeiling {
+            checks.append(.init(check: .activity, outcome: .pass,
+                                reason: "inside an exercise session; compared with the in-session ceiling"))
+        } else if exerciseReferenced {
+            checks.append(.init(check: .activity, outcome: transition ? .fail : .pass,
+                                reason: transition ? "posture or sleep transition"
+                                    : "compared with your own \(inSession ? "exercise-session" : "recovery") reference"))
+        } else if moving || inSession || (inRecovery && c.kind != .safetyExtreme) {
+            checks.append(.init(check: .activity, outcome: .fail,
+                                reason: inSession ? "inside an exercise session (not comparable with rest)"
+                                    : inRecovery ? "exercise recovery (not comparable with rest)"
+                                    : "movement in the span (not comparable with rest)"))
+        } else if c.direction > 0 && (c.kind == .safetyExtreme ? ctx.contains { $0.settlingAfterBout } : settling) {
+            checks.append(.init(check: .activity, outcome: .fail, reason: "settling after movement"))
         } else if transition && c.kind != .safetyExtreme {
             checks.append(.init(check: .activity, outcome: .fail, reason: "posture or sleep transition"))
         } else if unknownShare > 0.2 {
             checks.append(.init(check: .activity, outcome: .unknown, reason: "activity unknown for \(Int(unknownShare * 100))% of minutes"))
         } else {
-            checks.append(.init(check: .activity, outcome: .pass, reason: "still / asleep throughout"))
+            checks.append(.init(check: .activity, outcome: .pass,
+                                reason: inRecovery ? "still, past the recovery grace" : "still / asleep throughout"))
         }
 
         // 3. Sensor quality.
@@ -543,10 +651,14 @@ public enum WatchdogAlertVerifier {
         } else {
             let nq = Double(q.count)
             let off = q.contains { $0.onBody == .off }
-            let poor = Double(q.filter { $0.signal == .poor }.count) / nq
+            // Grade the channel the candidate is about: HRV and beat-derived respiration need beat timing; heart
+            // rate needs the bpm stream (degraded, i.e. unverified during movement, still counts as usable).
+            let beatChannel = c.channels.contains("HRV") || (c.channels.contains("Resp") && window.respFromBeats)
+            func grade(_ x: WatchdogMinuteQuality) -> WDSignal { beatChannel ? x.beats : x.signal }
+            let poor = Double(q.filter { grade($0) == .poor }.count) / nq
             let artifact = Double(q.filter { $0.motion == .artifact }.count) / nq
             let on = Double(q.filter { $0.onBody == .on }.count) / nq
-            let goodish = Double(q.filter { $0.signal == .good || $0.signal == .degraded }.count) / nq
+            let goodish = Double(q.filter { grade($0) == .good || grade($0) == .degraded }.count) / nq
             let tempNeedsPlacement = c.channels.contains("Temp") && q.first?.placement != "wrist"
             if off {
                 checks.append(.init(check: .sensorQuality, outcome: .fail, reason: "strap off the body"))

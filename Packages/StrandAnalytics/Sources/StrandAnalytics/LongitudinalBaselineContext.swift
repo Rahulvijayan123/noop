@@ -22,6 +22,12 @@ import WhoopStore
 //   • HR per stratum-day: sample-weighted mean of interval means. HRV: pooled √(Σd²/Σn) of the stored successive-
 //     difference components (never an average of RMSSDs); rows older than v49 fall back to n = rrBeats − 1.
 //   • Within-day scale: weighted MAD of the interval values (≥ 3 intervals) for live short-window comparisons.
+//   • Exercise sessions and their recovery (rule exercise-session-1, docs/context-watchdog/EXERCISE_SESSION.md) never
+//     count as rest or steady walking: their intervals feed the exercise-session and recovery series instead
+//     (audit 2026-10-09: recovery tails had leaked 17 min at 84.5 bpm into a day's awake-rest value).
+//   • A still bout is broken by a change between two known postures, movement, sleep, a gap or off-wrist, not by a
+//     still interval whose posture the decoder left unknown (those alternated every 1–2 minutes and kept every posture
+//     stratum empty).
 
 /// Body position of an awake still stratum.
 public enum LBPosture: String, Equatable, Sendable, Codable, CaseIterable {
@@ -33,7 +39,7 @@ public enum LBPosture: String, Equatable, Sendable, Codable, CaseIterable {
 extension LongitudinalBaseline {
 
     public enum ContextMaterializer {
-        public static let version = "lb-context-1"
+        public static let version = "lb-context-2"
         public static let minClassConfidence = 0.6
         public static let minEvidenceQuality = 0.5
         public static let maxStillIntensity = 0.40
@@ -135,10 +141,37 @@ extension LongitudinalBaseline {
             }
         }
 
+        /// Exercise sessions found in the interval rows (rule exercise-session-1). `restReference` is the established
+        /// awake-rest HR centre when the caller has one; otherwise the sample-weighted median HR of the rows' still,
+        /// awake intervals; otherwise 70 bpm.
+        public static func exerciseSessions(rows: [ActivityContextIntervalRow],
+                                            restReference: Double? = nil) -> [ExerciseSessionSpan] {
+            let rest = restReference ?? stillAwakeMedianHR(rows) ?? 70
+            return ExerciseSessionRule.sessions(minutes: ExerciseSessionRule.minutes(fromIntervals: rows),
+                                                restReference: rest)
+        }
+
+        static func stillAwakeMedianHR(_ rows: [ActivityContextIntervalRow]) -> Double? {
+            let xs = rows.filter { $0.sleepState == "awake" && worn($0) && still($0) }
+                .compactMap { r -> (Double, Double)? in r.hrMean.map { ($0, Double(r.hrSamples)) } }
+            return Acc.weightedMedian(xs)
+        }
+
         /// Daily observations for every context series from interval rows (any order, any days).
-        public static func observations(rows: [ActivityContextIntervalRow],
+        public static func observations(rows: [ActivityContextIntervalRow], restReference: Double? = nil,
                                         calendar: Calendar = .current) -> [LBSeries: [LBDailyObservation]] {
             let sorted = rows.sorted { $0.startTs < $1.startTs }
+            let sessions = exerciseSessions(rows: sorted, restReference: restReference)
+            /// The session phase an interval mostly falls in (by its midpoint).
+            func phase(_ r: ActivityContextIntervalRow) -> ExerciseSessionPhase {
+                let mid = (r.startTs + r.endTs) / 2
+                let minute = mid - ((mid % 60) + 60) % 60
+                for s in sessions {
+                    if minute >= s.startUnix && minute <= s.endUnix { return .session }
+                    if minute > s.endUnix && minute < (s.recoveryEndUnix ?? Int.max) { return .recovery }
+                }
+                return .none
+            }
             var acc: [LBSeries: [String: Acc]] = [:]
             // Start of the current still bout of one posture (a posture change, movement, sleep, a gap or
             // off-wrist ends a bout). The first interval of a bout and anything within 120 s of its start is the
@@ -147,6 +180,8 @@ extension LongitudinalBaseline {
             var lastWalkingEnd = Self.never
             var lastVigorousEnd = Self.never
             var prevStillPosture: LBPosture?? = nil   // .none = previous interval was not awake-still
+            // The last known posture of the current still bout (nil = none known yet in this bout).
+            var boutPosture: LBPosture? = nil
             var walkingBoutStart: Int? = nil
             var prevEnd = Self.never
 
@@ -180,6 +215,24 @@ extension LongitudinalBaseline {
                 guard isAwake else { prevStillPosture = nil; walkingBoutStart = nil; continue }
                 let day = civilDay(r, calendar: calendar, asleep: false)
 
+                // Exercise session and recovery: their own series, never rest. Plain (non-vigorous) walking keeps the
+                // steady-walking series wherever it happens, as the live Watchdog compares it.
+                let plainWalk = isWalking && !isVigorous && (r.intensity ?? 0) > 0
+                switch plainWalk ? .none : phase(r) {
+                case .session:
+                    acc[.exerciseSessionHR, default: [:]][day, default: Acc()].add(r, hr: true, hrv: false)
+                    prevStillPosture = nil
+                    walkingBoutStart = nil
+                    continue
+                case .recovery:
+                    acc[.exerciseRecoveryHR, default: [:]][day, default: Acc()].add(r, hr: true, hrv: false)
+                    prevStillPosture = nil
+                    walkingBoutStart = nil
+                    continue
+                case .none:
+                    break
+                }
+
                 // Steady walking.
                 if isWalking, !isVigorous, (r.intensity ?? 0) > 0 {
                     if walkingBoutStart == nil || !contiguous { walkingBoutStart = r.startTs }
@@ -197,10 +250,17 @@ extension LongitudinalBaseline {
                 }
                 let p = posture(of: r)
                 let sameBout: Bool = {
-                    guard contiguous, let prev = prevStillPosture else { return false }
-                    return prev == p
+                    guard contiguous, prevStillPosture != nil else { return false }
+                    // Only a change between two known postures breaks the bout.
+                    if let p, let known = boutPosture, p != known { return false }
+                    return true
                 }()
-                if !sameBout { boutStart = r.startTs }
+                if !sameBout {
+                    boutStart = r.startTs
+                    boutPosture = p
+                } else if let p {
+                    boutPosture = p
+                }
                 prevStillPosture = .some(p)
                 let settled = r.startTs - boutStart >= settleAfterTransitionS
                     && r.startTs - lastWalkingEnd >= settleAfterWalkingS

@@ -5,10 +5,11 @@ import XCTest
 /// model — and nothing at all where no baseline is established or the minute is not at steady state.
 final class WatchdogExpectationTests: XCTestCase {
     private func ctx(_ kind: WatchdogMinuteContextKind, posture: LBPosture? = nil, sinceEffortS: Int? = nil,
-                     sinceWalkingS: Int? = nil, transition: Bool = false, minute: Int = 0) -> WatchdogMinuteContext {
+                     sinceWalkingS: Int? = nil, transition: Bool = false, settling: Bool = false,
+                     minute: Int = 0) -> WatchdogMinuteContext {
         WatchdogMinuteContext(minuteUnix: 1_800_000_000 + minute * 60, kind: kind, posture: posture,
                               sinceEffortS: sinceEffortS, sinceWalkingS: sinceWalkingS,
-                              recentTransition: transition)
+                              recentTransition: transition, settling: settling)
     }
 
     private func ref(_ refs: [LBEvaluation], _ s: LBSeries) -> WatchdogLiveReference {
@@ -45,11 +46,13 @@ final class WatchdogExpectationTests: XCTestCase {
     }
 
     func testRecoveryAndTransitionsHaveNoExpectation() {
+        // Settling comes from the context resolver (2 min after an isolated movement minute, 10 min after a bout or
+        // walking); an exercise recovery is its own context with its own reference, learning here.
         let refs = WatchdogV2ScenarioTests.references()
         let minutes = [
-            ctx(.awakeStill, sinceEffortS: 20 * 60),      // 20 min after vigorous: recovering
-            ctx(.awakeStill, sinceEffortS: 31 * 60),      // past 30 min: steady
-            ctx(.awakeStill, sinceWalkingS: 5 * 60),      // 5 min after walking: settling
+            ctx(.recovery, sinceEffortS: 20 * 60),        // after an exercise session: recovery reference (learning)
+            ctx(.awakeStill, sinceEffortS: 31 * 60),      // steady
+            ctx(.awakeStill, sinceWalkingS: 5 * 60, settling: true),   // 5 min after walking: settling
             ctx(.awakeStill, sinceWalkingS: 11 * 60),
             ctx(.asleep, transition: true),               // sleep edge
         ]
@@ -59,6 +62,26 @@ final class WatchdogExpectationTests: XCTestCase {
         XCTAssertNil(hr.center[2])
         XCTAssertNotNil(hr.center[3])
         XCTAssertNil(hr.center[4])
+    }
+
+    func testExerciseContextsUseTheirOwnReferencesOnceEstablished() {
+        var refs = WatchdogV2ScenarioTests.references()
+        let asOf = "2026-09-30"
+        let tE = LongitudinalBaseline.isoEpochDay(asOf)!
+        for (s, mean, within) in [(LBSeries.exerciseSessionHR, 112.0, 15.0), (.exerciseRecoveryHR, 86.0, 7.0)] {
+            let obs = (1...30).map { i in
+                LBDailyObservation(day: LongitudinalBaseline.isoFromEpochDay(tE - i), value: mean + Double(i % 5) - 2,
+                                   qualityStatus: .ok, coverage: 60, withinDayScale: within)
+            }
+            refs.append(LongitudinalBaseline.evaluate(asOf: asOf, series: s, observations: obs))
+        }
+        let hr = WatchdogExpectation.track(channel: "HR", context: [ctx(.exerciseSession), ctx(.recovery)],
+                                           evaluations: refs)
+        XCTAssertEqual(hr.series[0], .exerciseSessionHR)
+        XCTAssertEqual(hr.series[1], .exerciseRecoveryHR)
+        XCTAssertEqual(hr.center[0]!, 112, accuracy: 3)
+        let hrv = WatchdogExpectation.track(channel: "HRV", context: [ctx(.exerciseSession)], evaluations: refs)
+        XCTAssertNil(hrv.center[0], "no exercise HRV reference: abstain, never a resting one")
     }
 
     func testNoEstablishedBaselineMeansNothingIsDrawn() {

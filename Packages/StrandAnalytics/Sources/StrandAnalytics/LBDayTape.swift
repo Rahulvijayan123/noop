@@ -197,10 +197,23 @@ public struct LBDayTape: Equatable, Sendable, Codable {
             return t - ended < WatchdogEventLabeler.postWorkoutSeconds
         }
 
+        // Per-minute sensor quality: a minute whose strap was off or whose heart-rate signal was poor is never rest
+        // (it files as unknown context, so it cannot reach a baseline).
+        let minuteQuality = WatchdogSignalQuality.assess(window: window)
         enum Context { case sleep, effort, rest, recovering, unknown }
         func context(_ i: Int) -> Context {
             if sleepAt(i) { return .sleep }
             guard i < evidence.count, evidence[i] else { return .unknown }
+            if i < minuteQuality.count, minuteQuality[i].onBody == .off || minuteQuality[i].signal == .poor {
+                return .unknown
+            }
+            // Exercise sessions (still minutes between sets included) are effort; their recovery is never rest
+            // (rule exercise-session-1).
+            switch window.exercise?.phase(at: i) ?? .none {
+            case .session: return .effort
+            case .recovery: return .recovering
+            case .none: break
+            }
             if effort[i] { return .effort }
             return recovering(i) ? .recovering : .rest
         }
