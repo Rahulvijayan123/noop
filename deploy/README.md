@@ -444,8 +444,8 @@ by the Spec 01 branch), the order matters; details are in `docs/model-integratio
    format 3 objects (`unsupportedVersion`).
 4. **Receiver advertisement** of protocol 1.5: `NOOP_PUSH_ADVERTISE_PPG_ANCHOR=1` in the push function's
    environment. Accepting 1.5 does not depend on it.
-5. **Phone flag** `noop.cloud.ppgAnchorUpload` (off by default) only after step 4. It adds roughly 80 bytes
-   of upload per optical second. Turning it on is an owner decision.
+5. **Phone flag** `noop.cloud.ppgAnchorUpload`, on by default since the 2026-10-09 production rollout (a stored
+   false turns it off). It adds roughly 80 bytes of upload per optical second and sends nothing until step 4.
 
 Resource notes. The sidecar's limits in `frwhoop-inference.service` fit one warm infer worker
 (measured about 373 MB for the parent plus both workers); raise `MemoryHigh` before setting

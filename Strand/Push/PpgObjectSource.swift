@@ -5,26 +5,22 @@ import WhoopStore
 
 // MARK: - Feature flag
 
-/// The default-off gate for uploading the banked v26 optical waveform with its anchor
+/// The default-on gate for uploading the banked v26 optical waveform with its anchor
 /// (protocol 1.5 / NPB1 format 3; docs/model-integration/ppg-transport.md).
 ///
-/// iOS has never uploaded `ppgWaveformSample`. Turning this on adds roughly 80 bytes per optical second to
-/// the phone's uploads, which is an owner decision, and still sends nothing until the receiver advertises
-/// 1.5 (`NOOP_PUSH_ADVERTISE_PPG_ANCHOR`). While it is off the object lane does not even offer 1.5, so it
-/// negotiates and uploads exactly what it did before. The key follows the app's `noop.` preference convention.
+/// It adds roughly 80 bytes per optical second to the phone's uploads, and still sends nothing until the
+/// receiver advertises 1.5 (`NOOP_PUSH_ADVERTISE_PPG_ANCHOR`). While it is off the object lane does not even
+/// offer 1.5, so it negotiates and uploads exactly what it did before. The key follows the app's `noop.`
+/// preference convention.
 public enum PpgObjectUploadFeature {
-    /// The exact UserDefaults key: `noop.cloud.ppgAnchorUpload` (default OFF).
+    /// The exact UserDefaults key: `noop.cloud.ppgAnchorUpload` (default ON; only a stored false turns it off).
     public static let enabledKey = "noop.cloud.ppgAnchorUpload"
 
-    public static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
+    public static var isEnabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? true }
 
-    /// Absent is identical to false, so turning it off removes the key.
+    /// Absent is identical to true, so turning it off stores false.
     public static func setEnabled(_ enabled: Bool) {
-        if enabled {
-            UserDefaults.standard.set(true, forKey: enabledKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: enabledKey)
-        }
+        UserDefaults.standard.set(enabled, forKey: enabledKey)
     }
 
     /// Both gates: this phone's flag, and a receiver that negotiated 1.5 and lists the stream on its object

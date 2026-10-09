@@ -3,7 +3,7 @@ import Foundation
 import StrandDesign
 
 // SensorBiomarkersView.swift — the Settings page for the sensor biomarkers: the on/off switch
-// (`SensorBiomarkerFeature`, default OFF) and one UTC day of the server's descriptive documents,
+// (`SensorBiomarkerFeature`, default ON) and one UTC day of the server's descriptive documents,
 // stepped back up to `maxDaysBack` days. The server computes per UTC day, so the page names UTC days.
 
 struct SensorBiomarkersView: View {

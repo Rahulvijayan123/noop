@@ -166,13 +166,16 @@ final class SensorBiomarkerTests: XCTestCase {
 
     // MARK: - Feature flag
 
-    func testFeatureFlagKeyAndDefaultOff() {
+    func testFeatureFlagKeyAndDefaultOn() {
         XCTAssertEqual(SensorBiomarkerFeature.enabledKey, "noop.sensorBiomarkersEnabled")
-        XCTAssertFalse(SensorBiomarkerFeature.isEnabled, "the flag must be OFF by default")
+        let previous = UserDefaults.standard.object(forKey: SensorBiomarkerFeature.enabledKey)
+        defer { UserDefaults.standard.set(previous, forKey: SensorBiomarkerFeature.enabledKey) }
+        UserDefaults.standard.removeObject(forKey: SensorBiomarkerFeature.enabledKey)
+        XCTAssertTrue(SensorBiomarkerFeature.isEnabled, "the flag must be ON by default")
+        SensorBiomarkerFeature.setEnabled(false)
+        XCTAssertFalse(SensorBiomarkerFeature.isEnabled, "turning it off must store false")
         SensorBiomarkerFeature.setEnabled(true)
         XCTAssertTrue(SensorBiomarkerFeature.isEnabled)
-        SensorBiomarkerFeature.setEnabled(false)
-        XCTAssertFalse(SensorBiomarkerFeature.isEnabled, "turning it off must remove the stored value")
     }
 
     // MARK: - Parsing

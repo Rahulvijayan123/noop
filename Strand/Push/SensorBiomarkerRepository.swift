@@ -18,24 +18,23 @@ import SwiftUI
 
 // MARK: - Feature flag
 
-/// The disabled-by-default gate for the sensor-biomarker section (spec-31 §9, CONTRACTS §1).
+/// The enabled-by-default gate for the sensor-biomarker section (spec-31 §9, CONTRACTS §1).
 ///
-/// Absent or false means the feature is OFF: no route is called and no section renders. This is the
+/// Absent means ON; a stored false means OFF: no route is called and no section renders. This is the
 /// iOS-side settings/debug gate; the worker-side `FRWHOOP_*` env flags are separate and live on the
 /// server. The key follows the app's `noop.`-prefixed preference convention.
 public enum SensorBiomarkerFeature {
-    /// The exact UserDefaults key: `noop.sensorBiomarkersEnabled` (default OFF).
+    /// The exact UserDefaults key: `noop.sensorBiomarkersEnabled` (default ON).
     public static let enabledKey = "noop.sensorBiomarkersEnabled"
 
-    public static var isEnabled: Bool { UserDefaults.standard.bool(forKey: enabledKey) }
+    /// The value an absent key reads as; `@AppStorage` readers of the key use the same default.
+    public static let defaultEnabled = true
 
-    /// Test seam / settings hook. Absent is identical to false, so turning it off removes the key.
+    public static var isEnabled: Bool { UserDefaults.standard.object(forKey: enabledKey) as? Bool ?? defaultEnabled }
+
+    /// Test seam / settings hook. Absent is identical to true, so turning it off stores false.
     public static func setEnabled(_ enabled: Bool) {
-        if enabled {
-            UserDefaults.standard.set(true, forKey: enabledKey)
-        } else {
-            UserDefaults.standard.removeObject(forKey: enabledKey)
-        }
+        UserDefaults.standard.set(enabled, forKey: enabledKey)
     }
 }
 

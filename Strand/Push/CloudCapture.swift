@@ -436,7 +436,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
     private var _objectTransport: ImuObjectTransport?
     private var _objectProgress: ImuPushProgressStore?
     private var _objectSource: ImuObjectSource?
-    /// The anchored PPG source (`PpgObjectUploadFeature`, default off), on the same transport and progress.
+    /// The anchored PPG source (`PpgObjectUploadFeature`, default on), on the same transport and progress.
     private var _ppgObjectSource: PpgObjectSource?
     private var _objectLoopTask: Task<Void, Never>?
     private var _objectCapabilities: PushCapabilities?

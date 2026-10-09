@@ -43,7 +43,7 @@ struct SettingsView: View {
     /// assistant entry points (`RootTabView`, `RootView`).
     @AppStorage("noop.coachEnabled") private var sanaEnabled = true
     /// Read through the key (not `SensorBiomarkerFeature.isEnabled`) so the row updates when the page flips it.
-    @AppStorage(SensorBiomarkerFeature.enabledKey) private var sensorBiomarkersOn = false
+    @AppStorage(SensorBiomarkerFeature.enabledKey) private var sensorBiomarkersOn = SensorBiomarkerFeature.defaultEnabled
 
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .imperial }
 

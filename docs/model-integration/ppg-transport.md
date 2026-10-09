@@ -94,9 +94,10 @@ records, all little-endian. Per record:
 
 ## Phone source and flag
 
-- Flag: `PpgObjectUploadFeature`, UserDefaults key `noop.cloud.ppgAnchorUpload`, default OFF (absent = off).
-  It is an owner decision because it adds phone upload volume: about 80 bytes decoded per optical second
-  (a continuous optical hour is 3,600 records ≈ 290 KB decoded, gzip on the wire). There is no UI for it.
+- Flag: `PpgObjectUploadFeature`, UserDefaults key `noop.cloud.ppgAnchorUpload`, default ON (absent = on; a
+  stored false turns it off). The owner turned it on for the 2026-10-09 production rollout. It adds phone
+  upload volume: about 80 bytes decoded per optical second (a continuous optical hour is 3,600 records
+  ≈ 290 KB decoded, gzip on the wire). There is no UI for it.
 - Second gate: `PpgObjectUploadFeature.laneOpen` requires the negotiated version to be 1.5 and
   `objectLane.streams` to list `ppgWaveformSample`. The source itself also returns nothing unless the
   page's negotiated version is 1.5, so a 1.4-or-older receiver gets nothing (not deltas without anchors).

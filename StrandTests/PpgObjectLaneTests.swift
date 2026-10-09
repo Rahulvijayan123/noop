@@ -110,16 +110,17 @@ final class PpgObjectLaneTests: XCTestCase {
 
     // MARK: - flag off
 
-    func testTheFlagIsANoopPreferenceThatDefaultsOff() {
+    func testTheFlagIsANoopPreferenceThatDefaultsOn() {
         XCTAssertEqual(PpgObjectUploadFeature.enabledKey, "noop.cloud.ppgAnchorUpload")
         let previous = UserDefaults.standard.object(forKey: PpgObjectUploadFeature.enabledKey)
         defer { UserDefaults.standard.set(previous, forKey: PpgObjectUploadFeature.enabledKey) }
         UserDefaults.standard.removeObject(forKey: PpgObjectUploadFeature.enabledKey)
-        XCTAssertFalse(PpgObjectUploadFeature.isEnabled, "absent means off")
+        XCTAssertTrue(PpgObjectUploadFeature.isEnabled, "absent means on")
+        PpgObjectUploadFeature.setEnabled(false)
+        XCTAssertFalse(PpgObjectUploadFeature.isEnabled)
+        XCTAssertEqual(UserDefaults.standard.object(forKey: PpgObjectUploadFeature.enabledKey) as? Bool, false)
         PpgObjectUploadFeature.setEnabled(true)
         XCTAssertTrue(PpgObjectUploadFeature.isEnabled)
-        PpgObjectUploadFeature.setEnabled(false)
-        XCTAssertNil(UserDefaults.standard.object(forKey: PpgObjectUploadFeature.enabledKey))
     }
 
     func testFlagOffStagesNothingAndTheLaneOffersExactlyThePre15List() async throws {
