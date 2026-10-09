@@ -430,4 +430,38 @@ final class ActivityContextAuthorityTests: XCTestCase {
         XCTAssertNil(ActivityExpertAuthority.motionSource(nil, track: motion.track, recordedRelease: .candidate,
                                                           inputRevision: 7, day: "2025-10-09").expectedBundleSHA256)
     }
+
+    // MARK: - Shadow-only channels
+
+    /// RecGym exercise recognition is registered with the policy as a channel no source carries: whatever else the
+    /// day holds, nothing selects it, so it can shape neither the canonical decode nor a candidate arm.
+    func testExerciseRecognitionIsShadowOnlyAndNeverSelected() throws {
+        XCTAssertEqual(Array(ActivityExpertSelection.Channel.allCases.prefix(3)), [.gaitQuality, .motionHeads, .embeddedGait],
+                       "appended: the existing channels keep their order")
+        let (input, walk) = day()
+        let selection = ActivityExpertSelection.select(
+            revisions: ["2025-10-09": 7],
+            gaitQuality: [gaitSource(input, walk: walk, release: .production)],
+            motionHeads: [motionSource(input, walk: walk, mode: .production)])
+        XCTAssertEqual(selection.use(of: .exerciseRecognition), .none)
+        XCTAssertNil(selection.decision(for: .exerciseRecognition))
+        XCTAssertFalse(selection.canonicalChannels.contains(.exerciseRecognition))
+        XCTAssertFalse(selection.candidateChannels.contains(.exerciseRecognition))
+
+        let block = ActivityExpertAuthority.shadowOnly(channel: .exerciseRecognition, inputRevision: 7,
+                                                       pinnedModelVersion: "recgym-cnn-transformer-e085ac0",
+                                                       pinnedWeightsDigest: String(repeating: "a", count: 64))
+        XCTAssertEqual(block.channel, .exerciseRecognition)
+        XCTAssertEqual(block.mode, .shadow)
+        XCTAssertEqual(block.releaseMode, .shadow)
+        XCTAssertEqual(block.use, .none)
+        XCTAssertEqual(block.reason, "shadow_only")
+        let text = try json(block)
+        XCTAssertTrue(text.contains("\"channel\":\"exercise_recognition\""))
+        XCTAssertTrue(text.contains("\"input_revision\":\"7\""))
+        XCTAssertEqual(try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(text.utf8)), block)
+        let claim = text.replacingOccurrences(of: "\"release_mode\":\"shadow\"", with: "\"release_mode\":\"production\"")
+        XCTAssertEqual(try JSONDecoder().decode(ActivityExpertAuthority.self, from: Data(claim.utf8)).releaseMode, .shadow,
+                       "a block that claims more than its shadow mode reads as shadow")
+    }
 }
