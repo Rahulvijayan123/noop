@@ -381,6 +381,25 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known, aut
   return out;
 }
 
+/**
+ * `GET /placement?deviceId=<id>`: the strap's resolved placement timeline (20261009150100): the declarations on the
+ * strap, its aliases and the installations provably bound to it (the phone's own `installation:<source>:my-whoop`
+ * declarations included), later declaration winning, plus the owner's device-less declarations (`scope: account`).
+ * Each piece names the device it was declared on (external id) and what it means for a wrist-trained model
+ * (`wrist_model_reason`: none for wrist, `placement_unsupported` confirmed for bicep / other, `placement_unknown`
+ * for unknown). Null when no deviceId was asked for; the device resolves like every other route's.
+ */
+export async function readResolvedPlacement({ rest, userId, sourceId, externalDeviceId }: {
+  rest: Pick<SupabaseRest, 'select' | 'rpc'>; userId: string; sourceId: string; externalDeviceId: string | null;
+}) {
+  if (externalDeviceId == null) return null;
+  if (!isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
+  const deviceId = await findNoopDevice({ rest, userId, sourceId, externalDeviceId });
+  if (!deviceId) throw fail('device_registration_pending', 409);
+  const intervals = await rest.rpc('placement_resolved_read_v1', { p_user: userId, p_device: deviceId });
+  return { device_id: externalDeviceId, intervals: Array.isArray(intervals) ? intervals : [] };
+}
+
 async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
@@ -752,7 +771,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         source: r.source,
         revision: r.revision,
       }));
-      return Response.json({ intervals }, { headers: { 'cache-control': 'no-store' } });
+      // `deviceId` (optional): the strap's placement as every server lane now reads it
+      // (20261009150100 placement_resolved_read_v1).
+      const resolved = await readResolvedPlacement({ rest, userId: user.id, sourceId: user.sourceId,
+        externalDeviceId: url.searchParams.get('deviceId') });
+      return Response.json({ intervals, ...(resolved ? { resolved } : {}) },
+        { headers: { 'cache-control': 'no-store' } });
     }
     if (isOverride) {
       if (!deviceId) throw fail('device_registration_pending', 409);

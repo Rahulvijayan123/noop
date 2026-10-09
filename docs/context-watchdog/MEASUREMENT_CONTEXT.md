@@ -37,14 +37,14 @@ Key: `user_id`, `device_id` (the strap the raw rows are stored under), `minute_s
 | COPIED | `activity_class`, `activity_conf`, `posture`, `exertion`, `activity_basis`, `activity_ref` | current epoch lineage (`activity_context_epochs_current`, basis `activity_epoch`), else the day document's runs (`activity_context_runs`, basis `activity_run`), else NULL (basis `none`) |
 | | `sleep_state` (`asleep` / `awake` / `in_bed`), `sleep_basis` | scored night (`server_sleep_nights`, frwhoop-server-1) holding the minute: its stage segments (`server_night_stages`) or just the period (`server_night`); outside a night NULL with `outside_server_night` (day scored) or `not_scored` |
 | | `wear_state` (`on_wrist` / `off_wrist` / `charging`), `wear_basis` | `charging`, then wrist events (`wrist_event`; a WRIST_OFF closes at a later WRIST_ON or after 5 sustained minutes of HR, basis `hr_present`), then the epoch, then the run, then HR presence |
-| | `placement`, `placement_basis` | NULL, `not_resolved`: placement resolution is owned by the placement work and lands separately |
+| | `placement`, `placement_basis` | the declared placement in effect at the minute's start, resolved for the strap by `internal.placement_intervals_for_device_v1` (20261009150100; declarations on the strap, its aliases and the installations provably bound to it, else the owner's device-less declaration): basis `declared_strap` / `declared_alias` / `declared_installation` / `declared_account`; NULL with `undeclared` when nothing is declared (`not_resolved` on rows built before 20261009150100) |
 | SESSION | `session_phase` (`none` / `session` / `recovery`), `session_start`, `session_rule`, `session_basis` | rule `exercise-session-1` (below) |
 | COMPLETE | `missing_reasons` | why the minute has no HR, and `context_unknown` when activity or the session phase is unknown |
 | VERSION | `context_version`, `revision`, `computed_at` | `measurement_context_versions`; `revision` is a sequence value bumped only when the row's content changes |
 
 Reasons (`reasons`, `missing_reasons`) are JSON arrays of `{code, certainty}` (plus `subcode` where the code has
 one), codes from `contracts/reason-codes.json` (`data-reason-1`, SQL `public.reason_codes`). Unknown stays unknown:
-nothing is fabricated to fill a gap (no activity is guessed, no sleep state outside a scored night, no placement).
+nothing is fabricated to fill a gap (no activity is guessed, no sleep state outside a scored night, no placement that was not declared).
 
 ### Quality rule `mcq-1` (`internal.measurement_context_quality_v1`)
 

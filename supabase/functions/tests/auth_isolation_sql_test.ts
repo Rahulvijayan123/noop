@@ -227,6 +227,8 @@ const SERVICE_ONLY_FUNCTIONS = [
   // Phone Watchdog episodes (20261009150000_watchdog_episodes.sql): the scores route's write and read.
   "watchdog_episodes_upsert_v1",
   "watchdog_episodes_read_v1",
+  // Strap placement resolution (20261009150100_placement_device_resolution.sql): the scores route's read.
+  "placement_resolved_read_v1",
 ];
 
 Deno.test({
