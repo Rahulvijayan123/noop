@@ -1,4 +1,5 @@
 import XCTest
+import SQLite3
 import NoopPush
 import WhoopProtocol
 import WhoopStore
@@ -1240,4 +1241,613 @@ final class BatchDedupeTests: XCTestCase {
         XCTAssertTrue(body.contains("\"bpm\":60"), "last writer must win")
     }
 
+}
+
+// MARK: - Mandatory sync: durability of the upload path
+
+/// A receiver stand-in for the transport's durability rules: it answers capabilities for one account and every
+/// upload with a fixed status and body, and records what was sent.
+private final class DurabilityUploader: CloudUploading, @unchecked Sendable {
+    private let lock = NSLock()
+    private var _uploads: [String] = []
+    var onOutcome: (@Sendable (CloudUploadSession.Outcome) -> Void)?
+    let owner: String
+    let source: String
+    var status = 503
+    var body: Data?
+
+    init(owner: String, source: String) {
+        self.owner = owner
+        self.source = source
+    }
+
+    var uploads: [String] { lock.lock(); defer { lock.unlock() }; return _uploads }
+
+    func capabilities(scope: CloudDataScope?) async throws -> PushCapabilities {
+        PushCapabilities(appendTables: PushCapabilities.all.appendTables,
+                         mutableTables: PushCapabilities.all.mutableTables, protocolVersion: "1.2",
+                         userId: owner, sourceId: source)
+    }
+
+    func uploadForeground(batchId: String, fileURL: URL, scope: CloudDataScope?) async throws -> CloudUploadSession.Outcome {
+        record(batchId)
+        return CloudUploadSession.Outcome(batchId: batchId, statusCode: status, body: body, errorDescription: nil)
+    }
+
+    private func record(_ batchId: String) {
+        lock.lock(); _uploads.append(batchId); lock.unlock()
+    }
+
+    func enqueueBackground(batchId: String, fileURL: URL, scope: CloudDataScope?) throws -> Int { 1 }
+    func outstandingTasks() async -> [(taskIdentifier: Int, batchId: String?)] { [] }
+}
+
+/// A mutable value a `@Sendable` closure can read.
+private final class Box<Value>: @unchecked Sendable {
+    private let lock = NSLock()
+    private var _value: Value
+    init(_ value: Value) { _value = value }
+    var value: Value {
+        get { lock.lock(); defer { lock.unlock() }; return _value }
+        set { lock.lock(); _value = newValue; lock.unlock() }
+    }
+}
+
+/// Signed in ⇒ syncing only holds if what is captured actually gets there: these pin the journal and transport
+/// rules that keep queued data moving through pruning, crashes, outages, refusals and source changes, the
+/// replay of what was captured while the runtime was down, and the two upload-path data fixes.
+final class CloudSyncDurabilityTests: XCTestCase {
+
+    private var directory: URL!
+    private var owner = ""
+    private let source = "22222222-2222-4222-8222-222222222222"
+
+    override func setUpWithError() throws {
+        directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("noop-durability-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        owner = UUID().uuidString.lowercased()
+    }
+
+    override func tearDownWithError() throws {
+        UserDefaults.standard.removeObject(forKey: "noop.cloud.protocolVersion.\(owner)")
+        try? FileManager.default.removeItem(at: directory)
+    }
+
+    private var payloadDirectory: URL { directory.appendingPathComponent("payload", isDirectory: true) }
+
+    private func makeJournal(owner: String? = nil, source: String? = nil,
+                             policy: CloudJournal.SealPolicy = CloudJournal.SealPolicy()) async throws -> CloudJournal {
+        let journal = CloudJournal()
+        try await journal.activate(configuration: .init(ownerId: owner ?? self.owner, sourceId: source ?? self.source,
+                                                        deviceId: "my-whoop"),
+                                   policy: policy, directory: directory)
+        return journal
+    }
+
+    private func hr(ts: Int, bpm: Int = 60, device: String? = nil) -> CloudJournalRecord {
+        let payload = try! PushProtocol.canonicalJson(.map([
+            "key": .map(["ts": .int(Int64(ts))]),
+            "data": .map(["bpm": .int(Int64(bpm))]),
+        ])).data(using: .utf8)!
+        return CloudJournalRecord(stream: .hrSample, encoding: .jsonRow, provenance: .live, characteristic: "2A37",
+                                  family: "whoop5", receivedAtMs: ts * 1000, strapTs: ts, deviceId: device,
+                                  payload: payload)
+    }
+
+    /// Seal everything pending for one device into a batch whose payload file is in the payload directory.
+    @discardableResult
+    private func seal(_ journal: CloudJournal, device: String = "my-whoop") async throws -> CloudSealedBatch {
+        let future = Int(Date().timeIntervalSince1970 * 1000) + 7_200_000
+        let candidates = try await journal.sealCandidates(nowMs: future)
+        let candidate = try XCTUnwrap(candidates.first { $0.deviceId == device })
+        let plan = try CloudBatchBuilder.plan(entries: try await journal.entries(for: candidate), stream: candidate.stream,
+                                              sourceId: candidate.sourceId, deviceId: candidate.deviceId,
+                                              protocolVersion: "1.2", startCursorJSON: nil)
+        try FileManager.default.createDirectory(at: payloadDirectory, withIntermediateDirectories: true)
+        let file = payloadDirectory.appendingPathComponent("\(plan.batch.batchId).ndjson.gz")
+        let wire = try PushBinaryCompression.gzip(plan.batch.body)
+        try wire.write(to: file)
+        try await journal.registerSeal(candidate, batchId: plan.batch.batchId, filePath: file.path,
+                                       contentSha256: PushDurabilityReceipt.sha256(plan.batch.body),
+                                       contentLength: wire.count, protocolVersion: "1.2", endCursorJSON: nil)
+        let sealed = try await journal.batches(states: [.sealed], limit: 64)
+        return try XCTUnwrap(sealed.first { $0.batchId == plan.batch.batchId })
+    }
+
+    private func coordinator(_ journal: CloudJournal, uploader: DurabilityUploader, now: Box<Int>,
+                             identity: Box<CloudPushIdentity?>? = nil) -> CloudTransportCoordinator {
+        let fallback = CloudPushIdentity(ownerId: owner, sourceId: source, tokenId: UUID().uuidString,
+                                         uploadToken: "noop_durability")
+        let identityBox = identity ?? Box<CloudPushIdentity?>(fallback)
+        return CloudTransportCoordinator(journal: journal, session: uploader,
+                                         scope: CloudDataScope(ownerId: owner, sourceId: source),
+                                         payloadDirectory: payloadDirectory, projectURL: "https://example.supabase.co",
+                                         identity: { identityBox.value }, now: { now.value }, random: { 0.5 },
+                                         cloudEnabled: { true })
+    }
+
+    private func eventually(_ seconds: Double = 5, _ condition: () async throws -> Bool) async rethrows -> Bool {
+        let deadline = Date().addingTimeInterval(seconds)
+        while Date() < deadline {
+            if try await condition() { return true }
+            try? await Task.sleep(nanoseconds: 25_000_000)
+        }
+        return try await condition()
+    }
+
+    // MARK: D1 journal pruning
+
+    func testANewJournalReclaimsFreedSpaceAndAnExistingOneKeepsItsMode() async throws {
+        let fresh = try await makeJournal()
+        let freshMode = await fresh.autoVacuumMode()
+        XCTAssertEqual(freshMode, 2, "a journal created now uses incremental auto-vacuum")
+        await fresh.deactivate()
+
+        // A journal an earlier build created (auto_vacuum NONE, tables already there) is not rebuilt.
+        let legacyDirectory = directory.appendingPathComponent("legacy", isDirectory: true)
+        try FileManager.default.createDirectory(at: legacyDirectory, withIntermediateDirectories: true)
+        var db: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(legacyDirectory.appendingPathComponent("journal.sqlite").path, &db), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(db, "CREATE TABLE journal_meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);",
+                                    nil, nil, nil), SQLITE_OK)
+        sqlite3_close(db)
+        let legacy = CloudJournal()
+        var policy = CloudJournal.SealPolicy()
+        policy.ackedRetentionSeconds = 0
+        try await legacy.activate(configuration: .init(ownerId: owner, sourceId: source, deviceId: "my-whoop"),
+                                  policy: policy, directory: legacyDirectory)
+        let legacyMode = await legacy.autoVacuumMode()
+        XCTAssertEqual(legacyMode, 0, "an existing journal keeps the mode it was created with")
+        legacy.submit([hr(ts: 1_700_000_000)])
+        _ = await legacy.flush()
+        let pruned = try await legacy.pruneAcknowledged()
+        XCTAssertEqual(pruned.records, 0, "and pruning there works without a vacuum")
+        await legacy.deactivate()
+    }
+
+    func testStartAndTheHourlyPassPruneAcknowledgedRows() async throws {
+        var policy = CloudJournal.SealPolicy()
+        policy.ackedRetentionSeconds = 0
+        policy.activeTargetSeconds = 3600
+        let journal = try await makeJournal(policy: policy)
+        journal.submit([hr(ts: 1_700_000_000)])
+        _ = await journal.flush()
+        let first = try await seal(journal)
+        _ = try await journal.applyReceipt(batchId: first.batchId, contentSha256: first.contentSha256, receiptJSON: "{}")
+        var held = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertEqual(held["my-whoop"], [1_700_000_000], "an acknowledged row is kept until it is pruned")
+        try await Task.sleep(nanoseconds: 20_000_000)   // a retention of 0 s still needs the row to be older
+
+        let now = Box(1_800_000_000)
+        let uploader = DurabilityUploader(owner: owner, source: source)
+        let coordinator = coordinator(journal, uploader: uploader, now: now)
+        await coordinator.start()
+        held = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertNil(held["my-whoop"], "start() prunes acknowledged rows")
+
+        journal.submit([hr(ts: 1_700_000_100)])
+        _ = await journal.flush()
+        let second = try await seal(journal)
+        _ = try await journal.applyReceipt(batchId: second.batchId, contentSha256: second.contentSha256, receiptJSON: "{}")
+        try await Task.sleep(nanoseconds: 20_000_000)
+        now.value += 600
+        await coordinator.cycle()
+        held = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertEqual(held["my-whoop"], [1_700_000_100], "the loop does not prune more than hourly")
+
+        now.value += 3_600
+        await coordinator.cycle()
+        held = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertNil(held["my-whoop"], "an hour later the loop prunes again")
+        await coordinator.stop()
+        await journal.deactivate()
+    }
+
+    // MARK: D5 stuck in `uploaded`
+
+    func testABatchLeftUploadedByAnEarlierRunIsSentAgainAtLaunch() async throws {
+        var policy = CloudJournal.SealPolicy()
+        policy.activeTargetSeconds = 3600
+        let journal = try await makeJournal(policy: policy)
+        journal.submit([hr(ts: 1_700_000_000), hr(ts: 1_700_000_001)])
+        _ = await journal.flush()
+        let batch = try await seal(journal)
+        // The 200 arrived, then the process died before the receipt was applied.
+        try await journal.markUploaded(batchId: batch.batchId)
+
+        let uploader = DurabilityUploader(owner: owner, source: source)
+        let coordinator = coordinator(journal, uploader: uploader, now: Box(Int(Date().timeIntervalSince1970)))
+        await coordinator.start()
+        let resent = await eventually { uploader.uploads.contains(batch.batchId) }
+        await coordinator.stop()
+
+        XCTAssertTrue(resent, "the batch is sent again; the receiver answers a replayed id with its receipt")
+        let stranded = try await journal.batches(states: [.uploaded], limit: 10)
+        XCTAssertTrue(stranded.isEmpty, "nothing is left in a state no pass looks at")
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 2, "the records are still held until a receipt says otherwise")
+        await journal.deactivate()
+    }
+
+    // MARK: D6 offline outages
+
+    func testBatchesThatRanOutOfAttemptsOfflineAreRetriedWhenTheNetworkReturns() async throws {
+        var policy = CloudJournal.SealPolicy()
+        policy.activeTargetSeconds = 3600
+        let journal = try await makeJournal(policy: policy)
+        journal.submit([hr(ts: 1_700_000_000, device: "offline"), hr(ts: 1_700_000_000, device: "refused"),
+                        hr(ts: 1_700_000_000, device: "later"), hr(ts: 1_700_000_000, device: "backoff")])
+        _ = await journal.flush()
+        let now = Box(1_800_000_000)
+        // No credential: the loop idles, so only the recovery itself moves anything here.
+        let coordinator = coordinator(journal, uploader: DurabilityUploader(owner: owner, source: source), now: now,
+                                      identity: Box<CloudPushIdentity?>(nil))
+        await coordinator.start()
+
+        let offline = try await seal(journal, device: "offline")
+        try await journal.markFailed(batchId: offline.batchId,
+                                     error: "attempt cap reached: cloud: transport failure: The Internet connection appears to be offline.",
+                                     nextAttemptAtMs: nil, blocked: true)
+        let refused = try await seal(journal, device: "refused")
+        try await journal.markFailed(batchId: refused.batchId, error: "HTTP 403 device_owner_conflict",
+                                     nextAttemptAtMs: nil, blocked: true)
+        let waiting = try await seal(journal, device: "backoff")
+        try await journal.markFailed(batchId: waiting.batchId, error: "HTTP 503",
+                                     nextAttemptAtMs: (now.value + 3_000) * 1000)
+
+        await coordinator.recoverStalledWork()
+
+        let blocked = try await journal.blockedBatches()
+        XCTAssertEqual(blocked.map(\.batchId), [refused.batchId],
+                       "an outage no longer strands a batch until the next launch; a refusal stays blocked")
+        let candidates = try await journal.sealCandidates(nowMs: (now.value + 7_200) * 1000)
+        XCTAssertTrue(candidates.contains { $0.deviceId == "offline" }, "its records are pending again, to be re-sealed")
+        let due = try await journal.batches(states: [.failed], dueBeforeMs: now.value * 1000, limit: 10)
+        XCTAssertEqual(due.map(\.batchId), [waiting.batchId], "a long backoff is cut short when the network returns")
+
+        // Recoveries are bounded: another request within a minute changes nothing.
+        let later = try await seal(journal, device: "later")
+        try await journal.markFailed(batchId: later.batchId, error: "attempt cap reached: HTTP 503",
+                                     nextAttemptAtMs: nil, blocked: true)
+        await coordinator.recoverStalledWork()
+        var stillBlocked = try await journal.blockedBatches().map(\.batchId)
+        XCTAssertTrue(stillBlocked.contains(later.batchId))
+        now.value += 61
+        await coordinator.recoverStalledWork()
+        stillBlocked = try await journal.blockedBatches().map(\.batchId)
+        XCTAssertEqual(stillBlocked, [refused.batchId])
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 4, "no record was dropped by any of it")
+        await coordinator.stop()
+        await journal.deactivate()
+    }
+
+    // MARK: D8 a refusal that names the batch
+
+    func testABatchRefusedForAnotherAccountsStrapIsBlockedInsteadOfRetriedEvery30Seconds() async throws {
+        var policy = CloudJournal.SealPolicy()
+        policy.activeTargetSeconds = 0
+        let journal = try await makeJournal(policy: policy)
+        journal.submit([hr(ts: 1_700_000_000), hr(ts: 1_700_000_001)])
+        _ = await journal.flush()
+        let uploader = DurabilityUploader(owner: owner, source: source)
+        uploader.status = 403
+        uploader.body = Data(#"{"type":"error","protocolVersion":"1.2","code":"device_owner_conflict"}"#.utf8)
+        let coordinator = coordinator(journal, uploader: uploader, now: Box(Int(Date().timeIntervalSince1970)))
+        let rejections = Box<[Int]>([])
+        await coordinator.setOnCredentialRejected { status in rejections.value.append(status) }
+
+        await coordinator.start()
+        let blocked = await eventually { ((try? await journal.blockedBatches()) ?? []).count == 1 }
+        try? await Task.sleep(nanoseconds: 300_000_000)
+        await coordinator.recoverStalledWork()
+        await coordinator.cycle()
+
+        XCTAssertTrue(blocked, "the refused batch is blocked like any batch the receiver will not take")
+        XCTAssertTrue(rejections.value.isEmpty, "it is not a credential problem, so no new credential is asked for")
+        XCTAssertEqual(uploader.uploads.count, 1, "and it is not sent again until the next launch")
+        let code = await coordinator.permanentRejectionCode()
+        XCTAssertEqual(code, "device_owner_conflict", "the reason is surfaced")
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.blockedBatches, 1)
+        XCTAssertEqual(stats.pendingRecords, 2, "the records are kept")
+        XCTAssertNil(CloudTransportCoordinator.permanentRejectionCode(status: 403, body: Data(#"{"code":"installation_revoked"}"#.utf8)),
+                     "any other 403 is still the credential's")
+        await coordinator.stop()
+        await journal.deactivate()
+    }
+
+    // MARK: D4 source rotation
+
+    func testRecordsAnEarlierSourceStillHeldGoOutUnderTheNewOne() async throws {
+        let oldSource = "a0a0a0a0-a0a0-4a0a-8a0a-a0a0a0a0a0a0"
+        let newSource = "b0b0b0b0-b0b0-4b0b-8b0b-b0b0b0b0b0b0"
+        let stranger = UUID().uuidString.lowercased()
+        let journal = try await makeJournal(source: oldSource)
+        journal.submit([hr(ts: 100)])
+        _ = await journal.flush()
+        let acked = try await seal(journal)
+        _ = try await journal.applyReceipt(batchId: acked.batchId, contentSha256: acked.contentSha256, receiptJSON: "{}")
+        journal.submit([hr(ts: 101), hr(ts: 102)])
+        _ = await journal.flush()
+        let unsent = try await seal(journal)
+        journal.submit([hr(ts: 103)])
+        _ = await journal.flush()
+        // Another account's queue under the same source id is never touched.
+        try await journal.activate(configuration: .init(ownerId: stranger, sourceId: oldSource, deviceId: "my-whoop"),
+                                   directory: directory)
+        journal.submit([hr(ts: 200)])
+        _ = await journal.flush()
+
+        // The server refused the old source; the account layer rotated it, and the runtime starts on the new one.
+        try await journal.activate(configuration: .init(ownerId: owner, sourceId: newSource, deviceId: "my-whoop"),
+                                   directory: directory)
+        await CloudPushRuntime.adoptEarlierSources(journal: journal, payloadDirectory: payloadDirectory)
+
+        let future = Int(Date().timeIntervalSince1970 * 1000) + 7_200_000
+        let rotated = try await journal.sealCandidates(nowMs: future)
+        let candidate = try XCTUnwrap(rotated.first)
+        let entries = try await journal.entries(for: candidate)
+        XCTAssertEqual(entries.map(\.record.strapTs), [101, 102, 103], "every unacknowledged record moved, in order")
+        XCTAssertTrue(entries.allSatisfy { $0.sourceId == newSource })
+        XCTAssertFalse(FileManager.default.fileExists(atPath: unsent.filePath), "the dissolved batch's file is gone")
+
+        try await journal.activate(configuration: .init(ownerId: owner, sourceId: oldSource, deviceId: "my-whoop"),
+                                   directory: directory)
+        let oldStats = await journal.stats()
+        XCTAssertEqual(oldStats.pendingRecords, 0, "nothing is left stranded under the old source")
+        let oldBatches = try await journal.batches(states: [.sealed, .failed, .blocked, .reserved, .uploaded], limit: 10)
+        XCTAssertTrue(oldBatches.isEmpty)
+        let ackedHeld = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100)
+        XCTAssertEqual(ackedHeld["my-whoop"]?.contains(100), true, "acknowledged rows keep their source")
+
+        try await journal.activate(configuration: .init(ownerId: stranger, sourceId: oldSource, deviceId: "my-whoop"),
+                                   directory: directory)
+        let strangerStats = await journal.stats()
+        XCTAssertEqual(strangerStats.pendingRecords, 1, "another account's records stay where they are")
+        await journal.deactivate()
+    }
+
+    // MARK: D2 capture missed while the runtime was down
+
+    /// A store stand-in holding one heart-rate row every `step` seconds of `range`, journaled the way the
+    /// seeder journals (in slices the staging buffer takes).
+    private func replaySender(_ journal: CloudJournal, holds range: Range<Int>, step: Int = 1, sent: Box<[Int]>,
+                              failAt: Int? = nil) -> (Int, Int) async -> CloudHistorySeeder.WindowOutcome {
+        { from, to in
+            if let failAt, (from...to).contains(failAt) { return .failed }
+            let first = max(from, range.lowerBound)
+            let aligned = (first + step - 1) / step * step
+            let last = min(to, range.upperBound - 1)
+            guard aligned <= last else { return .empty }
+            let seconds = Array(stride(from: aligned, through: last, by: step))
+            for slice in stride(from: 0, to: seconds.count, by: 2_000) {
+                journal.submit(seconds[slice..<min(slice + 2_000, seconds.count)].map { self.hr(ts: $0) })
+                _ = await journal.flush()
+            }
+            sent.value += seconds
+            // What the journal's own drain loop commits between a submit and the flush is not in the flush's count.
+            return .sent(seconds.count)
+        }
+    }
+
+    func testAResumedSyncReplaysOnlyWhatTheRuntimeMissedAndNothingTwice() async throws {
+        let defaults = isolatedDefaults()
+        let gaps = CloudCaptureGaps(defaults: defaults)
+        let t = 1_800_000_000
+        let hour = 3_600
+        let journal = try await makeJournal()
+        let sent = Box<[Int]>([])
+        let store = (t - 12 * hour)..<t
+        let key = "seed-test"
+
+        // The runtime first runs at t-10h; the first seeder pass sends its look-back hour.
+        gaps.noteRuntimeStarted(now: t - 10 * hour)
+        var committed = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: hour,
+                                                        windowSeconds: hour, defaults: defaults, gaps: gaps,
+                                                        now: t - 10 * hour, send: replaySender(journal, holds: store, sent: sent))
+        XCTAssertEqual(committed, hour)
+
+        // Live until t-6h, then signed out (or paused) for three hours. Meanwhile an offload banked hours the
+        // strap had buffered out of range, for this strap and for another one.
+        gaps.noteLive(now: t - 6 * hour)
+        gaps.noteMissedHistory(deviceId: "my-whoop", from: t - 9 * hour, to: t - 8 * hour, now: t - 5 * hour)
+        gaps.noteMissedHistory(deviceId: "other-strap", from: t - 9 * hour, to: t - 8 * hour, now: t - 5 * hour)
+        gaps.noteRuntimeStarted(now: t - 3 * hour)
+
+        committed = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: hour,
+                                                    windowSeconds: hour, defaults: defaults, gaps: gaps, now: t,
+                                                    send: replaySender(journal, holds: store, sent: sent))
+        XCTAssertEqual(committed, 4 * hour, "the three hours down and the offloaded hour, nothing else")
+        XCTAssertEqual(Set(sent.value).count, sent.value.count, "no second was handed over twice")
+        XCTAssertFalse(sent.value.contains { (t - 3 * hour)..<t ~= $0 }, "what was journaled live is not sent again")
+
+        let again = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: hour,
+                                                    windowSeconds: hour, defaults: defaults, gaps: gaps, now: t + 60,
+                                                    send: replaySender(journal, holds: store, sent: sent))
+        XCTAssertEqual(again, 0, "a second run replays nothing")
+        let stats = await journal.stats()
+        XCTAssertEqual(stats.pendingRecords, 5 * hour, "the journal holds each second once")
+        let held = await journal.recentStrapSeconds(stream: .hrSample, lastRecords: 100_000)
+        XCTAssertEqual(Set(held["my-whoop"] ?? []).count, held["my-whoop"]?.count, "no duplicate rows in the journal")
+        await journal.deactivate()
+    }
+
+    func testAnInterruptedReplayResumesWhereItStoppedAndIsBoundedToAMonth() async throws {
+        let defaults = isolatedDefaults()
+        let gaps = CloudCaptureGaps(defaults: defaults)
+        let t = 1_800_000_000
+        let hour = 3_600
+        let day = 86_400
+        let journal = try await makeJournal()
+        let sent = Box<[Int]>([])
+        let key = "seed-resume"
+        gaps.noteRuntimeStarted(now: t - 45 * day)
+        _ = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: 0, windowSeconds: hour,
+                                            defaults: defaults, gaps: gaps, now: t - 45 * day,
+                                            send: replaySender(journal, holds: 0..<0, sent: sent))
+        // Down for 45 days (the phone was signed out over a long trip).
+        gaps.noteRuntimeStarted(now: t)
+        let pending = gaps.pending(after: 0, deviceId: "my-whoop", now: t)
+        XCTAssertEqual(pending.first?.from, t - CloudCaptureGaps.replayWindowSeconds, "never more than a month back")
+
+        let store = (t - 31 * day)..<t
+        let recent = (t - 2 * hour)
+        let first = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: 0,
+                                                    windowSeconds: 6 * hour, defaults: defaults, gaps: gaps, now: t,
+                                                    send: replaySender(journal, holds: store, step: 600, sent: sent,
+                                                                       failAt: recent))
+        XCTAssertGreaterThan(first, 0)
+        XCTAssertFalse(sent.value.contains { $0 < t - 30 * day }, "nothing older than the replay window")
+        let beforeResume = sent.value.count
+        let rest = await CloudHistorySeeder.replay(key: key, deviceId: "my-whoop", lookbackSeconds: 0,
+                                                   windowSeconds: 6 * hour, defaults: defaults, gaps: gaps, now: t,
+                                                   send: replaySender(journal, holds: store, step: 600, sent: sent))
+        XCTAssertGreaterThan(rest, 0, "the window that failed is retried")
+        XCTAssertEqual(Set(sent.value).count, sent.value.count, "and nothing before it is sent again")
+        XCTAssertEqual(sent.value.count, 30 * day / 600, "the whole month, once")
+        XCTAssertGreaterThan(sent.value.count, beforeResume)
+        await journal.deactivate()
+    }
+
+    func testAnOffloadBankedWhileTheRuntimeIsDownIsNotedByItsOwnSeconds() {
+        let gaps = CloudCaptureGaps(defaults: isolatedDefaults())
+        let now = Int(Date().timeIntervalSince1970)
+        gaps.noteRuntimeStarted(now: now - 3_000)
+        gaps.noteLive(now: now - 2_000)
+        var streams = Streams()
+        streams.hr = [HRSample(ts: now - 1_500, bpm: 60), HRSample(ts: now - 1_400, bpm: 61)]
+        streams.gravity = [GravitySample(ts: now - 1_600, x: 0, y: 0, z: 1, dynAccel: nil)]
+        CloudCapture.noteMissedHistory(streams, localDeviceId: "My-Whoop", gaps: gaps)
+        CloudCapture.noteMissedHistory(Streams(), localDeviceId: "my-whoop", gaps: gaps)
+        let pending = gaps.pending(after: 0, deviceId: "my-whoop", now: now)
+        XCTAssertEqual(pending.map { $0.from..<$0.to }, [(now - 1_600)..<(now - 1_399)],
+                       "the chunk's earliest to latest second, under the store's id; an empty chunk notes nothing")
+    }
+
+    func testAnInstallThatNeverSyncedRecordsNoGapsAndAStartedGapIsNeverGrown() {
+        let gaps = CloudCaptureGaps(defaults: isolatedDefaults())
+        gaps.noteMissedHistory(deviceId: "my-whoop", from: 100, to: 200, now: 1_000)
+        XCTAssertEqual(gaps.latestSeq, 0, "nothing is owed to an account never synced from here")
+        gaps.noteRuntimeStarted(now: 1_000)
+        XCTAssertEqual(gaps.latestSeq, 0, "the first start is not a gap")
+        gaps.noteLive(now: 2_000)
+        gaps.noteMissedHistory(deviceId: "my-whoop", from: 500, to: 600, now: 2_100)
+        gaps.noteMissedHistory(deviceId: "my-whoop", from: 600, to: 700, now: 2_100)
+        XCTAssertEqual(gaps.latestSeq, 1, "contiguous chunks extend one gap")
+        gaps.noteRuntimeStarted(now: 3_000)
+        gaps.noteMissedHistory(deviceId: "my-whoop", from: 700, to: 800, now: 3_100)
+        let all = gaps.pending(after: 0, deviceId: "my-whoop", now: 3_100)
+        XCTAssertEqual(all.map(\.seq), [1, 2, 3], "after a start, a gap a seeder may have replayed is closed")
+        XCTAssertEqual(all.first.map { $0.from..<$0.to }, 500..<700)
+    }
+
+    func testTheRuntimeNotesTheSpanItWasDownAndCarriesAnEarlierSourceOnStart() async throws {
+        // A receiver nobody listens on, and no account signed in on this test host, so nothing is ever sent.
+        CloudPushSettings.bundleStringOverride = { key in
+            switch key {
+            case CloudPushSettings.endpointInfoKey: return "http://127.0.0.1:1/functions/v1/push"
+            case CloudPushSettings.publishableKeyInfoKey: return "sb_publishable_runtime_test"
+            default: return nil
+            }
+        }
+        defer { CloudPushSettings.bundleStringOverride = nil }
+        let defaults = isolatedDefaults()
+        let identityStore = CloudPushIdentityStore(defaults: defaults, secrets: MemorySecretStore())
+        let oldSource = "a0a0a0a0-a0a0-4a0a-8a0a-a0a0a0a0a0a0"
+        let journal = CloudJournal()
+        try await journal.activate(configuration: .init(ownerId: owner, sourceId: oldSource, deviceId: "my-whoop"),
+                                   directory: directory)
+        journal.submit([hr(ts: 1_700_000_000)])
+        _ = await journal.flush()
+        await journal.deactivate()
+
+        let gaps = CloudCaptureGaps(defaults: defaults)
+        let wentDown = Int(Date().timeIntervalSince1970) - 7_200
+        gaps.noteLive(now: wentDown)
+        let runtime = CloudPushRuntime(journal: journal, journalDirectory: directory, identityStore: identityStore,
+                                       bundleIdentifier: "com.noop.tests.\(UUID().uuidString)")
+        let identity = CloudPushIdentity(ownerId: owner, sourceId: source, tokenId: UUID().uuidString,
+                                         uploadToken: "noop_runtime")
+        try runtime.start(identity: identity, deviceId: "my-whoop")
+        let noted = await eventually { gaps.pending(after: 0, deviceId: "my-whoop").contains { $0.from == wentDown } }
+        XCTAssertTrue(noted, "the two hours the runtime was down are a gap for the seeders")
+        let adopted = await eventually { await journal.stats().pendingRecords == 1 }
+        XCTAssertTrue(adopted, "the record the old source held is pending under the new one")
+        await runtime.stop()
+        XCTAssertGreaterThanOrEqual(gaps.liveThrough ?? 0, Int(Date().timeIntervalSince1970) - 5,
+                                    "stopping marks the journal live up to now")
+    }
+
+    // MARK: upload-path data fixes
+
+    func testContactIsJournaledOnlyWhenItChangesPerStrap() throws {
+        let ledger = CloudContactLedger()
+        func contactRows(_ contact: StandardHRContact, _ device: String, _ ts: Int) -> Int {
+            CloudCapture.standardHRRecords(hr: 61, rr: [], contact: contact, family: .whoop5, at: ts, deviceId: device,
+                                           receivedAtMs: ts * 1000, characteristic: "2A37", ledger: nil,
+                                           contactLedger: ledger).filter { $0.stream == .event }.count
+        }
+        XCTAssertEqual(contactRows(.unsupported, "a", 1), 1, "the first reading opens with the strap's state")
+        XCTAssertEqual(contactRows(.unsupported, "a", 2), 0)
+        XCTAssertEqual(contactRows(.unsupported, "a", 3), 0)
+        XCTAssertEqual(contactRows(.unsupported, "b", 3), 1, "per strap")
+        XCTAssertEqual(contactRows(.supportedDetected, "a", 4), 1, "a change is journaled")
+        XCTAssertEqual(contactRows(.supportedDetected, "a", 5), 0)
+        XCTAssertTrue(StandardHRMapping.shouldRecordContact(previous: .unsupported, current: .supportedDetected),
+                      "the same rule the local store uses")
+        // The heart-rate row of every reading is still sent.
+        let rows = CloudCapture.standardHRRecords(hr: 61, rr: [], contact: .supportedDetected, family: .whoop5, at: 6,
+                                                  deviceId: "a", receivedAtMs: 6_000, characteristic: "2A37",
+                                                  ledger: nil, contactLedger: ledger)
+        XCTAssertEqual(rows.map(\.stream), [.hrSample])
+        ledger.reset()
+        XCTAssertEqual(contactRows(.supportedDetected, "a", 7), 1, "a new run opens with the current state again")
+    }
+
+    private func suspectFlags(_ records: [CloudJournalRecord]) throws -> [Int: Any] {
+        var out: [Int: Any] = [:]
+        for record in records where record.stream == .rrInterval {
+            let object = try XCTUnwrap(try JSONSerialization.jsonObject(with: record.payload) as? [String: Any])
+            let key = try XCTUnwrap(object["key"] as? [String: Any])
+            let data = try XCTUnwrap(object["data"] as? [String: Any])
+            out[try XCTUnwrap(key["ts"] as? Int)] = data["tsSuspect"]
+        }
+        return out
+    }
+
+    func testRRRowsCarryTheFillFlagTheStoreWritesForTheSameBeat() async throws {
+        var streams = Streams()
+        streams.hr = [HRSample(ts: 10, bpm: 70), HRSample(ts: 11, bpm: 120), HRSample(ts: 12, bpm: 70),
+                      HRSample(ts: 13, bpm: 70), HRSample(ts: 14, bpm: 70)]
+        streams.rr = [RRInterval(ts: 10, rrMs: 500, srcChannel: .whoop5Standard),     // fill: flagged
+                      RRInterval(ts: 11, rrMs: 500, srcChannel: .whoop5Historical),   // 120 bpm: a real beat
+                      RRInterval(ts: 12, rrMs: 857, srcChannel: .whoop5Standard),     // not 500 ms
+                      RRInterval(ts: 13, rrMs: 500, srcChannel: .whoop4Standard),     // not a WHOOP 5 transport
+                      RRInterval(ts: 14, rrMs: 500, srcChannel: .whoop5Historical),   // fill: flagged
+                      RRInterval(ts: 15, rrMs: 500, srcChannel: .whoop5Historical)]   // no heart rate that second
+        let records = CloudCapture.rows(from: streams, provenance: .history, family: .whoop5, wallClockRef: nil,
+                                        deviceClockRef: nil, receivedAtMs: 0, characteristic: nil, deviceId: "d")
+        let flags = try suspectFlags(records)
+        XCTAssertEqual(flags[10] as? Int, 1)
+        XCTAssertEqual(flags[14] as? Int, 1)
+        for ts in [11, 12, 13, 15] { XCTAssertTrue(flags[ts] is NSNull, "ts \(ts) is not flagged, as on disk") }
+
+        // The store's own rule on the same beats gives the same answer.
+        let store = try await WhoopStore.inMemory()
+        _ = try await store.insert(streams, deviceId: "d")
+        let stored = try await store.rrSuspectRowsForTest(deviceId: "d")
+        for row in stored {
+            XCTAssertEqual(row.tsSuspect == 1, (flags[row.ts] as? Int) == 1, "ts \(row.ts) matches the stored flag")
+        }
+
+        // The live path takes the flag from the rate before the ledger drops a second it already sent.
+        let ledger = CloudHeartRateLedger()
+        _ = ledger.claim([HRSample(ts: 20, bpm: 70)], deviceId: "d")
+        let live = CloudCapture.standardHRRecords(hr: 70, rr: [500], contact: nil, family: .whoop5, at: 20, deviceId: "d",
+                                                  receivedAtMs: 20_000, characteristic: "2A37", ledger: ledger)
+        XCTAssertFalse(live.contains { $0.stream == .hrSample }, "the second was already sent")
+        XCTAssertEqual(try suspectFlags(live)[20] as? Int, 1)
+    }
 }

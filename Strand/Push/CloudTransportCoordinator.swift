@@ -70,6 +70,11 @@ public actor CloudTransportCoordinator {
         public var sealMaxRecords: Int = PushProtocolLimits.maxRecords
         public var sealMaxBytes: Int = 1 << 20
         public var acceptedRetentionSeconds: Int = 7 * 24 * 3600
+        /// How often a running loop prunes acknowledged rows (and looks for stalled work) between launches.
+        public var maintenanceIntervalSeconds: Int = 3600
+        /// At most one stalled-work recovery per this many seconds, however many foregrounds and network
+        /// changes ask for one.
+        public var recoveryMinIntervalSeconds: Int = 60
         public init() {}
     }
 
@@ -124,6 +129,11 @@ public actor CloudTransportCoordinator {
     private var lastOutcomeAtMs: Int?
     private var lastHeartbeatAtSeconds = 0
     private var credentialRejectedAtSeconds = 0
+    private var lastMaintenanceAtSeconds: Int?
+    private var lastRecoveryAtSeconds: Int?
+    /// The receiver's code for the last batch it refused for good (`device_owner_conflict`, …), until a batch
+    /// is accepted again. Surfaced through `permanentRejectionCode()` and the journal's `blockedBatches` count.
+    private var permanentRejection: String?
 
     /// Called when the receiver refuses this installation's credential (HTTP 401/403). The batch is kept
     /// and retried; the owner of the callback decides whether to rotate the credential or end the session.
@@ -164,11 +174,17 @@ public actor CloudTransportCoordinator {
             Task { await self.handleBackgroundOutcome(outcome) }
         }
         try? await reconcileTasksAtLaunch()
+        // A batch whose 200 arrived but whose receipt was never applied (the process died in between) is in
+        // `uploaded`, which no pass looks at; it is sent again now and the receiver replays its receipt.
+        _ = try? await journal.requeueUploaded(dueAtMs: now() * 1000)
         try? await cleanUpAcknowledgedFiles()
         try? await resealBlockedBatches()
         // A launch is a fresh attempt: a batch that failed while the receiver was down must not sit
         // out a backoff that grew toward the hour cap, holding the seal backpressure closed meanwhile.
         try? await journal.rescheduleFailed(dueAtMs: now() * 1000)
+        // Acknowledged rows are kept a week for diagnostics and then removed; without this nothing removed
+        // them and the journal only grew.
+        await maintenance()
         kick()
     }
 
@@ -239,6 +255,12 @@ public actor CloudTransportCoordinator {
             lastError = "cycle failed at \(stage): \(error)"
         }
         recordHeartbeat(stage: stage)
+        // A phone that stays connected for days never relaunches, so the launch-time chores also run here,
+        // at most once an hour.
+        if let last = lastMaintenanceAtSeconds, now() - last >= policy.maintenanceIntervalSeconds {
+            await maintenance()
+            await recoverStalledWork(force: true)
+        }
     }
 
     /// At most one diagnostic write per 30 s: proves the loop is alive and where its last pass ended.
@@ -489,6 +511,15 @@ public actor CloudTransportCoordinator {
             await handleFailure(batch: batch, error: outcome.errorDescription ?? "transport")
             return false
         }
+        if let code = CloudTransportCoordinator.permanentRejectionCode(status: outcome.statusCode, body: outcome.body) {
+            // A 403 that names the batch, not the credential: the strap is held by another account, or the batch
+            // names another source. Waiting 30 s and asking the account layer for a new credential cured nothing
+            // and repeated every 30 s for as long as the app ran. It is blocked like any refused batch: kept,
+            // surfaced, and offered once more at the next launch.
+            permanentRejection = code
+            await handleFailure(batch: batch, error: "HTTP \(outcome.statusCode) \(code)")
+            return false
+        }
         if outcome.statusCode == 401 || outcome.statusCode == 403 {
             await handleCredentialRejection(batch: batch, status: outcome.statusCode, detail: "HTTP \(outcome.statusCode)")
             return false
@@ -500,6 +531,7 @@ public actor CloudTransportCoordinator {
         do {
             try await journal.markUploaded(batchId: batch.batchId)
             let acknowledged = try await applyReceipt(batch: batch, body: body)
+            if acknowledged { permanentRejection = nil }
             if !acknowledged {
                 // A 200 whose acknowledgement does not match this batch is not delivery. `uploaded` is not a
                 // state the send pass looks at again, so leaving the batch there would hold its records back
@@ -627,6 +659,19 @@ public actor CloudTransportCoordinator {
 
     /// How long a batch waits after the receiver refused the credential before it is offered again.
     static let credentialRetrySeconds: Double = 30
+
+    /// The receiver codes of a 403 that refuses the batch itself rather than the credential.
+    static let permanentRejectionCodes: Set<String> = ["device_owner_conflict", "source_id_mismatch",
+                                                        "object_owner_conflict"]
+
+    /// The code of a 403 that refuses this batch for good, or nil for any other answer (a 401/403 without one
+    /// of those codes is a credential problem and goes to the account layer).
+    static func permanentRejectionCode(status: Int, body: Data?) -> String? {
+        guard status == 403, let body,
+              let object = try? JSONSerialization.jsonObject(with: body) as? [String: Any],
+              let code = object["code"] as? String, permanentRejectionCodes.contains(code) else { return nil }
+        return code
+    }
 
     private func noteCredentialRejected(status: Int) {
         let seconds = now()
@@ -806,16 +851,44 @@ public actor CloudTransportCoordinator {
 
     // MARK: - maintenance
 
-    /// Reap acknowledged work only, and report what is pending.
+    /// Reap acknowledged work only, and report what is pending. Runs at `start()` and then at most every
+    /// `maintenanceIntervalSeconds` from the loop.
     @discardableResult
     public func maintenance() async -> CloudJournalStats {
+        lastMaintenanceAtSeconds = now()
         _ = try? await journal.pruneAcknowledged()
         return await journal.stats()
+    }
+
+    /// Put work that stalled while the phone was offline back in line: the app came to the foreground, the
+    /// network came back, or an hour passed. Failed batches whose backoff grew toward the hour cap become due
+    /// now, and batches that ran out of attempts on a retryable failure (no network, a 5xx) are re-sealed, so
+    /// an outage longer than the attempt budget no longer strands them until the next launch. Batches the
+    /// receiver refused for good stay blocked (they are offered again once per launch). Ordinary retries keep
+    /// their jittered backoff: this runs on those events only, and at most every `recoveryMinIntervalSeconds`.
+    public func recoverStalledWork(force: Bool = false) async {
+        guard active, cloudEnabled() else { return }
+        let seconds = now()
+        if !force, let last = lastRecoveryAtSeconds, seconds - last < policy.recoveryMinIntervalSeconds { return }
+        lastRecoveryAtSeconds = seconds
+        try? await journal.rescheduleFailed(dueAtMs: seconds * 1000)
+        do {
+            for blocked in try await journal.blockedBatches(limit: 64)
+            where CloudTransportCoordinator.isRetryable(error: blocked.lastError) {
+                try await journal.resealBlocked(batchId: blocked.batchId)
+            }
+        } catch {
+            lastError = "recover stalled: \(error)"
+        }
+        kick()
     }
 
     public func status() async -> (stats: CloudJournalStats, inFlight: Int, protocolVersion: String?, lastError: String?, lastOutcomeAtMs: Int?) {
         (await journal.stats(), inFlight + backgroundInFlight, negotiatedProtocolVersion, lastError, lastOutcomeAtMs)
     }
+
+    /// The receiver's code for the last batch it refused for good, until a batch is accepted again.
+    public func permanentRejectionCode() -> String? { permanentRejection }
 
     private func protectPayloadDirectory() async {
         #if os(iOS)

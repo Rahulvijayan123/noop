@@ -226,6 +226,9 @@ public struct CloudJournalStats: Sendable, Equatable {
     /// True when the pending footprint crossed the pressure threshold.
     public var diskPressure: Bool
     public var lastError: String?
+    /// Batches the receiver refused for good (or that ran out of attempts). Their records are kept and are
+    /// offered again at the next launch; a non-zero count is a condition to surface, not a loss.
+    public var blockedBatches: Int = 0
 
     public static let empty = CloudJournalStats(pendingRecords: 0, pendingBytes: 0, sealedBatches: 0,
                                                 uploadedBatches: 0, oldestPendingAgeSeconds: 0,
@@ -475,10 +478,36 @@ final class CloudJournalStore: @unchecked Sendable {
         // A background BLE relaunch can reach here while the phone is locked but after the first
         // unlock; if the file protection still denies access, SQLite reports IOERR and we surface a
         // protected-data failure instead of pretending the write landed.
+        //
+        // A NEW journal reclaims the space pruning frees (`incremental_vacuum` after each prune). The mode can
+        // only be chosen before the first table exists, so an existing journal keeps the mode it was created
+        // with: rebuilding it to change that would rewrite the whole file on a phone's launch path.
+        if isEmptyDatabase() { try exec("PRAGMA auto_vacuum=INCREMENTAL;") }
         try exec("PRAGMA journal_mode=WAL;")
         try exec("PRAGMA synchronous=FULL;")
         try exec("PRAGMA busy_timeout=4000;")
         try migrate()
+    }
+
+    /// True for a file with no schema yet (just created). A read that fails says false, so the open goes on
+    /// and reports the real error from the statements that follow.
+    private func isEmptyDatabase() -> Bool {
+        guard let db else { return false }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "SELECT COUNT(*) FROM sqlite_master", -1, &stmt, nil) == SQLITE_OK,
+              let stmt else { return false }
+        defer { sqlite3_finalize(stmt) }
+        guard sqlite3_step(stmt) == SQLITE_ROW else { return false }
+        return sqlite3_column_int64(stmt, 0) == 0
+    }
+
+    /// `PRAGMA auto_vacuum`: 0 none, 1 full, 2 incremental.
+    func autoVacuumMode() -> Int {
+        guard let db else { return 0 }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(db, "PRAGMA auto_vacuum", -1, &stmt, nil) == SQLITE_OK, let stmt else { return 0 }
+        defer { sqlite3_finalize(stmt) }
+        return sqlite3_step(stmt) == SQLITE_ROW ? Int(sqlite3_column_int64(stmt, 0)) : 0
     }
 
     private func exec(_ sql: String) throws {
@@ -904,6 +933,103 @@ final class CloudJournalStore: @unchecked Sendable {
         try step(stmt)
     }
 
+    /// Send again every batch left `uploaded` by an earlier run. `uploaded` only lasts between a 200 arriving
+    /// and its receipt being applied, so a batch still in it at launch lost its receipt to a crash or a kill;
+    /// nothing else ever looks at that state again. The receiver answers a replayed batch id with the receipt
+    /// it already issued, so the re-send is what completes it. The attempt count is left alone.
+    @discardableResult
+    func requeueUploaded(scope: CloudDataScope, dueAtMs: Int) throws -> Int {
+        let stmt = try prepare("""
+        UPDATE sealed_batch SET state = 'failed', task_id = NULL, next_attempt_at_ms = ?,
+                                last_error = 'receipt not applied before relaunch; re-sending'
+        WHERE state = 'uploaded' AND owner_id = ? AND source_id = ?
+        """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, Int64(dueAtMs))
+        sqlite3_bind_text(stmt, 2, scope.ownerId, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 3, scope.sourceId, -1, cloudSQLiteTransient)
+        try step(stmt)
+        return changes()
+    }
+
+    /// Blocked batches with the error that blocked them, oldest first.
+    func blockedBatches(scope: CloudDataScope, limit: Int) throws -> [(batchId: String, lastError: String)] {
+        let stmt = try prepare("""
+        SELECT batch_id, COALESCE(last_error, '') FROM sealed_batch
+        WHERE state = 'blocked' AND owner_id = ? AND source_id = ?
+        ORDER BY created_at_ms ASC, batch_id ASC LIMIT ?
+        """)
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_text(stmt, 1, scope.ownerId, -1, cloudSQLiteTransient)
+        sqlite3_bind_text(stmt, 2, scope.sourceId, -1, cloudSQLiteTransient)
+        sqlite3_bind_int(stmt, 3, Int32(limit))
+        var out: [(batchId: String, lastError: String)] = []
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            out.append((text(stmt, 0) ?? "", text(stmt, 1) ?? ""))
+        }
+        return out
+    }
+
+    /// Carry the account's unacknowledged records from every OTHER source onto `scope`'s source.
+    ///
+    /// An account has one source per phone, and it only changes when the server refused the old one (taken,
+    /// retired or revoked) and the account layer rotated it. The old source's credential is gone or refused by
+    /// then, and the journal only ever reads, seals and sends under the running scope, so whatever the old
+    /// source still held would otherwise wait forever. Its pending records are re-stamped with the new source;
+    /// its sealed-but-unacknowledged batches are dissolved first (records back to pending, job rows removed) so
+    /// they are rebuilt under the new source. Acknowledged records and every other account's rows are not
+    /// touched. A batch that did reach the server under the old source is harmless to send again: the receiver
+    /// keeps rows by their own identity. Returns the dissolved batches so their payload files can be deleted.
+    func adoptOtherSources(scope: CloudDataScope) throws -> (records: Int, batches: [(batchId: String, filePath: String)]) {
+        try exec("BEGIN IMMEDIATE;")
+        do {
+            let find = try prepare("""
+            SELECT batch_id, file_path FROM sealed_batch
+            WHERE owner_id = ? AND source_id != ? AND state != 'acked'
+            """)
+            sqlite3_bind_text(find, 1, scope.ownerId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(find, 2, scope.sourceId, -1, cloudSQLiteTransient)
+            var dissolved: [(batchId: String, filePath: String)] = []
+            while sqlite3_step(find) == SQLITE_ROW {
+                dissolved.append((text(find, 0) ?? "", text(find, 1) ?? ""))
+            }
+            sqlite3_finalize(find)
+
+            let free = try prepare("""
+            UPDATE journal_record SET batch_id = NULL, state = 0
+            WHERE owner_id = ? AND source_id != ? AND state = 1
+            """)
+            sqlite3_bind_text(free, 1, scope.ownerId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(free, 2, scope.sourceId, -1, cloudSQLiteTransient)
+            do { try step(free) } catch { sqlite3_finalize(free); throw error }
+            sqlite3_finalize(free)
+
+            let drop = try prepare("""
+            DELETE FROM sealed_batch WHERE owner_id = ? AND source_id != ? AND state != 'acked'
+            """)
+            sqlite3_bind_text(drop, 1, scope.ownerId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(drop, 2, scope.sourceId, -1, cloudSQLiteTransient)
+            do { try step(drop) } catch { sqlite3_finalize(drop); throw error }
+            sqlite3_finalize(drop)
+
+            let restamp = try prepare("""
+            UPDATE journal_record SET source_id = ?
+            WHERE owner_id = ? AND source_id != ? AND state = 0
+            """)
+            sqlite3_bind_text(restamp, 1, scope.sourceId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(restamp, 2, scope.ownerId, -1, cloudSQLiteTransient)
+            sqlite3_bind_text(restamp, 3, scope.sourceId, -1, cloudSQLiteTransient)
+            do { try step(restamp) } catch { sqlite3_finalize(restamp); throw error }
+            let moved = changes()
+            sqlite3_finalize(restamp)
+            try exec("COMMIT;")
+            return (moved, dissolved)
+        } catch {
+            try? exec("ROLLBACK;")
+            throw error
+        }
+    }
+
     /// Return a blocked batch's records to the pending pool so the builder can
     /// re-seal them. Used when a previously non-retryable rejection was fixed
     /// builder-side (e.g. duplicate conflict keys inside one batch): the
@@ -1085,6 +1211,9 @@ final class CloudJournalStore: @unchecked Sendable {
             try exec("DELETE FROM sealed_batch WHERE state = 'acked' AND created_at_ms < \(cutoff);")
             let batches = changes()
             try exec("COMMIT;")
+            // Hand the freed pages back to the file system where the journal was created to allow it. A journal
+            // without incremental auto-vacuum reuses them for new records instead, so it stops growing either way.
+            if records + batches > 0, autoVacuumMode() == 2 { try? exec("PRAGMA incremental_vacuum;") }
             return (records, batches, bytes)
         } catch {
             try? exec("ROLLBACK;")
@@ -1109,6 +1238,7 @@ final class CloudJournalStore: @unchecked Sendable {
         }
         out.sealedBatches = try countBatches(scope: scope, state: .sealed) + countBatches(scope: scope, state: .reserved)
         out.uploadedBatches = try countBatches(scope: scope, state: .uploaded)
+        out.blockedBatches = try countBatches(scope: scope, state: .blocked)
         out.diskPressure = out.pendingBytes >= diskPressureBytes
         out.historyCursorHeld = (try metaValue("history_cursor_held")).map { $0 == "1" } ?? false
         out.overflowRecords = Int(try metaValue("staging_overflow") ?? "0") ?? 0
@@ -1455,6 +1585,32 @@ public actor CloudJournal {
     public func rescheduleFailed(dueAtMs: Int) async throws {
         guard let scope = configuration?.scope else { return }
         try store?.rescheduleFailed(scope: scope, dueAtMs: dueAtMs)
+    }
+
+    /// Re-send batches an earlier run left `uploaded` (see `CloudJournalStore.requeueUploaded`).
+    @discardableResult
+    public func requeueUploaded(dueAtMs: Int) async throws -> Int {
+        guard let scope = configuration?.scope else { return 0 }
+        return try store?.requeueUploaded(scope: scope, dueAtMs: dueAtMs) ?? 0
+    }
+
+    /// The configured account's blocked batches and why each was blocked.
+    public func blockedBatches(limit: Int = 64) async throws -> [(batchId: String, lastError: String)] {
+        guard let scope = configuration?.scope else { return [] }
+        return try store?.blockedBatches(scope: scope, limit: limit) ?? []
+    }
+
+    /// Carry the configured account's unacknowledged records from its earlier sources onto the current one
+    /// (see `CloudJournalStore.adoptOtherSources`).
+    @discardableResult
+    public func adoptOtherSources() async throws -> (records: Int, batches: [(batchId: String, filePath: String)]) {
+        guard let store, let scope = configuration?.scope else { return (0, []) }
+        return try store.adoptOtherSources(scope: scope)
+    }
+
+    /// `PRAGMA auto_vacuum` of the open store (0 none, 1 full, 2 incremental), for tests and diagnostics.
+    public func autoVacuumMode() async -> Int? {
+        store?.autoVacuumMode()
     }
 
     /// Return a blocked batch's records to the pending pool for re-sealing
