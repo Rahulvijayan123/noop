@@ -363,7 +363,7 @@ def with_sessions(frame: MinuteFrame, sleep_rest=None, live: bool = True) -> tup
 
   spans = [dict(s, open=False) for s in es.session_spans(hr, strong, weak, rest)]
   if live:
-    ev = [strong[i] or weak[i] for i in range(size)]
+    ev = es.anchored(strong, weak)
     tail = es.periods(ev)[-1:] if any(ev) else []
     for a, b in tail:
       covered = any(s["a"] <= a <= s["b"] for s in spans)

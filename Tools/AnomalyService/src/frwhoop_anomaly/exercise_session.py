@@ -16,6 +16,7 @@ from typing import Callable, Sequence
 
 RULE = "exercise-session-1"
 MERGE_GAP_MIN = 10
+ANCHOR_MIN = 20
 SPAN_MIN = 10
 MIN_EVIDENCE_IN_SPAN = 3
 MIN_STRONG = 2
@@ -29,6 +30,23 @@ PRE_WINDOW = (45, 10)
 DEFAULT_REST_BPM = 70.0
 
 Rest = float | Callable[[int], float]
+
+
+def anchored(strong, weak) -> list[bool]:
+  """Counted evidence: strong minutes, and weak minutes within ANCHOR_MIN minutes of a strong one, so weak movement
+  far from any strong minute (a fidgety afternoon) never forms or stretches a period."""
+  n = len(strong)
+  strong_idx = [i for i in range(n) if strong[i]]
+  out = [False] * n
+  j = 0
+  for i in range(n):
+    if strong[i]:
+      out[i] = True
+    elif weak[i]:
+      while j < len(strong_idx) and strong_idx[j] < i - ANCHOR_MIN:
+        j += 1
+      out[i] = j < len(strong_idx) and strong_idx[j] <= i + ANCHOR_MIN
+  return out
 
 
 def periods(evidence: Sequence[bool]) -> list[list[int]]:
@@ -48,9 +66,10 @@ def _rest_at(rest: Rest, a: int) -> float:
   return float(rest(a)) if callable(rest) else float(rest)
 
 
-def qualifies(a: int, b: int, hr, strong, weak, rest: float) -> bool:
+def qualifies(a: int, b: int, hr, strong, weak, rest: float, counted: Sequence[bool] | None = None) -> bool:
   # Prefix sums over the period: the reference's window scan, O(length) instead of O(length × span).
-  ev = [bool(strong[i] or weak[i]) for i in range(a, b + 1)]
+  counted = counted if counted is not None else anchored(strong, weak)
+  ev = [bool(counted[i]) for i in range(a, b + 1)]
   cs = [0]
   for e in ev:
     cs.append(cs[-1] + int(e))
@@ -75,11 +94,11 @@ def session_spans(hr, strong, weak, rest: Rest) -> list[dict]:
   """Completed sessions over a contiguous minute grid, as minute indices: {a, b, end, pre, rest} where a/b are the
   first/last evidence minute and `end` the first minute that is no longer recovery (exclusive)."""
   n = len(hr)
-  ev = [bool(strong[i] or weak[i]) for i in range(n)]
+  ev = anchored(strong, weak)
   found = []
   for a, b in periods(ev):
     r = _rest_at(rest, a)
-    if qualifies(a, b, hr, strong, weak, r):
+    if qualifies(a, b, hr, strong, weak, r, ev):
       found.append((a, b, r))
   out = []
   busy: set[int] = set()
