@@ -142,7 +142,6 @@ struct DayStretchesSection: View {
                                    compactTitle: "Needs your input", inlineLimit: 4)
         WalkingQualityCard(dayStart: dayStart, window: window)
         positionChangesLink(doc)
-        StrapSignalCard(dayStart: dayStart, window: window, compact: true)
         ActivityCalibrationEntry()
         footnote
     }
@@ -392,23 +391,34 @@ struct DayActivityLane: View {
 struct FamilyTileGrid<Destination: View>: View {
     let totals: [FamilyTotal]
     let destination: (ActivityFamily) -> Destination
+    /// The tallest tile's natural height. Every tile is held to it, so the boxes are one size whatever each one
+    /// lists (a family with a breakdown is taller than one without, and a long title wraps).
+    @State private var tileHeight: CGFloat = 0
 
     var body: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), spacing: 10), GridItem(.flexible(), spacing: 10)], spacing: 10) {
+        LazyVGrid(columns: [GridItem(.flexible(), spacing: 12), GridItem(.flexible(), spacing: 12)], spacing: 12) {
             ForEach(totals) { total in
                 NavigationLink {
                     destination(total.family)
                 } label: {
-                    FamilyTile(total: total)
+                    FamilyTile(total: total, height: tileHeight)
                 }
                 .buttonStyle(.plain)
             }
         }
+        .onPreferenceChange(FamilyTileHeightKey.self) { tileHeight = $0 }
     }
+}
+
+private struct FamilyTileHeightKey: PreferenceKey {
+    static let defaultValue: CGFloat = 0
+    static func reduce(value: inout CGFloat, nextValue: () -> CGFloat) { value = max(value, nextValue()) }
 }
 
 struct FamilyTile: View {
     let total: FamilyTotal
+    /// Set by the grid to the tallest tile's height; 0 until it has measured them.
+    var height: CGFloat = 0
 
     /// Worth listing only when the family holds more than one label, or a label more specific than its name.
     private var showsBreakdown: Bool {
@@ -459,8 +469,11 @@ struct FamilyTile: View {
             }
         }
         .padding(12)
-        .frame(maxWidth: .infinity, minHeight: 104, alignment: .topLeading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
+        .background(GeometryReader { Color.clear.preference(key: FamilyTileHeightKey.self, value: $0.size.height) })
+        .frame(minHeight: max(height, 104), alignment: .topLeading)
         .background(RoundedRectangle(cornerRadius: 16, style: .continuous).fill(family.color.opacity(0.12)))
+        .noopCardShadow(in: RoundedRectangle(cornerRadius: 16, style: .continuous))
         .overlay(RoundedRectangle(cornerRadius: 16, style: .continuous).stroke(family.color.opacity(0.35), lineWidth: 1))
         .contentShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
         .accessibilityElement(children: .combine)

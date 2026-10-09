@@ -5,8 +5,9 @@ import WhoopStore
 // MARK: - Device page
 //
 // One band, one tap down from its Devices card: its state, what it records and what Nara uses it for, the
-// connection details (firmware, pack voltage, history format, clock) and the honest caveats. Read-only: every
-// action stays in the card's ⋯ menu, where the confirmations that guard them are presented. The values are
+// connection details (firmware, pack voltage, history format, clock) and the honest caveats. The one action here
+// is Sync now (harmless, nothing to confirm); every other action stays in the card's ⋯ menu, where the
+// confirmations that guard them are presented. The values are
 // the ones the Devices list already computed for the card (the card builds this page), so the two can never
 // disagree.
 
@@ -25,6 +26,9 @@ struct DeviceDetailView: View {
     var syncLine: String?
     var syncNote: String?
     var bondHint: String?
+    /// "Sync now": pull the strap's stored history and upload it (the card offers it for the connected WHOOP).
+    var onSyncNow: (() -> Void)? = nil
+    var isSyncing = false
 
     private var isWhoop: Bool {
         device.id == "my-whoop" || device.brand.caseInsensitiveCompare("WHOOP") == .orderedSame
@@ -52,6 +56,30 @@ struct DeviceDetailView: View {
                 if let syncLine {
                     NoopListDivider()
                     valueRow("Strap history", syncLine)
+                }
+                if onSyncNow != nil || isSyncing {
+                    NoopListDivider()
+                    Button { onSyncNow?() } label: {
+                        HStack(spacing: NoopMetrics.space3) {
+                            if isSyncing {
+                                ProgressView().controlSize(.small)
+                            } else {
+                                Image(systemName: "arrow.triangle.2.circlepath")
+                                    .foregroundStyle(StrandPalette.accent)
+                                    .accessibilityHidden(true)
+                            }
+                            Text(isSyncing ? "Syncing strap history…" : "Sync now")
+                                .font(StrandFont.body)
+                                .foregroundStyle(isSyncing ? StrandPalette.textSecondary : StrandPalette.accent)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .frame(maxWidth: .infinity, minHeight: NoopMetrics.listRowMinHeight)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(isSyncing || onSyncNow == nil)
+                    .accessibilityIdentifier("device.syncNow")
                 }
             }
 

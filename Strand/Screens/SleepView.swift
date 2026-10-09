@@ -9,19 +9,17 @@ import UIKit
 
 // MARK: - SleepView
 //
-// The Sleep tab: a glance at one night, then the trends behind it.
+// The Sleep tab: one night, read top to bottom.
 //
 //   1. Status: the night's freshness (syncing / calculating / not detected), only while it applies.
 //   2. Night stepper: "‹ Last night · Mon 6 – Tue 7 Oct ›".
-//   3. Night summary: the Rest ring, the state word, asleep against the need, the in-bed window and
-//      efficiency. Opens the night page (`TabRoute.sleepNight`), where the times, naps, edits, caveats
-//      and every per-night detail live.
-//   4. Stages: the filled stepped hypnogram with one legend row (tap a stage to highlight it) and at most
-//      one caveat badge.
-//   5. Naps, when the day has any.
-//   6. Trends: sleep debt, consistency, restorative share and respiratory rate, each opening its own
-//      metric page.
-//   7. Asleep: the last 14 nights against the sleep need, opening the asleep-time page.
+//   3. Overview: asleep, time in bed and efficiency.
+//   4. Sleep stages (`SleepStagesCard`): the in-bed window, the scrubbable hypnogram with one lane per
+//      metric (HR, RMSSD, skin temperature, breathing) on its own scale, lane toggles, stage durations
+//      (tap one to highlight it), caveats expanding in place, and a full-screen view.
+//   5. Naps, when the day has any; each opens the night page (`TabRoute.sleepNight`), where naps are edited.
+//   6. Analytics (`SleepTabAnalyticsStack`): Continuity, Regularity, Physiology by stage and Breathing.
+//      Everything reads in place; the stepper moves between nights.
 //
 // `SleepView` also stays the namespace for the pure sleep rules other screens and tests use
 // (`mainNightGroup`, `stubDaySession`, `decodeSegments`, `isStagingLowConfidence`, ...): names and
@@ -84,10 +82,6 @@ struct SleepView: View {
     /// Persisted per-epoch MOTION series keyed by each session's detected `startTs` (#407), loaded in the
     /// same `.task` as `allSessions` from `repo.sessionMotions(sessions:)`. Refreshed with `allSessions`.
     @State private var motionByStart: [Int: [Double]] = [:]
-
-    /// The stage highlighted from the legend (tap again to clear). Display-only. (ryanAtriumAi #988)
-    @State private var highlightedStage: SleepStage? = nil
-
     var body: some View {
         // Resolve the memoized model for THIS render. `dataKey` is O(1)-ish (counts + last-row identity),
         // so comparing it every render is cheap. When it matches the cached key we reuse the cached model;
@@ -176,7 +170,6 @@ struct SleepView: View {
             observeResultChange()
         }
         .onChangeCompat(of: nightOffset) { _ in
-            highlightedStage = nil
             resetResultNotice()
             observeResultChange()
         }
@@ -201,11 +194,15 @@ struct SleepView: View {
     private func content(_ model: SleepModel) -> some View {
         let shown = displayedNight(model)
         nightStepper(shown.night)
-        nightSummaryCard(shown.night, isStub: shown.isStub)
-        stagesCard(shown.night, isStub: shown.isStub)
+        overviewCard(shown.night, isStub: shown.isStub)
+        SleepStagesCard(night: shown.night, isStub: shown.isStub,
+                        caveats: shown.isStub ? [] : SleepCaveat.applicable(
+                            to: shown.night, todayEfficiency: repo.today?.efficiency,
+                            isOura: repo.activeDeviceIsOura),
+                        isLoading: !repo.loaded)
         napRows(shown.night)
-        trendsSection(model)
-        asleepSection(model)
+        SleepTabAnalyticsStack(night: shown.night, isStub: shown.isStub, navDays: navDays,
+                            habitualMidsleepSec: habitualMidsleepSec, isLoading: !repo.loaded)
     }
 
     /// The night on screen: the browsed night while browsing (the newest only until it has decoded), else
@@ -271,105 +268,19 @@ struct SleepView: View {
         )
     }
 
-    // MARK: Night summary
+    // MARK: Overview
 
-    /// The sleep-performance score (0–100) for a SPECIFIC night: the imported WHOOP figure for that
-    /// night's LOCAL wake-day when the export carried one, else the resolved Rest composite for that
-    /// day. Mirrors `performanceSeries`'s per-day transform exactly (the same single source of truth
-    /// the Today Rest score reads), keyed by the wake-day (sleep is filed under the day you woke) so
-    /// a browsed past night reads ITS OWN score, never last night's. nil when that day has no score.
-    private func performanceScore(for night: Night) -> Double? {
-        let wakeDay = Repository.localDayKey(Date(timeIntervalSince1970: TimeInterval(night.session.endTs)))
-        if let p = repo.importedSleep[wakeDay]?.performancePct { return p }
-        guard let daily = repo.days.last(where: { $0.day == wakeDay }) else { return nil }
-        return AnalyticsEngine.Rest.composite(daily: daily)
-    }
-
-    /// The Rest ring, its state word, and the night's three facts. One card at one height whatever it holds
-    /// (a night with no score keeps the ring with "—"), opening the night page.
-    private func nightSummaryCard(_ night: Night, isStub: Bool) -> some View {
-        let score = isStub ? nil : performanceScore(for: night)
-        let need = model?.sleepDebtLedger.needMin
+    /// Asleep, time in bed and efficiency for the night. Time in bed is the in-bed window
+    /// (`SleepNightFacts.windowMinutes`), the figure the night page's Times card prints.
+    private func overviewCard(_ night: Night, isStub: Bool) -> some View {
         let efficiency = isStub ? nil : SleepNightFacts.efficiencyPct(night, days: repo.days)
-        return SleepRouteLink(route: .sleepNight(wakeDay: SleepFormat.wakeDayKey(night.session.endTs))) {
-            NightSummaryLayout(
-                score: score,
-                asleep: isStub ? nil : SleepFormat.duration(night.stages.asleep),
-                need: need.map { String(localized: "of \(SleepFormat.duration($0)) need") },
-                window: SleepFormat.window(night.session.effectiveStartTs, night.session.endTs),
-                efficiency: efficiency.map { "\(Int($0.rounded()))" })
-        }
-        .buttonStyle(StrandPressableButtonStyle())
-        .accessibilityHint(Text("Opens this night"))
+        return SleepOverviewCard(
+            asleep: isStub ? nil : SleepFormat.duration(night.stages.asleep),
+            inBed: SleepFormat.duration(SleepNightFacts.windowMinutes(night)),
+            efficiency: efficiency.map { "\(Int($0.rounded()))%" })
     }
 
-    // MARK: Stages
-
-    @ViewBuilder
-    private func stagesCard(_ night: Night, isStub: Bool) -> some View {
-        let hasTimeline = (night.realSegments?.count ?? 0) >= 2
-        let caveats = isStub ? [] : SleepCaveat.applicable(to: night, todayEfficiency: repo.today?.efficiency,
-                                                           isOura: repo.activeDeviceIsOura)
-        NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text("Stages")
-                    .font(StrandFont.headline)
-                    .foregroundStyle(StrandPalette.textPrimary)
-                Group {
-                    if !repo.loaded {
-                        // The chart is a Canvas, so the scaffold's redaction cannot grey it. Until the first
-                        // load lands, show the placeholder rather than stage colours read off half the data.
-                        ChartPlaceholder(height: Self.compactChartHeight)
-                    } else if hasTimeline {
-                        NightTimelineChart(
-                            timeline: NightTimeline(onset: night.onsetDate,
-                                                    end: Date(timeIntervalSince1970: TimeInterval(night.session.endTs)),
-                                                    intervals: night.intervals),
-                            highlighted: highlightedStage,
-                            stageHeight: Self.compactStageHeight)
-                    } else if !isStub {
-                        // An imported night carries stage TOTALS only: no timeline is drawn for it.
-                        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                            Spacer(minLength: 0)
-                            StageCompositionBar(stages: night.stages, highlighted: highlightedStage, height: 20)
-                            Text("Stage totals only")
-                                .font(StrandFont.footnote)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                            Spacer(minLength: 0)
-                        }
-                    } else {
-                        EmptyChartMessage("No stage data recorded for this night.", height: Self.compactChartHeight)
-                    }
-                }
-                .frame(height: Self.compactChartHeight)
-                if !isStub {
-                    StageLegendRow(stages: night.stages, highlighted: $highlightedStage)
-                }
-                if let first = caveats.first {
-                    SleepRouteLink(route: .sleepNight(wakeDay: SleepFormat.wakeDayKey(night.session.endTs))) {
-                        HStack(spacing: NoopMetrics.space2) {
-                            SleepCaveatBadge(caveat: first)
-                            if caveats.count > 1 {
-                                Text("+\(caveats.count - 1)")
-                                    .font(StrandFont.captionNumber)
-                                    .foregroundStyle(StrandPalette.textTertiary)
-                            }
-                            Spacer(minLength: 0)
-                            Image(systemName: "chevron.right")
-                                .font(StrandFont.icon(.inline))
-                                .foregroundStyle(StrandPalette.textTertiary)
-                                .accessibilityHidden(true)
-                        }
-                        .frame(minHeight: NoopMetrics.minimumHitTarget)
-                        .contentShape(Rectangle())
-                    }
-                    .buttonStyle(.plain)
-                    .accessibilityHint(Text("Opens this night"))
-                }
-            }
-        }
-    }
-
+    /// The night timeline's compact frame, still read by the Today-hosted Stages card.
     static let compactStageHeight: CGFloat = 104
     /// The compact chart's whole frame (stage lane + its clock axis), kept for every kind of night.
     static let compactChartHeight: CGFloat = compactStageHeight + NightTimelineChart.axisHeight + NoopMetrics.space1
@@ -400,25 +311,6 @@ struct SleepView: View {
                 }
             }
         }
-    }
-
-    // MARK: Trends
-
-    private func trendsSection(_ model: SleepModel) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Trends")
-            SleepTrendTiles(model: model)
-        }
-    }
-
-    // MARK: Asleep
-
-    private func asleepSection(_ model: SleepModel) -> some View {
-        SleepRouteLink(route: .metricSourced(key: "sleep_total_min", source: "my-whoop")) {
-            AsleepNightsCard(days: repo.days, needMin: model.sleepDebtLedger.needMin, state: .ready)
-        }
-        .buttonStyle(StrandPressableButtonStyle())
-        .accessibilityHint(Text("Opens asleep time"))
     }
 
     // MARK: Empty / loading
@@ -454,19 +346,17 @@ struct SleepView: View {
     private var loadingLayout: some View {
         PeriodStepper(title: SleepFormat.relativeNight(0), subtitle: " ", canGoBack: false, canGoForward: false,
                       onBack: {}, onForward: {})
-        NightSummaryLayout(score: nil, asleep: nil, need: nil, window: nil, efficiency: nil, isLoading: true)
+        SleepOverviewCard(asleep: "7h 30m", inBed: "8h 00m", efficiency: "90%", isLoading: true)
         NoopCard {
-            VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Text("Stages").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                ChartPlaceholder(height: Self.compactChartHeight)
-                StageLegendRow(stages: Stages(awake: 0, light: 0, deep: 0, rem: 0), highlighted: .constant(nil))
+            VStack(alignment: .leading, spacing: NoopMetrics.space4) {
+                SleepCardTitle(icon: "moon.zzz.fill", title: "Sleep stages")
+                ChartPlaceholder(height: SleepStagesExplorer.compactHeight)
+                SleepStageDurationRow(stages: nil, highlighted: .constant(nil))
             }
         }
-        VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Trends")
-            SleepTrendTiles(model: nil)
+        ForEach(0..<3, id: \.self) { _ in
+            NoopCard { ChartPlaceholder(height: 140) }
         }
-        AsleepNightsCard(days: [], needMin: nil, state: .loading)
     }
 
     // MARK: - Result-change notice

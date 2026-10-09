@@ -41,12 +41,14 @@ public struct MetricTile: View {
     private let reservesTrendSlot: Bool
     private let isEstimate: Bool
     private let isLoading: Bool
+    private let secondary: String?
 
     public init(icon: String, iconColor: Color, label: LocalizedStringKey,
                 value: String?, unit: String?,
                 state: String? = nil, stateTone: StrandTone = .neutral,
                 trend: [Double]? = nil, reservesTrendSlot: Bool = false,
-                isEstimate: Bool = false, isLoading: Bool = false) {
+                isEstimate: Bool = false, isLoading: Bool = false, secondary: String? = nil) {
+        self.secondary = secondary
         self.icon = icon
         self.iconColor = iconColor
         self.label = label
@@ -92,7 +94,7 @@ public struct MetricTile: View {
                                  valueFont: { StrandFont.number(28 * $0) },
                                  unitFont: { StrandFont.scaled(14 * $0, weight: .regular, relativeTo: .subheadline) })
                 // Reserved when empty: a tile with a state word is never taller than one without.
-                Text(MetricTile.stateLine(state: state, isEstimate: isEstimate) ?? " ")
+                Text(lineText ?? " ")
                     .font(StrandFont.footnote)
                     .foregroundStyle(stateTone == .neutral ? StrandPalette.textSecondary : stateTone.color)
                     .lineLimit(1)
@@ -128,9 +130,17 @@ public struct MetricTile: View {
         #endif
     }
 
+    /// The line under the value: a second reading of the same metric (HRV's SDNN beside its RMSSD), then the
+    /// state word. The slot is reserved either way, so the tile is no taller for it.
+    private var lineText: String? {
+        let parts = [isLoading ? nil : secondary, MetricTile.stateLine(state: state, isEstimate: isEstimate)]
+            .compactMap { $0 }.filter { !$0.isEmpty }
+        return parts.isEmpty ? nil : parts.joined(separator: " · ")
+    }
+
     private var accessibilityValue: String {
         let number = displayUnit.map { "\(displayValue) \($0)" } ?? displayValue
-        return [number, MetricTile.stateLine(state: state, isEstimate: isEstimate)]
+        return [number, lineText]
             .compactMap { $0 }
             .joined(separator: ", ")
     }

@@ -30,6 +30,12 @@ struct CoachChatView: View {
     /// The iPad column. Local rather than in `chrome`, so an open column never pauses the tab swipe.
     @State private var inlineOpen = true
     @State private var showMemories = false
+    /// When the Sana tab was last on screen (or the app last went to the background), so coming back after a while
+    /// opens the greeting instead of the conversation that was left.
+    @State private var leftAt: Date?
+
+    /// Away this long and Sana greets again; a quick glance at another tab keeps the chat as it was.
+    private static let greetingAfterAway: TimeInterval = 120
 
     private static let inlineWidth: CGFloat = 300
 
@@ -91,7 +97,9 @@ struct CoachChatView: View {
         // Back in the foreground (often on a new day, with the app kept in memory overnight): a repeated start()
         // refreshes a starter set that is not from today, and retries a start that found the server unreachable.
         .onChange(of: scenePhase) { _, phase in
+            if phase == .background { leftAt = Date() }
             guard phase == .active else { return }
+            greetIfAwayAWhile()
             Task { await vm.start() }
         }
         // A question handed over by the Today launcher, Siri or `--coach-prompt`. It goes into a new chat (after
@@ -124,12 +132,17 @@ struct CoachChatView: View {
         }
         .onChange(of: vm.threadId) { _, _ in following = true }
         .onChange(of: inputFocused) { _, focused in if focused { vm.noteUserInteraction() } }
-        .onDisappear { chrome.drawerOpen = false }
+        .onDisappear {
+            chrome.drawerOpen = false
+            leftAt = Date()
+        }
+        .onAppear { greetIfAwayAWhile() }
         .sheet(isPresented: $showMemories) {
             // Values in, so a streaming flush (which redraws this view, and with it the sheet's content) leaves the
             // sheet alone unless the memories themselves changed.
             CoachMemorySheet(memories: vm.memories, isLoading: vm.isLoadingMemories,
                              refresh: { await vm.refreshMemories() },
+                             edit: { await vm.editMemory($0, content: $1) },
                              forget: { await vm.forget($0) },
                              forgetAll: { await vm.forgetAllMemories() })
                 .equatable()
@@ -140,6 +153,16 @@ struct CoachChatView: View {
             if CommandLine.arguments.contains("--coach-memories") { showMemories = true }
         }
         #endif
+    }
+
+    /// Sana opens on its greeting. After a while away the conversation that was left is put down (it stays in the
+    /// chat list) and the greeting comes back; a reply in progress is never interrupted.
+    private func greetIfAwayAWhile() {
+        defer { leftAt = nil }
+        guard let leftAt, Date().timeIntervalSince(leftAt) >= Self.greetingAfterAway,
+              !vm.messages.isEmpty, !vm.isGenerating, vm.canSwitchThreads else { return }
+        inputFocused = false
+        vm.newChat()
     }
 
     private var chatColumn: some View {
@@ -185,6 +208,13 @@ struct CoachChatView: View {
                 .foregroundStyle(StrandPalette.textPrimary)
                 .accessibilityAddTraits(.isHeader)
             Spacer(minLength: 0)
+            // What Sana remembers is a header button, not a sidebar footer: the sidebar only exists on a
+            // thread-aware server, and the memories should be one tap away either way.
+            CoachHeaderButton(symbol: "brain", label: "What Sana remembers", identifier: "coachMemoryHeaderButton") {
+                inputFocused = false
+                vm.noteUserInteraction()
+                showMemories = true
+            }
             if sidebarAvailable {
                 CoachHeaderButton(symbol: "square.and.pencil", label: "New chat", identifier: "coachNewChatButton") {
                     inputFocused = false
@@ -353,10 +383,29 @@ struct CoachChatView: View {
                     withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
                 }
             }
-            .onAppear { proxy.scrollTo("bottom", anchor: .bottom) }
+            .onAppear { settleAtNewest(proxy) }
+            // A reopened chat lays out its rows lazily, so a jump made before the heights are known lands short or
+            // past the end (the blank screen that needed a scroll up). Re-aim as the rows measure.
+            .onChange(of: vm.threadPhase) { _, _ in settleAtNewest(proxy) }
         }
         // Each thread gets its own scroll position and lazy layout.
         .id(vm.threadId)
+    }
+
+    /// Scrolls to the end of the newest message, without animation, then again as the lazy rows above it measure.
+    /// Aimed at the message itself (its own height is known once it is on screen) rather than at a one point
+    /// marker below it, which a lazy stack can only estimate.
+    private func settleAtNewest(_ proxy: ScrollViewProxy) {
+        for delay in [0.0, 0.08, 0.3] {
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
+                guard following else { return }
+                if let last = vm.messages.last?.id {
+                    proxy.scrollTo(last, anchor: .bottom)
+                } else {
+                    proxy.scrollTo("bottom", anchor: .bottom)
+                }
+            }
+        }
     }
 
     /// Pages in the previous messages and puts the one that was on top back on top, so the reader stays put.
@@ -637,11 +686,19 @@ private struct CoachComposer: View {
             .accessibilityLabel("Stop generating")
         } else {
             Button(action: commit) {
-                Image(systemName: "arrow.up")
+                let arrow = Image(systemName: "arrow.up")
                     .font(.system(size: 15, weight: .semibold))
                     .foregroundStyle(.white)
                     .frame(width: 38, height: 38)
-                    .background(NoopVisualStyle.mintDeep.opacity(canSend ? 1 : 0.55), in: Circle())
+                // Tinted glass with Liquid Glass on (the arrow stays white on the mint, above 4.5:1 at the floor
+                // opacity); the solid mint it always was with it off.
+                LiquidGlassSwitch {
+                    arrow
+                        .noopGlassControl(in: Circle(), tint: NoopVisualStyle.mintDeep, refraction: false)
+                        .opacity(canSend ? 1 : 0.55)
+                } original: {
+                    arrow.background(NoopVisualStyle.mintDeep.opacity(canSend ? 1 : 0.55), in: Circle())
+                }
             }
             .buttonStyle(.plain)
             .disabled(!canSend)

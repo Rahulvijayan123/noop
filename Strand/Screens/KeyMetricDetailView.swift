@@ -6,15 +6,16 @@ import StrandAnalytics
 // HRV, wrist temperature, respiratory rate, blood oxygen, stable awake heart rate, steps and calories), in the
 // owner-approved concept's style (nara-hrv.html, `KeyMetricStyle`). Top to bottom:
 //
-//   1. the title, the RMSSD | SDNN switch on HRV, the period control (24 hours where the metric has 5-minute
+//   1. the title, Today | History and, in History, the period control (24 hours where the metric has 5-minute
 //      windows, then 7 / 30 / 90 nights or days and a year) and, in the 24-hour view, the context chips,
-//   2. the period's value with what it is and how it compares (the usual or recent range),
-//   3. one panel: the readings as dots over the shaded range, the activity lane in the 24-hour view, a legend, and
-//      the selected reading with previous / next,
-//   4. how many periods were measured, an optional heart-rate comparison on HRV, and "Data & method" and
-//      "Readings" disclosures,
-//   5. the server's explanation (`MetricInsightCard`) with an "Ask Sana" button that opens Sana on this screen's
-//      context and remembers that the person cared about this metric.
+//   2. for each side (HRV shows RMSSD and then SDNN, one under the other): in Today the value now, a chart of
+//      every reading since midnight (coloured by what the wearer was doing, with the activity lane and the
+//      gaps) and the comparisons; in History the period's value, one panel (the readings as dots over the shaded range,
+//      gaps shaded with the server's reasons, the activity lane in the 24-hour view, a legend, and the selected
+//      reading with previous / next), how many periods were measured, and a "Readings" disclosure,
+//   3. the server's explanation (`MetricInsightCard`) with an "Ask Sana" button that opens Sana on this screen's
+//      context and remembers that the person cared about this metric,
+//   4. "Data & method" in two sentences.
 //
 // The values and charts come from the phone's own data (stable awake heart rate and the 5-minute windows from the
 // server's context layer, which the phone does not store), so they draw whatever the explanation service does.
@@ -30,6 +31,8 @@ struct KeyMetricDetailView: View {
     @EnvironmentObject private var coach: AICoachEngine
     @EnvironmentObject private var router: NavRouter
     @ObservedObject private var insights = MetricInsightStore.shared
+    /// The phone's own activity labels, which fill in a reading the server's window left unclear.
+    @ObservedObject private var lanes = KeyMetricActivityLanes.shared
     /// The context history stable awake heart rate is read from, and the day documents the 24-hour view reads. Its
     /// `epoch` moves when the account, or the device ids the server holds the strap under, change; the screen then
     /// reads again.
@@ -41,9 +44,12 @@ struct KeyMetricDetailView: View {
     /// The Sana tab's switch (RootTabView); the Ask Sana button goes with it.
     @AppStorage("noop.coachEnabled") private var coachEnabled = true
 
-    /// The switch side the reader picked; nil shows the entry's first.
-    @State private var picked: MetricInsightMetric?
     @State private var period: KeyMetricPeriod = KeyMetricPeriods.defaultPeriod
+    /// Today (the value now against the person's own baselines) or the history charts. The screen opens on Today.
+    @State private var mode: ScreenMode = .today
+    /// A day metric's value so far today (steps, calories). The charts leave today out because it is still running;
+    /// the Today view shows it.
+    @State private var todayValues: [MetricInsightMetric: Double] = [:]
     /// The 24-hour view's context chip, per side (each side opens on its own default).
     @State private var windowFilters: [MetricInsightMetric: KeyMetricWindowFilter] = [:]
     /// Every measured night or day of each side, ascending (`KeyMetricHistory.measured` of its series).
@@ -57,11 +63,16 @@ struct KeyMetricDetailView: View {
     /// The data the cached verdicts were computed from (`repo.refreshSeq` and the history's size): new nights can
     /// move every later day's usual, so a change drops the cache.
     @State private var usualSource: [MetricInsightMetric: String] = [:]
-    @State private var selection: Selection = .latest
+    /// Each side's chart selection (HRV shows both of its measures, each with its own chart).
+    @State private var selections: [MetricInsightMetric: Selection] = [:]
     @State private var comparing = false
     /// Resting heart rate per night, for HRV's comparison chart.
     @State private var restingHeartRate: [KeyMetricHistory.Reading] = []
     @State private var plotInset = KeyMetricPlotInsetKey.defaultValue
+    /// Today's strap readings the phone banked, for the sides whose Today chart draws them.
+    @State private var banked: [MetricInsightMetric: KeyMetricReadings.BankedSeries] = [:]
+
+    private enum ScreenMode: Hashable { case today, history }
 
     /// What the guide marks: the latest reading (on arrival), a chosen one, or a place with no reading.
     private enum Selection: Equatable {
@@ -70,8 +81,11 @@ struct KeyMetricDetailView: View {
         case gap(Date)
     }
 
-    /// The side on screen.
-    private var side: MetricInsightMetric { picked ?? entry.metrics.first ?? .restingHeartRate }
+    /// The entry's first side: it leads the period control and the explanation. HRV's two measures are shown one
+    /// under the other, never behind a switch.
+    private var primary: MetricInsightMetric { entry.metrics.first ?? .restingHeartRate }
+
+    private func selection(_ side: MetricInsightMetric) -> Selection { selections[side] ?? .latest }
 
     private var unitSystem: UnitSystem { UnitSystem(rawValue: unitSystemRaw) ?? .metric }
     private var temperatureUnit: TemperatureUnit {
@@ -82,25 +96,30 @@ struct KeyMetricDetailView: View {
         KeyMetricFormatter(metric: side, descriptor: metric, system: unitSystem, temperature: temperatureUnit)
     }
 
-    private var windowFilter: KeyMetricWindowFilter { windowFilters[side] ?? side.defaultWindowContext }
+    private func windowFilter(_ side: MetricInsightMetric) -> KeyMetricWindowFilter {
+        windowFilters[side] ?? side.defaultWindowContext
+    }
+
+    /// The period a side shows in History: the chosen one, or the longest unlocked one below it.
+    private func effectivePeriod(_ side: MetricInsightMetric) -> KeyMetricPeriod {
+        let periods = KeyMetricPeriods.periods(for: side)
+        return KeyMetricPeriods.coerced(periods.contains(period) ? period : KeyMetricPeriods.defaultPeriod,
+                                        among: periods, isUnlocked: { isUnlocked($0, side) })
+    }
+
+    private func isUnlocked(_ period: KeyMetricPeriod, _ side: MetricInsightMetric) -> Bool {
+        let shown = readings[side] ?? []
+        return KeyMetricPeriods.isUnlocked(period, spanDays: KeyMetricHistory.spanDays(shown),
+                                           hasHistory: loaded && !shown.isEmpty)
+    }
 
     // MARK: Body
 
     var body: some View {
-        let side = self.side
-        let shown = readings[side] ?? []
-        let periods = KeyMetricPeriods.periods(for: side)
-        let span = KeyMetricHistory.spanDays(shown)
-        let hasHistory = loaded && !shown.isEmpty
-        let unlocked: (KeyMetricPeriod) -> Bool = {
-            KeyMetricPeriods.isUnlocked($0, spanDays: span, hasHistory: hasHistory)
-        }
-        let effective = KeyMetricPeriods.coerced(periods.contains(period) ? period : KeyMetricPeriods.defaultPeriod,
-                                                 among: periods, isUnlocked: unlocked)
-        let insightState = insights.state(for: side)
-        let model: Shown = effective == .hours24
-            ? .windows(windowModel(side, shown: shown))
-            : .range(rangeModel(side, shown: shown, period: effective))
+        let primary = self.primary
+        let shown = readings[primary] ?? []
+        let effective = effectivePeriod(primary)
+        let insightState = insights.state(for: primary)
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
                 Text(entry.title)
@@ -109,42 +128,55 @@ struct KeyMetricDetailView: View {
                     .accessibilityAddTraits(.isHeader)
                     .padding(.bottom, 16)
                 VStack(alignment: .leading, spacing: KeyMetricStyle.gap) {
-                    if entry.metrics.count > 1 {
-                        KeyMetricSegments(items: entry.metrics,
-                                          selection: Binding(get: { side }, set: { picked = $0; selection = .latest }),
-                                          label: { $0.switchLabel })
-                    }
-                    KeyMetricSegments(items: periods,
-                                      selection: Binding(get: { effective }, set: { period = $0; selection = .latest }),
-                                      isEnabled: unlocked,
-                                      label: { KeyMetricPeriods.label($0, side.period) })
-                    if effective == .hours24 {
-                        KeyMetricChips(items: KeyMetricWindowFilter.allCases,
-                                       selection: Binding(get: { windowFilter },
-                                                          set: { windowFilters[side] = $0; selection = .latest }),
-                                       label: \.name)
+                    KeyMetricSegments(items: [ScreenMode.today, .history],
+                                      selection: Binding(get: { mode }, set: { mode = $0; selections = [:] }),
+                                      label: { $0 == .today ? KeyMetricTodayCopy.today : KeyMetricTodayCopy.history })
+                    if mode == .history {
+                        KeyMetricSegments(items: KeyMetricPeriods.periods(for: primary),
+                                          selection: Binding(get: { effective }, set: { period = $0; selections = [:] }),
+                                          isEnabled: { isUnlocked($0, primary) },
+                                          label: { KeyMetricPeriods.label($0, primary.period) })
+                        if effective == .hours24 {
+                            KeyMetricChips(items: KeyMetricWindowFilter.allCases,
+                                           selection: Binding(get: { windowFilter(primary) }, set: { filter in
+                                               for side in entry.metrics { windowFilters[side] = filter }
+                                               selections = [:]
+                                           }),
+                                           label: \.name)
+                        }
                     }
                 }
-                summary(side, model: model)
-                    .padding(.top, 24)
-                    .padding(.bottom, 20)
-                panel(side, model: model)
-                below(side, model: model)
-                    .padding(.top, 10)
+                ForEach(entry.metrics, id: \.self) { side in
+                    sideSection(side, models: sideModels(side))
+                        .padding(.top, 24)
+                }
+                if mode == .today {
+                    seeHistoryButton
+                        .padding(.top, 8)
+                }
                 if insightState?.phase != .hidden {
-                    MetricInsightCard(state: insightState, latestMeasuredDay: shown.last?.day, period: side.period,
-                                      onAskSana: coachEnabled ? { askSana(side, model: model) } : nil)
+                    MetricInsightCard(state: insightState, latestMeasuredDay: shown.last?.day, period: primary.period,
+                                      onAskSana: coachEnabled ? { askSana(primary, model: sideModels(primary).main) } : nil,
+                                      onRegenerate: {
+                                          StrandHaptic.selection.play()
+                                          insights.requestRegeneration(primary)
+                                          insightRequest &+= 1
+                                      })
                         .padding(.top, 24)
                 }
                 // The gait model runs on the server, so the row is offered only where there is one.
-                if side == .steps, let day = shown.last?.day, CloudPushSettings.isEnabled, CloudPushSettings.isConfigured {
+                if primary == .steps, let day = shown.last?.day, CloudPushSettings.isEnabled, CloudPushSettings.isConfigured {
                     walkingLink(day: day)
                         .padding(.top, 16)
                 }
+                methodNote
+                    .padding(.top, 16)
             }
             .padding(.horizontal, 20)
             .padding(.top, 8)
-            .padding(.bottom, 32)
+            // The floating tab bar sits over the bottom of the screen: leave its height as scroll room so the last
+            // line of the explanation can be scrolled clear of it.
+            .padding(.bottom, 32 + Self.tabBarRoom)
             .frame(maxWidth: 560, alignment: .leading)
             .frame(maxWidth: .infinity)
         }
@@ -163,15 +195,115 @@ struct KeyMetricDetailView: View {
         .task(id: "\(metric.id)|\(repo.refreshSeq)|\(context.epoch)|\(Repository.localDayKey(Date()))") {
             await load()
         }
-        // The explanation is asked for on appear, for each side the switch shows, again when a newer night or day
+        // The explanation (of the first side) is asked for on appear, again when a newer night or day
         // lands, and again for the next account after one ends (`epoch`); leaving the screen cancels the request and
         // its polling.
-        .task(id: "\(side.rawValue)|\(insightRequest)|\(insights.epoch)") { await insights.refresh(side) }
-        // The usual band for the days the shown range needs.
-        .task(id: usualTaskKey(side, model: model)) { await loadUsual(side, model: model) }
-        // The 24-hour view's day documents (and heart rate's, while comparing).
-        .task(id: windowTaskKey(side, model: model)) { await loadWindows(side, model: model) }
-        .task(id: "\(side.rawValue)|\(comparing)|\(repo.refreshSeq)") { await loadComparison(side) }
+        .task(id: "\(primary.rawValue)|\(insightRequest)|\(insights.epoch)") { await insights.refresh(primary) }
+        // The usual band for the days the shown ranges need.
+        .task(id: usualTaskKey) { await loadUsual() }
+        // The 5-minute views' day documents (and heart rate's, while comparing).
+        .task(id: windowTaskKey) { await loadWindows() }
+        .task(id: bankedTaskKey) { await loadBanked() }
+        .task(id: "\(repo.refreshSeq)|\(Repository.localDayKey(Date()))") { await loadActivityLanes() }
+        // The documents that can say why a night has no value.
+        .task(id: nightlyTaskKey) { await loadNightly() }
+        .task(id: "\(comparing)|\(repo.refreshSeq)") { await loadComparison() }
+    }
+
+    // MARK: Sides
+
+    /// What one side shows. Today: the 30-period range behind the headline and comparisons (`main`) and the chart
+    /// of today's readings (`today`). History: the chosen period (`main`).
+    private struct SideModels {
+        let main: Shown
+        let today: Shown?
+    }
+
+    private func sideModels(_ side: MetricInsightMetric) -> SideModels {
+        let shown = readings[side] ?? []
+        switch mode {
+        case .today:
+            let month = rangeModel(side, shown: shown, period: KeyMetricPeriods.defaultPeriod)
+            let chart: Shown
+            if let source = side.todaySource {
+                chart = .windows(todayModel(side, source: source))
+            } else {
+                chart = .range(rangeModel(side, shown: shown, period: .range(.week), endingAt: latestExpectedDay(side)))
+            }
+            return SideModels(main: .range(month), today: chart)
+        case .history:
+            let effective = effectivePeriod(side)
+            let main: Shown = effective == .hours24
+                ? .windows(windowModel(side, shown: shown, filter: windowFilter(side)))
+                : .range(rangeModel(side, shown: shown, period: effective))
+            return SideModels(main: main, today: nil)
+        }
+    }
+
+    /// The latest night or day that could have a value: last night, or yesterday for a day metric (today is still
+    /// running).
+    private func latestExpectedDay(_ side: MetricInsightMetric) -> String {
+        let today = Repository.localDayKey(Date())
+        return side.period == .night ? today : (PhysiologyContextDates.key(today, minusDays: 1) ?? today)
+    }
+
+    @ViewBuilder
+    private func sideSection(_ side: MetricInsightMetric, models: SideModels) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            if entry.metrics.count > 1 {
+                Text(side.switchLabel)
+                    .font(KeyMetricStyle.headline)
+                    .foregroundStyle(KeyMetricStyle.text)
+                    .accessibilityAddTraits(.isHeader)
+                    .padding(.bottom, 12)
+            }
+            if mode == .today, case .range(let r) = models.main {
+                todayContent(side, shown: readings[side] ?? [], range: r, chart: models.today)
+            } else {
+                summary(side, model: models.main)
+                    .padding(.bottom, 20)
+                panel(side, model: models.main)
+                below(side, model: models.main)
+                    .padding(.top, 10)
+            }
+        }
+    }
+
+    /// "Data & method": two sentences at the foot of the page, the same for Today and History.
+    private var methodNote: some View {
+        KeyMetricDisclosure(title: KeyMetricScreenCopy.method) {
+            Text(KeyMetricScreenCopy.methodSummary(entry.metrics))
+                .font(KeyMetricStyle.label)
+                .foregroundStyle(KeyMetricStyle.secondary)
+                .lineSpacing(2)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        }
+    }
+
+    private var seeHistoryButton: some View {
+        Button { mode = .history; selections = [:] } label: {
+            HStack(spacing: 6) {
+                Text(KeyMetricTodayCopy.seeHistory)
+                Image(systemName: "chart.dots.scatter")
+                    .accessibilityHidden(true)
+            }
+            .font(KeyMetricStyle.control)
+            .foregroundStyle(KeyMetricStyle.accent)
+            .frame(maxWidth: .infinity, minHeight: 44)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("keyMetric.seeHistory")
+    }
+
+    /// The height of the floating tab bar that overlays this screen on iPhone; none on Mac.
+    private static var tabBarRoom: CGFloat {
+        #if os(iOS)
+        NoopMetrics.tabBarClearance
+        #else
+        0
+        #endif
     }
 
     // MARK: Models
@@ -188,6 +320,8 @@ struct KeyMetricDetailView: View {
         let window: [KeyMetricHistory.Reading]
         let band: KeyMetricBand?
         let verdicts: [String: LBVitalVerdict]
+        /// The nights or days in `domain` without a reading.
+        let gaps: [KeyMetricGap]
     }
 
     /// One day's 5-minute windows.
@@ -203,16 +337,30 @@ struct KeyMetricDetailView: View {
         let shown: [KeyMetricWindowReading]
         let lane: [KeyMetricContextSpan]
         let domain: ClosedRange<Date>
+        let filter: KeyMetricWindowFilter
+        /// Rejected windows (with the server's reasons) and stretches with no window, up to now.
+        let gaps: [KeyMetricGap]
         /// The stable awake median reference, only on the stable awake chip.
         let reference: PhysiologyContext.ReferenceComparison?
         /// Heart rate by window start, while comparing.
         let heartRate: [Int: Double]
+        /// The day documents the view reads.
+        var loads: [PhysiologyContextStore.Key] = []
+        /// Today's chart: every reading since midnight, from `source`; `sessions` when the only value today is
+        /// last night's.
+        var today: KeyMetricTodaySource? = nil
+        var sessions = false
     }
 
+    /// `endingAt` pins the range's last day (Today's chart ends at last night even when it has no reading);
+    /// otherwise the range ends at the latest reading.
     private func rangeModel(_ side: MetricInsightMetric, shown: [KeyMetricHistory.Reading],
-                            period: KeyMetricPeriod) -> RangeModel {
+                            period: KeyMetricPeriod, endingAt: String? = nil) -> RangeModel {
         let range = period.range ?? .month
-        let domain = KeyMetricHistory.domain(shown, range: range)
+        var domain = KeyMetricHistory.domain(shown, range: range)
+        if let endingAt, let end = PhysiologyContextDates.date(endingAt), let days = range.days {
+            domain = end.addingTimeInterval(-Double(days - 1) * 86_400)...end
+        }
         let window = KeyMetricHistory.window(shown, domain: domain)
         let verdicts = usual[side] ?? [:]
         let band: KeyMetricBand?
@@ -222,7 +370,8 @@ struct KeyMetricDetailView: View {
         } else {
             band = KeyMetricBands.recent(shown, window: window)
         }
-        return RangeModel(period: period, domain: domain, window: window, band: band, verdicts: verdicts)
+        return RangeModel(period: period, domain: domain, window: window, band: band, verdicts: verdicts,
+                          gaps: domain.map { KeyMetricHistory.missingDays(window, domain: $0) } ?? [])
     }
 
     /// The day the 24-hour view shows: the latest measured night or full day, else last night or yesterday.
@@ -232,14 +381,16 @@ struct KeyMetricDetailView: View {
         return side.period == .night ? today : (PhysiologyContextDates.key(today, minusDays: 1) ?? today)
     }
 
-    private func windowModel(_ side: MetricInsightMetric, shown: [KeyMetricHistory.Reading]) -> WindowModel {
-        let day = windowDay(side, shown: shown)
+    /// One night's or day's 5-minute windows: `day`, or else the latest measured one.
+    private func windowModel(_ side: MetricInsightMetric, shown: [KeyMetricHistory.Reading], day: String? = nil,
+                             filter: KeyMetricWindowFilter) -> WindowModel {
+        let day = day ?? windowDay(side, shown: shown)
         guard let kind = side.windowMetric else {
-            return emptyWindows(day: day, status: .ready)
+            return emptyWindows(day: day, status: .ready, filter: filter)
         }
         let probeZone = TimeZone.current
         guard let probe = KeyMetricWindows.span(day: day, period: side.period, timeZone: probeZone) else {
-            return emptyWindows(day: day, status: .ready)
+            return emptyWindows(day: day, status: .ready, filter: filter)
         }
         let states = probe.days.map { context.state(for: .init(day: $0, metric: kind)) }
         let documents = states.compactMap { $0?.shownDay?.document }
@@ -261,8 +412,10 @@ struct KeyMetricDetailView: View {
         }
         let envelopes = KeyMetricWindows.envelopes(documents, metric: kind, in: interval)
         let all = KeyMetricWindows.readings(envelopes)
-        let filter = windowFilter
-        let shownWindows = all.filter { filter.admits($0.context) }
+        let shownWindows = all.filter { filter.admits($0) }
+        var kinds = [kind]
+        if comparing, kind != .heartRate { kinds.append(.heartRate) }
+        let loads = probe.days.flatMap { day in kinds.map { PhysiologyContextStore.Key(day: day, metric: $0) } }
         var heartRate: [Int: Double] = [:]
         if comparing, side.windowMetric != .heartRate {
             let hrDocs = probe.days.compactMap { context.state(for: .init(day: $0, metric: .heartRate))?.shownDay?.document }
@@ -273,15 +426,64 @@ struct KeyMetricDetailView: View {
         return WindowModel(status: status, day: day, interval: interval, zone: zone, all: all, shown: shownWindows,
                            lane: KeyMetricWindows.lane(envelopes),
                            domain: KeyMetricWindows.domain(interval: interval, readings: all, filter: filter),
+                           filter: filter,
+                           gaps: KeyMetricWindows.gaps(envelopes, interval: interval, filter: filter),
                            reference: filter == .stableAwake
                                ? KeyMetricWindows.stableAwakeReference(documents, metric: kind) : nil,
-                           heartRate: heartRate)
+                           heartRate: heartRate, loads: loads)
     }
 
-    private func emptyWindows(day: String, status: WindowModel.Status) -> WindowModel {
+    /// Today's chart: every reading since local midnight, each in the context it was taken in. The server's
+    /// windows where it keeps them; the strap readings the phone banked for temperature and blood oxygen; last
+    /// night's value drawn across the sleep when that is all there is (SDNN). The lane comes from the metric's
+    /// own windows, else from heart rate's, which cover the whole worn day.
+    private func todayModel(_ side: MetricInsightMetric, source: KeyMetricTodaySource) -> WindowModel {
+        let day = Repository.localDayKey(Date())
+        let own: PhysiologyContext.MetricKind? = {
+            if case .windows(let kind) = source { return kind }
+            return side.nightlyContextMetric
+        }()
+        let kinds = [own, .heartRate].compactMap { $0 }.reduce(into: [PhysiologyContext.MetricKind]()) {
+            if !$0.contains($1) { $0.append($1) }
+        }
+        let loads = kinds.map { PhysiologyContextStore.Key(day: day, metric: $0) }
+        let states = loads.map { context.state(for: $0) }
+        func documents(_ kind: PhysiologyContext.MetricKind?) -> [PhysiologyContextDocument] {
+            guard let kind else { return [] }
+            return [context.state(for: .init(day: day, metric: kind))?.shownDay?.document].compactMap { $0 }
+        }
+        let zone = PhysiologyContextWording.zone(states.compactMap { $0?.shownDay?.document?.timezoneId }.first)
+        guard let interval = KeyMetricWindows.today(day, timeZone: zone) else {
+            return emptyWindows(day: day, status: .ready, filter: .all)
+        }
+        var status: WindowModel.Status = .ready
+        switch source {
+        case .windows(let kind):
+            if documents(kind).isEmpty {
+                if states.contains(where: { Self.needsCloud($0) }) {
+                    status = .needsCloud
+                } else if states.contains(where: { $0 == nil || $0 == .loading }) {
+                    status = .loading
+                } else if states.contains(where: { if case .pending = $0 { return true } else { return false } }) {
+                    status = .pending
+                }
+            }
+        case .banked:
+            if banked[side] == nil { status = .loading }
+        }
+        let shown = KeyMetricWindows.day(source, night: status == .ready ? side.nightlyContextMetric : nil,
+                                         interval: interval, documents: { documents($0) }, banked: banked[side])
+        let domain = Date(timeIntervalSince1970: TimeInterval(interval.start))...Date(timeIntervalSince1970: TimeInterval(interval.end))
+        return WindowModel(status: status, day: day, interval: interval, zone: zone, all: shown.readings,
+                           shown: shown.readings, lane: shown.lane, domain: domain, filter: .all, gaps: shown.gaps,
+                           reference: nil, heartRate: [:], loads: loads, today: source, sessions: shown.sessions)
+    }
+
+    private func emptyWindows(day: String, status: WindowModel.Status, filter: KeyMetricWindowFilter) -> WindowModel {
         let now = Date()
         return WindowModel(status: status, day: day, interval: nil, zone: .current, all: [], shown: [], lane: [],
-                           domain: now.addingTimeInterval(-86_400)...now, reference: nil, heartRate: [:])
+                           domain: now.addingTimeInterval(-86_400)...now, filter: filter, gaps: [],
+                           reference: nil, heartRate: [:])
     }
 
     private static func needsCloud(_ state: PhysiologyContextStore.State?) -> Bool {
@@ -292,9 +494,18 @@ struct KeyMetricDetailView: View {
 
     // MARK: Loading (usual, windows, comparison)
 
-    private func usualTaskKey(_ side: MetricInsightMetric, model: Shown) -> String {
-        guard case .range(let r) = model, side.usualSeries != nil else { return "none" }
-        return "\(side.rawValue)|\(r.window.first?.day ?? "")|\(r.window.last?.day ?? "")|\(r.window.count)|\(repo.refreshSeq)|\(repo.days.count)"
+    private var usualTaskKey: String {
+        entry.metrics.map { side -> String in
+            guard case .range(let r) = sideModels(side).main, side.usualSeries != nil else { return "none" }
+            return "\(side.rawValue)|\(r.window.first?.day ?? "")|\(r.window.last?.day ?? "")|\(r.window.count)"
+        }.joined(separator: ",") + "|\(repo.refreshSeq)|\(repo.days.count)"
+    }
+
+    private func loadUsual() async {
+        for side in entry.metrics {
+            await loadUsual(side, model: sideModels(side).main)
+            guard !Task.isCancelled else { return }
+        }
     }
 
     /// Each needed day's Layer 1 verdict, merged into what the side already has (a longer range reuses them).
@@ -310,30 +521,241 @@ struct KeyMetricDetailView: View {
         usualSource[side] = source
     }
 
-    private func windowTaskKey(_ side: MetricInsightMetric, model: Shown) -> String {
-        guard case .windows(let w) = model, let kind = side.windowMetric else { return "none" }
-        return "\(kind.rawValue)|\(w.day)|\(comparing)|\(context.epoch)"
-    }
-
-    private func loadWindows(_ side: MetricInsightMetric, model: Shown) async {
-        guard case .windows(let w) = model, let kind = side.windowMetric,
-              let span = KeyMetricWindows.span(day: w.day, period: side.period, timeZone: w.zone) else { return }
-        var kinds = [kind]
-        if comparing, kind != .heartRate { kinds.append(.heartRate) }
-        for k in kinds {
-            for day in span.days {
-                guard !Task.isCancelled else { return }
-                await context.load(.init(day: day, metric: k))
+    /// Every 5-minute view on screen, with its side.
+    private var shownWindows: [(side: MetricInsightMetric, model: WindowModel)] {
+        entry.metrics.flatMap { side -> [(side: MetricInsightMetric, model: WindowModel)] in
+            let models = sideModels(side)
+            return [models.main, models.today].compactMap {
+                if case .windows(let w)? = $0 { return (side, w) } else { return nil }
             }
         }
     }
 
+    private var windowTaskKey: String {
+        shownWindows.flatMap(\.model.loads).map { "\($0.day)|\($0.metric.rawValue)" }.joined(separator: ",")
+            + "|\(context.epoch)|\(repo.refreshSeq)"
+    }
+
+    private func loadWindows() async {
+        for key in shownWindows.flatMap(\.model.loads) {
+            guard !Task.isCancelled else { return }
+            await context.load(key)
+        }
+    }
+
+    /// Today's banked strap readings (temperature, blood oxygen), read again on new data and at a new day.
+    private var bankedTaskKey: String {
+        guard mode == .today else { return "none" }
+        let sides = entry.metrics.filter { if case .banked? = $0.todaySource { return true } else { return false } }
+        return sides.map(\.rawValue).joined(separator: ",") + "|\(repo.refreshSeq)|\(Repository.localDayKey(Date()))"
+    }
+
+    /// The last few days' activity classification, from the phone's cache, so every reading can take the label of
+    /// the stretch it falls in.
+    private func loadActivityLanes() async {
+        let start = Calendar.current.startOfDay(for: Date())
+        for back in 0...3 {
+            guard !Task.isCancelled,
+                  let day = Calendar.current.date(byAdding: .day, value: -back, to: start) else { return }
+            await lanes.load(dayStart: day, repo: repo)
+        }
+    }
+
+    private func loadBanked() async {
+        guard mode == .today,
+              let interval = KeyMetricWindows.today(Repository.localDayKey(Date()), timeZone: .current) else { return }
+        for side in entry.metrics {
+            guard case .banked(let signal)? = side.todaySource else { continue }
+            let series = await repo.bankedSeries(signal, from: interval.start, to: interval.end)
+            guard !Task.isCancelled else { return }
+            banked[side] = series
+        }
+    }
+
+    /// The day documents whose nightly envelopes can explain a missing night: Today's chart's missing nights, and
+    /// a missing night selected in History.
+    private var nightlyKeys: [PhysiologyContextStore.Key] {
+        entry.metrics.flatMap { side -> [PhysiologyContextStore.Key] in
+            guard let kind = side.nightlyContextMetric else { return [] }
+            let models = sideModels(side)
+            var days: [String] = []
+            if case .range(let r)? = models.today { days += r.gaps.compactMap(\.day) }
+            if mode == .history, case .range = models.main, case .gap(let x) = selection(side) {
+                days.append(PhysiologyContextDates.key(x))
+            }
+            return days.map { .init(day: $0, metric: kind) }
+        }
+    }
+
+    private var nightlyTaskKey: String {
+        nightlyKeys.map { "\($0.day)|\($0.metric.rawValue)" }.joined(separator: ",") + "|\(context.epoch)"
+    }
+
+    private func loadNightly() async {
+        for key in nightlyKeys {
+            guard !Task.isCancelled else { return }
+            await context.load(key)
+        }
+    }
+
+    /// The server's reason a night has no value, once its document is loaded; nil when it gave none.
+    private func nightlyReason(_ side: MetricInsightMetric, day: String) -> String? {
+        guard let kind = side.nightlyContextMetric,
+              let document = context.state(for: .init(day: day, metric: kind))?.shownDay?.document else { return nil }
+        return KeyMetricWindows.nightlyGapReason([document], metric: kind)
+    }
+
     /// HRV's comparison: resting heart rate per night, read once the reader opens it.
-    private func loadComparison(_ side: MetricInsightMetric) async {
-        guard comparing, side == .hrvRmssd || side == .hrvSdnn else { return }
+    private func loadComparison() async {
+        guard comparing, entry.metrics.contains(where: { $0 == .hrvRmssd || $0 == .hrvSdnn }) else { return }
         let series = await repo.exploreSeries(key: "rhr", source: metric.source)
         guard !Task.isCancelled else { return }
         restingHeartRate = KeyMetricHistory.measured(series)
+    }
+
+    // MARK: Today
+
+    /// The Today view: the value now, where it sits against the person's usual range, and the same value against
+    /// the median of the last 7, 30 and 90 nights or days.
+    /// Today's chart is the History chart scoped to today: the 5-minute windows of last night (or today) where the
+    /// metric has them, else the last 7 nights or days ending at the latest one that could have a value.
+    @ViewBuilder
+    private func todayContent(_ side: MetricInsightMetric, shown: [KeyMetricHistory.Reading], range r: RangeModel,
+                              chart: Shown?) -> some View {
+        let format = formatter(side)
+        let today = Repository.localDayKey(Date())
+        let model = KeyMetricToday.make(readings: shown, todayValue: todayValues[side], today: today)
+        VStack(alignment: .leading, spacing: 0) {
+            todayHeadline(side, model: model, range: r, format: format)
+                .padding(.bottom, 16)
+            if side == .steps || side == .calories {
+                // A day total's Today chart is the day itself: the running total through the hours.
+                StepsTodayChart(kind: side == .steps ? .steps : .calories, dayTotal: todayValues[side])
+                    .padding(.bottom, 16)
+            } else if let chart {
+                panel(side, model: chart)
+                    .padding(.bottom, 16)
+            }
+            todayComparison(side, model: model, range: r, format: format)
+        }
+    }
+
+    private func todayHeadline(_ side: MetricInsightMetric, model: KeyMetricToday, range r: RangeModel,
+                               format: KeyMetricFormatter) -> some View {
+        var earlier: String?
+        if case .earlier(let day) = model.freshness, let date = PhysiologyContextDates.date(day) {
+            earlier = KeyMetricDates.short(date, includeYear: false)
+        }
+        let placement = model.value.flatMap { value in
+            model.day.map { KeyMetricBands.placement(value, day: $0, band: r.band, verdicts: r.verdicts) }
+        }
+        return VStack(alignment: .leading, spacing: 4) {
+            if let value = model.value {
+                let parts = format.parts(value)
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text(parts.number)
+                        .font(KeyMetricStyle.value)
+                        .tracking(-1.5)
+                        .foregroundStyle(KeyMetricStyle.text)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.5)
+                    if let unit = parts.unit {
+                        Text(unit)
+                            .font(KeyMetricStyle.valueUnit)
+                            .foregroundStyle(KeyMetricStyle.secondary)
+                    }
+                }
+            }
+            Text(loaded ? KeyMetricTodayCopy.caption(model.freshness, period: side.period, earlier: earlier)
+                 : KeyMetricCopy.reading(side.period))
+                .font(KeyMetricStyle.label)
+                .foregroundStyle(KeyMetricStyle.secondary)
+            if let placement, let kind = r.band?.kind, let line = KeyMetricScreenCopy.placement(placement, kind: kind) {
+                Text(line)
+                    .font(KeyMetricStyle.range)
+                    .foregroundStyle(KeyMetricStyle.text)
+                    .padding(.top, 4)
+            }
+        }
+        .accessibilityElement(children: .combine)
+    }
+
+    private func todayComparison(_ side: MetricInsightMetric, model: KeyMetricToday, range r: RangeModel,
+                                 format: KeyMetricFormatter) -> some View {
+        let rangeValue: String? = r.band?.latest.map { rangeText($0.low, $0.high, format: format) }
+        return KeyMetricPanel(padding: EdgeInsets(top: 14, leading: 16, bottom: 6, trailing: 16)) {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(KeyMetricTodayCopy.compareTitle)
+                    .font(KeyMetricStyle.label)
+                    .foregroundStyle(KeyMetricStyle.secondary)
+                    .padding(.bottom, 4)
+                if let rangeValue, let band = r.band {
+                    comparisonRow(title: band.kind == .usual ? KeyMetricTodayCopy.usualRange : KeyMetricTodayCopy.recentRange,
+                                  detail: nil, trailing: rangeValue, divider: !model.baselines.isEmpty)
+                }
+                ForEach(Array(model.baselines.enumerated()), id: \.element.id) { index, baseline in
+                    let median = format.text(baseline.median)
+                    comparisonRow(title: KeyMetricTodayCopy.baselineTitle(days: baseline.days, period: side.period),
+                                  detail: KeyMetricTodayCopy.baselineDetail(median: median, count: baseline.count,
+                                                                            period: side.period),
+                                  trailing: deltaText(baseline, side: side, format: format),
+                                  divider: index < model.baselines.count - 1)
+                }
+                if model.baselines.isEmpty {
+                    Text(loaded ? KeyMetricTodayCopy.noBaselines : " ")
+                        .font(KeyMetricStyle.small)
+                        .foregroundStyle(KeyMetricStyle.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.vertical, 10)
+                }
+            }
+        }
+        .accessibilityElement(children: .contain)
+    }
+
+    private func comparisonRow(title: String, detail: String?, trailing: String, divider: Bool) -> some View {
+        VStack(spacing: 0) {
+            HStack(alignment: .firstTextBaseline, spacing: 12) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(title)
+                        .font(KeyMetricStyle.control)
+                        .foregroundStyle(KeyMetricStyle.text)
+                    if let detail {
+                        Text(detail)
+                            .font(KeyMetricStyle.small)
+                            .foregroundStyle(KeyMetricStyle.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                Spacer(minLength: 8)
+                Text(trailing)
+                    .font(KeyMetricStyle.selectedValue)
+                    .foregroundStyle(KeyMetricStyle.text)
+                    .multilineTextAlignment(.trailing)
+            }
+            .padding(.vertical, 12)
+            .accessibilityElement(children: .combine)
+            if divider { Rectangle().fill(KeyMetricStyle.border).frame(height: 1) }
+        }
+    }
+
+    /// "+3 bpm" or "-2 ms": the value minus the baseline, in the reader's units. A difference in temperature
+    /// scales between units but does not shift, so it is converted as a difference, not as a reading.
+    private func deltaText(_ baseline: KeyMetricToday.Baseline, side: MetricInsightMetric,
+                           format: KeyMetricFormatter) -> String {
+        var delta = baseline.delta
+        if side == .skinTemp, temperatureUnit == .fahrenheit { delta *= 9.0 / 5.0 }
+        let reference = format.parts(baseline.median)
+        let places: Int = {
+            switch side {
+            case .steps, .calories: return 0
+            default: return reference.number.contains(where: { $0 == "." || $0 == "," }) ? 1 : 0
+            }
+        }()
+        let magnitude = String(format: "%.\(places)f", abs(delta))
+        if Double(magnitude) == 0 { return KeyMetricTodayCopy.sameAsBaseline }
+        let number = reference.unit == "%" ? "\(magnitude)%" : magnitude + (reference.unit.map { " \($0)" } ?? "")
+        return KeyMetricTodayCopy.delta(number, positive: delta > 0)
     }
 
     // MARK: 2. Summary
@@ -354,9 +776,9 @@ struct KeyMetricDetailView: View {
         case .windows(let w):
             let value = KeyMetricSummary.median(w.shown.map(\.value))
             let meaning = w.shown.isEmpty ? nil : KeyMetricScreenCopy.windowMedian(count: w.shown.count,
-                                                                                 filter: windowFilter)
+                                                                                 filter: w.filter)
             let line: String?
-            switch windowFilter {
+            switch w.filter {
             case .all: line = KeyMetricScreenCopy.windowsAllNoRange
             case .sleep: line = KeyMetricScreenCopy.windowsComparisonOther
             case .stableAwake:
@@ -428,17 +850,19 @@ struct KeyMetricDetailView: View {
         case .windows(let w):
             // The panel says why; the summary only says there is nothing to summarise.
             return w.status == .loading ? KeyMetricScreenCopy.windowsLoading
-                : KeyMetricScreenCopy.windowsSummaryEmpty(windowFilter)
+                : KeyMetricScreenCopy.windowsSummaryEmpty(w.filter)
         }
     }
 
-    /// Why the 24-hour panel has no readings.
-    private func windowsEmptyText(_ w: WindowModel) -> String? {
+    /// Why the 24-hour or Today panel has no readings.
+    private func windowsEmptyText(_ w: WindowModel, side: MetricInsightMetric) -> String? {
         switch w.status {
         case .needsCloud: return KeyMetricScreenCopy.windowsNeedCloud
         case .loading: return nil
         case .pending: return KeyMetricScreenCopy.windowsPending
-        case .ready: return KeyMetricScreenCopy.noWindows(windowFilter)
+        case .ready:
+            guard let today = w.today else { return KeyMetricScreenCopy.noWindows(w.filter) }
+            return today == .banked(.spo2) ? KeyMetricScreenCopy.spo2SleepOnly : KeyMetricScreenCopy.noReadingsToday
         }
     }
 
@@ -455,6 +879,9 @@ struct KeyMetricDetailView: View {
             return "\(KeyMetricDates.format(d.lowerBound, template: template)) – \(KeyMetricDates.format(d.upperBound, template: template))"
         case .windows(let w):
             guard let date = PhysiologyContextDates.date(w.day) else { return w.day }
+            if w.today != nil {
+                return "\(KeyMetricScreenCopy.today), \(KeyMetricDates.format(date, template: "MMMd"))"
+            }
             if side.period == .night, let previous = PhysiologyContextDates.key(w.day, minusDays: 1),
                let start = PhysiologyContextDates.date(previous) {
                 return "\(KeyMetricDates.format(start, template: "MMMd")) – \(KeyMetricDates.format(date, template: "MMMd"))"
@@ -470,7 +897,14 @@ struct KeyMetricDetailView: View {
         if let label = side.measurement.label { parts.append(label) }
         switch model {
         case .range: parts.append(KeyMetricScreenCopy.grain(side.period))
-        case .windows: parts.append(KeyMetricScreenCopy.fiveMinute)
+        case .windows(let w):
+            if let today = w.today {
+                parts.append(KeyMetricScreenCopy.todayGrain(today, sessions: w.sessions))
+            } else if let kind = side.windowMetric {
+                parts.append(KeyMetricScreenCopy.todayGrain(.windows(kind), sessions: false))
+            } else {
+                parts.append(KeyMetricScreenCopy.fiveMinute)
+            }
         }
         return parts.joined(separator: " · ")
     }
@@ -502,6 +936,16 @@ struct KeyMetricDetailView: View {
                 }
                 if hasReadings(model) {
                     legend(model: model)
+                }
+                if let note = gapNote(side, model: model) {
+                    Text(note)
+                        .font(KeyMetricStyle.small)
+                        .foregroundStyle(KeyMetricStyle.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(.horizontal, 2)
+                }
+                if hasReadings(model) {
                     selectionRow(side, model: model)
                 }
             }
@@ -529,18 +973,18 @@ struct KeyMetricDetailView: View {
         let band = (r.band?.spans ?? []).map {
             KeyMetricBandPoint(x: $0.date, low: format.plotted($0.low), high: format.plotted($0.high))
         }
-        let guide = rangeGuide(r)
+        let guide = rangeGuide(side, r)
         return Group {
             if r.window.isEmpty {
                 emptyPlot(loaded ? KeyMetricCopy.nothingToChart(side.period) : nil)
             } else {
-                KeyMetricDotChart(dots: dots, domain: plotDomain, band: band, yTitle: yTitle(side),
+                KeyMetricDotChart(dots: dots, domain: plotDomain, band: band, gaps: r.gaps, yTitle: yTitle(side),
                                   xTitle: KeyMetricCopy.axis(side.period), xTicks: ticks,
                                   xLabel: { KeyMetricDates.format($0, template: needsYear ? "MMMdyy" : "MMMd") },
                                   dotSize: r.window.count > 120 ? 14 : r.window.count > 45 ? 22 : 40,
                                   minimumPad: side.minimumPad, floorsAtZero: true, height: 210,
                                   guideX: guide.x, selectedID: guide.id,
-                                  onSelect: { selectReading(at: $0, in: r.window) })
+                                  onSelect: { selectReading(side, at: $0, in: r.window) })
             }
         }
     }
@@ -551,30 +995,30 @@ struct KeyMetricDetailView: View {
         return domain.lowerBound.addingTimeInterval(-43_200)...domain.upperBound.addingTimeInterval(43_200)
     }
 
-    private func selectedReading(_ r: RangeModel) -> KeyMetricHistory.Reading? {
-        switch selection {
+    private func selectedReading(_ side: MetricInsightMetric, _ r: RangeModel) -> KeyMetricHistory.Reading? {
+        switch selection(side) {
         case .latest: return r.window.last
         case .reading(let day): return r.window.first { $0.day == day } ?? r.window.last
         case .gap: return nil
         }
     }
 
-    private func rangeGuide(_ r: RangeModel) -> (x: Date?, id: String?) {
-        if case .gap(let x) = selection { return (x, nil) }
-        let reading = selectedReading(r)
+    private func rangeGuide(_ side: MetricInsightMetric, _ r: RangeModel) -> (x: Date?, id: String?) {
+        if case .gap(let x) = selection(side) { return (x, nil) }
+        let reading = selectedReading(side, r)
         return (reading?.date, reading?.day)
     }
 
     /// The nearest reading within half a day of the touch; otherwise the touched day, as a gap.
-    private func selectReading(at date: Date, in window: [KeyMetricHistory.Reading]) {
+    private func selectReading(_ side: MetricInsightMetric, at date: Date, in window: [KeyMetricHistory.Reading]) {
         guard let nearest = window.min(by: { abs($0.date.timeIntervalSince(date)) < abs($1.date.timeIntervalSince(date)) })
         else { return }
         if abs(nearest.date.timeIntervalSince(date)) <= 43_200 {
-            if selection != .reading(nearest.day) { StrandHaptic.selection.play() }
-            selection = .reading(nearest.day)
+            if selection(side) != .reading(nearest.day) { StrandHaptic.selection.play() }
+            selections[side] = .reading(nearest.day)
         } else {
             let day = PhysiologyContextDates.calendar.startOfDay(for: date.addingTimeInterval(43_200))
-            selection = .gap(day)
+            selections[side] = .gap(day)
         }
     }
 
@@ -584,18 +1028,22 @@ struct KeyMetricDetailView: View {
     private func windowChart(_ side: MetricInsightMetric, _ w: WindowModel) -> some View {
         let format = formatter(side)
         let ticks = Self.hourTicks(w.domain, zone: w.zone)
-        let dots = w.shown.map { KeyMetricDot(id: $0.id, x: $0.mid, y: format.plotted($0.value)) }
-        let guide = windowGuide(w)
+        let dots = w.shown.map { r in
+            KeyMetricDot(id: r.id, x: r.mid, y: format.plotted(r.value), color: KeyMetricActivityLane.dotColor(r.context),
+                         span: r.isSpan ? Date(timeIntervalSince1970: TimeInterval(r.start))...Date(timeIntervalSince1970: TimeInterval(r.end)) : nil)
+        }
+        let guide = windowGuide(side, w)
         if w.shown.isEmpty {
-            emptyPlot(windowsEmptyText(w))
+            emptyPlot(windowsEmptyText(w, side: side))
         } else {
-            KeyMetricDotChart(dots: dots, domain: w.domain,
+            KeyMetricDotChart(dots: dots, domain: w.domain, gaps: w.gaps,
                               referenceLine: w.reference?.center.map(format.plotted),
                               yTitle: yTitle(side), xTitle: KeyMetricScreenCopy.localTime, xTicks: ticks,
                               xLabel: { Self.hourLabel($0, zone: w.zone) },
-                              dotSize: 16, minimumPad: side.minimumPad, height: 210,
+                              dotSize: w.shown.count > 400 ? 6 : w.shown.count > 160 ? 10 : 16,
+                              minimumPad: side.minimumPad, height: 210,
                               guideX: guide.x, selectedID: guide.id,
-                              onSelect: { selectWindow(at: $0, in: w.shown) })
+                              onSelect: { selectWindow(side, at: $0, in: w.shown) })
         }
         if !w.lane.isEmpty {
             KeyMetricActivityLane(spans: w.lane, domain: w.domain, inset: plotInset, guideX: guide.x)
@@ -603,28 +1051,29 @@ struct KeyMetricDetailView: View {
         }
     }
 
-    private func selectedWindow(_ w: WindowModel) -> KeyMetricWindowReading? {
-        switch selection {
+    private func selectedWindow(_ side: MetricInsightMetric, _ w: WindowModel) -> KeyMetricWindowReading? {
+        switch selection(side) {
         case .latest: return w.shown.last
         case .reading(let id): return w.shown.first { $0.id == id } ?? w.shown.last
         case .gap: return nil
         }
     }
 
-    private func windowGuide(_ w: WindowModel) -> (x: Date?, id: String?) {
-        if case .gap(let x) = selection { return (x, nil) }
-        let reading = selectedWindow(w)
+    private func windowGuide(_ side: MetricInsightMetric, _ w: WindowModel) -> (x: Date?, id: String?) {
+        if case .gap(let x) = selection(side) { return (x, nil) }
+        let reading = selectedWindow(side, w)
         return (reading?.mid, reading?.id)
     }
 
-    /// The window under the touch (within 7½ minutes of its middle); otherwise that moment, as a gap.
-    private func selectWindow(at date: Date, in windows: [KeyMetricWindowReading]) {
+    /// The window under the touch (within 7½ minutes of its middle, or anywhere on a night's span); otherwise
+    /// that moment, as a gap.
+    private func selectWindow(_ side: MetricInsightMetric, at date: Date, in windows: [KeyMetricWindowReading]) {
         let nearest = windows.min { abs($0.mid.timeIntervalSince(date)) < abs($1.mid.timeIntervalSince(date)) }
-        if let nearest, abs(nearest.mid.timeIntervalSince(date)) <= 450 {
-            if selection != .reading(nearest.id) { StrandHaptic.selection.play() }
-            selection = .reading(nearest.id)
+        if let nearest, abs(nearest.mid.timeIntervalSince(date)) <= max(450, Double(nearest.end - nearest.start) / 2) {
+            if selection(side) != .reading(nearest.id) { StrandHaptic.selection.play() }
+            selections[side] = .reading(nearest.id)
         } else {
-            selection = .gap(date)
+            selections[side] = .gap(date)
         }
     }
 
@@ -674,14 +1123,25 @@ struct KeyMetricDetailView: View {
     private func legend(model: Shown) -> some View {
         let band: KeyMetricBand.Kind?
         var reference = false
+        let gaps: Bool
         switch model {
-        case .range(let r): band = r.band?.kind
-        case .windows(let w): band = nil; reference = w.reference != nil && !w.shown.isEmpty
+        case .range(let r): band = r.band?.kind; gaps = !r.gaps.isEmpty
+        case .windows(let w):
+            band = nil; reference = w.reference != nil && !w.shown.isEmpty
+            gaps = w.gaps.contains { $0.end > w.domain.lowerBound && $0.start < w.domain.upperBound }
         }
         return FlowLayout(spacing: 14) {
             HStack(spacing: 6) {
                 Circle().fill(KeyMetricStyle.accent).frame(width: 7, height: 7)
                 Text(KeyMetricScreenCopy.reading)
+            }
+            if gaps {
+                HStack(spacing: 6) {
+                    RoundedRectangle(cornerRadius: 2)
+                        .fill(KeyMetricStyle.gapFill)
+                        .frame(width: 15, height: 9)
+                    Text(KeyMetricScreenCopy.noReading)
+                }
             }
             if let band {
                 HStack(spacing: 6) {
@@ -713,21 +1173,23 @@ struct KeyMetricDetailView: View {
         let format = formatter(side)
         switch model {
         case .range(let r):
-            if case .gap(let x) = selection {
+            if case .gap(let x) = selection(side) {
+                let reason = nightlyReason(side, day: PhysiologyContextDates.key(x))
                 return ("\(KeyMetricScreenCopy.noReading) · \(KeyMetricDates.short(x, includeYear: false))",
-                        KeyMetricScreenCopy.gapNote)
+                        reason.map(PhysiologyContextWording.capitalizedFirst) ?? KeyMetricScreenCopy.gapNote)
             }
-            guard let reading = selectedReading(r) else { return nil }
+            guard let reading = selectedReading(side, r) else { return nil }
             let placement = KeyMetricBands.placement(reading.value, day: reading.day, band: r.band, verdicts: r.verdicts)
             let meta = r.band.flatMap { KeyMetricScreenCopy.placement(placement, kind: $0.kind) }
                 ?? KeyMetricCopy.latest(side.period)
             return ("\(format.text(reading.value)) · \(KeyMetricDates.short(reading.date, includeYear: false))", meta)
         case .windows(let w):
-            if case .gap(let x) = selection {
+            if case .gap(let x) = selection(side) {
+                let reason = w.gaps.first { $0.contains(x) }?.words
                 return ("\(KeyMetricScreenCopy.noReading) · \(Self.timeText(x, zone: w.zone))",
-                        KeyMetricScreenCopy.gapNote)
+                        reason.map(PhysiologyContextWording.capitalizedFirst) ?? KeyMetricScreenCopy.gapNote)
             }
-            guard let reading = selectedWindow(w) else { return nil }
+            guard let reading = selectedWindow(side, w) else { return nil }
             let time = PhysiologyContextWording.timeRange(.init(reading.start, reading.end), zone: w.zone,
                                                           locale: AppLanguage.activeLocale)
             var meta = [reading.context.name]
@@ -745,28 +1207,31 @@ struct KeyMetricDetailView: View {
         return VStack(spacing: 0) {
             Rectangle().fill(KeyMetricStyle.border).frame(height: 1)
             HStack(spacing: 3) {
-                stepButton(-1, model: model)
+                stepButton(-1, side: side, model: model)
                 VStack(spacing: 3) {
                     Text(text?.value ?? " ")
                         .font(KeyMetricStyle.selectedValue)
                         .foregroundStyle(KeyMetricStyle.text)
+                        .lineLimit(1)
+                    // A gap's reason can need a second line.
                     Text(text?.meta ?? " ")
                         .font(KeyMetricStyle.small)
                         .foregroundStyle(KeyMetricStyle.secondary)
+                        .lineLimit(2)
+                        .multilineTextAlignment(.center)
                 }
-                .lineLimit(1)
                 .minimumScaleFactor(0.8)
                 .frame(maxWidth: .infinity)
                 .accessibilityElement(children: .combine)
-                stepButton(1, model: model)
+                stepButton(1, side: side, model: model)
             }
             .padding(.top, 8)
         }
         .padding(.top, 4)
     }
 
-    private func stepButton(_ step: Int, model: Shown) -> some View {
-        Button { move(step, model: model) } label: {
+    private func stepButton(_ step: Int, side: MetricInsightMetric, model: Shown) -> some View {
+        Button { move(step, side: side, model: model) } label: {
             Image(systemName: step < 0 ? "chevron.left" : "chevron.right")
                 .font(.system(size: 17, weight: .regular))
                 .foregroundStyle(KeyMetricStyle.secondary)
@@ -778,26 +1243,26 @@ struct KeyMetricDetailView: View {
     }
 
     /// Steps through the readings shown, from the selected one (or from where a gap was touched).
-    private func move(_ step: Int, model: Shown) {
+    private func move(_ step: Int, side: MetricInsightMetric, model: Shown) {
         let ids: [String]
         let xs: [Date]
         let current: String?
         switch model {
         case .range(let r):
-            ids = r.window.map(\.day); xs = r.window.map(\.date); current = selectedReading(r)?.day
+            ids = r.window.map(\.day); xs = r.window.map(\.date); current = selectedReading(side, r)?.day
         case .windows(let w):
-            ids = w.shown.map(\.id); xs = w.shown.map(\.mid); current = selectedWindow(w)?.id
+            ids = w.shown.map(\.id); xs = w.shown.map(\.mid); current = selectedWindow(side, w)?.id
         }
         guard !ids.isEmpty else { return }
         let index: Int
-        if case .gap(let x) = selection {
+        if case .gap(let x) = selection(side) {
             let after = xs.firstIndex { $0 > x } ?? xs.count
             index = step > 0 ? min(after, ids.count - 1) : max(after - 1, 0)
         } else {
             let at = current.flatMap { ids.firstIndex(of: $0) } ?? ids.count - 1
             index = min(max(at + step, 0), ids.count - 1)
         }
-        selection = .reading(ids[index])
+        selections[side] = .reading(ids[index])
     }
 
     // MARK: 4. Below the panel
@@ -811,10 +1276,8 @@ struct KeyMetricDetailView: View {
                     .foregroundStyle(KeyMetricStyle.secondary)
                     .padding(.bottom, 4)
             }
-            if side == .hrvRmssd || side == .hrvSdnn { comparison(side, model: model) }
-            KeyMetricDisclosure(title: KeyMetricScreenCopy.method) {
-                KeyMetricFacts(rows: methodRows(side, model: model))
-            }
+            // Once, under the first of HRV's two charts: it follows that chart's guide.
+            if side == primary, side == .hrvRmssd || side == .hrvSdnn { comparison(side, model: model) }
             KeyMetricDisclosure(title: KeyMetricScreenCopy.readings) {
                 readingsTable(side, model: model)
             }
@@ -828,6 +1291,27 @@ struct KeyMetricDetailView: View {
             return KeyMetricScreenCopy.measuredCount(r.window.count, of: KeyMetricHistory.dayCount(d), side.period)
         case .windows(let w):
             return w.shown.isEmpty ? nil : KeyMetricScreenCopy.windowCount(w.shown.count)
+        }
+    }
+
+    /// The small line under a chart saying why readings are missing, only from what the server reported: the
+    /// rejected windows' reasons and unrecorded time, or a missing night's own rejected envelope.
+    private func gapNote(_ side: MetricInsightMetric, model: Shown) -> String? {
+        switch model {
+        case .windows(let w):
+            guard w.status == .ready else { return nil }
+            let note = KeyMetricGap.note(w.gaps, in: w.domain)
+            guard w.today != nil, !w.shown.isEmpty, !w.sessions else { return note }
+            return ["\(KeyMetricScreenCopy.todayCount(w.shown.count)).", note].compactMap { $0 }.joined(separator: " ")
+        case .range(let r):
+            // History names a selected missing night's reason in the row under the chart instead.
+            guard mode == .today else { return nil }
+            let explained = r.gaps.compactMap { gap -> String? in
+                guard let day = gap.day, let reason = nightlyReason(side, day: day),
+                      let date = PhysiologyContextDates.date(day) else { return nil }
+                return "\(KeyMetricDates.short(date, includeYear: false)), \(reason)"
+            }
+            return explained.isEmpty ? nil : KeyMetricScreenCopy.gapsBecause(explained.suffix(2).joined(separator: "; "))
         }
     }
 
@@ -853,18 +1337,18 @@ struct KeyMetricDetailView: View {
         .buttonStyle(.plain)
         .accessibilityValue(Text(comparing ? "Expanded" : "Collapsed"))
         Rectangle().fill(KeyMetricStyle.border).frame(height: 1)
-        if comparing { comparisonChart(model: model).padding(.top, 12).padding(.bottom, 4) }
+        if comparing { comparisonChart(side, model: model).padding(.top, 12).padding(.bottom, 4) }
     }
 
     @ViewBuilder
-    private func comparisonChart(model: Shown) -> some View {
+    private func comparisonChart(_ side: MetricInsightMetric, model: Shown) -> some View {
         let hr = MetricCatalog.metric(key: "rhr", source: metric.source)
         let bpm: (Double) -> String = { v in hr?.format(v, system: unitSystem, temperature: temperatureUnit) ?? "\(Int(v.rounded())) bpm" }
         switch model {
         case .range(let r):
             let lo = r.domain?.lowerBound ?? .distantPast, hi = r.domain?.upperBound ?? .distantFuture
             let nights = restingHeartRate.filter { $0.date >= lo && $0.date <= hi }
-            let guide = rangeGuide(r)
+            let guide = rangeGuide(side, r)
             let at = guide.id.flatMap { day in nights.first { $0.day == day } }
             comparisonHeader(KeyMetricScreenCopy.restingHeartRateNights, value: at.map { bpm($0.value) })
             KeyMetricDotChart(dots: nights.map { KeyMetricDot(id: $0.day, x: $0.date, y: $0.value) },
@@ -875,9 +1359,9 @@ struct KeyMetricDetailView: View {
                               xLabel: { KeyMetricDates.format($0, template: "MMMd") }, color: KeyMetricStyle.teal,
                               dotSize: 26, minimumPad: 3, height: 130, guideX: guide.x)
         case .windows(let w):
-            let guide = windowGuide(w)
+            let guide = windowGuide(side, w)
             let dots = w.shown.compactMap { r in w.heartRate[r.start].map { KeyMetricDot(id: r.id, x: r.mid, y: $0) } }
-            let at = selectedWindow(w).flatMap { w.heartRate[$0.start] }
+            let at = selectedWindow(side, w).flatMap { w.heartRate[$0.start] }
             comparisonHeader(KeyMetricScreenCopy.heartRateMatching, value: at.map(bpm))
             KeyMetricDotChart(dots: dots, domain: w.domain, yTitle: KeyMetricScreenCopy.heartRateAxis,
                               xTitle: KeyMetricScreenCopy.localTime, xTicks: Self.hourTicks(w.domain, zone: w.zone),
@@ -897,37 +1381,6 @@ struct KeyMetricDetailView: View {
         .padding(.bottom, 6)
     }
 
-    private func methodRows(_ side: MetricInsightMetric, model: Shown) -> [(label: String, value: String)] {
-        switch model {
-        case .range(let r):
-            var rows: [(label: String, value: String)] = [
-                (KeyMetricScreenCopy.rowMetric, KeyMetricScreenCopy.metricDescription(side, windows: false)),
-                (KeyMetricScreenCopy.rowSource, side.series.isServerOnly ? KeyMetricScreenCopy.sourceServer
-                    : KeyMetricScreenCopy.sourceStrap),
-            ]
-            if let label = side.measurement.label { rows.append((KeyMetricScreenCopy.rowMeasurement, label)) }
-            switch r.band?.kind ?? (side.usualSeries != nil ? .usual : .recent) {
-            case .usual:
-                rows.append((KeyMetricScreenCopy.rowShaded, KeyMetricScreenCopy.shadedUsual))
-                rows.append((KeyMetricScreenCopy.rowComparison, KeyMetricScreenCopy.comparisonUsual))
-            case .recent:
-                rows.append((KeyMetricScreenCopy.rowShaded, KeyMetricScreenCopy.shadedRecent(side.period)))
-                rows.append((KeyMetricScreenCopy.rowComparison, KeyMetricScreenCopy.comparisonRecent))
-            }
-            rows.append((KeyMetricScreenCopy.rowMissing, KeyMetricScreenCopy.missing(side.period)))
-            return rows
-        case .windows:
-            return [
-                (KeyMetricScreenCopy.rowMetric, KeyMetricScreenCopy.metricDescription(side, windows: true)),
-                (KeyMetricScreenCopy.rowSource, KeyMetricScreenCopy.sourceServer),
-                (KeyMetricScreenCopy.rowContext, KeyMetricScreenCopy.windowsContext),
-                (KeyMetricScreenCopy.rowComparison, windowFilter == .stableAwake
-                    ? KeyMetricScreenCopy.windowsComparisonStableAwake : KeyMetricScreenCopy.windowsComparisonOther),
-                (KeyMetricScreenCopy.rowMissing, KeyMetricScreenCopy.windowsMissing),
-            ]
-        }
-    }
-
     /// Five rows around the selected reading.
     @ViewBuilder
     private func readingsTable(_ side: MetricInsightMetric, model: Shown) -> some View {
@@ -935,7 +1388,7 @@ struct KeyMetricDetailView: View {
         let rows: [(String, String, String)] = {
             switch model {
             case .range(let r):
-                let at = selectedReading(r).flatMap { s in r.window.firstIndex { $0.day == s.day } } ?? r.window.count - 1
+                let at = selectedReading(side, r).flatMap { s in r.window.firstIndex { $0.day == s.day } } ?? r.window.count - 1
                 let lo = max(0, min(at - 2, r.window.count - 5))
                 return r.window.dropFirst(lo).prefix(5).map { reading in
                     let p = KeyMetricBands.placement(reading.value, day: reading.day, band: r.band, verdicts: r.verdicts)
@@ -943,7 +1396,7 @@ struct KeyMetricDetailView: View {
                             r.band.flatMap { KeyMetricScreenCopy.placement(p, kind: $0.kind) } ?? "")
                 }
             case .windows(let w):
-                let at = selectedWindow(w).flatMap { s in w.shown.firstIndex { $0.id == s.id } } ?? w.shown.count - 1
+                let at = selectedWindow(side, w).flatMap { s in w.shown.firstIndex { $0.id == s.id } } ?? w.shown.count - 1
                 let lo = max(0, min(at - 2, w.shown.count - 5))
                 return w.shown.dropFirst(lo).prefix(5).map { reading in
                     (Self.timeText(Date(timeIntervalSince1970: TimeInterval(reading.start)), zone: w.zone),
@@ -997,7 +1450,7 @@ struct KeyMetricDetailView: View {
         var screen = KeyMetricHandoff.Screen(
             metricName: entry.metrics.count > 1 ? "\(entry.title) (\(side.switchLabel))" : entry.title,
             periodLabel: KeyMetricPeriods.label(periodOf(model), side.period),
-            contextFilter: { if case .windows = model { return windowFilter.name } else { return nil } }(),
+            contextFilter: { if case .windows(let w) = model { return w.filter.name } else { return nil } }(),
             headline: text.value.map(format.text), headlineMeaning: text.meaning, rangeLine: text.rangeLine,
             selection: selected?.value, selectionMeaning: selected?.meta, measurement: side.measurement.label)
         switch model {
@@ -1031,11 +1484,18 @@ struct KeyMetricDetailView: View {
     private func load() async {
         let today = Repository.localDayKey(Date())
         var loadedReadings: [MetricInsightMetric: [KeyMetricHistory.Reading]] = [:]
+        var loadedToday: [MetricInsightMetric: Double] = [:]
         for side in entry.metrics {
             let series = await series(side, today: today)
             guard !Task.isCancelled else { return }
             loadedReadings[side] = KeyMetricHistory.measured(series, for: side, today: today)
+            // A day metric leaves today out of the charts; its value so far is the Today view's headline.
+            if side.period == .day,
+               let now = KeyMetricHistory.measured(series, keepsZero: side.keepsZero).first(where: { $0.day == today }) {
+                loadedToday[side] = now.value
+            }
         }
+        todayValues = loadedToday
         let latestDays = loadedReadings.compactMapValues { $0.last?.day }
         if loaded, latestDays != loadedLatestDays { insightRequest &+= 1 }
         loadedLatestDays = latestDays
@@ -1159,6 +1619,7 @@ struct WalkingDetailScreen: View {
         ScrollView {
             WalkingInsightsSection(day: day)
                 .padding(NoopMetrics.screenPadding)
+                .padding(.bottom, NoopMetrics.tabBarClearance)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }
         #if os(iOS)

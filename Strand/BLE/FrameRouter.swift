@@ -486,10 +486,11 @@ public final class FrameRouter {
                 if ev.hasPrefix("BLE_BONDED") {
                     state.bonded = true
                 }
-                // BATTERY_LEVEL events carry the only charging flag the strap reports (wire
-                // observation: u8 bit0, ~every 8 min on captured links). Flag only — battery %
-                // keeps its family-specific source (#77). No freshness gate needed here: this
-                // path never sees historical replay (backfill skips handle(frame:), see below).
+                // WHOOP 4.0: the BATTERY_LEVEL charge bit (u8 bit0, ~every 8 min) is the charging flag. 5.0/MG has
+                // no such bit in this decode (see `decodeWhoop5Event`), so its flag comes from the edges below and
+                // the gauge review after each battery reading. Flag only; battery % keeps its family-specific source
+                // (#77). No freshness gate needed here: this path never sees historical replay (backfill skips
+                // handle(frame:), see below).
                 if ev.hasPrefix("BATTERY_LEVEL"),
                    let ch = parsed.parsed["battery_charging"]?.intValue {
                     state.charging = (ch != 0)
@@ -506,15 +507,17 @@ public final class FrameRouter {
                 // guard is needed; the family-specific #77 concern was the 0x2A19 stub, a different source.
                 if ev.hasPrefix("BATTERY_LEVEL"), let pct = parsed.parsed["battery_pct"]?.doubleValue {
                     state.setBattery(pct)
+                    // 5.0/MG: an ON flag from an edge has to keep matching the gauge (`reviewChargingAgainstGauge`).
+                    if family == .whoop5 { state.reviewChargingAgainstGauge(pct: pct) }
                 }
                 // The strap raises CHARGING_ON(7)/CHARGING_OFF(8) the instant a pack goes on or comes off —
                 // flip the pill directly instead of waiting on the ~8-min BATTERY_LEVEL cadence above. Live-
                 // only like those blocks (backfill skips this router), so no replay guard is needed. Ported
                 // from tanarchytan/noop @72ac14d9. Twin of the Kotlin WhoopBleClient handler.
                 if ev.hasPrefix("CHARGING_ON") {
-                    state.charging = true
+                    state.noteChargingEdge(on: true)
                 } else if ev.hasPrefix("CHARGING_OFF") {
-                    state.charging = false
+                    state.noteChargingEdge(on: false)
                 }
                 // #1826: BATTERY_PACK_CONNECTED(21) / BATTERY_PACK_REMOVED(22), declared in the shared
                 // schema and handled on neither platform until @Zebsi235 measured them. On a 5/MG they
@@ -528,9 +531,9 @@ public final class FrameRouter {
                 // showed the strap re-sending these edges with byte-identical payloads, so the gate is
                 // load-bearing THERE. Copying it here would guard against something that cannot happen.
                 if ev.hasPrefix("BATTERY_PACK_CONNECTED") {
-                    state.charging = true
+                    state.noteChargingEdge(on: true)
                 } else if ev.hasPrefix("BATTERY_PACK_REMOVED") {
-                    state.charging = false
+                    state.noteChargingEdge(on: false)
                 }
                 // The other physical inputs the strap exposes — live only, as above. The double-tap
                 // was handled before the sync kick.

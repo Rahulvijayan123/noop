@@ -54,17 +54,19 @@ final class KitLayoutRulesTests: XCTestCase {
 
     // MARK: Surfaces
 
-    /// One shared soft lift on light, none on dark (where a shadow on the indigo canvas reads as a smudge).
-    func testCardShadowIsSoftOnLightAndAbsentOnDark() {
+    /// One shared two-layer lift (a wide ambient shadow and a tight contact shadow) in both schemes, so a card
+    /// hovers over the canvas on light and on dark.
+    func testCardShadowLiftsInBothSchemes() {
         let light = NoopSurfaceShadow.resolve(elevated: false, dark: false)
-        XCTAssertEqual(light.radius, 8)
-        XCTAssertEqual(light.y, 2)
+        XCTAssertEqual(light.radius, 20)
+        XCTAssertEqual(light.y, 9)
+        XCTAssertGreaterThan(light.contactRadius, 0)
         let dark = NoopSurfaceShadow.resolve(elevated: false, dark: true)
-        XCTAssertEqual(dark.radius, 0)
-        XCTAssertEqual(dark.color, .clear)
+        XCTAssertGreaterThan(dark.radius, 0)
+        XCTAssertNotEqual(dark.color, .clear)
         // Floating surfaces lift a little more than cards, in both schemes.
         XCTAssertGreaterThan(NoopSurfaceShadow.resolve(elevated: true, dark: false).radius, light.radius)
-        XCTAssertGreaterThan(NoopSurfaceShadow.resolve(elevated: true, dark: true).radius, 0)
+        XCTAssertGreaterThan(NoopSurfaceShadow.resolve(elevated: true, dark: true).radius, dark.radius)
     }
 
     /// The selected segment's corner is the track's minus the track padding, so the curves are concentric.

@@ -1,5 +1,6 @@
 import Foundation
 import WhoopProtocol
+import StrandAnalytics
 
 /// Measured readings the Skin Temp and Blood Oxygen Key Metrics tiles show between nightly scores.
 ///
@@ -135,6 +136,74 @@ enum KeyMetricReadings {
             BankedSeries.Point(ts: $0, value: sums[$0]!.sum / Double(sums[$0]!.n), n: sums[$0]!.n)
         }
         return out
+    }
+
+    /// One mark on a day's running step total.
+    struct CumulativePoint: Equatable {
+        /// The end of the slice, unix seconds.
+        let ts: Int
+        /// Steps counted from the start of the day up to `ts`.
+        let steps: Double
+    }
+
+    /// The day's energy through the hours, in the same running-total form (`steps` carries kilocalories here).
+    /// Each `sliceSeconds` slice of heart rate is run through the day-energy model on its own, the slices are summed
+    /// into a running total, and the total is scaled so the last mark equals `dayTotal` (the figure the Calories
+    /// headline shows). The hours therefore carry when the energy was spent; the total is the headline's. Without
+    /// a `dayTotal` the model's own sum stands. Empty when there is no heart rate.
+    static func cumulativeCalories(_ hr: [HRSample], from: Int, to: Int, sliceSeconds: Int, profile: UserProfile,
+                                   hrmax: Double?, restingHR: Double?, dayTotal: Double?) -> [CumulativePoint] {
+        guard to > from, sliceSeconds > 0, !hr.isEmpty else { return [] }
+        let sorted = hr.sorted { $0.ts < $1.ts }
+        var raw: [(ts: Int, kcal: Double)] = []
+        var running = 0.0
+        var index = 0
+        var start = from
+        while start < to {
+            let end = min(start + sliceSeconds, to)
+            var slice: [HRSample] = []
+            while index < sorted.count, sorted[index].ts < end {
+                if sorted[index].ts >= start { slice.append(sorted[index]) }
+                index += 1
+            }
+            if !slice.isEmpty {
+                running += Calories.estimateDayEnergy(slice, profile: profile, hrmax: hrmax, restingHR: restingHR).totalKcal
+            }
+            raw.append((end, running))
+            start = end
+        }
+        guard running > 0 else { return [] }
+        let scale = (dayTotal ?? 0) > 0 ? dayTotal! / running : 1
+        return raw.map { CumulativePoint(ts: $0.ts, steps: $0.kcal * scale) }
+    }
+
+    /// The running step total at the end of each `sliceSeconds` slice of `[from, to]`, from the strap's step
+    /// counter. Slice k holds the samples inside it plus the last sample before it, so no increment between two
+    /// adjacent samples is lost or counted twice and the slices add up to the whole window's count. Slices with
+    /// no counter movement repeat the total (a flat stretch). Empty when nothing was counted at all.
+    static func cumulativeSteps(_ samples: [StepSample], from: Int, to: Int, sliceSeconds: Int,
+                                ticksPerStep: Double) -> [CumulativePoint] {
+        let sorted = samples.sorted { $0.ts < $1.ts }
+        guard sorted.count >= 2, sliceSeconds > 0, to > from else { return [] }
+        let scale = max(0.5, ticksPerStep)
+        var points: [CumulativePoint] = []
+        var total = 0.0
+        var cursor = 0   // first sample at or after the current slice's start
+        var end = from + sliceSeconds
+        var slice = from
+        while slice < to {
+            end = min(slice + sliceSeconds, to)
+            while cursor < sorted.count, sorted[cursor].ts < slice { cursor += 1 }
+            var last = cursor
+            while last < sorted.count, sorted[last].ts < end { last += 1 }
+            let first = max(0, cursor - 1)
+            if last - first >= 2, let ticks = StepsCounter.stepsInWindow(Array(sorted[first..<last])) {
+                total += Double(ticks) / scale
+            }
+            points.append(CumulativePoint(ts: end, steps: total))
+            slice = end
+        }
+        return total > 0 ? points : []
     }
 
     /// Readings per clock hour, oldest first, from the points' own counts. Shows how densely the strap sampled:

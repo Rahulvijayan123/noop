@@ -5892,7 +5892,7 @@ private struct StrapBatteryRow: View {
 
     /// Level-banded battery glyph; the bolt variant when the strap reports charging.
     private func symbol(_ pct: Double) -> String {
-        if live.charging == true { return "battery.100.bolt" }
+        if live.isChargingNow { return "battery.100.bolt" }
         switch pct {
         case ..<13: return "battery.0"
         case ..<38: return "battery.25"
@@ -5906,7 +5906,7 @@ private struct StrapBatteryRow: View {
     /// strap reads honestly ("~6h left"); at two days or more we round to days ("~9 days left"). nil (no
     /// banked discharge yet, or charging) hides it, so the badge only ever shows an estimate we trust.
     private var estimateText: String? {
-        guard live.charging != true, let est = live.batteryEstimate else { return nil }
+        guard !live.isChargingNow, let est = live.batteryEstimate else { return nil }
         let hours = est.hoursRemaining
         guard hours.isFinite, hours > 0 else { return nil }
         if hours < 48 {
@@ -5943,7 +5943,7 @@ private struct StrapBatteryRow: View {
                     }
                 }
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Strap battery \(Int(pct.rounded())) percent\(live.charging == true ? ", charging" : "")\(estimateText.map { ", \($0)" } ?? "")")
+                .accessibilityLabel("Strap battery \(Int(pct.rounded())) percent\(live.isChargingNow ? ", charging" : "")\(estimateText.map { ", \($0)" } ?? "")")
             }
         }
     }

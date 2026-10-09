@@ -30,7 +30,8 @@ import WhoopStore
 //              refused delete leaves the chat usable),
 //              renameThread(id:title:) async, moveThread(id:folderId:) async, setPinned(id:_:) async,
 //              createFolder(name:) async, renameFolder(id:name:) async, deleteFolder(id:) async.
-//   Memory     refreshMemories() async (up to 200), forget(_:) async, forgetAllMemories() async.
+//   Memory     refreshMemories() async (up to 200), editMemory(_:content:) async -> CoachMemoryEditOutcome,
+//              forget(_:) async, forgetAllMemories() async.
 
 struct CoachChatMessage: Identifiable, Equatable {
     enum Role: String { case user, assistant }
@@ -160,6 +161,13 @@ enum CoachThreadPhase: Equatable {
     case loading, ready
 }
 
+/// How an edit of one memory ended: `changed` means the server had a newer or no version and the list was reloaded.
+enum CoachMemoryEditOutcome: Equatable, Sendable {
+    case saved
+    case changed(String)
+    case failed(String)
+}
+
 /// Drives the coach conversations: safety screens, the photo pipeline, the streaming tool loop, the open thread,
 /// memory, and persistence to the user's cloud project.
 @MainActor
@@ -260,6 +268,9 @@ final class CoachChatViewModel: ObservableObject {
     private var threadOnServer = false
     private var threadTitleSource: String?
     private var launchThread: CoachThread?
+    /// False (the app): Sana opens on its greeting and earlier chats are one tap away in the sidebar. True reopens
+    /// today's newest chat on launch, which is how the thread tests drive the launch path.
+    private let reopensLastChat: Bool
     private var deletedThreads = Set<String>()
     private var manifestCache: [String: CoachContextManifest] = [:]
     /// Outside questions waiting for the reply in progress. A plain prompt carries no screen context and no memory.
@@ -288,7 +299,9 @@ final class CoachChatViewModel: ObservableObject {
     /// keeps the workout and journal counts from opening the wearable database (tests).
     init(api: CoachAPI = .shared, baseDirectory: URL? = nil, now: @escaping () -> Date = Date.init,
          followUpFallbackDelay: TimeInterval = 4,
-         readsDeviceHistory: Bool = true) {
+         readsDeviceHistory: Bool = true,
+         reopensLastChat: Bool = false) {
+        self.reopensLastChat = reopensLastChat
         self.api = api
         self.baseDirectory = baseDirectory
         self.now = now
@@ -354,7 +367,7 @@ final class CoachChatViewModel: ObservableObject {
             adoptOpenConversation()
             return
         }
-        if features.threads, let pick = CoachThreadLaunch.pick(threads: threadStore.threads, now: now()) {
+        if reopensLastChat, features.threads, let pick = CoachThreadLaunch.pick(threads: threadStore.threads, now: now()) {
             show(pick)
             launchThread = pick
         } else {
@@ -546,6 +559,33 @@ final class CoachChatViewModel: ObservableObject {
             if messages.isEmpty { showStarters() }
         } catch {
             errorMessage = Self.userFacing(error)
+        }
+    }
+
+    /// The user's rewrite of one memory. On success the row is replaced in place; when the server says it changed
+    /// or is gone the list is reloaded, and any other failure leaves everything as it was for the editor to retry.
+    func editMemory(_ memory: CoachMemory, content: String) async -> CoachMemoryEditOutcome {
+        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
+        do {
+            let reply = try await api.updateMemory(id: memory.id, content: text)
+            // The reply has no `pinned`, and an older row may lack the optional fields: keep what the list knew.
+            let saved = CoachMemory(id: memory.id, content: reply.content, topic: reply.topic, importance: reply.importance,
+                                    createdAt: reply.createdAt ?? memory.createdAt, updatedAt: reply.updatedAt ?? memory.updatedAt,
+                                    source: reply.source ?? memory.source, confirmations: reply.confirmations ?? memory.confirmations,
+                                    pinned: reply.pinned ?? memory.pinned)
+            if let index = memories.firstIndex(where: { $0.id == memory.id }) { memories[index] = saved }
+            manifestCache = manifestCache.mapValues { $0.replacingMemory(saved) }
+            local?.updateManifests { $0.replacingMemory(saved) }
+            return .saved
+        } catch let error as CoachRouteError where error.status == 409 || error.status == 404 {
+            await refreshMemories()
+            return .changed(error.status == 409
+                ? String(localized: "Sana updated this memory while you were editing. The list now shows the latest version.")
+                : String(localized: "This memory is no longer saved. The list has been refreshed."))
+        } catch let error as CoachRouteError where error.status == 400 {
+            return .failed(String(localized: "Sana couldn't save that. Keep it under 500 characters and try again."))
+        } catch {
+            return .failed(Self.userFacing(error))
         }
     }
 

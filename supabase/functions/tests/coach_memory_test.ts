@@ -297,3 +297,36 @@ Deno.test('coach memories: a save that updates a row is version-guarded; when an
   const again = (await save(h, { content: 'User has a sore left knee and ices it after runs', topic: 'injury' })).body;
   assertEquals([again.kept, again.memory.content], [true, 'User has a sore left knee and ices it after runs']);
 });
+
+Deno.test("coach memories: PATCH edits the owner's memory, version-guarded and audited as the user's", async () => {
+  const h = await harness();
+  const run = (await save(h, { content: 'User runs on Tuesdays', topic: 'routine', importance: 2 })).body.memory;
+  const edit = (id: string, body: unknown, token = 'noop_personal') => h.json(`memories/${id}`, { method: 'PATCH', body, token });
+
+  const res = await edit(run.id, { content: '  User runs on Tuesdays and Fridays ' });
+  assertEquals(res.status, 200);
+  assertEquals([res.body.memory.id, res.body.memory.content, res.body.memory.topic, res.body.memory.importance],
+    [run.id, 'User runs on Tuesdays and Fridays', 'routine', 2]);
+  assertEquals(h.db.activeMemories().map((m) => [m.content, m.version]), [['User runs on Tuesdays and Fridays', 2]]);
+  const event = h.db.rows('coach_memory_events').find((e) => e.op === 'update')!;
+  assertEquals([event.actor, event.before.content, event.after.content], ['user', 'User runs on Tuesdays', 'User runs on Tuesdays and Fridays']);
+  const call = h.db.rpcCalls.find((c) => c.name === 'coach_memory_apply_v1' && c.args.p_ops[0].op === 'update')!;
+  assertEquals(call.args.p_ops[0].expect_version, 1);
+
+  assertEquals((await edit(run.id, { content: 'Hijack' }, 'noop_other')).status, 404, "another owner's memory is not found");
+  assertEquals(h.db.activeMemories()[0].content, 'User runs on Tuesdays and Fridays');
+  for (const bad of [{ content: '' }, { content: 'x'.repeat(501) }, {}]) assertEquals((await edit(run.id, bad)).status, 400);
+  assertEquals((await edit('not-a-uuid', { content: 'x' })).status, 400);
+
+  const rpc = h.rest.rpc;
+  h.rest.rpc = async (name: string, args: any) => {
+    if (name === 'coach_memory_apply_v1' && args.p_ops?.[0]?.op === 'update' && args.p_actor === 'user') {
+      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'update', id: run.id, content: 'User runs on Fridays' }], p_actor: 'curator' });
+    }
+    return await rpc(name, args);
+  };
+  assertEquals((await edit(run.id, { content: 'User runs daily' })).status, 409, 'a change made after the read is never overwritten');
+  h.rest.rpc = rpc;
+  await h.json(`memories/${run.id}`, { method: 'DELETE' });
+  assertEquals((await edit(run.id, { content: 'User runs daily' })).status, 404, 'a forgotten memory cannot be edited back');
+});

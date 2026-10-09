@@ -985,7 +985,8 @@ private func decodeWhoop5CommandResponse(_ frame: [UInt8], fb: FieldBuilder, sch
 ///
 /// `event` (u8 @10, EventNumber) and `event_timestamp` (u32 @12, real unix) are already set by the
 /// static +4 walk. This hook adds the BATTERY_LEVEL payload, which follows the same +4 rule as the
-/// rest of the 5.0 layout: 4.0's soc@17 / mv@21 / charge@26 become soc@21 / mv@25 / charge@30. Unlike
+/// rest of the 5.0 layout: 4.0's soc@17 / mv@21 become soc@21 / mv@25, and charge@26 becomes @30, which is
+/// deliberately left unread (see the end of this function). Unlike
 /// the 5.0 COMMAND_RESPONSE (which switched to a DIRECT percent), the EVENT battery keeps 4.0's
 /// deci-percent (÷10) — confirmed by a clean monotonic discharge across a real capture (49.9 → 47.7 %).
 /// The same range guards as the 4.0 `event` post-hook fail closed.
@@ -1004,9 +1005,11 @@ private func decodeWhoop5Event(_ frame: [UInt8], fb: FieldBuilder, schema: Schem
     if let mv = readDType(frame, 25, "u16", limit), (3000...4300).contains(mv) {
         fb.add(25, 2, "battery_mV", "battery", value: .int(mv), note: "mV")
     }
-    if let ch = readDType(frame, 30, "u8", limit), ch <= 1 {
-        fb.add(30, 1, "battery_charging", "battery", value: .int(ch & 1))
-    }
+    // The charge bit at @30 is deliberately NOT decoded. It reads 0 through a real charge (9 Oct 2026: the pack
+    // climbed from 12.9% to 45.1%, and all 54 readings had it at 0), so a value here would tell the store and the
+    // watchdog that the pack was not charging. The 5.0/MG charging flag comes from the CHARGING_ON/OFF and pack
+    // edges, reviewed against the gauge (`LiveState.reviewChargingAgainstGauge`). Decode the bit again only once a
+    // charging frame has been seen with it set.
 }
 
 /// Decode a WHOOP 5.0 CONSOLE_LOGS (type 50) frame — the strap firmware's own plaintext diagnostics

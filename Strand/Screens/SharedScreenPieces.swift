@@ -79,15 +79,21 @@ struct HeaderControlGlyph: View {
     let systemName: String
 
     var body: some View {
-        Image(systemName: systemName)
+        // With Liquid Glass on, the circle is a piece of glass (blur, thin body, rim light) like the other floating
+        // controls; with it off it keeps the solid inset fill it always had.
+        let glyph = Image(systemName: systemName)
             .font(StrandFont.icon(.row))
             .foregroundStyle(StrandPalette.textSecondary)
             .frame(width: NoopMetrics.compactControlSize, height: NoopMetrics.compactControlSize)
-            .background(Circle().fill(StrandPalette.surfaceInset))
-            // The hit area grows to 44 pt and the padding is given back, so the header row keeps its height.
-            .padding(4)
-            .contentShape(Rectangle())
-            .padding(-4)
+        LiquidGlassSwitch {
+            glyph.noopGlassControl(in: Circle())
+        } original: {
+            glyph.background(Circle().fill(StrandPalette.surfaceInset))
+        }
+        // The hit area grows to 44 pt and the padding is given back, so the header row keeps its height.
+        .padding(4)
+        .contentShape(Rectangle())
+        .padding(-4)
     }
 }
 

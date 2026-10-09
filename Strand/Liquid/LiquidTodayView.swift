@@ -415,17 +415,19 @@ struct LiquidTodayView: View {
     /// The page header: a time-of-day greeting with the user's first name, and Settings. No title and no
     /// date: the greeting is the only line. Day navigation has no control here for now.
     private var header: some View {
-        HStack(alignment: .center, spacing: NoopMetrics.space1) {
-            Text(verbatim: greeting)
-                .font(StrandFont.title1)
-                .foregroundStyle(StrandPalette.textPrimary)
-                .lineLimit(1)
-                .minimumScaleFactor(0.6)
-                .frame(maxWidth: .infinity, alignment: .leading)
-                .accessibilityAddTraits(.isHeader)
-                .accessibilityIdentifier("today.greeting")
-            HeaderSettingsButton()
-                .padding(.leading, NoopMetrics.space1)
+        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+            HStack(alignment: .center, spacing: NoopMetrics.space1) {
+                Text(verbatim: greeting)
+                    .font(StrandFont.title1)
+                    .foregroundStyle(StrandPalette.textPrimary)
+                    .lineLimit(1)
+                    .minimumScaleFactor(0.6)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .accessibilityAddTraits(.isHeader)
+                    .accessibilityIdentifier("today.greeting")
+                HeaderSettingsButton()
+                    .padding(.leading, NoopMetrics.space1)
+            }
         }
     }
 
@@ -517,6 +519,8 @@ struct LiquidTodayView: View {
         var value: String?
         var unit: String?
         var state: String? = nil
+        /// A second reading of the same metric, shown under the value (HRV's SDNN beside its RMSSD).
+        var secondary: String? = nil
         var isEstimate = false
         /// The catalog entry the tile opens (and whose key names its spark series).
         var detail: MetricDescriptor?
@@ -549,7 +553,11 @@ struct LiquidTodayView: View {
             return TileModel(metric: metric, value: Self.intValue(restScore), unit: "%",
                              detail: catalog(HeroRingMetric.rest), sparkKey: HeroRingMetric.rest)
         case .hrv:
-            return TileModel(metric: metric, value: Self.intValue(hrv), unit: "ms",
+            // Both HRV measures on the one tile: RMSSD leads (the Charge input), SDNN sits under it. Each is the
+            // latest night's average, carried the same way when today has none yet.
+            let sdnn = displayDay?.avgSdnn ?? hrvDay?.avgSdnn
+            return TileModel(metric: metric, value: Self.intValue(hrv), unit: String(localized: "ms RMSSD"),
+                             secondary: Self.intValue(sdnn).map { String(localized: "SDNN \($0) ms") },
                              detail: catalog("hrv"), sparkKey: "hrv")
         case .restingHr:
             return TileModel(metric: metric, value: Self.intValue(rhr), unit: "bpm",
@@ -619,7 +627,7 @@ struct LiquidTodayView: View {
         let tile = MetricTile(icon: m.metric.customizationIcon, iconColor: m.metric.customizationTint,
                               label: LocalizedStringKey(m.metric.title), value: m.value, unit: m.unit,
                               state: m.state, trend: trend, reservesTrendSlot: keyMetricsDetailed,
-                              isEstimate: m.isEstimate, isLoading: isLoading)
+                              isEstimate: m.isEstimate, isLoading: isLoading, secondary: m.secondary)
         if let detail = m.detail {
             // A VALUE link (not a closure), so a re-tap of the Today tab pops back to the root (#135/#198).
             // The detail page's About section carries the explanation.
@@ -1538,27 +1546,46 @@ private struct TodayStrapRow: View {
     private var line: Line? {
         let battery = LiquidTodayView.StrapBatteryDisplay.resolve(
             activeIsWhoop: live.activeIsWhoop, connected: live.connected,
-            batteryPct: live.batteryPct, charging: live.charging,
+            batteryPct: live.batteryPct, charging: live.isChargingNow,
             ringPct: live.ouraBatteryPct, ringCharging: live.ouraWearState == .charging)
         let synced = live.lastSyncedAt.map { String(localized: "Synced \(relativeAgo($0))") }
-        if live.backfilling {
+        let refusedBond = live.connected && live.pairingHint != nil
+        switch LiquidTodayView.strapRowLead(battery: battery, backfilling: live.backfilling,
+                                            refusedBond: refusedBond) {
+        case .charging(let beside):
+            // On the charger, the charge leads. A sync or a refused bond sits beside it as the subtitle.
+            let note: String?
+            switch beside {
+            case .syncing?: note = String(localized: "Syncing history…")
+            case .rePair?: note = String(localized: "Re-pair to sync")
+            case nil: note = nil
+            }
+            if case .charge(let pct, _, let isRing) = battery {
+                return Line(icon: Self.batterySymbol(pct: pct, charging: true), iconColor: StrandPalette.statusPositive,
+                            title: isRing ? "Ring" : "Strap", subtitle: isRing ? nil : (note ?? synced),
+                            value: chargeText(pct: pct, charging: true, isRing: isRing), tone: .positive)
+            }
+            // On the charger before the gauge has a reading: say so rather than staying silent.
+            return Line(icon: "battery.100.bolt", iconColor: StrandPalette.statusPositive, title: "Strap",
+                        subtitle: note ?? synced, value: String(localized: "Charging"), tone: .positive)
+        case .syncing:
             return Line(icon: "arrow.triangle.2.circlepath", iconColor: StrandPalette.accent, title: "Strap",
                         subtitle: nil, value: String(localized: "Syncing history…"), tone: .accent)
-        }
-        if live.connected, live.pairingHint != nil {
+        case .rePair:
             // The bond was refused: history can't sync until the strap is re-paired (how-to on Devices).
             return Line(icon: "exclamationmark.triangle", iconColor: StrandPalette.statusWarning, title: "Strap",
                         subtitle: nil, value: String(localized: "Re-pair to sync"), tone: .warning)
-        }
-        switch battery {
-        case .charge(let pct, let charging, let isRing):
-            return Line(icon: Self.batterySymbol(pct: pct, charging: charging), iconColor: StrandPalette.textSecondary,
-                        title: isRing ? "Ring" : "Strap", subtitle: isRing ? nil : synced,
-                        value: chargeText(pct: pct, charging: charging, isRing: isRing), tone: .neutral)
-        case .offline, .pending, .notActiveDevice:
-            guard live.activeIsWhoop, let synced else { return nil }
-            return Line(icon: "arrow.triangle.2.circlepath", iconColor: StrandPalette.textSecondary, title: "Strap",
-                        subtitle: nil, value: synced, tone: .neutral)
+        case .level:
+            switch battery {
+            case .charge(let pct, _, let isRing):
+                return Line(icon: Self.batterySymbol(pct: pct, charging: false), iconColor: StrandPalette.textSecondary,
+                            title: isRing ? "Ring" : "Strap", subtitle: isRing ? nil : synced,
+                            value: chargeText(pct: pct, charging: false, isRing: isRing), tone: .neutral)
+            case .offline, .pending, .notActiveDevice:
+                guard live.activeIsWhoop, let synced else { return nil }
+                return Line(icon: "arrow.triangle.2.circlepath", iconColor: StrandPalette.textSecondary, title: "Strap",
+                            subtitle: nil, value: synced, tone: .neutral)
+            }
         }
     }
 
@@ -1586,7 +1613,7 @@ private struct TodayStrapRow: View {
     /// #992, verbatim from `TodayView.estimateText`: under 48 h show hours, at two days or more round to
     /// days; nil (no banked discharge yet, or charging) hides it, so the row only shows an estimate we trust.
     private var estimateText: String? {
-        guard live.charging != true, let est = live.batteryEstimate else { return nil }
+        guard !live.isChargingNow, let est = live.batteryEstimate else { return nil }
         let hours = est.hoursRemaining
         guard hours.isFinite, hours > 0 else { return nil }
         if hours < 48 {
@@ -1709,6 +1736,46 @@ extension LiquidTodayView {
             guard let pct = batteryPct else { return .pending(charging: charging == true) }
             return .charge(pct: pct, charging: charging == true, isRing: false)
         }
+
+        /// Whether this display says the device is on its charger. Nothing is claimed off a link (`.offline`), and a
+        /// device that is neither the strap nor a ring has no charge to say so about (`.notActiveDevice`).
+        var isCharging: Bool {
+            switch self {
+            case .charge(_, let charging, _), .pending(let charging): return charging
+            case .offline, .notActiveDevice: return false
+            }
+        }
+    }
+
+    /// What the strap row leads with, decided from the signals it reads. Pure and internal, so the order is pinned by
+    /// `LiquidBatteryDisplayTests` with no view and no BLE.
+    ///
+    /// A charge leads whatever else the strap is doing. A history sync runs for seconds at a time, about once a minute,
+    /// while the strap is connected. When it took the row, a strap on its charger read "Syncing history…" and never said
+    /// so, so a sync or a refused bond now sits beside the charge instead of replacing it.
+    enum StrapRowLead: Equatable {
+        /// On the charger. `beside` is the note shown under the charge, when a sync or a refused bond is also going on.
+        case charging(beside: Beside?)
+        /// Not charging, and a history sync is in progress.
+        case syncing
+        /// Not charging, and the bond was refused: history cannot sync until the strap is re-paired.
+        case rePair
+        /// Neither: the charge level, the last sync time, or nothing.
+        case level
+
+        enum Beside: Equatable {
+            case syncing
+            case rePair
+        }
+    }
+
+    static func strapRowLead(battery: StrapBatteryDisplay, backfilling: Bool, refusedBond: Bool) -> StrapRowLead {
+        if battery.isCharging {
+            return .charging(beside: backfilling ? .syncing : (refusedBond ? .rePair : nil))
+        }
+        if backfilling { return .syncing }
+        if refusedBond { return .rePair }
+        return .level
     }
 
     /// Per-night HRV for the "N of 4 nights" baseline count. The scored daily rows alone under-count: a night

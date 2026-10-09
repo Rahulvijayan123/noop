@@ -139,4 +139,60 @@ final class LiquidBatteryDisplayTests: XCTestCase {
                                        ringPct: 93, ringCharging: true),
                        .charge(pct: 61, charging: false, isRing: false))
     }
+
+    // MARK: - The bottom strap row leads with the charge
+
+    private typealias Lead = LiquidTodayView.StrapRowLead
+
+    private func lead(_ battery: Display, backfilling: Bool = false, refusedBond: Bool = false) -> Lead {
+        LiquidTodayView.strapRowLead(battery: battery, backfilling: backfilling, refusedBond: refusedBond)
+    }
+
+    /// THE row regression. A history sync runs for seconds at a time about once a minute while the strap is connected,
+    /// and it used to take the whole row: a strap on its charger read "Syncing history…" and never said it was charging.
+    func testChargingLeadsWhileAHistorySyncRuns() {
+        let battery = Display.resolve(activeIsWhoop: true, connected: true, batteryPct: 47.5, charging: true,
+                                      ringPct: nil, ringCharging: false)
+        XCTAssertEqual(lead(battery, backfilling: true), .charging(beside: .syncing),
+                       "the sync belongs beside the charge, not in place of it")
+    }
+
+    /// The charge is said before the gauge has a reading, too. Charging is the wearer's live question.
+    func testChargingLeadsBeforeTheFirstPercentage() {
+        let battery = Display.resolve(activeIsWhoop: true, connected: true, batteryPct: nil, charging: true,
+                                      ringPct: nil, ringCharging: false)
+        XCTAssertEqual(lead(battery, backfilling: true), .charging(beside: .syncing))
+        XCTAssertEqual(lead(battery), .charging(beside: nil))
+    }
+
+    /// A refused bond does not stop a charge. The re-pair note sits beside it, where the wearer still sees it.
+    func testChargingLeadsWithARefusedBond() {
+        let battery = Display.resolve(activeIsWhoop: true, connected: true, batteryPct: 47.5, charging: true,
+                                      ringPct: nil, ringCharging: false)
+        XCTAssertEqual(lead(battery, refusedBond: true), .charging(beside: .rePair))
+    }
+
+    /// Off the charger the sync and the re-pair keep their own lines, in the order they always had.
+    func testNotChargingKeepsTheSyncAndRePairLines() {
+        let battery = Display.resolve(activeIsWhoop: true, connected: true, batteryPct: 47.5, charging: false,
+                                      ringPct: nil, ringCharging: false)
+        XCTAssertEqual(lead(battery, backfilling: true, refusedBond: true), .syncing)
+        XCTAssertEqual(lead(battery, refusedBond: true), .rePair)
+        XCTAssertEqual(lead(battery), .level)
+    }
+
+    /// No link means nothing is claimed about charge, and a sync cannot be running over it.
+    func testOfflineIsNeverChargingOnTheRow() {
+        let battery = Display.resolve(activeIsWhoop: true, connected: false, batteryPct: 47.5, charging: true,
+                                      ringPct: nil, ringCharging: false)
+        XCTAssertFalse(battery.isCharging)
+        XCTAssertEqual(lead(battery), .level)
+    }
+
+    /// A charging ring leads the same way. Its own charge is what the row is about, so there is no strap note beside it.
+    func testChargingRingLeadsToo() {
+        let battery = Display.resolve(activeIsWhoop: false, connected: true, batteryPct: 47.5, charging: nil,
+                                      ringPct: 80, ringCharging: true)
+        XCTAssertEqual(lead(battery), .charging(beside: nil))
+    }
 }

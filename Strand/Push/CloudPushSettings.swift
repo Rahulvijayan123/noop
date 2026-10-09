@@ -22,7 +22,7 @@ public enum CloudPushSettings {
     public static let sourceRevisionInfoKey = "NOOPSourceRevision"
     public static let finalHostedComputeInfoKey = "NOOPFinalHostedCompute"
 
-    /// User-facing opt-out / manual override. Absent means "follow the build".
+    /// Set on sign-in; only consulted while nobody is signed in. Absent means "follow the build".
     private static let enabledOverrideKey = "noop.cloud.enabled.override"
     private static let endpointOverrideKey = "noop.cloud.endpoint.override"
 
@@ -111,25 +111,23 @@ public enum CloudPushSettings {
     /// no offline mode, so cloud is not a preference there. It is on whenever the build is configured, and
     /// neither a stored override nor `setEnabled(_:)` can turn it off.
     ///
-    /// Any other build keeps cloud OPT-IN: carrying a receiver is not consent to upload, so nothing leaves
-    /// the phone until the user turns it on. An unconfigured build can never be enabled: there is no
-    /// receiver to point at, and the toggle is refused rather than silently accepted.
+    /// In any other build, a signed-in account always syncs: there is no switch to turn it off, and an
+    /// opt-out stored by an older build is ignored for as long as someone is signed in. Signed out, the
+    /// stored flag still decides (signing in sets it), so nothing changes for a phone nobody signed into.
+    /// An unconfigured build can never be enabled: there is no receiver to point at.
     ///
     /// Enabled does not mean uploading: nothing leaves the phone until an account is signed in and has an
     /// installation credential (see `CloudPushIdentityStore.current()`).
     public static var isEnabled: Bool {
         guard isConfigured else { return false }
         if isHostedComputeBuild { return true }
+        if CloudPushIdentityStore.currentOwnerId() != nil { return true }
         let defaults = UserDefaults.standard
         if defaults.object(forKey: enabledOverrideKey) != nil {
             return defaults.bool(forKey: enabledOverrideKey)
         }
         return false
     }
-
-    /// Whether the person can choose to switch cloud sync on or off. False in a hosted-compute build,
-    /// where there is nothing to switch to, so screens show the state instead of offering a control.
-    public static var isUserSwitchable: Bool { isConfigured && !isHostedComputeBuild }
 
     /// The receiver's project origin (`https://<project>.supabase.co`), derived from the configured
     /// receiver URL by dropping the function path.

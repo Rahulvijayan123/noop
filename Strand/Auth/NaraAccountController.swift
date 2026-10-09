@@ -24,9 +24,58 @@ protocol CloudRuntimeControlling: AnyObject, Sendable {
     func start(identity: CloudPushIdentity, deviceId: String) throws
     func stop() async
     func setCredentialRejectionHandler(_ handler: (@Sendable (CloudDataScope, Int) -> Void)?)
+    /// The running transport's upload state, or nil when the runtime is not running.
+    func syncStatus() async -> CloudSyncStatus?
 }
 
-extension CloudPushRuntime: CloudRuntimeControlling {}
+extension CloudPushRuntime: CloudRuntimeControlling {
+    func syncStatus() async -> CloudSyncStatus? {
+        guard let coordinator = coordinatorIfRunning else { return nil }
+        let status = await coordinator.status()
+        return CloudSyncStatus(stats: status.stats, inFlight: status.inFlight,
+                               lastAttemptAtMs: status.lastOutcomeAtMs, lastError: status.lastError)
+    }
+}
+
+/// What the upload path is doing, as the transport and its journal track it.
+public struct CloudSyncStatus: Equatable, Sendable {
+    /// Captured readings the server has not acknowledged yet.
+    public var pendingRecords: Int
+    /// When the oldest unacknowledged reading was captured; nil when nothing is pending.
+    public var oldestPendingAt: Date?
+    /// Sealed batches waiting to go, or sent and waiting for their receipt.
+    public var queuedBatches: Int
+    /// Uploads in flight right now.
+    public var inFlight: Int
+    /// When the receiver last answered an upload (or the attempt failed); nil before the first one this launch.
+    public var lastAttemptAt: Date?
+    /// The transport's most recent failure this launch. Not cleared by a later success.
+    public var lastError: String?
+
+    public init(pendingRecords: Int, oldestPendingAt: Date?, queuedBatches: Int, inFlight: Int,
+                lastAttemptAt: Date?, lastError: String?) {
+        self.pendingRecords = pendingRecords
+        self.oldestPendingAt = oldestPendingAt
+        self.queuedBatches = queuedBatches
+        self.inFlight = inFlight
+        self.lastAttemptAt = lastAttemptAt
+        self.lastError = lastError
+    }
+
+    init(stats: CloudJournalStats, inFlight: Int, lastAttemptAtMs: Int?, lastError: String?,
+         now: Date = Date()) {
+        self.init(pendingRecords: stats.pendingRecords,
+                  oldestPendingAt: stats.pendingRecords > 0
+                      ? now.addingTimeInterval(-TimeInterval(stats.oldestPendingAgeSeconds)) : nil,
+                  queuedBatches: stats.sealedBatches + stats.uploadedBatches,
+                  inFlight: inFlight,
+                  lastAttemptAt: lastAttemptAtMs.map { Date(timeIntervalSince1970: TimeInterval($0) / 1000) },
+                  lastError: lastError ?? stats.lastError)
+    }
+
+    /// Everything captured so far has been acknowledged by the server.
+    public var isUpToDate: Bool { pendingRecords == 0 && queuedBatches == 0 && inFlight == 0 }
+}
 
 // MARK: - Controller
 
@@ -54,8 +103,6 @@ public final class NaraAccountController: ObservableObject {
         case working
         /// The account is linked and the upload runtime is running.
         case ready
-        /// The person turned cloud sync off. Nothing is uploaded and nothing new is queued.
-        case paused
         /// A temporary problem; Nara retries by itself.
         case retrying(String)
         /// Needs the person: the message says what to do.
@@ -174,8 +221,7 @@ public final class NaraAccountController: ObservableObject {
     private func phaseChanged(to phase: NaraAuthService.Phase) {
         let previous = lastPhase
         lastPhase = phase
-        // Signing in or signing up is the person's own decision to use a cloud account, so it turns the
-        // upload path on. A session that is merely restored at launch leaves their setting alone.
+        // Signing in or signing up turns the upload path on. A restored session is turned on by `bind`.
         if case .signedIn = phase {
             switch previous {
             case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode, .choosingSetup:
@@ -234,11 +280,8 @@ public final class NaraAccountController: ObservableObject {
         retryTask?.cancel()
         store.activate(ownerId: owner)
         ownsLocalHistory = CloudLocalDataBinding.claimIfUnclaimed(by: owner, defaults: defaults)
-        guard uploadsEnabled() else {
-            await teardownRuntime()
-            bootstrap = .paused
-            return
-        }
+        // A signed-in account always syncs. An opt-out an older build stored is turned back on here.
+        if !uploadsEnabled() { setUploadsFlag(true) }
         let alreadyReady: Bool = {
             guard bootstrap == .ready, let scope = runtime.runningScope else { return false }
             return scope.ownerId == owner
@@ -543,11 +586,9 @@ public final class NaraAccountController: ObservableObject {
         await settle()
     }
 
-    /// The upload switch in the account screen.
-    public func setUploadsEnabled(_ enabled: Bool) {
-        setUploadsFlag(enabled)
-        objectWillChange.send()
-        requestReconcile()
+    /// What the upload path is doing, for the account screen. Nil while the runtime is not running.
+    public func syncStatus() async -> CloudSyncStatus? {
+        await runtime.syncStatus()
     }
 
     // MARK: environment

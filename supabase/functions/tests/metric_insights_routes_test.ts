@@ -67,6 +67,17 @@ Deno.test('POST /insights: owner from the credential, no device, the RPC outcome
     'resting_hr', 'skin_temp', 'spo2', 'steps']);
 });
 
+Deno.test('POST /insights: regenerate:true calls the regenerate RPC for the credential owner only', async () => {
+  const { rest, calls } = await fixture();
+  const response = await handleScoresRequest(request({ body: { metric: 'hrv_sdnn', regenerate: true, p_user: OTHER } }),
+    { rest, cfg });
+  assertEquals(response.status, 200);
+  assertEquals(calls, [{ name: 'metric_insight_regenerate_v1', args: { p_user: USER, p_metric: 'hrv_sdnn' } }]);
+  const plain = await handleScoresRequest(request({ body: { metric: 'hrv_sdnn', regenerate: 'yes' } }), { rest, cfg });
+  assertEquals(plain.status, 200);
+  assertEquals(calls[1], { name: 'metric_insight_request_v1', args: { p_user: USER, p_metric: 'hrv_sdnn' } });
+});
+
 Deno.test('POST /insights: only the allow-listed metrics, a bounded JSON body, and POST only', async () => {
   const { rest, calls } = await fixture();
   for (const body of [{}, { metric: 'recovery_score' }, { metric: 'RESTING_HR' }, { metric: ['resting_hr'] }, { metric: 7 }, null]) {

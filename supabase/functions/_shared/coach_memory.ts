@@ -73,7 +73,37 @@ export async function memoriesRoute(req: Request, userId: string, tail: string[]
     }
     return Response.json({ deleted: true });
   }
+  if (req.method === 'PATCH' && tail[0]) return await editMemory(req, userId, tail[0], d);
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
+}
+
+/**
+ * The person's own edit of one active memory: new text, and optionally a topic or importance. Guarded by the row's
+ * version, so an edit never overwrites a change the curator made after the list was read (409 `stale`).
+ */
+async function editMemory(req: Request, userId: string, rawId: string, d: CoachDeps): Promise<Response> {
+  const id = uuidOf(rawId);
+  if (!id) throw fail('invalid_id', 400);
+  const body = await readJson(req, SMALL_BODY_BYTES);
+  const content = typeof body?.content === 'string' ? body.content.trim() : '';
+  if (!content || content.length > 500) throw fail('invalid_memory', 400);
+  const [row] = await d.rest.select('coach_memory_items',
+    `user_id=eq.${userId}&id=eq.${id}&retired_at=is.null&select=${MEMORY_COLUMNS}`);
+  if (!row) throw fail('not_found', 404);
+  const topic = typeof body?.topic === 'string' ? memoryTopic(body.topic) : row.topic;
+  const importance = Number.isFinite(body?.importance)
+    ? Math.max(1, Math.min(5, Math.round(body.importance))) : Number(row.importance ?? 3);
+  const [res] = await applyMemoryOps(d, userId,
+    [{ op: 'update', id, content, topic, importance, ...versionGuard(row) }], 'user');
+  if (!res?.applied) {
+    if (res?.reason === 'stale') throw fail('stale', 409);
+    if (res?.reason === 'invalid_content') throw fail('invalid_memory', 400);
+    throw fail('not_found', 404);
+  }
+  // The cached starters may quote the old text.
+  await dropStarterCache(d, userId);
+  const stamp = new Date(d.now()).toISOString();
+  return Response.json({ memory: publicMemory({ ...row, content, topic, importance, updated_at: stamp }) });
 }
 
 /** coach_memory_apply_v1 takes at most 100 ops per call. */

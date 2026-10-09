@@ -685,10 +685,10 @@ public final class BLEManager: NSObject, ObservableObject {
     ///
     /// `charging` is not purely "is charging" (#1935): on a 5/MG it is also set on pack ATTACH, so a
     /// depleted or badly-seated pack reads true while nothing charges, and this gate then stays off. The
-    /// window is bounded — the next BATTERY_LEVEL rewrites the flag from the strap's own gauge — and the
-    /// reasoning for accepting that rather than splitting the state is on `LiveState.charging`. Read it
-    /// before adding a trend check here: making this wait for a rising gauge would delay throttle release
-    /// on every honest attach to close an edge that already closes itself.
+    /// window is bounded: the gauge review (`LiveState.reviewChargingAgainstGauge`) clears the flag within
+    /// about five minutes when the gauge does not rise. The reasoning is on `LiveState.charging`. Read it
+    /// before adding a trend check here. The flag is set at the edge rather than after a rising gauge, so an
+    /// honest attach releases the throttle at once.
     static func lowPowerThrottleActive(batteryPct: Int, charging: Bool, thresholdPct: Int) -> Bool {
         thresholdPct > 0 && !charging && batteryPct <= thresholdPct
     }
@@ -1616,16 +1616,27 @@ public final class BLEManager: NSObject, ObservableObject {
         // already banked from live events this session, so a seed that races the first live reading is safe.
         // nil-SoC rows are dropped here (the buffer is non-optional %); a read failure is non-fatal, the
         // estimate just cold-starts as before.
-        let seedNow = Int(Date().timeIntervalSince1970)
-        let fourteenDays = 14 * 24 * 3600
-        if let rows = try? await store.batterySamples(
-            deviceId: deviceId, from: seedNow - fourteenDays, to: seedNow, limit: 2000) {
-            let seed = rows.compactMap { row -> (ts: Int, soc: Double)? in
-                guard let soc = row.soc else { return nil }
-                return (ts: row.ts, soc: soc)
-            }
-            state.seedBatterySamples(seed)
+        batterySeedStore = store
+        await reseedBatterySamples(window: 14 * 24 * 3600)
+    }
+
+    /// The store the SoC buffer is seeded from, kept so the buffer can be refilled after a disconnect.
+    private var batterySeedStore: WhoopStore?
+
+    /// Refills `LiveState.batterySamples` from the persisted battery table. A disconnect empties the buffer, and
+    /// this strap drops the link after every history sync, so without a refill the gauge fallback behind
+    /// "Charging" never has two readings to compare and the row never says charging. The offload banks a
+    /// reading about every 30 s while charging, so the rows are what shows the climb. The seed de-dupes by ts.
+    func reseedBatterySamples(window: Int = 2 * 3600) async {
+        guard let store = batterySeedStore else { return }
+        let now = Int(Date().timeIntervalSince1970)
+        guard let rows = try? await store.batterySamples(
+            deviceId: deviceId, from: now - window, to: now, limit: 2000) else { return }
+        let seed = rows.compactMap { row -> (ts: Int, soc: Double)? in
+            guard let soc = row.soc else { return nil }
+            return (ts: row.ts, soc: soc)
         }
+        state.seedBatterySamples(seed)
     }
 
     /// Designated initializer for testing and preview use: accepts a pre-built Collector.
@@ -3018,6 +3029,7 @@ public final class BLEManager: NSObject, ObservableObject {
         guard backfilling else { return }
         backfilling = false
         state.backfilling = false
+        Task { [weak self] in await self?.reseedBatterySamples() }
         // #174: a backfill just ended. Start (or extend) the deep-packet cooldown from this instant so
         // any type-0x2F records the strap flushes in the seconds after the session aren't miscounted as
         // the live R22 stream — they're the offload's tail.
@@ -6332,6 +6344,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         // (the Sync Strap shortcut, a state-restoration relaunch) reconnects by identifier, not by scan.
         UserDefaults.standard.set(peripheral.identifier.uuidString, forKey: Self.lastConnectedPeripheralKey)
         state.connected = true
+        Task { [weak self] in await self?.reseedBatterySamples() }   // the disconnect emptied the SoC buffer
         // A connect succeeded → clear the stale-bond re-pair guide UNLESS we are in a known bond-loop
         // (#617). In that loop the strap "connects" every ~3 s before timing out again, so clearing here
         // wiped the guide on EVERY cycle: it flashed for ~1 s and vanished, so the user could never read it
@@ -6594,7 +6607,7 @@ extension BLEManager: @preconcurrency CBCentralManagerDelegate {
         bondedAt = nil   // cleared after the bond-loop detector above read it (#617)
         state.connected = false
         state.encryptedBond = false   // cleared with didBond; next session must re-prove the bond (#69)
-        state.charging = nil          // a stale charging flag must not outlive the link
+        state.forgetCharging()        // a stale charging flag, and its review window, must not outlive the link
         state.batteryMv = nil         // #592: a stale pack voltage must not outlive the link
         state.strapFirmware = nil     // a stale firmware version must not outlive the link
         state.extendedBatteryProbe = nil  // #592: drop a stale probe result on disconnect

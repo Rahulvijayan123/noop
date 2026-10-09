@@ -253,11 +253,11 @@ struct WalkingInsightsSection: View {
         }
     }
 
-    /// The day's walks of a minute or more, longest first.
+    /// Every walk of the day of a minute or more, longest first.
     private func walks(_ r: WalkingDayReading) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             sectionTitle("Walks")
-            ForEach(r.bouts.sorted { $0.seconds > $1.seconds }.prefix(6)) { bout in
+            ForEach(r.bouts.sorted { $0.seconds > $1.seconds }) { bout in
                 HStack(spacing: 10) {
                     RoundedRectangle(cornerRadius: 2)
                         .fill(ActivityFamily.walking.color.opacity(

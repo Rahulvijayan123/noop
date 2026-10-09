@@ -87,7 +87,6 @@ struct StretchDetailSheet: View {
     @State private var correction: StretchCorrection?
     @State private var note = ""
     @State private var primed = false
-    @State private var showAllRuns = false
 
     private enum Anchor: Hashable { case model, validation }
 
@@ -118,7 +117,6 @@ struct StretchDetailSheet: View {
                     VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                         signals
                         validationCard.id(Anchor.validation)
-                        zoomButton
                         howItWasRead.id(Anchor.model)
                     }
                     .padding(.horizontal, NoopMetrics.screenHPadding)
@@ -177,27 +175,20 @@ struct StretchDetailSheet: View {
         let hrSamples = d.map(Self.hrSamples) ?? []
         ValueReadout(hrReadout(d, samples: hrSamples), isScrubbing: hrSelection != nil, isLoading: isLoading)
         NoopCard {
-            IntradayChart(samples: hrSamples, bucketSeconds: max(1, d?.binSeconds ?? 30), legend: [],
-                          state: isLoading ? .loading
-                            : (hrSamples.isEmpty ? .empty(emptyText) : .ready),
-                          window: window(d),
-                          y: ChartValueAxis(unit: "bpm", domain: .fitted(minSpan: 20)),
-                          selection: $hrSelection, height: NoopMetrics.chartHeightSecondary,
-                          accessibilityTitle: String(localized: "Heart rate over the stretch"))
-        }
-        if let d, d.bins.contains(where: { $0.motionG != nil }) || (d.stepTicks ?? 0) > 0 {
-            NoopCard {
-                VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
+            VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
+                if let d {
+                    StretchSignalChart(detail: d, kind: .heartRate, selection: $hrSelection)
                     if d.bins.contains(where: { $0.motionG != nil }) {
-                        Text("Wrist movement").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                        SliceBars(detail: d, tint: StrandPalette.metricCyan, unit: "g", decimals: 2,
-                                  selection: $hrSelection) { $0.motionG }
+                        StretchSignalChart(detail: d, kind: .wristMovement, selection: $hrSelection)
                     }
                     if (d.stepTicks ?? 0) > 0 {
-                        Text("Step counter ticks").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
-                        SliceBars(detail: d, tint: StrandPalette.metricPurple, unit: nil, decimals: 0,
-                                  selection: $hrSelection) { $0.stepTicks.map(Double.init) }
+                        StretchSignalChart(detail: d, kind: .stepTicks, selection: $hrSelection)
                     }
+                } else {
+                    Text(isLoading ? String(localized: "Reading the strap's stored data…") : emptyText)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                        .frame(maxWidth: .infinity, minHeight: 120, alignment: .leading)
                 }
             }
         }
@@ -258,7 +249,19 @@ struct StretchDetailSheet: View {
     /// time, the runs inside the stretch, and how the answer is used.
     private var howItWasRead: some View {
         AboutDisclosure("How this was read", initiallyExpanded: isDemoModelAnchor) {
-            modelCard
+            ForEach(StretchNarrative.paragraphs(narrativeInput())) { paragraph in
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(paragraph.title)
+                        .font(StrandFont.subhead.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Text(paragraph.text)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .lineSpacing(3)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: .infinity, alignment: .leading)
+            }
             Text(target.kind == .activityContext
                  ? String(localized: "Read by the activity model")
                  : String(localized: "Worked out from the strap's own signals"))
@@ -271,136 +274,70 @@ struct StretchDetailSheet: View {
         }
     }
 
+    /// The facts the written reading is built from: the model's answers, what the strap recorded, the evidence
+    /// used and what the other source said over the same time.
+    private func narrativeInput() -> StretchNarrative.Input {
+        let d = detail
+        func choices(_ rows: [(name: String, p: Double)]) -> [StretchNarrative.Choice] {
+            rows.map { StretchNarrative.Choice(name: $0.name, p: $0.p) }
+        }
+        func other(source: String, _ lines: [StretchModelContext.Overlap]) -> StretchNarrative.Other? {
+            lines.isEmpty ? nil : StretchNarrative.Other(source: source, labels: lines.map { ($0.label, $0.seconds) })
+        }
+        switch target {
+        case .activity(let e):
+            let experts = ActivityExpertsSummary.over(start: e.start, end: e.end, runs: input.runs)
+            var i = StretchNarrative.Input(label: e.label, confidence: e.confidence,
+                                           durationSeconds: d?.durationSeconds ?? target.durationSeconds)
+            i.posture = choices(HeadBlock.rows(e.posture, name: \.displayName))
+            i.movement = choices(HeadBlock.rows(e.locomotion, name: \.displayName))
+            i.arm = choices(HeadBlock.rows(e.armBehavior, name: \.displayName))
+            i.experts = experts.experts.map(ActivityExpertsSummary.name)
+            i.specific = experts.detail.map(ActivityExpertsSummary.name)
+            i.gaitProbability = experts.gait?.probability
+            i.gaitCadence = experts.gait?.cadenceSpm
+            i.gaitSpeed = experts.gait?.speedMps
+            i.runCount = input.runs.count
+            i.other = other(source: String(localized: "the strap's own labels"),
+                            StretchOverlap.strapStates(over: e.start, e.end, segments: input.segments))
+            fill(&i, from: d)
+            return i
+        case .strap(let s):
+            let experts = ActivityExpertsSummary.over(start: s.start, end: s.end, runs: input.runs)
+            var i = StretchNarrative.Input(label: s.state.title, confidence: nil,
+                                           durationSeconds: d?.durationSeconds ?? s.durationSeconds)
+            i.strapBasis = s.basisText
+            i.strapDetail = s.state.detail
+            i.avgHr = s.avgHr; i.minHr = s.minHr; i.maxHr = s.maxHr
+            i.meanMotionG = s.motionG
+            i.stepTicks = s.stepTicks
+            i.experts = experts.experts.map(ActivityExpertsSummary.name)
+            i.specific = experts.detail.map(ActivityExpertsSummary.name)
+            i.gaitProbability = experts.gait?.probability
+            i.gaitCadence = experts.gait?.cadenceSpm
+            i.gaitSpeed = experts.gait?.speedMps
+            i.other = other(source: String(localized: "the activity model"),
+                            StretchOverlap.activityLabels(over: s.start, s.end, runs: input.runs))
+            fill(&i, from: d)
+            return i
+        }
+    }
+
+    /// The finer readings of the loaded stretch win over the summary the list carried.
+    private func fill(_ i: inout StretchNarrative.Input, from d: StretchDetail?) {
+        guard let d else { return }
+        i.avgHr = d.avgHr ?? i.avgHr; i.minHr = d.minHr ?? i.minHr; i.maxHr = d.maxHr ?? i.maxHr
+        i.meanMotionG = d.meanMotionG ?? i.meanMotionG
+        i.peakMotionG = d.peakMotionG
+        i.stepTicks = d.stepTicks ?? i.stepTicks
+    }
+
     private var isDemoModelAnchor: Bool {
         #if DEBUG
         return Self.demoAnchor == .model
         #else
         return false
         #endif
-    }
-
-    // MARK: What the model said
-
-    @ViewBuilder
-    private var modelCard: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-            switch target {
-            case .activity(let e): activityModel(e)
-            case .strap(let s): strapModel(s)
-            }
-        }
-        .frame(maxWidth: .infinity, alignment: .leading)
-    }
-
-    @ViewBuilder
-    private func activityModel(_ e: ActivityEpisode) -> some View {
-        let tint = ActivityFamily.of(e.label).color
-        HStack(spacing: 10) {
-            Text("Confidence")
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-            if e.confidence < 0.55 {
-                StatePill("Low confidence", tone: .warning, showsDot: false).fixedSize()
-            }
-            Spacer(minLength: 8)
-            ProbabilityBar(value: e.confidence, tint: tint)
-            Text("\(Int((e.confidence * 100).rounded()))%")
-                .font(StrandFont.subhead.weight(.semibold))
-                .foregroundStyle(StrandPalette.textPrimary)
-                .monospacedDigit()
-                .frame(width: 44, alignment: .trailing)
-        }
-        HeadBlock(title: String(localized: "Posture"), rows: HeadBlock.rows(e.posture, name: \.displayName), tint: tint)
-        HeadBlock(title: String(localized: "Movement"), rows: HeadBlock.rows(e.locomotion, name: \.displayName), tint: tint)
-        HeadBlock(title: String(localized: "Arm"), rows: HeadBlock.rows(e.armBehavior, name: \.displayName), tint: tint)
-        ActivityExpertsBlock(summary: .over(start: e.start, end: e.end, runs: input.runs))
-        let strap = StretchOverlap.strapStates(over: e.start, e.end, segments: input.segments)
-        if !strap.isEmpty {
-            Divider().opacity(0.4)
-            overlapLines(title: String(localized: "The strap's own labels over this time"), strap)
-        }
-        if input.runs.count > 1 { runList }
-    }
-
-    @ViewBuilder
-    private func strapModel(_ s: DayStateSegment) -> some View {
-        Text(s.basisText)
-            .font(StrandFont.subhead)
-            .foregroundStyle(StrandPalette.textSecondary)
-            .fixedSize(horizontal: false, vertical: true)
-        if let detail = s.state.detail {
-            Text(detail)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textTertiary)
-        }
-        let model = StretchOverlap.activityLabels(over: s.start, s.end, runs: input.runs)
-        if !model.isEmpty {
-            Divider().opacity(0.4)
-            overlapLines(title: String(localized: "The activity model read this time as"), model)
-        }
-        ActivityExpertsBlock(summary: .over(start: s.start, end: s.end, runs: input.runs))
-    }
-
-    private func overlapLines(title: String, _ lines: [StretchModelContext.Overlap]) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-            ForEach(Array(lines.enumerated()), id: \.offset) { _, line in
-                HStack {
-                    Text(line.label)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                    Spacer(minLength: 8)
-                    Text(StretchFormat.duration(line.seconds))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .monospacedDigit()
-                }
-            }
-        }
-    }
-
-    /// The model's reading inside the stretch, a few minutes at a time, for a stretch that is more than one run.
-    private var runList: some View {
-        let ordered = input.runs.sorted { $0.start > $1.start }
-        let visible = showAllRuns ? ordered : Array(ordered.prefix(6))
-        return VStack(alignment: .leading, spacing: 6) {
-            Divider().opacity(0.4)
-            Text("Inside this stretch")
-                .font(StrandFont.subhead)
-                .foregroundStyle(StrandPalette.textSecondary)
-            ForEach(Array(visible.enumerated()), id: \.offset) { _, run in
-                let from = Date(timeIntervalSince1970: TimeInterval(max(run.start, target.start)))
-                let to = Date(timeIntervalSince1970: TimeInterval(min(run.end, target.end)))
-                HStack {
-                    Text("\(StretchFormat.clock(from, seconds: true)) – \(StretchFormat.clock(to, seconds: true))")
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textSecondary)
-                        .monospacedDigit()
-                    Spacer(minLength: 8)
-                    Text(run.displayContext ?? ActivityContextEpisodes.unclear)
-                        .font(StrandFont.footnote)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .lineLimit(1)
-                    Text("\(Int((run.overallConfidence * 100).rounded()))%")
-                        .font(StrandFont.footnote.weight(.semibold))
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .monospacedDigit()
-                        .frame(width: 40, alignment: .trailing)
-                }
-            }
-            if ordered.count > 6 {
-                Button {
-                    withAnimation(StrandMotion.interactive) { showAllRuns.toggle() }
-                } label: {
-                    Text(showAllRuns ? String(localized: "Show fewer") : String(localized: "Show all \(ordered.count)"))
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.accent)
-                }
-                .buttonStyle(.plain)
-            }
-        }
     }
 
     // MARK: Verdict
@@ -493,13 +430,6 @@ struct StretchDetailSheet: View {
         }
     }
 
-    private var zoomButton: some View {
-        NoopButton("Show on the heart rate graph", systemImage: "magnifyingglass", kind: .secondary, fullWidth: true) {
-            onZoom(input.zoomRange)
-            dismiss()
-        }
-    }
-
     // MARK: Saving
 
     private var noteIsDirty: Bool {
@@ -576,46 +506,4 @@ struct StretchDetailSheet: View {
         }.value
         load = .ready(built)
     }
-}
-
-// MARK: Pieces
-
-/// One value per slice as a bar spanning the slice, on the stretch's clock axis with the unit on the value
-/// axis. The selection is shared with the heart-rate chart above, so one scrub reads all three.
-private struct SliceBars: View {
-    let detail: StretchDetail
-    let tint: Color
-    let unit: String?
-    let decimals: Int
-    @Binding var selection: Date?
-    let value: (StretchBin) -> Double?
-
-    var body: some View {
-        let bars = detail.bins.compactMap { b -> (id: Int, from: Date, to: Date, mid: Date, v: Double)? in
-            value(b).map { (b.start, Self.date(b.start), Self.date(b.end),
-                            Date(timeIntervalSince1970: TimeInterval(b.start) + Double(b.durationSeconds) / 2), $0) }
-        }
-        let window = Self.date(detail.start)...Self.date(max(detail.end, detail.start + 1))
-        let axis = ChartValueAxis(unit: unit, domain: .fitted(minSpan: decimals > 0 ? 0.05 : 2, includeZero: true),
-                                  tickCount: 2, format: ChartValueAxis.decimals(decimals))
-        let yLayout = axis.layout(for: bars.map(\.v))
-        let picked = selection.flatMap { s in bars.first { $0.from <= s && s < $0.to } }
-        Chart {
-            ForEach(bars, id: \.id) { b in
-                // A rectangle from zero, not `BarMark(xStart:xEnd:y:)`, which draws a thin horizontal bar AT
-                // the value (an interval along x) instead of a column up to it.
-                RectangleMark(xStart: .value("From", b.from), xEnd: .value("To", b.to),
-                              yStart: .value("Zero", 0), yEnd: .value("Value", b.v))
-                    .cornerRadius(NaraChartStyle.barCornerRadius)
-                    .foregroundStyle(tint.opacity(picked == nil || picked?.id == b.id ? 1 : NaraChartStyle.dimmedOpacity))
-            }
-            SelectionRule(selection, unit: nil)
-        }
-        .naraChartAxes(x: ChartAxis.layout(window, style: .hours, target: 4), y: yLayout)
-        .chartScrub(xs: bars.map(\.mid), selection: $selection)
-        .frame(height: 88)
-        .accessibilityLabel(Text("Readings over the stretch"))
-    }
-
-    private static func date(_ ts: Int) -> Date { Date(timeIntervalSince1970: TimeInterval(ts)) }
 }

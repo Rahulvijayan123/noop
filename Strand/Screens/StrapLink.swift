@@ -117,7 +117,7 @@ extension StrapLinkInputs {
             hasReconnectGuide: live.reconnectGuide != nil,
             radioProblem: live.lastSyncError.flatMap { $0.contains("Bluetooth") ? $0 : nil },
             batteryPct: live.batteryPct,
-            charging: live.charging,
+            charging: live.isChargingNow,
             firmware: live.strapFirmware,
             knownStrap: knownStrap,
             isWhoop4: live.connected && model.ble.isWhoop4)

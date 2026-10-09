@@ -49,6 +49,35 @@ private struct WatchdogUnits {
     var fahrenheit: Bool { temperatureUnit == .fahrenheit }
 }
 
+/// The newest reading TODAY of the vitals Watchdog reads only at still minutes (resting HR, SpO₂), so their tiles
+/// carry a real value with the time it was read when the last half-hour has none.
+@MainActor
+enum WatchdogTodayLatest {
+    static func load(repo: Repository) async -> [String: WatchdogFallback] {
+        var out: [String: WatchdogFallback] = [:]
+        let day = Repository.localDayKey(Date())
+        let store = PhysiologyContextStore.shared
+        let key = PhysiologyContextStore.Key(day: day, metric: .restingHeartRate)
+        await store.load(key)
+        if let document = store.state(for: key)?.shownDay?.document {
+            let zone = PhysiologyContextWording.zone(document.timezoneId)
+            if let interval = KeyMetricWindows.today(day, timeZone: zone),
+               let last = KeyMetricWindows.readings(
+                KeyMetricWindows.envelopes([document], metric: .restingHeartRate, in: interval)).last {
+                out["rhr"] = WatchdogFallback(value: "\(Int(last.value.rounded())) bpm",
+                                              caption: "Read " + KeyMetricDetailView.timeText(last.mid, zone: zone))
+            }
+        }
+        let start = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
+        let spo2 = await repo.bankedSeries(.spo2, from: start, to: Int(Date().timeIntervalSince1970))
+        if let value = spo2.lastValue, let ts = spo2.lastTs {
+            out["spo2"] = WatchdogFallback(value: "\(MonitorLabels.number(value, unit: "%")) %",
+                                           caption: "Read " + KeyMetricDetailView.timeText(Date(timeIntervalSince1970: TimeInterval(ts)), zone: .current))
+        }
+        return out
+    }
+}
+
 extension WatchdogLiveSnapshot {
     /// Whether any vital has a reading in the half-hour (a strap is on and streaming).
     var hasReadings: Bool { metrics.contains { $0.status != "No reading" } }
@@ -70,6 +99,7 @@ struct WatchdogLiveCard: View {
     @AppStorage(UnitPrefs.systemKey) private var unitSystemRaw = UnitSystem.imperial.rawValue
     @AppStorage(UnitPrefs.temperatureKey) private var temperatureRaw = ""
     @State private var picked: WatchdogPick?
+    @State private var todayLatest: [String: WatchdogFallback] = [:]
 
     private var units: WatchdogUnits { WatchdogUnits(unitSystemRaw: unitSystemRaw, temperatureRaw: temperatureRaw) }
 
@@ -83,6 +113,16 @@ struct WatchdogLiveCard: View {
     private var checking: Bool { store.watchdogResult == nil }
 
     private let columns = Array(repeating: GridItem(.flexible(), spacing: NoopMetrics.space2), count: 3)
+
+    /// Last night's value for a vital with no reading in the half-hour; nil for a vital that has a live one.
+    private func fallback(for row: WatchdogLiveSnapshot.MetricRow) -> WatchdogFallback? {
+        guard row.status == "No reading" else { return nil }
+        if let today = todayLatest[row.id] { return today }
+        let now = Date()
+        return WatchdogFallback.make(id: row.id, days: repo.days,
+                                     todayKey: max(Repository.logicalDayKey(now), Repository.localDayKey(now)),
+                                     fahrenheit: units.fahrenheit)
+    }
 
     var body: some View {
         let snap = snapshot
@@ -105,28 +145,37 @@ struct WatchdogLiveCard: View {
                         .padding(.horizontal, NoopMetrics.cardPadding)
                         .padding(.bottom, NoopMetrics.space3)
                 }
-                if checking || snap.hasReadings {
-                    LazyVGrid(columns: columns, spacing: NoopMetrics.space2) {
-                        ForEach(snap.metrics) { row in
-                            Button { picked = WatchdogPick(id: row.id) } label: {
-                                WatchdogVitalCell(row: row)
-                            }
-                            .buttonStyle(LiquidPressStyle())
-                            .accessibilityHint("Shows the last 30 minutes")
+                // Always the six vitals. With no half-hour reading a cell carries last night's value (stamped)
+                // instead of the whole grid disappearing, so resting HR and SpO₂ are always on the card.
+                LazyVGrid(columns: columns, spacing: NoopMetrics.space2) {
+                    ForEach(snap.metrics) { row in
+                        Button { picked = WatchdogPick(id: row.id) } label: {
+                            WatchdogVitalCell(row: row, fallback: fallback(for: row))
                         }
+                        .buttonStyle(LiquidPressStyle())
+                        .accessibilityHint("Shows the last 30 minutes")
                     }
-                    .padding([.horizontal, .bottom], NoopMetrics.cardPadding)
-                    .loadingPlaceholder(checking)
                 }
+                .padding([.horizontal, .bottom], NoopMetrics.cardPadding)
+                .loadingPlaceholder(checking)
                 if store.pendingEpisodeNote != nil {
                     NoopListDivider(leadingInset: 0)
                     WatchdogNoteButton(title: "Add a note about the last alert") {
                         store.showEpisodeNoteSheet = true
                     }
                 }
+                if !checking, !snap.hasReadings {
+                    // Why there is nothing live (charging, not connected, off wrist). It sits at the bottom of the
+                    // card, under the vitals, rather than above them.
+                    WatchdogNoReadingNote(wristOff: store.watchdogResult?.unavailable == .wristOff)
+                        .padding(.horizontal, NoopMetrics.cardPadding)
+                        .padding(.top, NoopMetrics.space3)
+                        .padding(.bottom, NoopMetrics.space3)
+                }
             }
         }
         .onAppear { WatchdogNotifier.requestAuthorization() }
+        .task(id: store.watchdogResult?.lastTickUnix ?? 0) { todayLatest = await WatchdogTodayLatest.load(repo: repo) }
         .sheet(item: $picked) { pick in
             let snap = snapshot
             if let row = snap.metrics.first(where: { $0.id == pick.id }) {
@@ -227,6 +276,8 @@ private struct WatchdogValueLine: View {
 /// One vital on the root card: name, value with its unit, the call. Fixed height.
 private struct WatchdogVitalCell: View {
     let row: WatchdogLiveSnapshot.MetricRow
+    /// Last night's value, when the half-hour has no reading for this vital.
+    var fallback: WatchdogFallback?
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.space1) {
@@ -235,10 +286,10 @@ private struct WatchdogVitalCell: View {
                 .foregroundStyle(StrandPalette.textSecondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.75)
-            WatchdogValueLine(formatted: row.now)
-            Text(MonitorLabels.watchdogStatus(row.status))
+            WatchdogValueLine(formatted: fallback?.value ?? row.now)
+            Text(fallback?.caption ?? MonitorLabels.watchdogStatus(row.status))
                 .font(StrandFont.footnote.weight(.medium))
-                .foregroundStyle(row.tone)
+                .foregroundStyle(fallback == nil ? row.tone : StrandPalette.textSecondary)
                 .lineLimit(1)
                 .minimumScaleFactor(0.8)
         }
@@ -247,13 +298,27 @@ private struct WatchdogVitalCell: View {
         .background(NoopInsetSurface())
         .contentShape(RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous))
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(WatchdogVitalCell.spoken(row))
+        .accessibilityLabel(fallback.map { "\(row.name), \($0.value), \($0.caption)" } ?? WatchdogVitalCell.spoken(row))
     }
 
     static func spoken(_ row: WatchdogLiveSnapshot.MetricRow) -> String {
         let parts = MonitorLabels.splitValue(row.now)
         let value = parts.value.map { "\($0) \(MonitorLabels.unit(parts.unit ?? "", fahrenheit: false))" } ?? "no reading"
         return "\(row.name), \(value), \(MonitorLabels.watchdogStatus(row.status))"
+    }
+}
+
+/// The reason there is nothing live, when the app can tell (the strap is charging, not connected or off the wrist).
+/// Owns LiveState so a heart-rate tick redraws this note and not the whole Watchdog card.
+private struct WatchdogNoReadingNote: View {
+    @EnvironmentObject private var live: LiveState
+    let wristOff: Bool
+
+    var body: some View {
+        if let reason = MonitorLabels.noReadingReason(charging: live.isChargingNow, connected: live.connected,
+                                                      activeIsWhoop: live.activeIsWhoop, wristOff: wristOff) {
+            InlineNotice(reason, tone: .neutral, placement: .inCard)
+        }
     }
 }
 
@@ -302,6 +367,7 @@ struct WatchdogPage: View {
     /// Only the DEBUG screenshot hook opens an alert from the page itself; the rows open their own.
     @State private var pickedAlert: WatchdogPick?
     @State private var demoApplied = false
+    @State private var todayLatest: [String: WatchdogFallback] = [:]
 
     private var units: WatchdogUnits { WatchdogUnits(unitSystemRaw: unitSystemRaw, temperatureRaw: temperatureRaw) }
 
@@ -342,7 +408,8 @@ struct WatchdogPage: View {
                             Button { picked = WatchdogPick(id: row.id) } label: {
                                 WatchdogVitalTile(row: row,
                                                   trace: WatchdogTrace(result: result, row: row,
-                                                                       fahrenheit: units.fahrenheit))
+                                                                       fahrenheit: units.fahrenheit),
+                                                  fallback: row.status == "No reading" ? todayLatest[row.id] : nil)
                             }
                             .buttonStyle(LiquidPressStyle())
                             .accessibilityHint("Shows the last 30 minutes")
@@ -369,6 +436,7 @@ struct WatchdogPage: View {
             AboutDisclosure("About Watchdog", paragraphs: aboutParagraphs)
         }
         .onAppear { WatchdogNotifier.requestAuthorization() }
+        .task(id: store.watchdogResult?.lastTickUnix ?? 0) { todayLatest = await WatchdogTodayLatest.load(repo: repo) }
         #if DEBUG
         .task(id: store.watchdogResult?.lastTickUnix ?? 0) { applyDemoSheet() }
         #endif
@@ -496,6 +564,8 @@ struct WatchdogPage: View {
 private struct WatchdogVitalTile: View {
     let row: WatchdogLiveSnapshot.MetricRow
     let trace: WatchdogTrace?
+    /// Today's newest reading, when the last half-hour has none.
+    var fallback: WatchdogFallback?
     @State private var noSelection: Date?
 
     var body: some View {
@@ -506,13 +576,13 @@ private struct WatchdogVitalTile: View {
                     .foregroundStyle(StrandPalette.textSecondary)
                     .lineLimit(1)
                 Spacer(minLength: NoopMetrics.space1)
-                Text(MonitorLabels.watchdogStatus(row.status))
+                Text(fallback?.caption ?? MonitorLabels.watchdogStatus(row.status))
                     .font(StrandFont.footnote.weight(.medium))
-                    .foregroundStyle(row.tone)
+                    .foregroundStyle(fallback == nil ? row.tone : StrandPalette.textSecondary)
                     .lineLimit(1)
                     .minimumScaleFactor(0.8)
             }
-            WatchdogValueLine(formatted: row.now)
+            WatchdogValueLine(formatted: fallback?.value ?? row.now)
             Group {
                 if let trace, !trace.readings.isEmpty {
                     WatchdogWindowChart(trace: trace, compact: true, selection: $noSelection, height: 44,
@@ -555,6 +625,8 @@ private struct WatchdogVitalSheet: View {
         return ChartSelection.nearestIndex(to: selection, in: readings.map(\.time)).map { readings[$0] }
     }
 
+    private var windowIsEmpty: Bool { trace?.readings.isEmpty ?? true }
+
     private var spanLine: String {
         guard let trace else { return "Last 30 minutes" }
         let start = WatchdogEventCopy.clock(Int(trace.window.lowerBound.timeIntervalSince1970))
@@ -577,13 +649,27 @@ private struct WatchdogVitalSheet: View {
         let context: String
         switch row.status {
         case "Live", "Learning": context = "Still learning your range"
-        case "No reading": context = "No reading in this half-hour"
+        case "No reading": context = dayMetric == nil ? "No reading in this half-hour" : "Not read in the last 30 minutes"
         default:
             let expected = MonitorLabels.splitValue(row.expected).value
             context = expected.map { "\(status) · expected \($0) \(unit)" } ?? status
         }
         return ReadoutContent(dateLine: spanLine, value: MonitorLabels.splitValue(row.now).value, unit: unit,
                               context: context)
+    }
+
+    /// The vital's full day under the half-hour: Watchdog itself scores only the last 30 minutes, but the strap
+    /// and the server keep every reading since midnight.
+    private var dayMetric: MetricInsightMetric? {
+        switch row.id {
+        case "hr": return .heartRate
+        case "rhr": return .restingHeartRate
+        case "hrv": return .hrvRmssd
+        case "temp": return .skinTemp
+        case "resp": return .respRate
+        case "spo2": return .spo2
+        default: return nil
+        }
     }
 
     private var stats: [StatItem] {
@@ -630,14 +716,28 @@ private struct WatchdogVitalSheet: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: NoopMetrics.sectionGap) {
                     ValueReadout(readout, isScrubbing: selection != nil)
-                    NoopCard {
-                        if let trace {
-                            WatchdogWindowChart(trace: trace, selection: $selection,
-                                                height: NoopMetrics.chartHeightSecondary + 60,
-                                                accessibilityTitle: row.name)
-                        } else {
-                            EmptyChartMessage("No readings in this half-hour",
-                                              height: NoopMetrics.chartHeightSecondary + 60)
+                    if windowIsEmpty, dayMetric != nil {
+                        // Nothing in the last half-hour (resting HR and SpO₂ are only read at still minutes):
+                        // an empty chart says nothing, so the day's readings take its place.
+                        Text("\(row.name) was not read in the last 30 minutes, so here is every reading today.")
+                            .font(.footnote)
+                            .foregroundStyle(StrandPalette.textSecondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                    } else {
+                        NoopCard {
+                            if let trace, !trace.readings.isEmpty {
+                                WatchdogWindowChart(trace: trace, selection: $selection,
+                                                    height: NoopMetrics.chartHeightSecondary + 60,
+                                                    accessibilityTitle: row.name)
+                            } else {
+                                EmptyChartMessage("No readings in this half-hour",
+                                                  height: NoopMetrics.chartHeightSecondary + 60)
+                            }
+                        }
+                    }
+                    if let metric = dayMetric {
+                        NoopCard {
+                            DayReadingsChart(metric: metric, unit: unit, fahrenheit: unit.contains("F"))
                         }
                     }
                     StatGrid(stats, columns: 2)

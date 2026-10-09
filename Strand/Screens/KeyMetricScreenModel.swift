@@ -29,14 +29,30 @@ enum KeyMetricPeriod: Hashable, Sendable {
 }
 
 extension MetricInsightMetric {
-    /// The context-layer metric whose 5-minute windows the 24-hour view shows; nil when the screen has no such
-    /// view. Resting heart rate, temperature, breathing, blood oxygen, steps and calories are nightly or daily
-    /// values whose windows are not the same measurement, so they keep to the multi-day views.
+    /// The context-layer metric whose 5-minute windows History's 24-hour view shows; nil when the screen has no
+    /// such view. Resting heart rate and breathing have windows of another grain (a rolling hourly low, 2-minute
+    /// windows), which only the Today chart draws.
     var windowMetric: PhysiologyContext.MetricKind? {
         switch self {
         case .hrvRmssd: return .hrvRmssd
         case .hrvSdnn: return .hrvSdnn
         case .heartRate: return .heartRate
+        default: return nil
+        }
+    }
+
+    /// What the Today chart draws for today: the server's windows, or the readings the phone banked from the
+    /// strap; nil for the day totals (steps, calories), whose Today chart is the last seven days.
+    var todaySource: KeyMetricTodaySource? {
+        // SDNN has no 5-minute windows on the server (only one value per night), so the phone computes them from
+        // the strap's R-R intervals, one per 5 minutes beside RMSSD's.
+        if self == .hrvSdnn { return .banked(.hrvSdnn) }
+        if let kind = windowMetric { return .windows(kind) }
+        switch self {
+        case .respRate: return .windows(.respiratoryRate)
+        case .restingHeartRate: return .windows(.restingHeartRate)
+        case .skinTemp: return .banked(.skinTemp)
+        case .spo2: return .banked(.spo2)
         default: return nil
         }
     }
@@ -58,6 +74,22 @@ extension MetricInsightMetric {
     var defaultWindowContext: KeyMetricWindowFilter {
         period == .night ? .sleep : .stableAwake
     }
+}
+
+enum KeyMetricTodaySource: Equatable, Sendable {
+    case windows(PhysiologyContext.MetricKind)
+    case banked(KeyMetricBankedSignal)
+}
+
+enum KeyMetricBankedSignal: Equatable, Sendable {
+    /// 5-minute means of the strap's per-second wrist temperature.
+    case skinTemp
+    /// Each in-band SpO₂ reading; the strap writes them only while its wearer sleeps still.
+    case spo2
+    /// SDNN of each 5-minute window of the strap's R-R intervals, computed on the phone.
+    case hrvSdnn
+
+    var seconds: Int { self == .spo2 ? 1 : 300 }
 }
 
 enum KeyMetricPeriods {
@@ -238,24 +270,29 @@ enum KeyMetricSummary {
 
 // MARK: - 24-hour view
 
-/// The context a 5-minute window was taken in, from the server's sleep detection, stable-awake eligibility and
-/// activity composition. An estimate, and the screen labels it so.
+/// What the wearer was doing during a window, from the server's wear and sleep detection and the activity
+/// classifier's labels (strap motion, then the decoder's posture where the motion only says "still"). An
+/// estimate, and the screen labels it so.
 enum KeyMetricWindowContext: String, CaseIterable, Sendable {
     case sleep
-    case stableAwake
+    case lyingDown
+    case sitting
+    case standing
+    case still
     case moving
-    case awake
-    case mixed
-    case unknown
+    case offWrist
+    case unclear
 
     var name: String {
         switch self {
-        case .sleep: return String(localized: "Sleep")
-        case .stableAwake: return String(localized: "Stable awake")
+        case .sleep: return String(localized: "Sleeping")
+        case .lyingDown: return String(localized: "Lying down")
+        case .sitting: return String(localized: "Sitting")
+        case .standing: return String(localized: "Standing")
+        case .still: return String(localized: "Still")
         case .moving: return String(localized: "Moving")
-        case .awake: return String(localized: "Awake")
-        case .mixed: return String(localized: "Mixed")
-        case .unknown: return String(localized: "Unknown")
+        case .offWrist: return String(localized: "Off wrist")
+        case .unclear: return String(localized: "Unclear")
         }
     }
 
@@ -264,20 +301,37 @@ enum KeyMetricWindowContext: String, CaseIterable, Sendable {
         "walking", "brisk_walking", "running", "stepping", "cycling", "other_movement", "light_activity",
         "vigorous_activity",
     ]
+    /// Labels that say the wrist was still without saying how the body was placed.
+    static let stillLabels: Set<String> = ["stationary", "still", "low_movement"]
 
-    /// Sleep first (the sleep detector's state), then stable awake (the server's own eligibility), then a
-    /// dominant moving label, then mixed (partly asleep, or no single activity label), then plain awake.
+    /// Off the wrist first (the server's wear evidence), then asleep (the sleep detector), then a partly asleep
+    /// window as unclear, then the dominant activity label; a window with no single label is unclear.
     static func of(_ e: PhysiologyContext.MeasurementEnvelope) -> KeyMetricWindowContext {
+        if e.sleepWear.wearState == .notWorn { return .offWrist }
         switch e.sleepWear.sleepState {
         case .asleep: return .sleep
-        case .mixed: return .mixed
-        case .unknown: return .unknown
-        case .awake: break
+        case .mixed: return .unclear
+        case .awake, .unknown: break
         }
-        if e.verdict(.stableAwakeRest)?.state == .eligible { return .stableAwake }
-        if let label = e.activity.dominantLabel, movingLabels.contains(label) { return .moving }
-        if e.activity.mixed || e.activity.dominantLabel == nil { return .mixed }
-        return .awake
+        var label = e.activity.dominantLabel
+        if label == nil || stillLabels.contains(label!), let posture = e.decoderActivity?.dominantLabel,
+           ["sitting", "sitting_desk", "standing", "lying_down"].contains(posture) {
+            label = posture
+        }
+        guard let label else { return .unclear }
+        if movingLabels.contains(label) { return .moving }
+        switch label {
+        case "sitting", "sitting_desk": return .sitting
+        case "standing": return .standing
+        case "lying_down": return .lyingDown
+        case "sleeping": return e.sleepWear.sleepState == .unknown ? .sleep : .still
+        default: return stillLabels.contains(label) ? .still : .unclear
+        }
+    }
+
+    /// The server's own stable-awake-rest eligibility, outside sleep.
+    static func isStableAwake(_ e: PhysiologyContext.MeasurementEnvelope) -> Bool {
+        e.sleepWear.sleepState != .asleep && e.verdict(.stableAwakeRest)?.state == .eligible
     }
 }
 
@@ -288,21 +342,28 @@ enum KeyMetricWindowFilter: String, CaseIterable, Hashable, Sendable {
     var name: String {
         switch self {
         case .all: return String(localized: "All")
-        case .sleep: return KeyMetricWindowContext.sleep.name
-        case .stableAwake: return KeyMetricWindowContext.stableAwake.name
+        case .sleep: return String(localized: "Sleep")
+        case .stableAwake: return String(localized: "Stable awake")
         }
     }
 
-    func admits(_ context: KeyMetricWindowContext) -> Bool {
+    func admits(_ context: KeyMetricWindowContext, stableAwake: Bool) -> Bool {
         switch self {
         case .all: return true
         case .sleep: return context == .sleep
-        case .stableAwake: return context == .stableAwake
+        case .stableAwake: return stableAwake
         }
+    }
+
+    func admits(_ r: KeyMetricWindowReading) -> Bool { admits(r.context, stableAwake: r.stableAwake) }
+
+    func admits(_ e: PhysiologyContext.MeasurementEnvelope) -> Bool {
+        admits(KeyMetricWindowContext.of(e), stableAwake: KeyMetricWindowContext.isStableAwake(e))
     }
 }
 
-/// One accepted 5-minute estimate.
+/// One accepted estimate: a 5-minute (or shorter) window, a phone-banked strap reading, or a night's value
+/// drawn across the sleep it covers.
 struct KeyMetricWindowReading: Equatable, Identifiable, Sendable {
     let id: String
     let start: Int
@@ -311,8 +372,11 @@ struct KeyMetricWindowReading: Equatable, Identifiable, Sendable {
     let context: KeyMetricWindowContext
     /// The observed share of the window's input signal, when the server reported one.
     let coverage: Double?
+    var stableAwake: Bool = false
 
     var mid: Date { Date(timeIntervalSince1970: TimeInterval(start + end) / 2) }
+    /// A value that stands for a whole session (a night), drawn as a span rather than a point.
+    var isSpan: Bool { end - start > 1_800 }
 }
 
 /// A stretch of the activity lane: consecutive windows with one context.
@@ -330,33 +394,160 @@ enum KeyMetricWindows {
                           in interval: PhysiologyContext.Interval) -> [PhysiologyContext.MeasurementEnvelope] {
         var seen = Set<String>()
         return documents.flatMap(\.envelopes).filter { e in
-            e.metric == metric && e.method.aggregation == .window && !MeasurementContextSelection.isNightly(e)
-                && interval.contains(e.support.start) && seen.insert(e.id).inserted
-        }.sorted { ($0.support.start, $0.id) < ($1.support.start, $1.id) }
+            e.metric == metric && e.method.aggregation != .day && !MeasurementContextSelection.isNightly(e)
+                && interval.contains(slot(e).start) && seen.insert(e.id).inserted
+        }.sorted { (slot($0).start, $0.id) < (slot($1).start, $1.id) }
+    }
+
+    /// Where a window sits on the time axis: its display bucket when the server gave one (a rolling estimate's
+    /// support reaches back further than the moment it describes), else its support.
+    static func slot(_ e: PhysiologyContext.MeasurementEnvelope) -> PhysiologyContext.Interval {
+        e.displayBucket ?? e.support
     }
 
     /// The accepted estimates: a finite positive value whose signal passed the quality checks (fully, or with
     /// stated limitations). A window that failed them, or had no signal, is a gap.
     static func readings(_ envelopes: [PhysiologyContext.MeasurementEnvelope]) -> [KeyMetricWindowReading] {
         envelopes.compactMap { e in
-            guard let v = e.value, v.isFinite, v > 0,
-                  e.validity.state == .valid || e.validity.state == .degraded else { return nil }
-            return KeyMetricWindowReading(id: e.id, start: e.support.start, end: e.support.end, value: v,
-                                          context: KeyMetricWindowContext.of(e), coverage: e.validity.coverage)
+            guard isAccepted(e), let v = e.value else { return nil }
+            let at = slot(e)
+            return KeyMetricWindowReading(id: e.id, start: at.start, end: at.end, value: v,
+                                          context: KeyMetricActivityLanes.filled(KeyMetricWindowContext.of(e),
+                                                                                 start: at.start, end: at.end),
+                                          coverage: e.validity.coverage,
+                                          stableAwake: KeyMetricWindowContext.isStableAwake(e))
         }
+    }
+
+    /// The accepted nightly (session) values of `metric` that overlap `interval`, each drawn across the sleep
+    /// it covers: what a metric the server measures once a night shows on a day's chart.
+    static func sessions(_ documents: [PhysiologyContextDocument], metric: PhysiologyContext.MetricKind,
+                         overlapping interval: PhysiologyContext.Interval) -> [KeyMetricWindowReading] {
+        var seen = Set<String>()
+        return documents.flatMap(\.envelopes).filter { e in
+            e.metric == metric && MeasurementContextSelection.isNightly(e) && isAccepted(e)
+                && e.support.end > interval.start && e.support.start < interval.end && seen.insert(e.id).inserted
+        }.sorted { $0.support.start < $1.support.start }.compactMap { e in
+            e.value.map {
+                KeyMetricWindowReading(id: e.id, start: e.support.start, end: e.support.end, value: $0,
+                                       context: KeyMetricWindowContext.of(e), coverage: e.validity.coverage)
+            }
+        }
+    }
+
+    /// Readings the phone banked from the strap (one per point), each in the context of the lane span it falls
+    /// in (unclear where the lane says nothing).
+    static func banked(_ points: [(ts: Int, value: Double)], seconds: Int,
+                       lane: [KeyMetricContextSpan]) -> [KeyMetricWindowReading] {
+        points.map { p in
+            let found = lane.first { p.ts >= $0.start && p.ts < $0.end }?.context ?? .unclear
+            let context = KeyMetricActivityLanes.filled(found, start: p.ts, end: p.ts + max(1, seconds))
+            return KeyMetricWindowReading(id: "\(p.ts)", start: p.ts, end: p.ts + max(1, seconds), value: p.value,
+                                          context: context, coverage: nil)
+        }
+    }
+
+    /// The stretches of at least `minimumUnrecorded` seconds between banked readings, up to `now`; where the
+    /// lane says the strap was off the wrist for most of a stretch, that is the reason. `within` limits them to
+    /// the lane spans of those contexts (blood oxygen is only measured asleep, so its daytime is not a gap).
+    static func bankedGaps(_ readings: [KeyMetricWindowReading], interval: PhysiologyContext.Interval,
+                           lane: [KeyMetricContextSpan], within: Set<KeyMetricWindowContext>? = nil,
+                           now: Date = Date(), minimumUnrecorded: Int = 900) -> [KeyMetricGap] {
+        let limit = min(interval.end, Int(now.timeIntervalSince1970))
+        var holes: [(Int, Int)] = []
+        var cursor = interval.start
+        for r in readings where r.start < limit {
+            if r.start - cursor >= minimumUnrecorded { holes.append((cursor, r.start)) }
+            cursor = max(cursor, r.end)
+        }
+        if limit - cursor >= minimumUnrecorded { holes.append((cursor, limit)) }
+        if let within {
+            let allowed = lane.filter { within.contains($0.context) }
+            holes = holes.flatMap { hole in
+                allowed.compactMap { span -> (Int, Int)? in
+                    let a = max(hole.0, span.start), b = min(hole.1, span.end)
+                    return b - a >= minimumUnrecorded ? (a, b) : nil
+                }
+            }
+        }
+        return holes.map { a, b in
+            let off = lane.filter { $0.context == .offWrist }
+                .reduce(0) { $0 + max(0, min(b, $1.end) - max(a, $1.start)) }
+            let cause: KeyMetricGap.Cause = off * 2 >= b - a ? .rejected(KeyMetricScreenCopy.gapOffWrist) : .unrecorded
+            return KeyMetricGap(startS: a, endS: b, cause: cause)
+        }
+    }
+
+    /// Everything a day chart draws from `source` over `interval`: the readings, the stretches without one, and
+    /// the activity lane (the metric's own windows', else heart rate's, which cover the whole worn day). When
+    /// the day has no reading, a metric the server measures per night shows that night across its sleep
+    /// (`sessions`). `banked` is nil while the phone's strap readings are still being read.
+    struct DayReadings {
+        var readings: [KeyMetricWindowReading] = []
+        var gaps: [KeyMetricGap] = []
+        var lane: [KeyMetricContextSpan] = []
+        var sessions = false
+    }
+
+    static func day(_ source: KeyMetricTodaySource, night: PhysiologyContext.MetricKind?,
+                    interval: PhysiologyContext.Interval,
+                    documents: (PhysiologyContext.MetricKind) -> [PhysiologyContextDocument],
+                    banked: KeyMetricReadings.BankedSeries?, now: Date = Date()) -> DayReadings {
+        let heartRate = envelopes(documents(.heartRate), metric: .heartRate, in: interval)
+        var out = DayReadings(lane: lane(heartRate))
+        if out.lane.isEmpty {
+            // No server windows yet: the phone's own classification still says what the day was.
+            out.lane = KeyMetricActivityLanes.all.filter { $0.end > interval.start && $0.start < interval.end }
+        }
+        switch source {
+        case .windows(let kind):
+            let own = kind == .heartRate ? heartRate : envelopes(documents(kind), metric: kind, in: interval)
+            out.readings = readings(own)
+            out.gaps = gaps(own, interval: interval, filter: .all, now: now)
+            if !own.isEmpty { out.lane = lane(own) }
+        case .banked(let signal):
+            guard let banked else { return out }
+            let points = banked.points.filter { $0.ts >= interval.start && $0.ts < interval.end }
+            out.readings = self.banked(points.map { ($0.ts, $0.value) }, seconds: signal.seconds, lane: out.lane)
+            out.gaps = bankedGaps(out.readings, interval: interval, lane: out.lane,
+                                  within: signal == .spo2 ? [.sleep] : nil, now: now)
+        }
+        if out.readings.isEmpty, let night {
+            out.readings = sessions(documents(night), metric: night, overlapping: interval)
+            out.sessions = !out.readings.isEmpty
+            if out.sessions { out.gaps = [] }
+        }
+        return out
+    }
+
+    /// Today's chart: local midnight up to now.
+    static func today(_ day: String, timeZone: TimeZone, now: Date = Date()) -> PhysiologyContext.Interval? {
+        guard let whole = span(day: day, period: .day, timeZone: timeZone)?.interval else { return nil }
+        let end = min(whole.end, Int(now.timeIntervalSince1970))
+        return PhysiologyContext.Interval(whole.start, max(whole.start + 60, end))
     }
 
     /// The activity lane: every window's context (accepted or not, so the lane shows where the strap knew the
     /// context even when the estimate was rejected), joined where adjacent windows share one.
     static func lane(_ envelopes: [PhysiologyContext.MeasurementEnvelope]) -> [KeyMetricContextSpan] {
+        KeyMetricActivityLanes.filled(rawLane(envelopes))
+    }
+
+    private static func rawLane(_ envelopes: [PhysiologyContext.MeasurementEnvelope]) -> [KeyMetricContextSpan] {
         var spans: [KeyMetricContextSpan] = []
         for e in envelopes {
             let context = KeyMetricWindowContext.of(e)
-            if let last = spans.last, last.context == context, e.support.start - last.end <= 60 {
-                spans[spans.count - 1] = KeyMetricContextSpan(start: last.start, end: max(last.end, e.support.end),
+            let at = slot(e)
+            if let last = spans.last, last.context == context, at.start - last.end <= 60 {
+                spans[spans.count - 1] = KeyMetricContextSpan(start: last.start, end: max(last.end, at.end),
                                                               context: context)
+            } else if let last = spans.last, at.start < last.end {
+                // Overlapping slots: the later window takes over from where it starts.
+                spans[spans.count - 1] = KeyMetricContextSpan(start: last.start, end: at.start, context: last.context)
+                if spans[spans.count - 1].end <= spans[spans.count - 1].start { spans.removeLast() }
+                spans.append(KeyMetricContextSpan(start: at.start, end: at.end, context: context))
             } else {
-                spans.append(KeyMetricContextSpan(start: e.support.start, end: e.support.end, context: context))
+                spans.append(KeyMetricContextSpan(start: at.start, end: at.end, context: context))
             }
         }
         return spans
@@ -411,6 +602,167 @@ enum KeyMetricWindows {
               reference.status == .ready || reference.status == .provisional,
               let center = reference.center, center.isFinite, center > 0 else { return nil }
         return reference
+    }
+
+    /// Whether the window's estimate is one the chart draws (the rule `readings` applies).
+    static func isAccepted(_ e: PhysiologyContext.MeasurementEnvelope) -> Bool {
+        guard let v = e.value, v.isFinite, v > 0 else { return false }
+        return e.validity.state == .valid || e.validity.state == .degraded
+    }
+
+    /// The stretches without a reading, up to `now`: the windows the server rejected (in a context `filter`
+    /// admits) with the server's own leading reason, and stretches of at least `minimumUnrecorded` seconds with no
+    /// window at all. Adjacent stretches with the same reason are joined.
+    static func gaps(_ envelopes: [PhysiologyContext.MeasurementEnvelope], interval: PhysiologyContext.Interval,
+                     filter: KeyMetricWindowFilter, now: Date = Date(),
+                     minimumUnrecorded: Int = 900) -> [KeyMetricGap] {
+        var gaps: [KeyMetricGap] = []
+        func add(_ start: Int, _ end: Int, _ cause: KeyMetricGap.Cause) {
+            guard end > start else { return }
+            if let last = gaps.last, last.cause == cause, start - last.endS <= 60 {
+                gaps[gaps.count - 1] = KeyMetricGap(startS: last.startS, endS: max(last.endS, end), cause: cause)
+            } else {
+                gaps.append(KeyMetricGap(startS: start, endS: end, cause: cause))
+            }
+        }
+        let limit = min(interval.end, Int(now.timeIntervalSince1970))
+        var cursor = interval.start
+        for e in envelopes where slot(e).start < limit {
+            let at = slot(e)
+            if at.start - cursor >= minimumUnrecorded { add(cursor, at.start, .unrecorded) }
+            cursor = max(cursor, at.end)
+            guard !isAccepted(e), filter.admits(e) else { continue }
+            add(max(at.start, gaps.last?.endS ?? at.start), min(at.end, limit), KeyMetricGap.cause(e.validity))
+        }
+        if !envelopes.isEmpty, limit - cursor >= minimumUnrecorded { add(cursor, limit, .unrecorded) }
+        return gaps
+    }
+
+    /// Why a night has no value of `metric`, in the server's words: only when the day's document holds nightly
+    /// (session) envelopes and the server rejected every one of them, from the longest. Nil otherwise, including a
+    /// night the server never scored.
+    static func nightlyGapReason(_ documents: [PhysiologyContextDocument],
+                                 metric: PhysiologyContext.MetricKind) -> String? {
+        let nights = documents.flatMap(\.envelopes).filter {
+            $0.metric == metric && MeasurementContextSelection.isNightly($0)
+        }
+        guard !nights.contains(where: isAccepted),
+              let longest = nights.max(by: { $0.support.end - $0.support.start < $1.support.end - $1.support.start }),
+              longest.validity.state == .invalid || longest.validity.state == .missing else { return nil }
+        return KeyMetricGap.cause(longest.validity).words(seconds: longest.support.end - longest.support.start)
+    }
+}
+
+extension KeyMetricHistory {
+    /// The days in `domain` without a reading, as gaps half a day either side of the day's position.
+    static func missingDays(_ window: [Reading], domain: ClosedRange<Date>) -> [KeyMetricGap] {
+        let measured = Set(window.map(\.day))
+        var gaps: [KeyMetricGap] = []
+        var date = domain.lowerBound
+        while date <= domain.upperBound, gaps.count < 400 {
+            let day = PhysiologyContextDates.key(date)
+            if !measured.contains(day) {
+                let t = Int(date.timeIntervalSince1970)
+                gaps.append(KeyMetricGap(startS: t - 43_200, endS: t + 43_200, cause: .noValue, day: day))
+            }
+            date = date.addingTimeInterval(86_400)
+        }
+        return gaps
+    }
+}
+
+extension MetricInsightMetric {
+    /// The context-layer metric whose nightly (session) envelope can say why a night has no value; nil for the
+    /// metrics without one (stable awake heart rate is built from windows, steps and calories are not measured
+    /// there).
+    var nightlyContextMetric: PhysiologyContext.MetricKind? {
+        switch self {
+        case .restingHeartRate: return .restingHeartRate
+        case .hrvRmssd: return .hrvRmssd
+        case .hrvSdnn: return .hrvSdnn
+        case .skinTemp: return .skinTemperature
+        case .respRate: return .respiratoryRate
+        case .spo2: return .spo2Candidate
+        case .heartRate, .steps, .calories: return nil
+        }
+    }
+}
+
+/// A stretch of a chart without a reading, and what the server said about it.
+struct KeyMetricGap: Identifiable, Equatable, Sendable {
+    enum Cause: Equatable, Sendable {
+        /// The server rejected the estimate; its leading reason in plain words when it gave one.
+        case rejected(String?)
+        /// The server's validity check found no signal at all.
+        case noSignal
+        /// No window was recorded here.
+        case unrecorded
+        /// A night or day without a value; any reason comes from that night's own envelope.
+        case noValue
+    }
+
+    let startS: Int
+    let endS: Int
+    let cause: Cause
+    /// The night or day (`yyyy-MM-dd`) of a `noValue` gap.
+    var day: String? = nil
+
+    var id: Int { startS }
+
+    /// The cause in words (lower case, no full stop); nil when nothing more than "no reading" is known.
+    var words: String? { cause.words(seconds: endS - startS) }
+    var start: Date { Date(timeIntervalSince1970: TimeInterval(startS)) }
+    var end: Date { Date(timeIntervalSince1970: TimeInterval(endS)) }
+
+    func contains(_ date: Date) -> Bool {
+        let t = Int(date.timeIntervalSince1970)
+        return t >= startS && t < endS
+    }
+}
+
+extension KeyMetricGap.Cause {
+    func words(seconds: Int) -> String? {
+        switch self {
+        case .rejected(let reason): return reason ?? KeyMetricScreenCopy.gapFailedChecks
+        case .noSignal: return KeyMetricScreenCopy.gapNoSignal
+        case .unrecorded: return KeyMetricScreenCopy.unrecordedFragment(PhysiologyContextWording.duration(seconds))
+        case .noValue: return nil
+        }
+    }
+}
+
+extension KeyMetricGap {
+    /// The cause a rejected or missing estimate's validity states.
+    static func cause(_ validity: PhysiologyContext.SignalValidity) -> Cause {
+        if let reason = PhysiologyContextWording.topReason(validity.reasons) { return .rejected(reason) }
+        return validity.state == .missing ? .noSignal : .rejected(nil)
+    }
+
+    /// One short line under a chart: the leading reasons by time lost, then the unrecorded time. Nil when there is
+    /// no gap in `domain`.
+    static func note(_ gaps: [KeyMetricGap], in domain: ClosedRange<Date>) -> String? {
+        let lo = Int(domain.lowerBound.timeIntervalSince1970), hi = Int(domain.upperBound.timeIntervalSince1970)
+        var byReason: [String: Int] = [:]
+        var order: [String] = []
+        var unrecorded = 0
+        for g in gaps {
+            let seconds = min(g.endS, hi) - max(g.startS, lo)
+            guard seconds > 0 else { continue }
+            if g.cause == .unrecorded { unrecorded += seconds; continue }
+            guard let reason = g.cause.words(seconds: seconds) else { continue }
+            if byReason[reason] == nil { order.append(reason) }
+            byReason[reason, default: 0] += seconds
+        }
+        // Longest first; a tie keeps the order the reasons appeared in.
+        let top = order.enumerated().sorted {
+            let a = byReason[$0.element, default: 0], b = byReason[$1.element, default: 0]
+            return a != b ? a > b : $0.offset < $1.offset
+        }.prefix(2).map(\.element)
+        let reasons = top.map { "\($0) (\(PhysiologyContextWording.duration(byReason[$0, default: 0])))" }
+        var parts: [String] = []
+        if !reasons.isEmpty { parts.append(KeyMetricScreenCopy.gapsBecause(reasons.joined(separator: "; "))) }
+        if unrecorded > 0 { parts.append(KeyMetricScreenCopy.unrecorded(PhysiologyContextWording.duration(unrecorded))) }
+        return parts.isEmpty ? nil : parts.joined(separator: " ")
     }
 }
 
@@ -527,58 +879,41 @@ enum KeyMetricScreenCopy {
     static var heartRateMatching: String { String(localized: "Heart rate · matching windows") }
     static var restingHeartRateNights: String { String(localized: "Resting heart rate · same nights") }
 
-    static var rowMetric: String { String(localized: "Metric") }
-    static var rowSource: String { String(localized: "Source") }
-    static var rowShaded: String { String(localized: "Shaded range") }
-    static var rowComparison: String { String(localized: "Comparison") }
-    static var rowContext: String { String(localized: "Context") }
-    static var rowMissing: String { String(localized: "Missing readings") }
     static var rowTime: String { String(localized: "Time") }
     static var rowNight: String { String(localized: "Night") }
     static var rowDay: String { String(localized: "Day") }
 
-    static var shadedUsual: String {
-        String(localized: "Your usual range for each night or day, from your own history. Not a safety range.")
-    }
-    static func shadedRecent(_ period: MetricInsightPeriod) -> String {
-        switch period {
-        case .night: return String(localized: "Middle 80% of your previous 30 measured nights. Not a safety range.")
-        case .day: return String(localized: "Middle 80% of your previous 30 measured days. Not a safety range.")
-        }
-    }
-    static var comparisonUsual: String {
-        String(localized: "The same personal baseline the Monitor and your explanation use")
-    }
-    static var comparisonRecent: String {
-        String(localized: "Your own recent history; no usual range is kept for this metric")
-    }
-    static func missing(_ period: MetricInsightPeriod) -> String {
-        switch period {
-        case .night: return String(localized: "A night without a reading is a gap, never zero")
-        case .day: return String(localized: "A day without a reading is a gap, never zero")
-        }
-    }
-    static var windowsMissing: String {
-        String(localized: "Windows that did not pass quality checks are left out, never zero")
-    }
-    static var windowsContext: String {
-        String(localized: "Estimated from the sleep detector, motion and steps")
-    }
-    static var windowsComparisonStableAwake: String {
-        String(localized: "The line is your usual median of stable awake windows")
-    }
     static var windowsComparisonOther: String {
         String(localized: "Single windows have no usual range; compare nights in the 7- and 30-night views")
     }
-    static var sourceStrap: String { String(localized: "Your strap") }
-    static var sourceServer: String { String(localized: "Your strap, processed on the server") }
-    static var rowMeasurement: String { String(localized: "Measured or estimated") }
     static var windowsAllNoRange: String {
         String(localized: "Contexts are shown below the chart; there is no combined range")
     }
     static var localTime: String { String(localized: "Local time") }
     static var heartRateAxis: String { String(localized: "Heart rate (bpm)") }
     static var fiveMinute: String { String(localized: "5-minute windows") }
+
+    /// The Today chart's grain, by what it draws.
+    static func todayGrain(_ source: KeyMetricTodaySource, sessions: Bool) -> String {
+        if sessions { return String(localized: "Last night's value") }
+        switch source {
+        case .windows(.respiratoryRate): return String(localized: "2-minute windows")
+        case .windows(.restingHeartRate): return String(localized: "Hourly low, every 5 minutes")
+        case .windows: return fiveMinute
+        case .banked(.skinTemp): return String(localized: "5-minute means from your strap")
+        case .banked(.spo2): return String(localized: "Every strap reading")
+        case .banked(.hrvSdnn): return String(localized: "5-minute windows from your strap's beats")
+        }
+    }
+    static var today: String { String(localized: "Today") }
+    static func todayCount(_ count: Int) -> String {
+        count == 1 ? String(localized: "1 reading so far today") : String(localized: "\(count) readings so far today")
+    }
+    static var noReadingsToday: String { String(localized: "No readings yet today.") }
+    static var spo2SleepOnly: String {
+        String(localized: "Your strap measures blood oxygen only while you sleep still, so the day has no readings.")
+    }
+    static var gapOffWrist: String { String(localized: "the strap was off your wrist") }
 
     /// The reading's grain on the panel: one value per night or per day.
     static func grain(_ period: MetricInsightPeriod) -> String {
@@ -610,25 +945,55 @@ enum KeyMetricScreenCopy {
         }
     }
 
-    /// What one reading is, for the method rows.
-    static func metricDescription(_ metric: MetricInsightMetric, windows: Bool) -> String {
-        if windows {
-            switch metric {
-            case .hrvRmssd: return String(localized: "Pulse-derived RMSSD in 5-minute windows")
-            case .hrvSdnn: return String(localized: "Pulse-derived SDNN in 5-minute windows")
-            default: return String(localized: "Heart rate in 5-minute windows")
-            }
+    /// "Data & method" in two sentences: what one reading is, then what the shading and the gaps mean. HRV shows
+    /// both of its measures, so it gets one text for the pair.
+    static func methodSummary(_ metrics: [MetricInsightMetric]) -> String {
+        if Set(metrics) == [.hrvRmssd, .hrvSdnn] {
+            return String(localized: "HRV is measured from your pulse as RMSSD and SDNN, one value per night and one per 5-minute window. RMSSD is shaded with your usual range and SDNN with the middle 80% of your previous 30 measured nights (neither is a safety range); missing nights and rejected windows stay as gaps, never zero.")
         }
+        guard let metric = metrics.first else { return "" }
+        return "\(methodWhat(metric)) \(methodBand(metric))"
+    }
+
+    static func methodWhat(_ metric: MetricInsightMetric) -> String {
         switch metric {
-        case .restingHeartRate: return String(localized: "Your resting heart rate, one value per night")
-        case .hrvRmssd: return String(localized: "Pulse-derived RMSSD, one value per night")
-        case .hrvSdnn: return String(localized: "Nightly SDNN index (5-minute SDNN, averaged)")
-        case .skinTemp: return String(localized: "Wrist skin temperature during sleep (not core temperature)")
-        case .respRate: return String(localized: "Breathing rate estimated from heartbeat timing during sleep")
-        case .spo2: return String(localized: "Blood oxygen estimate during sleep, not yet verified")
-        case .heartRate: return String(localized: "Median heart rate in stable awake 5-minute windows, per day")
-        case .steps: return String(localized: "Steps counted by your strap, per full day")
-        case .calories: return String(localized: "Estimated energy for each full day")
+        case .restingHeartRate: return String(localized: "Resting heart rate is one value per night from your strap; through the day it is the lowest 5 minutes of each rolling hour.")
+        case .hrvRmssd: return String(localized: "HRV (RMSSD) is measured from your pulse, one value per night and one per 5-minute window.")
+        case .hrvSdnn: return String(localized: "HRV (SDNN) is the night's 5-minute SDNN values averaged, from your pulse.")
+        case .skinTemp: return String(localized: "Wrist skin temperature is one value per night during sleep, and your strap's readings through the day; it is not core temperature.")
+        case .respRate: return String(localized: "Breathing rate is estimated from heartbeat timing, one value per night and one per 2-minute window.")
+        case .spo2: return String(localized: "Blood oxygen is a not-yet-verified estimate your strap takes only while you sleep, one value per night.")
+        case .heartRate: return String(localized: "Stable awake heart rate is the day's median of 5-minute windows taken at rest; Today shows every 5-minute window.")
+        case .steps: return String(localized: "Steps are counted by your strap, one total per full day.")
+        case .calories: return String(localized: "Calories are an estimate of the energy you used, one value per full day.")
+        }
+    }
+
+    static func methodBand(_ metric: MetricInsightMetric) -> String {
+        switch (metric.usualSeries != nil, metric.period, metric.windowMetric != nil) {
+        case (true, .night, _):
+            return String(localized: "The shaded band is your usual range from your own history, not a safety range; a night without a reading stays a gap, never zero.")
+        case (true, .day, _):
+            return String(localized: "The shaded band is your usual range from your own history, not a safety range; a day without a reading stays a gap, never zero.")
+        case (false, .night, _):
+            return String(localized: "The shaded band is the middle 80% of your previous 30 measured nights, not a safety range; a night without a reading stays a gap, never zero.")
+        case (false, .day, true):
+            return String(localized: "The shaded band is the middle 80% of your previous 30 measured days, not a safety range; a day or window without an accepted reading stays a gap, never zero.")
+        case (false, .day, false):
+            return String(localized: "The shaded band is the middle 80% of your previous 30 measured days, not a safety range; a day without a reading stays a gap, never zero.")
+        }
+    }
+
+    // Missing data: the server's own reasons, never a guess.
+    static var gapNoSignal: String { String(localized: "no signal was recorded") }
+    static var gapFailedChecks: String { String(localized: "the signal did not pass the quality checks") }
+    static func gapsBecause(_ reasons: String) -> String { String(localized: "Gaps: \(reasons).") }
+    static func unrecorded(_ duration: String) -> String { String(localized: "Nothing was recorded for \(duration).") }
+    static func unrecordedFragment(_ duration: String) -> String { String(localized: "nothing was recorded for \(duration)") }
+    static func missingBecause(_ reason: String, _ period: MetricInsightPeriod) -> String {
+        switch period {
+        case .night: return String(localized: "No reading for this night: \(reason).")
+        case .day: return String(localized: "No reading for this day: \(reason).")
         }
     }
 
@@ -639,14 +1004,17 @@ enum KeyMetricScreenCopy {
             usualNow("45–62 ms"), reading, noReading, gapNote, activityLane, stableAwakeReference,
             windowCount(1), windowCount(64), windowsNeedCloud, windowsLoading, windowsPending, usableSignal(0.8),
             method, readings, compareHeartRate, compareRestingHeartRate, heartRateMatching,
-            restingHeartRateNights, rowMetric, rowSource, rowShaded, rowComparison, rowContext, rowMissing, rowTime,
-            rowNight, rowDay, shadedUsual, comparisonUsual, comparisonRecent, windowsMissing, windowsContext,
-            windowsComparisonStableAwake, windowsComparisonOther, sourceStrap, sourceServer, rowMeasurement,
-            windowsAllNoRange, localTime, heartRateAxis, fiveMinute,
+            restingHeartRateNights, rowTime, rowNight, rowDay, windowsComparisonOther,
+            windowsAllNoRange, localTime, heartRateAxis, fiveMinute, today, todayCount(1), todayCount(140),
+            noReadingsToday, spo2SleepOnly, gapOffWrist,
         ]
+        let sources: [KeyMetricTodaySource] = [.windows(.hrvRmssd), .windows(.respiratoryRate),
+                                               .windows(.restingHeartRate), .banked(.skinTemp), .banked(.spo2)]
+        let grains = (sources + [.banked(.hrvSdnn)]).map { todayGrain($0, sessions: false) }
+            + [todayGrain(.windows(.hrvSdnn), sessions: true)]
         let perPeriod = periods.flatMap { p in
             [median(count: 1, p), median(count: 26, p), recentRange("38–55 ms", p), usualLearning(p),
-             recentLearning(p), measuredCount(5, of: 7, p), shadedRecent(p), missing(p)]
+             recentLearning(p), measuredCount(5, of: 7, p)]
                 + [KeyMetricPeriod.hours24, .range(.week), .range(.month), .range(.quarter), .range(.year)]
                     .map { KeyMetricPeriods.label($0, p) }
         }
@@ -657,11 +1025,12 @@ enum KeyMetricScreenCopy {
         let placements = [KeyMetricPlacement.within, .above, .below, .learning].flatMap { p in
             [KeyMetricBand.Kind.usual, .recent].compactMap { placement(p, kind: $0) }
         }
-        let descriptions = MetricInsightMetric.allCases.flatMap {
-            [metricDescription($0, windows: false), metricDescription($0, windows: true)]
-        }
         let names = MetricInsightMetric.allCases.flatMap { [chartName($0), memoryName($0)] }
-        return fixed + perPeriod + windows + contexts + placements + descriptions + names
+        let methods = MetricInsightMetric.allCases.map { methodSummary([$0]) } + [methodSummary([.hrvRmssd, .hrvSdnn])]
+        let gaps = [gapNoSignal, gapFailedChecks, gapsBecause("movement affected the signal (25 min)"),
+                    unrecorded("2 h 10 min"), unrecordedFragment("45 min")]
+            + periods.map { missingBecause("too many beats were rejected", $0) }
+        return fixed + grains + perPeriod + windows + contexts + placements + names + methods + gaps
             + periods.map(grain) + [bandLegend(.usual), bandLegend(.recent)]
     }
 }

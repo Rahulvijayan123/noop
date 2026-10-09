@@ -218,6 +218,62 @@ final class CoachAPIThreadTests: XCTestCase {
         XCTAssertEqual(CoachURLProtocolStub.requests("GET", "memories").last?.query, [:], "the default list is unchanged")
     }
 
+    func testMemoryEditPatchesOnlyWhatIsGivenAndKeepsTheStatusOfARefusal() async throws {
+        let id = "dddddddd-0000-4000-8000-00000000000d"
+        route(["PATCH memories/\(id)": .json(["memory": ["id": id, "content": "User runs 5k on Sundays", "topic": "training",
+                                                         "importance": 3, "updatedAt": "2026-10-09T08:00:00.000Z"]])])
+        let saved = try await api.updateMemory(id: id.uppercased(), content: "User runs 5k on Sundays")
+        XCTAssertEqual(saved.content, "User runs 5k on Sundays")
+        XCTAssertEqual(saved.updatedAt, "2026-10-09T08:00:00.000Z")
+        _ = try await api.updateMemory(id: id, content: "x", topic: "goal", importance: 9)
+        let patches = CoachURLProtocolStub.requests("PATCH", "memories/\(id)").map(\.json)
+        XCTAssertEqual(patches[0] as NSDictionary, ["content": "User runs 5k on Sundays"])
+        XCTAssertEqual(patches[1] as NSDictionary, ["content": "x", "topic": "goal", "importance": 5], "importance is clamped to 1...5")
+
+        route(["PATCH memories/\(id)": .json(["error": "stale"], status: 409)])
+        do {
+            _ = try await api.updateMemory(id: id, content: "y")
+            XCTFail("expected a 409")
+        } catch let error as CoachRouteError {
+            XCTAssertEqual(error, CoachRouteError(status: 409, code: "stale"))
+        }
+    }
+
+    func testMemorySectionsGroupByTopicSafetyFirstThenPinnedImportanceAndRecency() {
+        func memory(_ id: String, _ topic: String, _ importance: Int = 3, updated: String? = nil, pinned: Bool? = nil) -> CoachMemory {
+            CoachMemory(id: id, content: id, topic: topic, importance: importance, createdAt: "2026-01-01T00:00:00Z",
+                        updatedAt: updated, pinned: pinned)
+        }
+        let sections = CoachMemory.sections([
+            memory("run-old", "training", updated: "2026-09-01T00:00:00Z"),
+            memory("custom", "zebra"),
+            memory("run-new", "training", updated: "2026-10-01T00:00:00Z"),
+            memory("run-big", "training", 5),
+            memory("knee", "injury", 3),
+            memory("asthma", "injury", 4, pinned: true),
+            memory("marathon", "goal"),
+        ])
+        XCTAssertEqual(sections.map(\.topic), ["injury", "goal", "training", "zebra"])
+        XCTAssertEqual(sections[0].memories.map(\.id), ["asthma", "knee"])
+        XCTAssertEqual(sections[2].memories.map(\.id), ["run-big", "run-new", "run-old"])
+        XCTAssertEqual(sections[3].title, "Zebra")
+        XCTAssertNotNil(memory("a", "goal", updated: "2026-10-09T08:00:00.000Z").changedAt)
+        XCTAssertNil(CoachMemory(id: "b", content: "b", topic: "goal", importance: 3).changedAt)
+    }
+
+    func testCachedManifestsTakeTheEditedTextAndKeepTheRest() {
+        let manifest = CoachContextManifest(memories: [
+            CoachMemory(id: "m1", content: "User has a knee injury", topic: "injury", importance: 4, source: "curator", pinned: true),
+            CoachMemory(id: "m2", content: "User runs", topic: "training", importance: 3),
+        ], memoryCount: 2)
+        let edited = manifest.replacingMemory(CoachMemory(id: "m1", content: "User has a left knee injury", topic: "injury",
+                                                          importance: 4, updatedAt: "2026-10-09T08:00:00.000Z"))
+        XCTAssertEqual(edited.memories.map(\.content), ["User has a left knee injury", "User runs"])
+        XCTAssertEqual(edited.memories[0].pinned, true)
+        XCTAssertEqual(edited.memories[0].source, "curator")
+        XCTAssertEqual(edited.memoryCount, 2)
+    }
+
     // MARK: Side calls and context
 
     func testSideCallsAndContextRoutesUseTheirTimeoutsAndShapes() async throws {

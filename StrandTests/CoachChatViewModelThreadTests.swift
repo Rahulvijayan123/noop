@@ -120,7 +120,8 @@ final class CoachChatViewModelThreadTests: XCTestCase {
     private func makeVM(fallbackDelay: TimeInterval = 0.3) -> Harness {
         let box = owner!
         let api = CoachURLProtocolStub.api(owner: { box.value })
-        let vm = CoachChatViewModel(api: api, baseDirectory: base, followUpFallbackDelay: fallbackDelay, readsDeviceHistory: false)
+        let vm = CoachChatViewModel(api: api, baseDirectory: base, followUpFallbackDelay: fallbackDelay, readsDeviceHistory: false,
+                                      reopensLastChat: true)
         let repo = Repository(deviceId: "test-coach-vm")
         let engine = AICoachEngine(repo: repo)
         let profile = ProfileStore()
@@ -181,6 +182,19 @@ final class CoachChatViewModelThreadTests: XCTestCase {
     }
 
     // MARK: Launch
+
+    @MainActor
+    func testTheAppOpensOnTheGreetingEvenWithATodayThread() {
+        let now = Date()
+        seedCache(lastActive: now)
+        let box = owner!
+        let api = CoachURLProtocolStub.api(owner: { box.value })
+        let vm = CoachChatViewModel(api: api, baseDirectory: base, readsDeviceHistory: false)
+        vm.attach(repo: Repository(deviceId: "test-coach-greeting"), engine: AICoachEngine(repo: Repository(deviceId: "test-coach-greeting")),
+                  profile: ProfileStore())
+        XCTAssertNotEqual(vm.threadId.uuidString.lowercased(), thread, "a new chat, not the last one")
+        XCTAssertTrue(vm.messages.isEmpty, "the greeting shows")
+    }
 
     @MainActor
     func testLaunchReopensTodaysThreadThenMergesTheServerPage() async throws {

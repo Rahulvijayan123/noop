@@ -564,6 +564,8 @@ public struct SegmentedPillControl<T: Hashable>: View {
     let commitsReselection: Bool
     @Binding var selection: T
     @Environment(\.dynamicTypeSize) private var dynamicTypeSize
+    @Environment(\.liquidGlass) private var glass
+    @Environment(\.colorScheme) private var scheme
     public init(_ items: [T], selection: Binding<T>, adaptsToAvailableWidth: Bool = false,
                 fillsAvailableWidth: Bool = false,
                 label: @escaping (T) -> String) {
@@ -649,6 +651,8 @@ public struct SegmentedPillControl<T: Hashable>: View {
                                                                      style: .continuous)
                                 selectedShape
                                     .fill(StrandPalette.surfaceRaised)
+                                    // With Liquid Glass on, the raised tile thins like the card around it.
+                                    .opacity(glass.isEnabled ? glass.bodyOpacity(scheme) : 1)
                                     .overlay(selectedShape.strokeBorder(StrandPalette.hairline,
                                                                         lineWidth: NoopMetrics.hairlineWidth))
                             }

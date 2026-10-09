@@ -1550,6 +1550,70 @@ final class Repository: ObservableObject {
         }.value
     }
 
+    /// The phone-banked series behind a Today chart (`KeyMetricBankedSignal`).
+    func bankedSeries(_ signal: KeyMetricBankedSignal, from: Int, to: Int) async -> KeyMetricReadings.BankedSeries {
+        switch signal {
+        case .skinTemp: return await bankedSkinTemp(from: from, to: to)
+        case .spo2: return await bankedSpo2(from: from, to: to)
+        case .hrvSdnn: return await bankedHrv(sdnn: true, from: from, to: to)
+        }
+    }
+
+    /// HRV over `[from, to]` as one reading per tumbling 5-minute window, computed on the phone from the
+    /// strap's R-R intervals: SDNN (`sdnn`) or RMSSD, each over the same window with the same cleaning and
+    /// beat-accuracy gates the nightly values use (`HRVAnalyzer.rollingSdnn` / `rollingRmssd`). A window that
+    /// fails a gate or has too few clean beats gives no point (a gap, never a made-up number). Each point is
+    /// stamped at the window's start so a 5-minute reading sits where its beats were.
+    func bankedHrv(sdnn: Bool, from: Int, to: Int) async -> KeyMetricReadings.BankedSeries {
+        guard to > from, let store = await ensureStore() else { return KeyMetricReadings.BankedSeries() }
+        let window = 300
+        var rr: [RRInterval] = []
+        for id in rawPhysiologyReadIds(store: store) {
+            rr = await timelineRR(store: store, source: id, from: from - window, to: to)
+            if !rr.isEmpty { break }
+        }
+        guard !rr.isEmpty else { return KeyMetricReadings.BankedSeries() }
+        let readings: [(ts: Int, value: Double)] = await Task.detached(priority: .utility) {
+            if sdnn {
+                return HRVAnalyzer.rollingSdnn(rr: rr, windowSec: window, stepSec: window)
+                    .map { (ts: $0.ts - window, value: $0.sdnn) }
+            }
+            return HRVAnalyzer.rollingRmssd(rr: rr, windowSec: window, stepSec: window)
+                .map { (ts: $0.ts - window, value: $0.rmssd) }
+        }.value
+        return KeyMetricReadings.bankedSeries(readings.filter { $0.ts >= from }, bucketSeconds: 1)
+    }
+
+    /// Cumulative steps through the day: the strap's step counter read at each 15-minute mark from `from`, as
+    /// scaled steps (ticks / `ticksPerStep`). Each slice is counted with the same wrap-aware, class-gated
+    /// kernel as the day total (`StepsCounter`), joined to its neighbour by the sample just before it, so the
+    /// slices add up to the day's count. Nil when no strap counter covers the day.
+    func stepsThroughDay(from: Int, to: Int, ticksPerStep: Double) async -> [KeyMetricReadings.CumulativePoint]? {
+        guard to > from, let store = await ensureStore() else { return nil }
+        for id in importedReadIds {
+            let samples = (try? await store.stepSamples(deviceId: id, from: from, to: to, limit: 200_000)) ?? []
+            if samples.count < 2 { continue }
+            let points = await Task.detached(priority: .utility) {
+                KeyMetricReadings.cumulativeSteps(samples, from: from, to: to, sliceSeconds: 900,
+                                                  ticksPerStep: ticksPerStep)
+            }.value
+            if !points.isEmpty { return points }
+        }
+        return nil
+    }
+
+    /// Today's running energy total in 15-minute slices (`KeyMetricReadings.cumulativeCalories`).
+    func caloriesThroughDay(from: Int, to: Int, profile: UserProfile, hrmax: Double?, restingHR: Double?,
+                            dayTotal: Double?) async -> [KeyMetricReadings.CumulativePoint]? {
+        let hr = await hrSamples(from: from, to: to, limit: 200_000)
+        guard hr.count >= 2 else { return nil }
+        let points = await Task.detached(priority: .utility) {
+            KeyMetricReadings.cumulativeCalories(hr, from: from, to: to, sliceSeconds: 900, profile: profile,
+                                                 hrmax: hrmax, restingHR: restingHR, dayTotal: dayTotal)
+        }.value
+        return points.isEmpty ? nil : points
+    }
+
     /// Raw strap step TICKS over `[from, to]` for a manual-workout summary (#398): the wrap-aware
     /// `step_motion_counter@57` delta-sum (shared `StepsCounter` kernel) from the FIRST id that has a
     /// countable window — the active strap wins, mirroring `stepActivityClassLatest`. Never MERGED across

@@ -23,6 +23,11 @@ enum KeyMetricStyle {
     static let teal = Color(light: "#357E84", dark: "#8AD2D2")
     /// Context the readings cannot be matched to (mixed, unknown).
     static let track = Color(light: "#E8E1F0", dark: "#312741")
+    /// Activity contexts on the lane and the readings: standing, and moving.
+    static let amber = Color(light: "#A86A1C", dark: "#E8B66A")
+    static let rose = Color(light: "#B0446A", dark: "#F09AB8")
+    /// Behind a stretch without a reading: fainter than the range band, so a gap never reads as a value.
+    static let gapFill = secondary.opacity(0.12)
 
     // MARK: Type
 
@@ -68,6 +73,8 @@ struct KeyMetricPanel<Content: View>: View {
                                                                   style: .continuous))
             .overlay(RoundedRectangle(cornerRadius: KeyMetricStyle.panelRadius, style: .continuous)
                 .strokeBorder(KeyMetricStyle.border, lineWidth: 1))
+            // The panel is the one raised surface on this screen: the shared lift keeps it off the page.
+            .noopCardShadow(in: RoundedRectangle(cornerRadius: KeyMetricStyle.panelRadius, style: .continuous))
     }
 }
 
@@ -192,31 +199,6 @@ struct KeyMetricDisclosure<Content: View>: View {
     }
 }
 
-/// "Label …… value" rows, the label in the secondary colour and the value trailing.
-struct KeyMetricFacts: View {
-    let rows: [(label: String, value: String)]
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                HStack(alignment: .firstTextBaseline, spacing: 12) {
-                    Text(row.label)
-                        .foregroundStyle(KeyMetricStyle.secondary)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    Text(row.value)
-                        .foregroundStyle(KeyMetricStyle.text)
-                        .multilineTextAlignment(.trailing)
-                        .frame(maxWidth: .infinity, alignment: .trailing)
-                        .layoutPriority(1)
-                }
-                .font(KeyMetricStyle.small)
-                .fixedSize(horizontal: false, vertical: true)
-                .accessibilityElement(children: .combine)
-            }
-        }
-    }
-}
-
 // MARK: - Ask Sana
 
 /// The small pill that opens Sana with this screen's context.
@@ -231,10 +213,12 @@ struct KeyMetricAskSanaButton: View {
                     .accessibilityHidden(true)
                 Text("Ask Sana")
                     .font(KeyMetricStyle.labelStrong)
+                    .lineLimit(1)
+                    .fixedSize()
             }
             .foregroundStyle(KeyMetricStyle.accent)
-            .padding(.horizontal, 12)
-            .frame(minHeight: 32)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 34)
             .background(Capsule().fill(KeyMetricStyle.band))
             .overlay(Capsule().strokeBorder(KeyMetricStyle.border, lineWidth: 1))
             .contentShape(Capsule())

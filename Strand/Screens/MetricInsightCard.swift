@@ -28,6 +28,7 @@ enum MetricInsightCopy {
         case .day: return String(localized: "Sign in to see an explanation of your recent days.")
         }
     }
+    static var regenerate: String { String(localized: "Regenerate") }
     static var updating: String { String(localized: "Updating…") }
     static var earlier: String { String(localized: "Earlier explanation") }
     // The three section labels, in plain words for patients: what was observed, the likely interpretation, and the
@@ -99,7 +100,7 @@ enum MetricInsightCopy {
 
     /// Every fixed string above, for both periods (for the copy checks).
     static var allFixedText: [String] {
-        [title, unavailable, updating, earlier, observed, interpretation, uncertainty, related, estimated, sources,
+        [title, unavailable, regenerate, updating, earlier, observed, interpretation, uncertainty, related, estimated, sources,
          more(related: true, sources: true)]
             + MetricInsightPeriod.allCases.flatMap { [preparing($0), notEnoughData($0), signedOut($0), writtenBy($0)] }
     }
@@ -141,6 +142,17 @@ struct MetricInsightCard: View {
     var embedded = false
     /// Opens Sana about this screen; nil hides the button.
     var onAskSana: (() -> Void)? = nil
+    /// Writes the explanation again; nil hides the button. Offered when there is an explanation (or a failed
+    /// attempt) and no analysis is already running.
+    var onRegenerate: (() -> Void)? = nil
+
+    private var canRegenerate: Bool {
+        guard onRegenerate != nil, let state else { return false }
+        switch state.phase {
+        case .ready, .unavailable: return true
+        case .pending, .loading, .notEnoughData, .signedOut, .hidden: return false
+        }
+    }
 
     /// The period the card speaks of.
     private var shownPeriod: MetricInsightPeriod { state?.insight?.period ?? period }
@@ -195,14 +207,27 @@ struct MetricInsightCard: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: 8) {
-            Text(MetricInsightCopy.title)
-                .font(KeyMetricStyle.labelStrong)
-                .foregroundStyle(KeyMetricStyle.secondary)
-                .accessibilityAddTraits(.isHeader)
-            marker
-            Spacer(minLength: 8)
-            if let onAskSana { KeyMetricAskSanaButton(action: onAskSana) }
+        // Two tidy rows: the title with its state pill, then the actions, so no label ever wraps.
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(alignment: .center, spacing: 8) {
+                Text(MetricInsightCopy.title)
+                    .font(KeyMetricStyle.labelStrong)
+                    .foregroundStyle(KeyMetricStyle.secondary)
+                    .lineLimit(1)
+                    .fixedSize()
+                    .accessibilityAddTraits(.isHeader)
+                marker
+                    .lineLimit(1)
+                    .fixedSize()
+                Spacer(minLength: 0)
+            }
+            if (canRegenerate && onRegenerate != nil) || onAskSana != nil {
+                HStack(spacing: 8) {
+                    if canRegenerate, let onRegenerate { KeyMetricRegenerateButton(action: onRegenerate) }
+                    if let onAskSana { KeyMetricAskSanaButton(action: onAskSana) }
+                    Spacer(minLength: 0)
+                }
+            }
         }
     }
 
@@ -283,35 +308,22 @@ struct MetricInsightCard: View {
     }
 
     private func related(_ items: [MetricInsight.Related]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
+        VStack(alignment: .leading, spacing: 12) {
             label(MetricInsightCopy.related)
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
-                    Group {
-                        if let symbol = Self.symbol(item.direction) {
-                            Image(systemName: symbol)
-                                .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(KeyMetricStyle.secondary)
-                        } else {
-                            Color.clear
-                        }
-                    }
-                    .frame(width: 14)
-                    .accessibilityHidden(true)
-                    VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: 8) {
-                            Text(item.label)
-                                .font(KeyMetricStyle.control)
-                                .fontWeight(.medium)
-                                .foregroundStyle(KeyMetricStyle.text)
-                            if item.estimated {
-                                Text(MetricInsightCopy.estimated)
-                                    .font(KeyMetricStyle.small)
-                                    .foregroundStyle(KeyMetricStyle.secondary)
-                                    .padding(.horizontal, 6)
-                                    .padding(.vertical, 1)
-                                    .overlay(Capsule().strokeBorder(KeyMetricStyle.border, lineWidth: 1))
-                            }
+                    // Always a glyph, hidden when the direction is unknown: an empty spacer has no baseline and
+                    // pushes the row's text out of line.
+                    Image(systemName: Self.symbol(item.direction) ?? "arrow.right")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(KeyMetricStyle.secondary)
+                        .opacity(Self.symbol(item.direction) == nil ? 0 : 1)
+                        .frame(width: 14)
+                        .accessibilityHidden(true)
+                    VStack(alignment: .leading, spacing: 3) {
+                        ViewThatFits(in: .horizontal) {
+                            HStack(alignment: .firstTextBaseline, spacing: 8) { relatedTitle(item) }
+                            VStack(alignment: .leading, spacing: 4) { relatedTitle(item) }
                         }
                         Text(item.summary)
                             .font(KeyMetricStyle.label)
@@ -320,8 +332,28 @@ struct MetricInsightCard: View {
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityElement(children: .combine)
             }
+        }
+    }
+
+    /// The signal's name and, for an estimated one, its tag (beside the name, or under it when both do not fit).
+    @ViewBuilder
+    private func relatedTitle(_ item: MetricInsight.Related) -> some View {
+        Text(item.label)
+            .font(KeyMetricStyle.control)
+            .fontWeight(.medium)
+            .foregroundStyle(KeyMetricStyle.text)
+            .fixedSize(horizontal: false, vertical: true)
+        if item.estimated {
+            Text(MetricInsightCopy.estimated)
+                .font(KeyMetricStyle.small)
+                .foregroundStyle(KeyMetricStyle.secondary)
+                .padding(.horizontal, 6)
+                .padding(.vertical, 1)
+                .overlay(Capsule().strokeBorder(KeyMetricStyle.border, lineWidth: 1))
+                .fixedSize()
         }
     }
 
@@ -380,5 +412,33 @@ struct MetricInsightCard: View {
         case .flat: return "arrow.right"
         case .unknown: return nil
         }
+    }
+}
+
+/// The small "Regenerate" capsule in the explanation's header: writes the explanation again.
+struct KeyMetricRegenerateButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "arrow.clockwise")
+                    .font(.system(size: 12, weight: .medium))
+                    .accessibilityHidden(true)
+                Text(MetricInsightCopy.regenerate)
+                    .font(KeyMetricStyle.labelStrong)
+                    .lineLimit(1)
+                    .fixedSize()
+            }
+            .foregroundStyle(KeyMetricStyle.accent)
+            .padding(.horizontal, 14)
+            .frame(minHeight: 34)
+            .background(Capsule().fill(KeyMetricStyle.band))
+            .overlay(Capsule().strokeBorder(KeyMetricStyle.border, lineWidth: 1))
+            .contentShape(Capsule())
+            .frame(minHeight: 44)
+        }
+        .buttonStyle(.plain)
+        .accessibilityHint(Text("Asks for a new explanation of this metric"))
     }
 }

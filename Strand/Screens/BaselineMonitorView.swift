@@ -485,10 +485,14 @@ struct MonitorChip: View {
                 .minimumScaleFactor(0.75)
                 .padding(.horizontal, NoopMetrics.space2)
                 .frame(maxWidth: .infinity, minHeight: NoopMetrics.minimumHitTarget)
-                .background(
-                    RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous)
-                        .fill(selected ? StrandPalette.accent.opacity(0.18) : StrandPalette.surfaceInset)
-                )
+                .background {
+                    // The same well every nested surface uses, so it turns to glass with the setting.
+                    NoopInsetSurface()
+                    if selected {
+                        RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous)
+                            .fill(StrandPalette.accent.opacity(0.18))
+                    }
+                }
                 .overlay(
                     RoundedRectangle(cornerRadius: NoopMetrics.insetRadius, style: .continuous)
                         .strokeBorder(selected ? StrandPalette.accent : Color.clear, lineWidth: 1.5)

@@ -288,7 +288,7 @@ private struct LiveSignalRows: View {
             .init(title: String(localized: "Battery"),
                   value: activeBatteryPct.map { "\($0) %" } ?? String(localized: "Unknown"),
                   // "by strap" only when a strap is what reported it (#2075).
-                  detail: live.charging == true ? String(localized: "Charging")
+                  detail: live.isChargingNow ? String(localized: "Charging")
                           : activeIsWhoop ? String(localized: "Last reported by strap")
                           : String(localized: "Last reported by the ring"),
                   icon: "battery.75percent", tone: batteryTone),

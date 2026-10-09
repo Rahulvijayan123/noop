@@ -3,7 +3,7 @@ import StrandDesign
 
 /// The Nara account screen: create an account, enter the emailed code, choose between starting fresh and
 /// recovering an enrollment-code account, sign in, reset a password, and, once signed in, see that this phone
-/// is linked and switch cloud sync on or off.
+/// is linked and what cloud sync is doing. Sync has no off switch while signed in.
 ///
 /// Every state shown here comes from `NaraAuthService` (who is signed in) and `NaraAccountController` (is this
 /// phone linked to them). The view holds no account logic of its own.
@@ -23,6 +23,7 @@ public struct NaraAccountView: View {
     @State private var enrollmentCode = ""
     @State private var showsRecoveryEntry = false
     @State private var confirmSignOut = false
+    @State private var syncStatus: CloudSyncStatus?
     @FocusState private var focus: Field?
 
     @MainActor
@@ -442,31 +443,8 @@ public struct NaraAccountView: View {
         if CloudPushSettings.isConfigured {
             StrandCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    if CloudPushSettings.isUserSwitchable {
-                        Toggle(isOn: Binding(get: { CloudPushSettings.isEnabled },
-                                             set: { account.setUploadsEnabled($0) })) {
-                            VStack(alignment: .leading, spacing: 3) {
-                                Text("Sync with your account").font(StrandFont.headline)
-                                    .foregroundStyle(StrandPalette.textPrimary)
-                                Text("Uploads your strap data so it can be scored.")
-                                    .font(StrandFont.subhead)
-                                    .foregroundStyle(StrandPalette.textSecondary)
-                                    .fixedSize(horizontal: false, vertical: true)
-                            }
-                        }
-                        .accessibilityIdentifier("nara.account.sync")
-                    } else {
-                        VStack(alignment: .leading, spacing: 3) {
-                            Text("Synced with your account").font(StrandFont.headline)
-                                .foregroundStyle(StrandPalette.textPrimary)
-                            Text("Your strap data is saved privately to this account and scored there.")
-                                .font(StrandFont.subhead)
-                                .foregroundStyle(StrandPalette.textSecondary)
-                                .fixedSize(horizontal: false, vertical: true)
-                        }
-                        .accessibilityElement(children: .combine)
-                        .accessibilityIdentifier("nara.account.syncAutomatic")
-                    }
+                    syncStatusSection
+                        .task(id: account.bootstrap) { await pollSyncStatus() }
 
                     if !account.ownsLocalHistory {
                         Text("This phone's saved history belongs to another Nara account. It is not uploaded and is never mixed into your data.")
@@ -487,6 +465,94 @@ public struct NaraAccountView: View {
         .accessibilityIdentifier("nara.account.signOut")
     }
 
+    /// Sync is always on while signed in; this shows what the upload path is actually doing.
+    private var syncStatusSection: some View {
+        TimelineView(.periodic(from: .now, by: 30)) { _ in
+            VStack(alignment: .leading, spacing: 8) {
+                HStack(spacing: 8) {
+                    Text("Sync with your account").font(StrandFont.headline)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    Spacer(minLength: 8)
+                    syncPill
+                }
+                Text("Your strap data uploads to this account automatically while you're signed in.")
+                    .font(StrandFont.subhead)
+                    .foregroundStyle(StrandPalette.textSecondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                ForEach(syncDetails, id: \.self) { line in
+                    Text(line)
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let error = syncError {
+                    Text(String(localized: "Last upload error: \(error)"))
+                        .font(StrandFont.footnote)
+                        .foregroundStyle(StrandPalette.statusWarning)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("nara.account.syncStatus")
+    }
+
+    @ViewBuilder
+    private var syncPill: some View {
+        if let status = syncStatus {
+            if status.inFlight > 0 {
+                StatePill("Uploading", tone: .accent, pulsing: true)
+            } else if status.isUpToDate {
+                StatePill("Up to date", tone: .positive)
+            } else if status.lastError != nil {
+                StatePill("Upload problem", tone: .warning)
+            } else {
+                StatePill("Waiting to upload", tone: .neutral)
+            }
+        } else if account.bootstrap != .ready {
+            StatePill("Not linked yet", tone: .neutral)
+        }
+    }
+
+    private var syncDetails: [String] {
+        guard let status = syncStatus else {
+            return account.bootstrap == .ready
+                ? []
+                : [String(localized: "Uploads start once this phone is linked to your account.")]
+        }
+        var lines: [String] = []
+        if status.pendingRecords > 0 {
+            let count = status.pendingRecords.formatted()
+            if let oldest = status.oldestPendingAt {
+                let age = oldest.formatted(.relative(presentation: .named))
+                lines.append(String(localized: "\(count) readings waiting to upload, oldest from \(age)."))
+            } else {
+                lines.append(String(localized: "\(count) readings waiting to upload."))
+            }
+        } else if status.isUpToDate {
+            lines.append(String(localized: "Everything recorded so far has been saved to your account."))
+        }
+        if let attempt = status.lastAttemptAt {
+            let when = attempt.formatted(.relative(presentation: .named))
+            lines.append(String(localized: "Last upload attempt \(when)."))
+        }
+        return lines
+    }
+
+    /// The transport keeps its last failure after later uploads succeed, so it only means something while
+    /// data is still waiting.
+    private var syncError: String? {
+        guard let status = syncStatus, !status.isUpToDate else { return nil }
+        return status.lastError
+    }
+
+    private func pollSyncStatus() async {
+        while !Task.isCancelled {
+            syncStatus = await account.syncStatus()
+            try? await Task.sleep(nanoseconds: 5_000_000_000)
+        }
+    }
+
     @ViewBuilder
     private var statusPill: some View {
         switch account.bootstrap {
@@ -499,8 +565,6 @@ public struct NaraAccountView: View {
             }
         case .ready:
             StatePill("Connected", tone: .positive)
-        case .paused:
-            StatePill("Sync off", tone: .neutral)
         case .retrying:
             StatePill("Retrying", tone: .warning)
         case .blocked:

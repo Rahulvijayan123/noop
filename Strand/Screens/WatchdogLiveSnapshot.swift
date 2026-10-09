@@ -156,7 +156,9 @@ struct WatchdogLiveSnapshot {
                              pulsePeriod: whoopReadSeconds(id: id, whoop5: whoop5))
         }
         let aligned = lastAligned(series: series, reconstructed: reconstructed, usual: usual)
-        let lastObs = aligned?.obs
+        // A vital with a recorded value is never "No reading": when no expected value lines up with the newest
+        // minute, the newest recorded value is still the reading (shown without a call).
+        let lastObs = aligned?.obs ?? series.last(where: \.isFinite)
         let lastHat = aligned?.hat
         let lastWidth: Double = {
             if let i = aligned?.index, i >= 0, i < rangeSeries.count, rangeSeries[i] > 0 {
@@ -173,7 +175,7 @@ struct WatchdogLiveSnapshot {
         if lastObs == nil {
             status = "No reading"
             tone = StrandPalette.textTertiary
-        } else if !callReady {
+        } else if !callReady || lastHat == nil {
             status = hasLive ? "Live" : "Learning"
             tone = StrandPalette.textSecondary
         } else if outsideBand {

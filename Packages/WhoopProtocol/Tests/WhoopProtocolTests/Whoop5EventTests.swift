@@ -26,7 +26,8 @@ final class Whoop5EventTests: XCTestCase {
     }
 
     /// Real BATTERY_LEVEL(3) event, soc payload `02 f3 01 …`: u16@21 = 0x01f3 = 499 → 49.9 %,
-    /// mv u16@25 = 0x0ef9 = 3833 mV, charge u8@30 = 0 (worn, not charging).
+    /// mv u16@25 = 0x0ef9 = 3833 mV. The charge byte at @30 is not decoded (see `decodeWhoop5Event`): it reads 0
+    /// here, and it also reads 0 through a real charge.
     private let batteryEventHex =
         "aa01240001002eb130350300a589266a5118140002f3010000f90e00000000340806003500000000358eb56f"
 
@@ -38,7 +39,7 @@ final class Whoop5EventTests: XCTestCase {
         XCTAssertEqual(f.parsed["event_timestamp"]?.intValue, 1780910501)
         XCTAssertEqual(f.parsed["battery_pct"]?.doubleValue, 49.9)   // deci-percent ÷10, like 4.0
         XCTAssertEqual(f.parsed["battery_mV"]?.intValue, 3833)
-        XCTAssertEqual(f.parsed["battery_charging"]?.intValue, 0)
+        XCTAssertNil(f.parsed["battery_charging"])   // not decoded on 5.0: the bit reads 0 while charging
     }
 
     /// Real DOUBLE_TAP(14) event — a simple event with no payload. The static +4 walk alone must

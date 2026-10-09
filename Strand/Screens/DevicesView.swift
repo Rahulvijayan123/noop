@@ -249,6 +249,12 @@ private struct DevicesContent: View {
                     onAbortSync: (device.status == .active && live.connected && live.backfilling
                                   && SourceCoordinator.isWhoop(device))
                         ? { model.ble.abortBackfill() } : nil,
+                    onSyncNow: (device.status == .active && live.connected && live.bonded && !live.backfilling
+                                && SourceCoordinator.isWhoop(device))
+                        ? {
+                            model.ble.syncNow()
+                            Task { await CloudPushRuntime.shared.flushAndKick() }
+                        } : nil,
                     // MG ECG probe: the Test Centre gate PLUS the Experimental ECG opt-in PLUS a
                     // positively-identified MG. `ecgGate` is hoisted for the same type-checker reason as
                     // `probeGate`; BLEManager gates the sends again, so the UI gate is defence in depth,
@@ -767,6 +773,9 @@ private struct DeviceCard: View {
     /// it reads the flag NAMES the strap's firmware knows and writes nothing.
     var onFeatureFlagProbe: (() -> Void)? = nil
     var onAbortSync: (() -> Void)? = nil
+    /// Pull the strap's stored history now and upload it. Non-nil only for the connected, paired WHOOP while no
+    /// sync is running.
+    var onSyncNow: (() -> Void)? = nil
     /// WHOOP MG ECG (Labrador) probe. Non-nil only for an MG with the Experimental ECG opt-in on.
     var onEcgProbe: (() -> Void)? = nil
     /// #103 device-config READ probe (Test Centre → Connection, both WHOOP families). Read-only: it asks
@@ -885,7 +894,8 @@ private struct DeviceCard: View {
                              lastSeen: lastSeenLine, batteryPct: liveBatteryPct, batteryMv: liveBatteryMv,
                              firmware: liveFirmware, historyLayout: liveHistoryLayout, clockLine: liveClockLine,
                              clockWarning: liveClockWarning, syncLine: syncLine, syncNote: syncNote,
-                             bondHint: bondRefused ? pairingHint : nil)
+                             bondHint: bondRefused ? pairingHint : nil, onSyncNow: onSyncNow,
+                             isSyncing: onAbortSync != nil)
         } label: {
             cardContent
         }
@@ -948,6 +958,9 @@ private struct DeviceCard: View {
                 }
                 // Stop a sync that is part-way through. Present only while this strap is actually
                 // offloading; the parent owns that condition.
+                if let onSyncNow {
+                    Button { onSyncNow() } label: { Label("Sync now", systemImage: "arrow.triangle.2.circlepath") }
+                }
                 if let onAbortSync {
                     Button { onAbortSync() } label: { Label("Stop sync", systemImage: "stop.circle") }
                 }

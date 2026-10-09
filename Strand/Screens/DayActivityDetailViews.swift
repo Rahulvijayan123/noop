@@ -441,7 +441,7 @@ struct WalkingQualityCard: View {
                 headline(reading)
                 metrics(reading)
                 if !reading.bouts.isEmpty { lane(reading) }
-                Text("From the strap's raw motion, read every 5 seconds by a gait model (ElderNet). Steps, speed and stride are wrist estimates; they are steadiest on longer, unhurried walks.")
+                Text("From the strap's raw motion, read every 5 seconds by a gait model (ElderNet). Cadence, speed and stride are wrist estimates; they are steadiest on longer, unhurried walks.")
                     .font(StrandFont.footnote)
                     .foregroundStyle(StrandPalette.textTertiary)
                     .fixedSize(horizontal: false, vertical: true)
@@ -463,24 +463,6 @@ struct WalkingQualityCard: View {
     private func headline(_ r: WalkingDayReading) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 18) {
             stat(StretchFormat.duration(r.walkingSeconds), "walking")
-            if let steps = r.steps {
-                NavigationLink(value: TabRoute.daySteps(dayStart)) {
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text(Int(steps.rounded()).formatted())
-                            .font(StrandFont.number(20))
-                            .foregroundStyle(StrandPalette.textPrimary)
-                        HStack(spacing: 3) {
-                            Text("steps")
-                            Image(systemName: "chevron.right").font(.system(size: 8, weight: .semibold))
-                        }
-                        .font(StrandFont.caption)
-                        .foregroundStyle(StrandPalette.metricPurple)
-                    }
-                    .contentShape(Rectangle())
-                }
-                .buttonStyle(.plain)
-                .accessibilityHint("Opens your steps for this day")
-            }
             if r.briskSeconds > 0 { stat(StretchFormat.duration(r.briskSeconds), "brisk") }
         }
     }

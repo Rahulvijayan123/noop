@@ -669,7 +669,10 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // app draws the value and the chart from its own data, so any failure here only hides the explanation.
       const metric = requestBody?.metric;
       if (typeof metric !== 'string' || !INSIGHT_METRICS.has(metric)) throw fail('invalid_metric', 400);
-      const outcome = await rest.rpc('metric_insight_request_v1', { p_user: user.id, p_metric: metric });
+      // `regenerate: true` (the app's Regenerate button) asks for the explanation to be written again even though
+      // the inputs are unchanged; everything else about the request is the same.
+      const outcome = await rest.rpc(requestBody?.regenerate === true ? 'metric_insight_regenerate_v1' : 'metric_insight_request_v1',
+        { p_user: user.id, p_metric: metric });
       return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGroundTruthLabels) {

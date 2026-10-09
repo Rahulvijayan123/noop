@@ -65,6 +65,8 @@ final class MetricInsightStore: ObservableObject {
         /// The running account's scope; nil until the account's cloud path is up.
         var runningScope: @MainActor () -> CloudDataScope?
         var fetch: @MainActor (CloudDataScope, MetricInsightMetric) async -> MetricInsightFetchResult
+        /// The same read, asking for the explanation to be written again. Nil reads as `fetch`.
+        var fetchRegenerate: (@MainActor (CloudDataScope, MetricInsightMetric) async -> MetricInsightFetchResult)? = nil
         var now: @MainActor () -> Date
         /// Waits `seconds`; throws when the waiting task is cancelled.
         var sleep: @MainActor (TimeInterval) async throws -> Void
@@ -75,6 +77,10 @@ final class MetricInsightStore: ObservableObject {
             runningScope: { CloudPushRuntime.shared.runningScope },
             fetch: { scope, metric in
                 await MetricInsightClient(identity: CloudPushRuntime.credentialProvider(for: scope)).request(metric)
+            },
+            fetchRegenerate: { scope, metric in
+                await MetricInsightClient(identity: CloudPushRuntime.credentialProvider(for: scope))
+                    .request(metric, regenerate: true)
             },
             now: { Date() },
             sleep: { seconds in try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000)) })
@@ -100,6 +106,8 @@ final class MetricInsightStore: ObservableObject {
     private var generation = 0
     /// The account the cached states were read for.
     private var cachedScope: CloudDataScope?
+    /// Metrics whose next read asks for a new explanation (`requestRegeneration`).
+    private var regenerating: Set<MetricInsightMetric> = []
 
     init(environment: Environment = .live) {
         self.environment = environment
@@ -117,6 +125,14 @@ final class MetricInsightStore: ObservableObject {
     }
 
     // MARK: Reads
+
+    /// The reader asked for a new explanation. The one shown stays, marked as updating, and the next `refresh`
+    /// asks the server to write it again (once), then polls like any pending analysis.
+    func requestRegeneration(_ metric: MetricInsightMetric) {
+        guard let shown = states[metric], shown.phase != .pending, shown.phase != .loading else { return }
+        regenerating.insert(metric)
+        states[metric] = State(phase: .pending, insight: shown.insight, insightIsCurrent: false)
+    }
 
     /// Ask for the metric's explanation, then keep asking while it is being prepared, at the server's suggested
     /// interval and for at most `pollBudget`. Runs inside the card's `.task`, so leaving the screen cancels it; a
@@ -159,7 +175,10 @@ final class MetricInsightStore: ObservableObject {
             states[metric] = .loading
         }
 
-        let result = await environment.fetch(scope, metric)
+        let regenerate = regenerating.remove(metric) != nil
+        let result = regenerate && environment.fetchRegenerate != nil
+            ? await environment.fetchRegenerate!(scope, metric)
+            : await environment.fetch(scope, metric)
         // Dropped when the account ended (or changed) while the request was out.
         guard started == generation, environment.runningScope() == scope else { return nil }
         switch result {

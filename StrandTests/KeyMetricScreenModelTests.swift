@@ -147,7 +147,9 @@ final class KeyMetricScreenModelTests: XCTestCase {
 
     private func envelope(_ start: Int, value: Double? = 60, metric: PC.MetricKind = .hrvRmssd,
                           sleep: PC.SleepWakeState = .awake, stable: Bool = false, label: String = "still",
-                          validity: PC.ValidityState = .valid, nightly: Bool = false) -> PC.MeasurementEnvelope {
+                          validity: PC.ValidityState = .valid, nightly: Bool = false,
+                          reasons: [PC.ReasonCode] = [], wear: PC.WearEvidenceState = .worn,
+                          decoder: String? = nil) -> PC.MeasurementEnvelope {
         let support = PC.Interval(start, start + 300)
         let method = nightly
             ? PC.MethodRef(id: "snapshot.\(metric.rawValue).night", algorithmVersion: "t", aggregation: .session,
@@ -158,6 +160,11 @@ final class KeyMetricScreenModelTests: XCTestCase {
             interval: support, intervalS: 300, source: .strapMotion, heartRateDependent: false,
             labels: [PC.LabelShare(label: label, seconds: 300, share: 1)], unknownS: 0, uncoveredS: 0, transitions: 0,
             mixed: false, dominantLabel: label, resolvedOverlapS: 0, reasons: [])
+        let decoded = decoder.map {
+            PC.ActivityComposition(interval: support, intervalS: 300, source: .decoderIntervals, heartRateDependent: true,
+                                   labels: [PC.LabelShare(label: $0, seconds: 300, share: 1)], unknownS: 0, uncoveredS: 0,
+                                   transitions: 0, mixed: false, dominantLabel: $0, resolvedOverlapS: 0, reasons: [])
+        }
         let verdicts = stable
             ? [PC.EligibilityVerdict(comparison: .stableAwakeRest, state: .eligible, reasons: [], policyVersion: "t")]
             : []
@@ -166,13 +173,13 @@ final class KeyMetricScreenModelTests: XCTestCase {
             source: PC.SourceRef(product: nightly ? .scoringSnapshot : .metricSeries, key: "k@\(start)",
                                  inputRevision: 1, resultRevision: 1),
             value: value, support: support, displayBucket: nil, localTime: PC.localTime(at: start, timezoneId: tz),
-            validity: PC.SignalValidity(state: validity, reasons: [], coverage: 0.82, observedS: 300),
-            regimeKey: "r1", activity: composition, decoderActivity: nil,
+            validity: PC.SignalValidity(state: validity, reasons: reasons, coverage: 0.82, observedS: 300),
+            regimeKey: "r1", activity: composition, decoderActivity: decoded,
             preceding: PC.PrecedingHistory(lookback: PC.Interval(start - 1800, start), source: .strapMotion,
                                            stillRunS: 600, stillRunEndedBy: nil, secondsSinceSupportedActivity: nil,
                                            lastSupportedActivityLabel: nil, coveredS: 1800, transitions: 0),
             sleepWear: PC.SleepWearContext(sleepState: sleep, sleepEvidence: [], sleepDependsOnHeartSignals: false,
-                                           wearState: .worn, wearEvidence: [], reasons: []),
+                                           wearState: wear, wearEvidence: [], reasons: []),
             history: PC.HistoryContext(
                 wake: PC.WakeReference(secondsSinceWake: nil, wakeAt: nil, referenceEpisodeId: nil, referenceKind: .mainSleep,
                                        reasons: []),
@@ -180,13 +187,68 @@ final class KeyMetricScreenModelTests: XCTestCase {
             eligibility: verdicts, comparisons: [], finality: .final)
     }
 
-    func testAWindowsContextIsSleepThenStableAwakeThenMovement() {
+    func testAWindowsContextIsOffWristThenSleepThenWhatTheActivityLabelsSay() {
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, sleep: .asleep, wear: .notWorn)), .offWrist)
         XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, sleep: .asleep, stable: true)), .sleep)
-        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, stable: true)), .stableAwake)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, sleep: .mixed)), .unclear)
         XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "walking")), .moving)
-        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "sitting")), .awake)
-        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, sleep: .mixed)), .mixed)
-        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, sleep: .unknown)), .unknown)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "sitting_desk")), .sitting)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "standing")), .standing)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "lying_down")), .lyingDown)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "fidgeting")), .unclear)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "stationary")), .still)
+        // Strap motion that only says "still" takes the decoder's posture; a moving label keeps its own.
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "stationary", decoder: "standing")), .standing)
+        XCTAssertEqual(KeyMetricWindowContext.of(envelope(0, label: "walking", decoder: "sitting")), .moving)
+        // Stable awake is the server's eligibility, separate from the context, and never while asleep.
+        XCTAssertTrue(KeyMetricWindowContext.isStableAwake(envelope(0, stable: true)))
+        XCTAssertFalse(KeyMetricWindowContext.isStableAwake(envelope(0, sleep: .asleep, stable: true)))
+        XCTAssertTrue(KeyMetricWindowFilter.stableAwake.admits(envelope(0, stable: true, label: "sitting")))
+        XCTAssertFalse(KeyMetricWindowFilter.stableAwake.admits(envelope(0, label: "sitting")))
+    }
+
+    func testTodayRunsFromLocalMidnightToNowWithNightsAsSpansAndBankedGaps() {
+        let zone = TimeZone(identifier: "America/Los_Angeles")!
+        let midnight = 1_791_529_200 // 2026-10-09 00:00 PDT
+        let now = Date(timeIntervalSince1970: TimeInterval(midnight + 3_600 * 11))
+        XCTAssertEqual(KeyMetricWindows.today("2026-10-09", timeZone: zone, now: now),
+                       PC.Interval(midnight, midnight + 3_600 * 11))
+        let interval = PC.Interval(midnight, midnight + 3_600 * 11)
+
+        // A metric the server measures only per night shows that night across its sleep.
+        var night = envelope(midnight + 9_000, nightly: true)
+        night.support = PC.Interval(midnight + 9_000, midnight + 36_000)
+        let sessions = KeyMetricWindows.sessions([document([night, envelope(midnight, validity: .invalid, nightly: true)])],
+                                                 metric: .hrvRmssd, overlapping: interval)
+        XCTAssertEqual(sessions.map { [$0.start, $0.end] }, [[midnight + 9_000, midnight + 36_000]])
+        XCTAssertTrue(sessions[0].isSpan)
+
+        // Banked readings take the lane's context; a stretch without them is unrecorded, or off the wrist when the
+        // lane says so, and blood oxygen's gaps stay inside sleep.
+        let lane = [KeyMetricContextSpan(start: midnight, end: midnight + 7_200, context: .sleep),
+                    KeyMetricContextSpan(start: midnight + 7_200, end: midnight + 14_400, context: .offWrist),
+                    KeyMetricContextSpan(start: midnight + 14_400, end: midnight + 39_600, context: .sitting)]
+        let points = [(ts: midnight, value: 34.1), (ts: midnight + 300, value: 34.2), (ts: midnight + 15_000, value: 33.0)]
+        let banked = KeyMetricWindows.banked(points, seconds: 300, lane: lane)
+        XCTAssertEqual(banked.map(\.context), [.sleep, .sleep, .sitting])
+        let gaps = KeyMetricWindows.bankedGaps(banked, interval: interval, lane: lane, now: now)
+        XCTAssertEqual(gaps.map { [$0.startS, $0.endS] }, [[midnight + 600, midnight + 15_000],
+                                                          [midnight + 15_300, midnight + 39_600]])
+        XCTAssertEqual(gaps[0].words, "the strap was off your wrist")
+        XCTAssertEqual(gaps[1].cause, KeyMetricGap.Cause.unrecorded)
+        let sleepOnly = KeyMetricWindows.bankedGaps(banked, interval: interval, lane: lane, within: [.sleep], now: now)
+        XCTAssertEqual(sleepOnly.map { [$0.startS, $0.endS] }, [[midnight + 600, midnight + 7_200]])
+    }
+
+    func testARollingWindowSitsAtItsDisplayBucket() {
+        var rolling = envelope(1_000, metric: .restingHeartRate)
+        rolling.method = PC.MethodRef(id: "series.resting_hr.60min_min5", algorithmVersion: "t",
+                                      aggregation: .minimumOfBins, windowS: 3_600, units: "bpm")
+        rolling.support = PC.Interval(0, 3_600)
+        rolling.displayBucket = PC.Interval(3_300, 3_600)
+        let envelopes = KeyMetricWindows.envelopes([document([rolling])], metric: .restingHeartRate,
+                                                   in: PC.Interval(0, 86_400))
+        XCTAssertEqual(KeyMetricWindows.readings(envelopes).map { [$0.start, $0.end] }, [[3_300, 3_600]])
     }
 
     func testOnlyAcceptedWindowEstimatesInsideTheSpanAreReadings() {
@@ -212,8 +274,66 @@ final class KeyMetricScreenModelTests: XCTestCase {
         XCTAssertEqual(readings.first?.coverage, 0.82)
         // The lane keeps every window's context (rejected ones too) and joins neighbours that share one.
         let lane = KeyMetricWindows.lane(envelopes)
-        XCTAssertEqual(lane.map(\.context), [.sleep, .awake])
+        XCTAssertEqual(lane.map(\.context), [.sleep, .still])
         XCTAssertEqual(lane.last.map { [$0.start, $0.end] }, [1_300, 2_200])
+    }
+
+    private func document(_ envelopes: [PC.MeasurementEnvelope]) -> PhysiologyContextDocument {
+        PhysiologyContextDocument(
+            full: nil, header: nil, status: nil, statusReasons: [], availability: [], regimes: nil, envelopes: envelopes,
+            sleep: nil, bouts: [], exertion: [], exposures: nil, dailyValues: [], comparisons: [], episodes: [],
+            dependence: [], pulseEpisodes: nil, undecodedElements: 0, undecodedMembers: [])
+    }
+
+    func testGapsCarryTheServersReasonAndUnrecordedTimeButNeverAFilteredReading() {
+        let interval = PC.Interval(0, 10_000)
+        let envelopes = [
+            envelope(0),
+            envelope(300, validity: .invalid, reasons: ["motion_contaminated"]),
+            envelope(600, validity: .invalid, reasons: ["motion_contaminated"]),
+            envelope(900, validity: .missing),
+            envelope(1_200, sleep: .asleep),                 // filtered out by the stable awake chip: not a gap
+            envelope(3_000, sleep: .asleep, validity: .invalid, reasons: ["rr_under_covered"]),
+            envelope(3_300),
+        ]
+        let gaps = KeyMetricWindows.gaps(envelopes, interval: interval, filter: .all,
+                                         now: Date(timeIntervalSince1970: 5_000))
+        XCTAssertEqual(gaps.map { [$0.startS, $0.endS] }, [[300, 900], [900, 1_200], [1_500, 3_000], [3_000, 3_300],
+                                                            [3_600, 5_000]])
+        XCTAssertEqual(gaps.first?.words, "movement affected the signal", "neighbours with one reason are joined")
+        XCTAssertEqual(gaps[1].cause, KeyMetricGap.Cause.noSignal)
+        XCTAssertEqual(gaps[2].cause, KeyMetricGap.Cause.unrecorded)
+        XCTAssertEqual(gaps.last?.endS, 5_000, "never past now")
+        // The stable awake chip leaves out the rejected sleep window but keeps unrecorded time.
+        let awake = KeyMetricWindows.gaps(envelopes, interval: interval, filter: .stableAwake,
+                                          now: Date(timeIntervalSince1970: 5_000))
+        XCTAssertFalse(awake.contains { $0.startS == 3_000 })
+        XCTAssertTrue(awake.contains { $0.cause == KeyMetricGap.Cause.unrecorded && $0.startS == 1_500 })
+
+        let note = KeyMetricGap.note(gaps, in: Date(timeIntervalSince1970: 0)...Date(timeIntervalSince1970: 5_000))
+        XCTAssertEqual(note, "Gaps: movement affected the signal (10 min); no signal was recorded (5 min). "
+                           + "Nothing was recorded for 48 min.")
+        XCTAssertNil(KeyMetricGap.note([], in: Date(timeIntervalSince1970: 0)...Date(timeIntervalSince1970: 5_000)))
+    }
+
+    func testAMissingNightIsExplainedOnlyWhenTheServerRejectedEveryNightlyValue() {
+        let rejected = envelope(0, validity: .invalid, nightly: true, reasons: ["excess_rejected_beats"])
+        XCTAssertEqual(KeyMetricWindows.nightlyGapReason([document([rejected])], metric: .hrvRmssd),
+                       "too many beats were rejected")
+        XCTAssertNil(KeyMetricWindows.nightlyGapReason([document([rejected, envelope(400, nightly: true)])],
+                                                       metric: .hrvRmssd), "an accepted night needs no reason")
+        XCTAssertNil(KeyMetricWindows.nightlyGapReason([document([envelope(0, validity: .unverified, nightly: true)])],
+                                                       metric: .hrvRmssd), "unverified is not a reason for a gap")
+        XCTAssertNil(KeyMetricWindows.nightlyGapReason([document([])], metric: .hrvRmssd), "no envelope, no guess")
+    }
+
+    func testMissingDaysAreTheDaysInTheRangeWithoutAReading() throws {
+        let readings = KeyMetricHistory.measured([("2026-10-01", 50), ("2026-10-03", 52)])
+        let start = try XCTUnwrap(PhysiologyContextDates.date("2026-10-01"))
+        let end = try XCTUnwrap(PhysiologyContextDates.date("2026-10-04"))
+        let gaps = KeyMetricHistory.missingDays(readings, domain: start...end)
+        XCTAssertEqual(gaps.map(\.day), ["2026-10-02", "2026-10-04"])
+        XCTAssertEqual(gaps.first.map { $0.endS - $0.startS }, 86_400)
     }
 
     func testANightsTwentyFourHoursRunNoonToNoonInTheDocumentsZone() throws {
@@ -251,7 +371,10 @@ final class KeyMetricScreenModelTests: XCTestCase {
         // Metrics without a usual never speak of one.
         for period in MetricInsightPeriod.allCases {
             XCTAssertFalse(KeyMetricScreenCopy.recentRange("1–2", period).localizedCaseInsensitiveContains("usual"))
-            XCTAssertFalse(KeyMetricScreenCopy.shadedRecent(period).localizedCaseInsensitiveContains("usual"))
+        }
+        for metric in MetricInsightMetric.allCases where metric.usualSeries == nil {
+            XCTAssertFalse(KeyMetricScreenCopy.methodSummary([metric]).localizedCaseInsensitiveContains("usual"),
+                           metric.rawValue)
         }
         XCTAssertFalse(KeyMetricScreenCopy.placement(.above, kind: .recent)!.localizedCaseInsensitiveContains("usual"))
     }

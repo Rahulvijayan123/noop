@@ -96,39 +96,34 @@ public final class LiveState: ObservableObject {
     /// GET_EXTENDED_BATTERY_INFO response (#592). Shown on the Devices card as a "x.xx V" readout beside the
     /// percent; nil until the first battery event lands. Twin of the Android LiveState.batteryMv.
     @Published public var batteryMv: Int? = nil
-    /// Charging flag. Two sources, and they mean different things (#1935).
+    /// Charging flag: nil until the first charging signal of a session, and cleared on disconnect. It is the flag
+    /// only; the battery % keeps its family-specific source (#77).
     ///
-    /// The authority is the strap's BATTERY_LEVEL event — wire observation: u8 bit0 in the payload
-    /// (4.0 @26 / 5.0 @30), pushed ~every 8 min on captured links. That is a LEVEL signal from the
-    /// strap's own gauge: every live battery event rewrites this flag, whatever it was.
+    /// WHOOP 4.0: the BATTERY_LEVEL event's charge bit (u8 bit0 @26), pushed about every 8 minutes. Each event
+    /// rewrites the flag, as it always has.
     ///
-    /// On a 5/MG it is ALSO set by `BATTERY_PACK_CONNECTED(21)` and cleared by
-    /// `BATTERY_PACK_REMOVED(22)`, which is a latency win — 21 leads `CHARGING_ON(7)` by up to ~17 s in
-    /// captures, so the pill responds when the pack goes on. But 21 means A PACK WAS ATTACHED, not that
-    /// charging began. They diverge on a depleted pack or a poor contact: 21 fires, 7 never does, and
-    /// this reads true while nothing charges.
+    /// WHOOP 5.0 / MG: the charging EDGES own the flag (#1935). CHARGING_ON(7) and BATTERY_PACK_CONNECTED(21) set
+    /// it; CHARGING_OFF(8) and BATTERY_PACK_REMOVED(22) clear it (`noteChargingEdge`). The 5.0 BATTERY_LEVEL charge
+    /// bit is not read. It stayed 0 through a real charge (9 Oct 2026: the pack climbed from 12.9% to 45.1%, and all
+    /// 54 readings had it at 0), so it cannot say whether the pack is charging.
     ///
-    /// THAT STATE IS BOUNDED, which is why it is documented rather than split. It does not last until 22:
-    /// the next live BATTERY_LEVEL overwrites it from the strap's own GAUGE, so the window is about one
-    /// battery cadence, and the gauge always gets the last word.
+    /// An edge is the strap's word, but 21 means a pack was ATTACHED, not that charging began. A depleted pack or
+    /// a poor contact fires 21 and never 7. So an ON flag on a 5/MG is reviewed against the gauge every five
+    /// minutes, and clears when the gauge has not risen (`reviewChargingAgainstGauge`). A wrong "charging" now
+    /// clears within about five minutes of the edge that set it.
     ///
-    /// It gets the last word only because nothing else repeats, which is a real constraint rather than an
-    /// observation (#1935). The pack record reaches this platform LOG-ONLY (`FrameRouter`, Test Centre
-    /// gated) and writes nothing here. Android learned the same rule the hard way: its pushed pack-info
-    /// event (109) once wrote `charging = true` on pack PRESENCE every couple of minutes, outran the
-    /// gauge, and held a flat pack at "charging" for its whole attachment. An EDGE may set this flag
-    /// (7, 21, 22); a repeating presence signal must not, or the gauge cannot correct it.
+    /// On a 5/MG only edges set this flag, and the gauge may only clear it. A repeating presence signal must not set it:
+    /// Android learned that a pack-info event writing `charging = true` on presence every couple of minutes
+    /// outran the gauge and held a flat pack at "charging" for its whole attachment. The display fallback in
+    /// `isChargingNow` is separate, and applies only while this flag is nil.
     ///
-    /// It matters beyond the pill. `BLEManager.lowPowerThrottleActive` reads it and gates THREE levers, not
-    /// one: the low-battery offload cadence, the connection-priority throttle, and the continuous-capture
-    /// pause behind the user's own "Pause HRV capture" percentage. So a pack attached but not charging can
-    /// keep background capture running at low battery after the user asked for it to stop, for that
-    /// window. `BLEManager.batteryPollDue` also reads it, polling every tick instead of every
-    /// other, which is harmless and arguably wanted with a pack on.
-    ///
-    /// nil until the first event of a session; cleared on disconnect so a stale flag can't outlive the
-    /// link. Flag ONLY — the battery % keeps its family-specific source (#77).
+    /// It matters beyond the pill. `BLEManager.lowPowerThrottleActive` reads this flag and gates three levers:
+    /// the low-battery offload cadence, the connection-priority throttle, and the continuous-capture pause behind
+    /// the user's own "Pause HRV capture" percentage. Those levers read the flag, not `isChargingNow`.
     @Published public var charging: Bool? = nil
+    /// The gauge reading that opened the current review window for an ON flag: the first reading after the edge,
+    /// then the reading that closed each window. Nil until a reading arrives after an edge.
+    private var chargingWindow: (ts: Int, soc: Double)? = nil
 
     /// The Oura ring's current wear/charge state (nil for non-Oura straps or before any evidence this
     /// session). Driven by OuraLiveSource from the live-HR push + the ring's STATE charger strings: a live
@@ -169,6 +164,47 @@ public final class LiveState: ObservableObject {
     /// the recent discharge slope over it. Capped + bounded so it can't grow without limit; cleared on
     /// disconnect so a stale estimate can't outlive the link.
     @Published public private(set) var batterySamples: [(ts: Int, soc: Double)] = []
+    /// Whether the strap is on a charger, as the wearer should see it. The strap's own flag wins once it has spoken.
+    /// Until then (`charging == nil`: the app opened while the strap was already on the charger, and no edge has come
+    /// this session) the gauge's trend decides, so a strap on the charger is not shown as plain idle.
+    public var isChargingNow: Bool {
+        if let charging { return charging }
+        return ChargingEvidence.rising(samples: batterySamples, now: Int(Date().timeIntervalSince1970))
+    }
+
+    /// A charging edge from the strap: `on` for CHARGING_ON(7) and BATTERY_PACK_CONNECTED(21), off for
+    /// CHARGING_OFF(8) and BATTERY_PACK_REMOVED(22). A new edge restarts the gauge review below.
+    func noteChargingEdge(on: Bool) {
+        charging = on
+        chargingWindow = nil
+    }
+
+    /// Reviews an ON flag on a WHOOP 5.0 / MG against the gauge, once per battery reading (`FrameRouter`). The first
+    /// reading after the edge opens a five-minute window. When a window closes, the flag clears if the gauge rose
+    /// less than `ChargingEvidence.riseToKeep` across it, and the next window opens from that reading. A pack at or
+    /// above `ChargingEvidence.fullCharge` is left alone, since a full pack has nothing left to rise. Not for 4.0,
+    /// whose charge bit is the flag itself.
+    func reviewChargingAgainstGauge(pct: Double, now: Int = Int(Date().timeIntervalSince1970)) {
+        guard charging == true else { return }
+        guard let window = chargingWindow else {
+            chargingWindow = (ts: now, soc: pct)
+            return
+        }
+        guard now - window.ts >= ChargingEvidence.reviewSpan else { return }
+        chargingWindow = (ts: now, soc: pct)
+        let rise = pct - window.soc
+        if pct < ChargingEvidence.fullCharge, rise < ChargingEvidence.riseToKeep {
+            charging = false
+            chargingWindow = nil
+        }
+    }
+
+    /// Drops the flag and its review window. Called on disconnect, so a stale state cannot outlive the link.
+    func forgetCharging() {
+        charging = nil
+        chargingWindow = nil
+    }
+
     /// Cap on the SoC buffer. Battery events arrive only every ~8 minutes, so a few hundred readings
     /// already spans a couple of days, plenty to fit a discharge slope against.
     static let maxBatterySamples = 400
@@ -687,7 +723,7 @@ public final class LiveState: ObservableObject {
     }
 
     /// Drop the banked SoC buffer (called on disconnect) so a stale runtime estimate can't outlive the
-    /// link, the twin of the `charging = nil` clear on the same path.
+    /// link, the twin of the `forgetCharging()` clear on the same path.
     public func clearBatterySamples() {
         batterySamples.removeAll()
     }
@@ -767,7 +803,7 @@ public final class LiveState: ObservableObject {
 
     /// Blank all live biometric readouts (HR + R-R + the rolling buffer) so a stale heart rate or
     /// R-R strip can't outlive the link. Called on CoreBluetooth disconnect (BLEManager), the twin of
-    /// the `charging = nil` / `encryptedBond = false` clears on the same path.
+    /// the `forgetCharging()` / `encryptedBond = false` clears on the same path.
     public func clearBiometrics() {
         heartRate = nil
         lastHeartRatePacketUnix = nil
@@ -1291,5 +1327,34 @@ public enum LiveConsoleReadout {
         // half-away-from-zero and Kotlin's Math.round is half-up, identical over the 0...100 this sees.
         if activeIsWhoop { return whoopPct.map { Int($0.rounded()) } }
         return ringPct
+    }
+}
+
+
+/// Charging judged from the battery gauge's trend: the fallback before the strap's own charging flag arrives, and
+/// the yardstick an ON flag is reviewed against on a 5.0 / MG (`LiveState.reviewChargingAgainstGauge`).
+enum ChargingEvidence {
+    /// A rise this large over `span` seconds shows charging with no edge to go on. Strict on purpose: a false
+    /// "charging" on an idle strap is the error to avoid in this fallback.
+    static let riseToEstablish = 0.5
+    /// A rise below this across a review window means the gauge is not charging, so an ON edge is cleared. Lower
+    /// than `riseToEstablish` on purpose: the edge already says charging, so the gauge only has to rule it out, and
+    /// a false "not charging" is the error to avoid there.
+    static let riseToKeep = 0.2
+    /// Length of one review window, in seconds.
+    static let reviewSpan = 300
+    /// At or above this the gauge cannot rise any further, so it cannot contradict an edge.
+    static let fullCharge = 99.0
+
+    /// True when the gauge has risen by `riseToEstablish` over the last `span` seconds, and the newest reading is
+    /// recent. The base is the newest reading at least `span` old. A charging strap reports about every 30 seconds,
+    /// and one step is only about half a point, so comparing with the previous reading would miss a charge. The
+    /// captured 5.0 pack climbed about a point a minute (12.9% to 45.1% over half an hour).
+    static func rising(samples: [(ts: Int, soc: Double)], now: Int,
+                       freshWithin: Int = 2_400, span: Int = 300, maxSpan: Int = 1_800) -> Bool {
+        guard let latest = samples.last, now - latest.ts <= freshWithin else { return false }
+        guard let base = samples.last(where: { latest.ts - $0.ts >= span }),
+              latest.ts - base.ts <= maxSpan else { return false }
+        return latest.soc - base.soc >= riseToEstablish
     }
 }

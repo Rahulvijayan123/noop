@@ -187,7 +187,7 @@ final class SettingsUITests: XCTestCase {
         tapRow("settings.account")
         signOutIfSignedIn()
         signUp(account)
-        enableSync()
+        waitForSyncStatus()
         goBack()
 
         tapRow("settings.name")
@@ -232,7 +232,7 @@ final class SettingsUITests: XCTestCase {
         let deadline = Date().addingTimeInterval(20)
         while !signedIn.exists && !signInForm.exists && Date() < deadline { usleep(250_000) }
         if !signedIn.exists { signIn(account) }
-        enableSync()
+        waitForSyncStatus()
         goBack()
         XCTAssertTrue(waitForLabel(element("settings.name"), containing: account.displayName, timeout: 30),
                       "restored name: \(element("settings.name").label)")
@@ -329,10 +329,10 @@ final class SettingsUITests: XCTestCase {
         XCTAssertEqual((field.value as? String)?.count, text.count, "the whole password went in")
     }
 
-    private func enableSync() {
-        let sync = app.switches["nara.account.sync"]
-        XCTAssertTrue(sync.waitForExistence(timeout: 10))
-        setSwitch(sync, on: true)
+    /// Sync has no switch: a signed-in account always syncs, and the screen shows its status.
+    private func waitForSyncStatus() {
+        XCTAssertTrue(element("nara.account.syncStatus").waitForExistence(timeout: 10), "the sync status shows")
+        XCTAssertFalse(app.switches["nara.account.sync"].exists, "there is no switch to turn sync off")
     }
 
     // MARK: - Helpers

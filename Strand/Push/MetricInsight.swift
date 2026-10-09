@@ -485,7 +485,9 @@ struct MetricInsightClient: Sendable {
         self.identity = identity
     }
 
-    func request(_ metric: MetricInsightMetric) async -> MetricInsightFetchResult {
+    /// `regenerate` asks the server to write the explanation again though the inputs are unchanged (an older
+    /// server ignores it and answers from its cache).
+    func request(_ metric: MetricInsightMetric, regenerate: Bool = false) async -> MetricInsightFetchResult {
         guard let endpoint else { return .failed(.notConfigured) }
         guard let identity = identity() else { return .failed(.missingIdentity) }
         var request = URLRequest(url: endpoint.appendingPathComponent("insights"), timeoutInterval: Self.timeout)
@@ -493,7 +495,10 @@ struct MetricInsightClient: Sendable {
         CloudReceiverAuth.apply(identity, to: &request)
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.cachePolicy = .reloadIgnoringLocalCacheData
-        guard let body = try? JSONSerialization.data(withJSONObject: ["metric": metric.rawValue]) else {
+        let payload: [String: Any] = regenerate
+            ? ["metric": metric.rawValue, "regenerate": true]
+            : ["metric": metric.rawValue]
+        guard let body = try? JSONSerialization.data(withJSONObject: payload) else {
             return .failed(.malformed)
         }
         request.httpBody = body

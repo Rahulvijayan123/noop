@@ -99,12 +99,15 @@ public struct NoopPanelSurface: View {
         let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
         let shadow = NoopSurfaceShadow.resolve(elevated: elevated, dark: scheme == .dark)
         return ZStack {
+            // The lift is drawn outside the card only. A shadow under a thin glass body would show through it
+            // as a smudge, which is why the glass card used to thin its shadow; clipped to the outside the full
+            // shadow can stay and the card keeps floating at any intensity.
+            NoopOuterShadow(shape: shape, shadow: shadow)
             LiquidGlassBackdrop(level: glass, scale: 0.5)
                 .clipShape(shape)
             shape
                 .fill(NoopVisualStyle.surface)
                 .opacity(glass.bodyOpacity(scheme))
-                .shadow(color: shadow.color.opacity(glass.shadowScale), radius: shadow.radius, x: 0, y: shadow.y)
             shape.strokeBorder(NoopVisualStyle.border.opacity(0.45), lineWidth: NoopMetrics.hairlineWidth)
             LiquidGlassHighlights(shape: shape, level: glass)
         }
@@ -117,21 +120,85 @@ public struct NoopPanelSurface: View {
         return shape
             .fill(NoopVisualStyle.surface)
             .overlay(shape.strokeBorder(NoopVisualStyle.border, lineWidth: NoopMetrics.hairlineWidth))
+            .shadow(color: shadow.contactColor, radius: shadow.contactRadius, x: 0, y: shadow.contactY)
             .shadow(color: shadow.color, radius: shadow.radius, x: 0, y: shadow.y)
     }
 }
 
-/// The one shared card shadow, decided in one place so every surface lifts by the same amount.
+/// The one shared card shadow, decided in one place so every surface lifts by the same amount. Two layers: a wide,
+/// soft ambient shadow that lifts the card off the canvas, and a tight contact shadow under its edge so the lift
+/// reads as a thing with thickness. Dark mode has both too: black on the deep indigo canvas is quiet, but it is
+/// what makes a lifted indigo card look like it hovers rather than sits.
 enum NoopSurfaceShadow {
-    struct Value { let color: Color; let radius: CGFloat; let y: CGFloat }
+    struct Value {
+        let color: Color
+        let radius: CGFloat
+        let y: CGFloat
+        let contactColor: Color
+        let contactRadius: CGFloat
+        let contactY: CGFloat
+    }
 
     static func resolve(elevated: Bool, dark: Bool) -> Value {
         switch (elevated, dark) {
-        case (false, false): return Value(color: NaraBrand.deepIndigo.opacity(0.05), radius: 8, y: 2)
-        case (false, true):  return Value(color: .clear, radius: 0, y: 0)
-        case (true, false):  return Value(color: NaraBrand.deepIndigo.opacity(0.08), radius: 12, y: 4)
-        case (true, true):   return Value(color: .black.opacity(0.28), radius: 12, y: 4)
+        case (false, false):
+            return Value(color: NaraBrand.deepIndigo.opacity(0.14), radius: 20, y: 9,
+                         contactColor: NaraBrand.deepIndigo.opacity(0.08), contactRadius: 3, contactY: 1)
+        case (false, true):
+            return Value(color: .black.opacity(0.50), radius: 22, y: 10,
+                         contactColor: .black.opacity(0.30), contactRadius: 3, contactY: 1)
+        case (true, false):
+            return Value(color: NaraBrand.deepIndigo.opacity(0.20), radius: 28, y: 14,
+                         contactColor: NaraBrand.deepIndigo.opacity(0.10), contactRadius: 4, contactY: 2)
+        case (true, true):
+            return Value(color: .black.opacity(0.62), radius: 30, y: 14,
+                         contactColor: .black.opacity(0.36), contactRadius: 4, contactY: 2)
         }
+    }
+}
+
+private struct NoopCardShadowModifier<S: Shape>: ViewModifier {
+    let shape: S
+    let elevated: Bool
+    @Environment(\.colorScheme) private var scheme
+
+    func body(content: Content) -> some View {
+        content.background {
+            NoopOuterShadow(shape: shape, shadow: NoopSurfaceShadow.resolve(elevated: elevated, dark: scheme == .dark))
+        }
+    }
+}
+
+public extension View {
+    /// The shared two-layer card lift, for a hand-drawn surface (a tinted tile) that is not a `NoopCard` but sits
+    /// at the same height above the canvas. Drawn only outside `shape`, so a translucent body does not show it.
+    func noopCardShadow<S: Shape>(in shape: S, elevated: Bool = false) -> some View {
+        modifier(NoopCardShadowModifier(shape: shape, elevated: elevated))
+    }
+}
+
+/// A card's shadow with the card's own footprint cut out, so it shows only outside the edge. Used under a
+/// translucent body, where an ordinary shadow would be visible through the glass.
+struct NoopOuterShadow<S: Shape>: View {
+    let shape: S
+    let shadow: NoopSurfaceShadow.Value
+
+    var body: some View {
+        shape
+            .fill(Color.black)
+            .shadow(color: shadow.contactColor, radius: shadow.contactRadius, x: 0, y: shadow.contactY)
+            .shadow(color: shadow.color, radius: shadow.radius, x: 0, y: shadow.y)
+            .mask {
+                // Everything around the card, minus the card itself. The negative padding widens what is drawn
+                // without changing the layout size, so the cut-out shape is exactly the card's footprint.
+                ZStack {
+                    Rectangle().padding(-(shadow.radius * 3 + abs(shadow.y)))
+                    shape.fill(Color.black).blendMode(.destinationOut)
+                }
+                .compositingGroup()
+            }
+            .allowsHitTesting(false)
+            .accessibilityHidden(true)
     }
 }
 
@@ -144,14 +211,25 @@ enum NoopSurfaceShadow {
 /// ```
 public struct NoopInsetSurface: View {
     public var cornerRadius: CGFloat
+    @Environment(\.colorScheme) private var scheme
+    @Environment(\.liquidGlass) private var glass
 
     public init(cornerRadius: CGFloat = NoopMetrics.insetRadius) {
         self.cornerRadius = cornerRadius
     }
 
     public var body: some View {
-        RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
-            .fill(NoopVisualStyle.inset)
+        let shape = RoundedRectangle(cornerRadius: cornerRadius, style: .continuous)
+        if glass.isEnabled {
+            // Nested in a glass card the well thins with it, so the card's glass reads through the stat cell, chip
+            // or list instead of a solid patch sitting on it.
+            ZStack {
+                shape.fill(NoopVisualStyle.inset).opacity(glass.insetBodyOpacity(scheme))
+                LiquidGlassHighlights(shape: shape, level: glass)
+            }
+        } else {
+            shape.fill(NoopVisualStyle.inset)
+        }
     }
 }
 

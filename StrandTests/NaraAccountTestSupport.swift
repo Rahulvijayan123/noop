@@ -40,6 +40,17 @@ final class FakeRuntime: CloudRuntimeControlling, @unchecked Sendable {
     private var _started: [CloudPushIdentity] = []
     private var _stops = 0
     private var _handler: (@Sendable (CloudDataScope, Int) -> Void)?
+    private var _syncStatus: CloudSyncStatus?
+
+    /// What `syncStatus()` reports while running.
+    var reportedSyncStatus: CloudSyncStatus? {
+        get { lock.lock(); defer { lock.unlock() }; return _syncStatus }
+        set { lock.lock(); _syncStatus = newValue; lock.unlock() }
+    }
+
+    func syncStatus() async -> CloudSyncStatus? {
+        runningScope != nil ? reportedSyncStatus : nil
+    }
 
     var runningScope: CloudDataScope? {
         lock.lock(); defer { lock.unlock() }

@@ -7,6 +7,10 @@ struct KeyMetricDot: Identifiable, Equatable {
     let id: String
     let x: Date
     let y: Double
+    /// The dot's own colour (its activity context); the chart's colour otherwise.
+    var color: Color? = nil
+    /// A value that stands for a stretch of time (a night) is also drawn as a line across it.
+    var span: ClosedRange<Date>? = nil
 }
 
 /// The shaded range at one x, in plotted units.
@@ -29,6 +33,8 @@ struct KeyMetricDotChart: View {
     let dots: [KeyMetricDot]
     let domain: ClosedRange<Date>
     var band: [KeyMetricBandPoint] = []
+    /// Stretches without a reading, drawn as faint full-height bands so missing data never reads as a low value.
+    var gaps: [KeyMetricGap] = []
     var referenceLine: Double? = nil
     /// "HRV (ms)", drawn above the plot.
     let yTitle: String
@@ -90,6 +96,10 @@ struct KeyMetricDotChart: View {
     private var chart: some View {
         let selected = dots.first { $0.id == selectedID }
         return Chart {
+            ForEach(gaps) { g in
+                RectangleMark(xStart: .value("gap start", g.start), xEnd: .value("gap end", g.end))
+                    .foregroundStyle(KeyMetricStyle.gapFill)
+            }
             ForEach(bandMarks) { b in
                 AreaMark(x: .value("x", b.x), yStart: .value("low", b.low), yEnd: .value("high", b.high))
                     .foregroundStyle(KeyMetricStyle.band)
@@ -100,9 +110,17 @@ struct KeyMetricDotChart: View {
                     .foregroundStyle(KeyMetricStyle.teal)
                     .lineStyle(StrokeStyle(lineWidth: 1.5, dash: [4, 4]))
             }
+            ForEach(dots.filter { $0.span != nil }) { d in
+                if let span = d.span {
+                    RuleMark(xStart: .value("from", span.lowerBound), xEnd: .value("to", span.upperBound),
+                             y: .value("y", d.y))
+                        .foregroundStyle((d.color ?? color).opacity(0.6))
+                        .lineStyle(StrokeStyle(lineWidth: 3, lineCap: .round))
+                }
+            }
             ForEach(dots) { d in
                 PointMark(x: .value("x", d.x), y: .value("y", d.y))
-                    .foregroundStyle(color)
+                    .foregroundStyle(d.color ?? color)
                     .symbolSize(dotSize)
             }
             if let guideX {
@@ -238,26 +256,39 @@ struct KeyMetricActivityLane: View {
     let inset: KeyMetricPlotInset
     var guideX: Date? = nil
 
+    // One clearly different hue per context, so the lane and the dots can be read apart at a glance: sleep and
+    // lying down are indigo and sky blue, sitting green, still slate, standing amber, moving red.
     static func color(_ context: KeyMetricWindowContext) -> Color {
         switch context {
-        case .sleep: return KeyMetricStyle.accent
-        case .stableAwake: return KeyMetricStyle.teal
-        case .moving: return KeyMetricStyle.secondary
-        case .awake: return KeyMetricStyle.secondary.opacity(0.45)
-        case .mixed: return KeyMetricStyle.track
-        // Unknown is drawn hollow: the strap could not tell.
-        case .unknown: return .clear
+        case .sleep: return Color(light: "#4A3FB8", dark: "#8F86FF")
+        case .lyingDown: return Color(light: "#2F8FDB", dark: "#78C2FF")
+        case .sitting: return Color(light: "#1E9B63", dark: "#5FD9A2")
+        case .standing: return Color(light: "#E08A00", dark: "#FFC247")
+        case .still: return Color(light: "#7D8AA3", dark: "#A3AFC6")
+        case .moving: return Color(light: "#DE3B2B", dark: "#FF7A66")
+        case .offWrist: return KeyMetricStyle.secondary.opacity(0.35)
+        // Unclear is drawn hollow: the strap could not tell.
+        case .unclear: return .clear
         }
     }
 
-    /// One bar (or legend swatch); unknown is an outline.
+    /// A reading's dot colour: its context's lane colour, with the hollow contexts drawn in the muted text colour.
+    static func dotColor(_ context: KeyMetricWindowContext) -> Color {
+        switch context {
+        case .unclear: return KeyMetricStyle.secondary
+        case .offWrist: return KeyMetricStyle.secondary.opacity(0.6)
+        default: return color(context)
+        }
+    }
+
+    /// One bar (or legend swatch); unclear is an outline.
     @ViewBuilder
     static func swatch(_ context: KeyMetricWindowContext, width: CGFloat, height: CGFloat) -> some View {
-        RoundedRectangle(cornerRadius: 2)
+        RoundedRectangle(cornerRadius: min(5, height / 2))
             .fill(color(context))
             .overlay {
-                if context == .unknown {
-                    RoundedRectangle(cornerRadius: 2).strokeBorder(KeyMetricStyle.secondary.opacity(0.5), lineWidth: 1)
+                if context == .unclear {
+                    RoundedRectangle(cornerRadius: min(5, height / 2)).strokeBorder(KeyMetricStyle.secondary.opacity(0.6), lineWidth: 1.5)
                 }
             }
             .frame(width: width, height: height)
@@ -281,18 +312,18 @@ struct KeyMetricActivityLane: View {
                 ZStack(alignment: .topLeading) {
                     ForEach(visible) { span in
                         let a = max(Double(span.start), lo), b = min(Double(span.end), hi)
-                        Self.swatch(span.context, width: max(1, x(b) - x(a) - 1), height: 8)
+                        Self.swatch(span.context, width: max(1, x(b) - x(a) - 1), height: 22)
                             .offset(x: x(a), y: 4)
                     }
                     if let guideX {
                         Rectangle()
                             .fill(KeyMetricStyle.secondary.opacity(0.8))
-                            .frame(width: 1, height: 16)
+                            .frame(width: 1, height: 30)
                             .offset(x: x(guideX.timeIntervalSince1970))
                     }
                 }
             }
-            .frame(height: 16)
+            .frame(height: 30)
             .accessibilityHidden(true)
             legend
         }
@@ -301,14 +332,14 @@ struct KeyMetricActivityLane: View {
     private var legend: some View {
         let shown = visible
         let present = KeyMetricWindowContext.allCases.filter { c in shown.contains { $0.context == c } }
-        return FlowLayout(spacing: 10) {
+        return FlowLayout(spacing: 14) {
             ForEach(present, id: \.self) { c in
-                HStack(spacing: 6) {
-                    Self.swatch(c, width: 12, height: 6)
+                HStack(spacing: 7) {
+                    Self.swatch(c, width: 22, height: 14)
                     Text(c.name)
                 }
-                .font(KeyMetricStyle.small)
-                .foregroundStyle(KeyMetricStyle.secondary)
+                .font(KeyMetricStyle.label)
+                .foregroundStyle(KeyMetricStyle.text)
             }
         }
     }

@@ -1,6 +1,7 @@
 import Foundation
 import StrandDesign
 import StrandAnalytics
+import WhoopStore
 
 // MARK: - MonitorLabels
 //
@@ -190,6 +191,23 @@ enum MonitorLabels {
         return hasReadings ? headline : "No readings in the last 30 minutes"
     }
 
+    /// Why the half-hour has nothing to read, when the app can tell: the strap is on its charger, is not connected,
+    /// or does not detect a wrist. Nil when none of those is true (the engine's own line then stands). A strap on a
+    /// charger is not on a wrist, so it records no heart rate; this is the case that read as a broken Watchdog.
+    static func noReadingReason(charging: Bool, connected: Bool, activeIsWhoop: Bool, wristOff: Bool) -> String? {
+        guard activeIsWhoop else { return nil }
+        if connected, charging {
+            return "Your strap is charging, so it is not reading your heart. Readings resume once it is back on your wrist."
+        }
+        if !connected {
+            return "Your strap is not connected right now, so there is nothing live to read. Last night's values are shown below."
+        }
+        if wristOff {
+            return "Your strap does not detect a wrist. Readings resume once it is worn."
+        }
+        return nil
+    }
+
     /// The snapshot's caption only when it asks for something: an alert that was not delivered. The other
     /// captions ("Not enough minutes.", "Strap off. Not recovered.") repeat what the state word says.
     static func watchdogNotice(_ caption: String?) -> String? {
@@ -229,6 +247,58 @@ enum MonitorLabels {
     /// "25 min", "1 h 35 min".
     static func minutesText(_ minutes: Int) -> String {
         minutes < 60 ? "\(minutes) min" : (minutes % 60 == 0 ? "\(minutes / 60) h" : "\(minutes / 60) h \(minutes % 60) min")
+    }
+}
+
+// MARK: - Watchdog fallback
+
+/// What a Watchdog cell shows when its half-hour has no reading: the newest recorded night's value for the vital,
+/// stamped with when it is from, so the cell carries a real number instead of a bare dash. Only the vitals the
+/// night produces (not live heart rate, which has no stored last reading). Heart rate stays "No reading".
+struct WatchdogFallback: Equatable {
+    /// The value with its unit ("54 bpm"), ready for `MonitorLabels.splitValue`.
+    let value: String
+    /// When it is from: "Last night" for today's row, else the day ("Tue 6 Oct").
+    let caption: String
+
+    /// The newest row up to and including today that holds the field. Unlike the strictly-prior carries the
+    /// Today screen uses, today's row counts: it is last night's sleep, scored this morning.
+    static func make(id: String, days: [DailyMetric], todayKey: String, fahrenheit: Bool) -> WatchdogFallback? {
+        func newest(_ has: (DailyMetric) -> Bool) -> DailyMetric? {
+            days.last { $0.day <= todayKey && has($0) }
+        }
+        let row: DailyMetric?
+        let value: String
+        switch id {
+        case "rhr":
+            row = newest { $0.restingHr != nil }
+            value = row?.restingHr.map { "\($0) bpm" } ?? ""
+        case "hrv":
+            row = newest { ($0.avgHrv ?? 0) > 0 }
+            value = row?.avgHrv.map { "\(MonitorLabels.number($0, unit: "ms")) ms" } ?? ""
+        case "temp":
+            row = newest { $0.skinTempC != nil }
+            let unit = fahrenheit ? "°F" : "°C"
+            value = row?.skinTempC.map {
+                "\(MonitorLabels.number(fahrenheit ? UnitFormatter.celsiusToFahrenheit($0) : $0, unit: unit)) \(unit)"
+            } ?? ""
+        case "resp":
+            row = newest { $0.respRateBpm != nil }
+            value = row?.respRateBpm.map { "\(MonitorLabels.number($0, unit: "rpm")) rpm" } ?? ""
+        case "spo2":
+            row = newest { $0.spo2Pct != nil }
+            value = row?.spo2Pct.map { "\(MonitorLabels.number($0, unit: "%")) %" } ?? ""
+        default:
+            return nil
+        }
+        guard let row, !value.isEmpty else { return nil }
+        return WatchdogFallback(value: value, caption: caption(day: row.day, todayKey: todayKey))
+    }
+
+    static func caption(day: String, todayKey: String) -> String {
+        if day == todayKey { return "Last night" }
+        guard let date = ChartDay.date(forKey: day) else { return day }
+        return date.formatted(.dateTime.weekday(.abbreviated).day().month(.abbreviated))
     }
 }
 

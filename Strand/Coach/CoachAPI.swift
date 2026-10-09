@@ -88,6 +88,66 @@ struct CoachMemory: Codable, Identifiable, Equatable, Sendable {
     var pinned: Bool? = nil
 }
 
+extension CoachMemory {
+    /// The longest text `PATCH memories/<id>` accepts (after trimming).
+    static let maxContentLength = 500
+
+    /// One topic's memories, as the memory sheet lists them.
+    struct Section: Identifiable, Equatable {
+        let topic: String
+        let memories: [CoachMemory]
+        var id: String { topic }
+        var title: String { CoachMemory.title(forTopic: topic) }
+    }
+
+    /// Safety topics first (they hold the pinned facts), then the plans, then everything else; unknown topics last.
+    private static let topicOrder = ["injury", "health", "goal", "training", "routine", "sleep", "nutrition", "lifestyle",
+                                     "preference", "achievement", "general"]
+
+    static func title(forTopic topic: String) -> String {
+        switch topic {
+        case "injury": return String(localized: "Injuries")
+        case "health": return String(localized: "Health")
+        case "goal": return String(localized: "Goals")
+        case "training": return String(localized: "Training")
+        case "routine": return String(localized: "Routines")
+        case "sleep": return String(localized: "Sleep")
+        case "nutrition": return String(localized: "Nutrition")
+        case "lifestyle": return String(localized: "Lifestyle")
+        case "preference": return String(localized: "Preferences")
+        case "achievement": return String(localized: "Achievements")
+        case "general": return String(localized: "General")
+        default: return topic.replacingOccurrences(of: "_", with: " ").capitalized
+        }
+    }
+
+    /// Grouped by topic; within a topic pinned first, then importance, then the most recently changed.
+    static func sections(_ memories: [CoachMemory]) -> [Section] {
+        let byTopic = Dictionary(grouping: memories) { $0.topic.lowercased() }
+        let rank = { (topic: String) in topicOrder.firstIndex(of: topic) ?? topicOrder.count }
+        return byTopic.keys
+            .sorted { (rank($0), $0) < (rank($1), $1) }
+            .map { topic in
+                Section(topic: topic, memories: byTopic[topic, default: []].sorted { a, b in
+                    if (a.pinned == true) != (b.pinned == true) { return a.pinned == true }
+                    if a.importance != b.importance { return a.importance > b.importance }
+                    return a.recencyKey > b.recencyKey
+                })
+            }
+    }
+
+    /// When the fact was last written, if the server said.
+    var changedAt: Date? {
+        guard let raw = updatedAt ?? createdAt else { return nil }
+        let iso = raw.replacingOccurrences(of: " ", with: "T")
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: iso) ?? ISO8601DateFormatter().date(from: iso)
+    }
+
+    private var recencyKey: String { (updatedAt ?? createdAt ?? "").replacingOccurrences(of: " ", with: "T") }
+}
+
 struct CoachMessageMeta: Codable, Equatable, Sendable {
     var toolNames: [String]?
     var viz: CoachViz?
@@ -606,6 +666,17 @@ struct CoachContextManifest: Codable, Equatable, Sendable {
         return copy
     }
 
+    /// Puts the user's rewrite of a memory in place, so a cached manifest never prompts with the old text.
+    func replacingMemory(_ memory: CoachMemory) -> CoachContextManifest {
+        var copy = self
+        copy.memories = memories.map { $0.id == memory.id ? CoachMemory(id: $0.id, content: memory.content, topic: memory.topic,
+                                                                           importance: memory.importance, createdAt: $0.createdAt,
+                                                                           updatedAt: memory.updatedAt ?? $0.updatedAt,
+                                                                           source: $0.source, confirmations: $0.confirmations,
+                                                                           pinned: $0.pinned) : $0 }
+        return copy
+    }
+
     /// Drops every mention of a deleted thread (its summary, its library rows and its open loops), so a cached
     /// manifest can never bring a deleted chat back into a prompt.
     func removingThread(id: String) -> CoachContextManifest {
@@ -982,6 +1053,16 @@ final class CoachAPI: @unchecked Sendable {
         var body: [String: Any] = ["content": content, "topic": topic, "importance": importance]
         if let threadId { body["threadId"] = threadId }
         return try JSONDecoder().decode(Reply.self, from: try await send(try request("memories", method: "POST", body: body))).memory
+    }
+
+    /// `PATCH memories/<id>`: the user's own rewrite. Throws `CoachRouteError`; 404 when the memory is gone (or was
+    /// forgotten), 409 `stale` when it changed since it was read.
+    func updateMemory(id: String, content: String, topic: String? = nil, importance: Int? = nil) async throws -> CoachMemory {
+        struct Reply: Decodable { let memory: CoachMemory }
+        var body: [String: Any] = ["content": content]
+        if let topic { body["topic"] = topic }
+        if let importance { body["importance"] = min(max(importance, 1), 5) }
+        return try await decode(Reply.self, try request("memories/\(id.lowercased())", method: "PATCH", body: body)).memory
     }
 
     func deleteMemory(id: String) async throws {

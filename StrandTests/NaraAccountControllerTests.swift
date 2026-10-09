@@ -334,25 +334,64 @@ final class NaraAccountControllerTests: XCTestCase {
         XCTAssertEqual(server.calls.count, calls)
     }
 
-    // MARK: sync switch
+    // MARK: always-on sync
 
-    func testTurningSyncOffStopsTheRuntimeButKeepsTheAccountAndCredential() async throws {
+    func testARestoredSessionWithAnOldOptOutSyncsAgain() async throws {
         await controller.start()
         await signIn(ownerA)
         let identity = try XCTUnwrap(store.identity(forOwner: ownerA))
         let calls = server.calls.count
 
-        controller.setUploadsEnabled(false)
-        await controller.settle()
-        XCTAssertEqual(controller.bootstrap, .paused)
-        XCTAssertNil(runtime.runningScope)
-        XCTAssertEqual(store.identity(forOwner: ownerA), identity)
+        // Relaunch with the opt-out an older build could store, the session restored from storage.
+        uploadsOn = false
+        runtime = FakeRuntime()
+        backend = FakeAuthBackend()
+        backend.stored = FakeAuthBackend.session(userId: ownerA)
+        backend.tokenResult = .success("jwt-for-\(ownerA)")
+        makeControllerStack()
+        await controller.start()
 
-        controller.setUploadsEnabled(true)
-        await controller.settle()
+        XCTAssertTrue(uploadsOn, "a signed-in account always syncs")
         XCTAssertEqual(controller.bootstrap, .ready)
         XCTAssertEqual(runtime.runningScope, identity.scope)
-        XCTAssertEqual(server.calls.count, calls, "turning sync back on needs no new credential")
+        XCTAssertEqual(server.calls.count, calls, "the stored credential is reused")
+    }
+
+    func testSyncStatusComesFromTheRunningTransportOnly() async throws {
+        let status = CloudSyncStatus(pendingRecords: 12, oldestPendingAt: clock.now, queuedBatches: 1,
+                                     inFlight: 0, lastAttemptAt: nil, lastError: "receiver status 503")
+        runtime.reportedSyncStatus = status
+        await controller.start()
+        let signedOut = await controller.syncStatus()
+        XCTAssertNil(signedOut, "nothing is running while signed out")
+
+        await signIn(ownerA)
+        let signedIn = await controller.syncStatus()
+        XCTAssertEqual(signedIn, status)
+        XCTAssertEqual(signedIn?.isUpToDate, false)
+
+        await signOut()
+        let afterSignOut = await controller.syncStatus()
+        XCTAssertNil(afterSignOut)
+    }
+
+    func testSyncStatusIsUpToDateOnlyWhenNothingIsWaiting() {
+        var stats = CloudJournalStats.empty
+        let now = Date(timeIntervalSince1970: 1_700_000_000)
+        let drained = CloudSyncStatus(stats: stats, inFlight: 0, lastAttemptAtMs: 1_699_999_990_000,
+                                      lastError: nil, now: now)
+        XCTAssertTrue(drained.isUpToDate)
+        XCTAssertNil(drained.oldestPendingAt)
+        XCTAssertEqual(drained.lastAttemptAt, Date(timeIntervalSince1970: 1_699_999_990))
+
+        stats.pendingRecords = 4
+        stats.oldestPendingAgeSeconds = 60
+        stats.uploadedBatches = 1
+        let waiting = CloudSyncStatus(stats: stats, inFlight: 1, lastAttemptAtMs: nil, lastError: nil, now: now)
+        XCTAssertFalse(waiting.isUpToDate)
+        XCTAssertEqual(waiting.oldestPendingAt, now.addingTimeInterval(-60))
+        XCTAssertEqual(waiting.queuedBatches, 1)
+        XCTAssertEqual(waiting.inFlight, 1)
     }
 
     // MARK: on-device history

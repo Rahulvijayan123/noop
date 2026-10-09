@@ -50,13 +50,22 @@ public struct LiquidGlassLevel: Equatable, Sendable {
         return 1 - (1 - floor) * amount
     }
 
-    /// The same, for a surface that is a solid colour by meaning (a filled primary button).
-    public var tintedBodyOpacity: Double { 1 - 0.28 * amount }
+    /// The same, for a surface that is a solid colour by meaning (a filled primary button). At full strength the
+    /// fill is a third see-through; the floor keeps the white label above 4.5:1 on the accent.
+    public var tintedBodyOpacity: Double { 1 - 0.36 * amount }
+
+    /// A well nested inside a glass card (a stat cell, a chip, a header circle's resting fill): it thins well below
+    /// the card's own body, so the card's glass shows through it.
+    public func insetBodyOpacity(_ scheme: ColorScheme) -> Double {
+        let floor = scheme == .dark ? 0.34 : 0.30
+        return 1 - (1 - floor) * amount
+    }
 
     public var sheenOpacity: Double { 0.18 * amount }
     public var rimOpacity: Double { 0.62 * amount }
-    /// The drop shadow is thinned as the body thins, or it would show through the glass as a smudge.
-    public var shadowScale: Double { 1 - 0.55 * amount }
+    /// The drop shadow stays at full strength: glass cards clip it to the outside of their edge (`NoopOuterShadow`),
+    /// so a thin body no longer shows it through.
+    public var shadowScale: Double { 1 }
 
     /// Metal lens strength for floating controls. Zero below 15% so a faint setting stays a pure blur.
     public var refractionStrength: Float { amount < 0.15 ? 0 : Float(0.35 + 0.65 * amount) }
