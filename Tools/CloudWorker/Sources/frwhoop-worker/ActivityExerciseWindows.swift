@@ -249,35 +249,48 @@ struct ExerciseResponse: Equatable {
         guard InertiaSettings.isHex64(weights) else { throw ExerciseResponseError.schema("weights_sha256") }
         let scaler = try string("scaler_version"), prep = try string("preprocessing_version")
         guard (obj["classes"] as? [String]) == ExerciseWire.classes else { throw ExerciseResponseError.schema("classes") }
-        guard (obj["window_s"] as? Int) == ExerciseWire.windowSeconds, (obj["hop_s"] as? Int) == ExerciseWire.hopSeconds
+        guard number(obj["window_s"]) == Double(ExerciseWire.windowSeconds),
+              number(obj["hop_s"]) == Double(ExerciseWire.hopSeconds)
         else { throw ExerciseResponseError.schema("window grid") }
         guard let rawWindows = obj["windows"] as? [Any] else { throw ExerciseResponseError.schema("windows") }
         var windows: [ExerciseWindow] = []
         windows.reserveCapacity(rawWindows.count)
         var previous: Int?
         for raw in rawWindows {
-            guard let w = raw as? [String: Any], let s = (w["s"] as? NSNumber)?.int64Value,
-                  let e = (w["e"] as? NSNumber)?.int64Value, let fp = w["input_sha256"] as? String,
+            guard let w = raw as? [String: Any], let sd = number(w["s"]), let ed = number(w["e"]),
+                  let fp = w["input_sha256"] as? String,
                   let p = w["p"] as? [Any] else { throw ExerciseResponseError.schema("window shape") }
-            guard abs(Double(s)) < ActivityPythonService.maxWindowTimeMagnitude, s % 2 == 0,
-                  e == s + Int64(ExerciseWire.windowSeconds) else {
-                throw ExerciseResponseError.invalidValues("window \(s)-\(e) off the 2 s grid")
+            // Checked before any Int conversion (which traps for non-finite or huge values).
+            guard sd.isFinite, ed.isFinite, abs(sd) < ActivityPythonService.maxWindowTimeMagnitude,
+                  sd == sd.rounded(), ed == sd + Double(ExerciseWire.windowSeconds) else {
+                throw ExerciseResponseError.invalidValues("window \(sd)-\(ed) off the 2 s grid")
             }
+            let s = Int(sd), e = Int(ed)
+            guard s % 2 == 0 else { throw ExerciseResponseError.invalidValues("window \(s) off the 2 s grid") }
             guard InertiaSettings.isHex64(fp) else { throw ExerciseResponseError.invalidValues("input_sha256") }
-            let probs = p.compactMap { ($0 as? NSNumber)?.doubleValue }
+            let probs = p.compactMap { number($0) }
             guard probs.count == ExerciseWire.classes.count, p.count == probs.count,
                   probs.allSatisfy({ $0.isFinite && $0 >= 0 && $0 <= 1 }),
                   abs(probs.reduce(0, +) - 1) <= ExerciseWire.sumTolerance else {
                 throw ExerciseResponseError.invalidValues("probabilities of window \(s)")
             }
-            if let previous, Int(s) <= previous { throw ExerciseResponseError.invalidValues("windows out of order") }
-            previous = Int(s)
-            windows.append(ExerciseWindow(start: Int(s), end: Int(e), probabilities: probs, inputSHA256: fp))
+            if let previous, s <= previous { throw ExerciseResponseError.invalidValues("windows out of order") }
+            previous = s
+            windows.append(ExerciseWindow(start: s, end: e, probabilities: probs, inputSHA256: fp))
         }
         return ExerciseResponse(
             model: ExerciseModelInfo(modelId: ExerciseWire.modelId, modelVersion: version, weightsSHA256: weights,
                                      scalerVersion: scaler, preprocessingVersion: prep),
-            windows: windows, droppedNonfinite: (obj["n_dropped_nonfinite"] as? Int) ?? 0)
+            windows: windows,
+            droppedNonfinite: number(obj["n_dropped_nonfinite"]).flatMap { $0.isFinite && $0 >= 0 && $0 < 1e9 ? Int($0) : nil } ?? 0)
+    }
+
+    /// A JSON number as Double: what JSONSerialization hands back (bridged on Darwin, Int or Double on Linux) or a
+    /// literal built in Swift. Everything else (strings, objects) is nil.
+    static func number(_ value: Any?) -> Double? {
+        if let d = value as? Double { return d }
+        if let i = value as? Int { return Double(i) }
+        return nil
     }
 }
 
