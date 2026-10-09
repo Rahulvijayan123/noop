@@ -189,11 +189,13 @@ struct ScoringLane {
                     return
                 case .completed:
                     consecutiveFailures = 0
+                    clearError()
                     stats.claimed += 1
                     stats.completed += 1
                     stats.lastScoreAt = Date()
                 case .superseded:
                     consecutiveFailures = 0
+                    clearError()
                     stats.claimed += 1
                     stats.superseded += 1
                 }
@@ -227,6 +229,13 @@ struct ScoringLane {
         let kind = (error as? PostgresClient.Error)?.kind ?? .other
         stats.lastErrorKind = kind
         stats.failureKinds[kind.rawValue, default: 0] += 1
+    }
+
+    /// The heartbeat writes `lastError` to `scoring_service_heartbeats.last_error` on every beat; a
+    /// scored or superseded day must retire it, or one transient failure reads as a lane failing forever.
+    private mutating func clearError() {
+        stats.lastError = nil
+        stats.lastErrorKind = nil
     }
 
     // MARK: - Path A (legacy fleet queue)
