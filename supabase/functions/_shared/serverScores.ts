@@ -311,6 +311,48 @@ export async function readAnomalyCandidates({ rest, userId, deviceId, since, lim
   return { candidates: list, cursor, windows: Array.isArray(read) ? read : [], reason_codes_version: REASON_CODES_VERSION };
 }
 
+/** `GET /exercise-windows`: at most a day per request, at most this many windows per page. */
+export const EXERCISE_WINDOWS_MAX_RANGE_SECONDS = 86_400;
+export const EXERCISE_WINDOWS_MAX_ROWS = 5_000;
+
+/**
+ * `GET /exercise-windows?deviceId=<id>&from=<unix s>&to=<unix s>[&limit=<n>]`: the RecGym exercise head's SHADOW windows
+ * (20261009160000_activity_exercise_windows.sql) that start in [from, to), oldest first, owner and device from the
+ * credential. `to - from` is at most a day; a full page carries `next_from` to continue from. Every row says its
+ * release (`release_mode`, always shadow), the placement the strap was declared at and whether the wrist-trained
+ * model supports it. For inspection only: nothing in the app decodes, scores or alerts on these rows.
+ */
+export function parseExerciseWindowsQuery(params: URLSearchParams) {
+  const from = params.get('from');
+  const to = params.get('to');
+  const limit = params.get('limit') ?? String(EXERCISE_WINDOWS_MAX_ROWS);
+  if (from == null || to == null || !/^\d{1,10}$/.test(from) || !/^\d{1,10}$/.test(to)
+      || Number(to) <= Number(from) || Number(to) - Number(from) > EXERCISE_WINDOWS_MAX_RANGE_SECONDS) {
+    throw fail('invalid_range', 400);
+  }
+  if (!/^\d{1,5}$/.test(limit) || Number(limit) < 1 || Number(limit) > EXERCISE_WINDOWS_MAX_ROWS) {
+    throw fail('invalid_limit', 400);
+  }
+  return { from: Number(from), to: Number(to), limit: Number(limit) };
+}
+
+export async function readExerciseWindows({ rest, userId, deviceId, from, to, limit }: {
+  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; from: number; to: number; limit: number;
+}) {
+  const iso = (t: number) => encodeURIComponent(new Date(t * 1000).toISOString());
+  const rows = ((await rest.select('activity_exercise_windows',
+    `user_id=eq.${userId}&device_id=eq.${deviceId}&window_start=gte.${iso(from)}&window_start=lt.${iso(to)}`
+    + '&select=window_start,window_s,model_id,model_version,weights_sha256,scaler_version,preprocessing_version,'
+    + 'placement,placement_supported,placement_reason,top_class,top_p,p_null,probs,input_sha256,release_mode,'
+    + `input_revision,result_revision,computed_at&order=window_start.asc&limit=${limit}`)) ?? []) as Array<Record<string, any>>;
+  const windows: Array<Record<string, any>> = rows.map((r) => ({ ...r, release_mode: 'shadow',
+    input_revision: String(r.input_revision), result_revision: String(r.result_revision) }));
+  const last = windows.at(-1);
+  const nextFrom = windows.length === limit && last
+    ? Math.floor(Date.parse(String(last.window_start)) / 1000) + 1 : null;
+  return { windows, next_from: nextFrom, release_mode: 'shadow' };
+}
+
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
   + 'input_revision,release_mode,result_revision,computed_at';
 
@@ -493,6 +535,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isSeries = req.method === 'GET' && route === '/series';
   const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
   const isGaitWindows = req.method === 'GET' && route === '/gait-windows';
+  // RecGym exercise windows, shadow only (20261009160000): one device, a time range.
+  const isExerciseWindows = req.method === 'GET' && route === '/exercise-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
@@ -524,7 +568,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
       && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes
-      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet) {
+      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -561,7 +605,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
-        || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet
+        || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet || isExerciseWindows
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
         : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES
@@ -569,7 +613,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         : isWatchdogEpisodesPost ? WATCHDOG_EPISODES_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates || isContextMinutes
-        || isWatchdogEpisodesGet
+        || isWatchdogEpisodesGet || isExerciseWindows
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
         || isInsights) ? null
@@ -633,6 +677,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (!deviceId) throw fail('device_registration_pending', 409);
       const query = parseAnomalyCandidatesQuery(url.searchParams);
       const page = await readAnomalyCandidates({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExerciseWindows) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseExerciseWindowsQuery(url.searchParams);
+      const page = await readExerciseWindows({ rest, userId: user.id, deviceId, ...query });
       return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGaitWindows) {

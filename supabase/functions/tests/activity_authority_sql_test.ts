@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { startLocalPostgres, USER_A } from './local_postgres.ts';
-import { readActivityWindows, readGaitWindows } from '../_shared/serverScores.ts';
+import { readActivityWindows, readExerciseWindows, readGaitWindows } from '../_shared/serverScores.ts';
 
 // Activity DB contracts on the whole migration chain (docs/model-integration/activity-authority.md), in the
 // throwaway harness only: every activity *_contract.sql (each rolls back), then the /gait-windows and
@@ -101,6 +101,54 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
       // The candidate table is the worker's alone: an owner token cannot read it through PostgREST.
       const owner = await db.request('activity_candidate_days?select=day');
       assert.notEqual(owner.status, 200, 'no owner read of the candidate table');
+    });
+
+    await t.step('the exercise route reads the windows the real publish function wrote, through PostgREST', async () => {
+      const device = 'e0000000-0000-4000-8000-000000000012';
+      const day = '2026-12-06';
+      const lo = Date.parse(`${day}T00:00:00Z`) / 1000 + 3600;
+      await db.sql(`
+        insert into public.devices(id,user_id,source_kind) values ('${device}','${USER_A}','noop_push');
+        insert into public.placement_intervals(owner, device_id, placement, effective_start)
+          values ('${USER_A}', '${device}', 'bicep', to_timestamp(${lo - 60}));
+        do $$
+        declare fp text; dlo bigint := extract(epoch from ('${day}'::date::timestamp at time zone 'UTC'))::bigint;
+          j record;
+        begin
+          fp := public.activity_context_fingerprint(array[repeat('8',64)],dlo,dlo+86399,'hart-activity-1',
+            'hart-activity-v1','hart-activity-preprocess-v1','v1');
+          perform public.enqueue_activity_context('${USER_A}','${device}','${day}',array[gen_random_uuid()],
+            array[repeat('8',64)],fp);
+          select * into j from public.claim_activity_context_v2(300);
+          perform public.publish_activity_exercise_windows(j.lease_token, j.input_revision, jsonb_build_object(
+            'day','${day}','schema','exercise-windows-1',
+            'model',jsonb_build_object('model_id','recgym-cnn-transformer','model_version','recgym-cnn-transformer-e085ac0',
+              'weights_sha256',repeat('7',64),'scaler_version','recgym-wrist-imu-scaler-1',
+              'preprocessing_version','recgym-prep-1','classes',jsonb_build_array('Adductor','ArmCurl','BenchPress',
+              'LegCurl','LegPress','Null','Riding','RopeSkipping','Running','Squat','StairClimber','Walking'),
+              'window_s',4,'hop_s',2),
+            'authority',jsonb_build_object('policy','expert-authority-1','channel','exercise_recognition',
+              'mode','shadow','release_mode','shadow','use','none'),
+            'spans',jsonb_build_array(jsonb_build_array(${lo},${lo + 20})),
+            'windows',(select jsonb_agg(jsonb_build_object('s',${lo} + 2*k,'fp',repeat('c',64),
+              'p','[0.01,0.01,0.86,0.01,0.01,0.03,0.01,0.01,0.01,0.02,0.01,0.01]'::jsonb) order by k)
+              from generate_series(0, 7) k)));
+        end $$;`);
+      const page = await readExerciseWindows({ rest: db.rest, userId: USER_A, deviceId: device, from: lo, to: lo + 20,
+        limit: 5 });
+      assert.equal(page.windows.length, 5);
+      assert.equal(page.next_from, lo + 9);
+      const w: any = page.windows[0];
+      assert.equal(Date.parse(w.window_start) / 1000, lo);
+      assert.equal(w.top_class, 'BenchPress');
+      assert.equal(w.placement, 'bicep');
+      assert.equal(w.placement_supported, false);
+      assert.equal(w.placement_reason, 'placement_unsupported');
+      assert.equal(w.release_mode, 'shadow');
+      assert.match(w.input_revision, /^[0-9]+$/);
+      assert.equal(Number(w.probs.BenchPress), 0.86);
+      const owner = await db.request('activity_exercise_windows?select=window_start');
+      assert.equal(owner.status, 200, 'the owner reads their own windows');
     });
   } finally {
     await db.close();
