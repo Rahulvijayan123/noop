@@ -76,6 +76,19 @@ final class CloudReceiverClientAuthTests: XCTestCase {
         XCTAssertNotNil(grant.expiresAt)
     }
 
+    func testTheGrantCarriesTheServersSyncPolicyWhenItSendsOne() async throws {
+        ReceiverStub.respond(status: 201, json: grantJSON(extra: ["syncPolicy": ["required": false, "staleAfterHours": 6]]))
+        let relaxed = try await client().provisionInstallation(accessToken: "t", expectedOwnerId: owner, sourceId: source,
+                                                               platform: .ios, appVersion: "1.0", currentToken: nil)
+        XCTAssertEqual(relaxed.syncPolicy, CloudSyncPolicy(required: false, staleAfterHours: 6))
+
+        ReceiverStub.reset()
+        ReceiverStub.respond(status: 201, json: grantJSON())
+        let older = try await client().provisionInstallation(accessToken: "t", expectedOwnerId: owner, sourceId: source,
+                                                             platform: .ios, appVersion: "1.0", currentToken: nil)
+        XCTAssertNil(older.syncPolicy, "a server that sends no policy leaves the account's assumed one in place")
+    }
+
     func testAPresentedCredentialTravelsInItsOwnHeaderNotTheBearer() async throws {
         ReceiverStub.respond(status: 200, json: grantJSON(action: "reused", token: nil))
 

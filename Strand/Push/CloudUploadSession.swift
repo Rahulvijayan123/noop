@@ -175,6 +175,8 @@ public final class CloudUploadSession: NSObject, @unchecked Sendable {
         guard http.statusCode == 200 else {
             throw UploadError.unexpectedStatus(http.statusCode, String(data: data, encoding: .utf8))
         }
+        // The reply also says whether the account must keep syncing; it is kept per account (`CloudSyncPolicy`).
+        CloudSyncPolicyStore.shared.record(replyBody: data, forOwner: identity.ownerId)
         return try PushCapabilities.parse(data)
     }
 

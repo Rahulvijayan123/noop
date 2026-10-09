@@ -458,12 +458,19 @@ private struct DevicesContent: View {
                     NaraAccountView()
                 } label: {
                     NoopListRow(icon: "arrow.up.heart", iconColor: StrandPalette.accent, title: "Cloud upload",
-                                value: CloudPushSettings.isEnabled ? String(localized: "On") : String(localized: "Off"))
+                                value: cloudUploadValue)
                 }
                 .accessibilityLabel("Cloud upload")
             }
         }
         .buttonStyle(.plain)
+    }
+
+    /// A signed-in account is always synced while its sync policy requires it, so the row states that instead
+    /// of an on/off that nothing on the next screen can change.
+    private var cloudUploadValue: String {
+        if CloudPushSettings.signedInSyncIsMandatory { return String(localized: "Synced") }
+        return CloudPushSettings.isEnabled ? String(localized: "On") : String(localized: "Off")
     }
 
     private var whoopFirstNote: String {

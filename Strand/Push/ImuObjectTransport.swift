@@ -56,6 +56,8 @@ public final class ImuObjectTransport: PushTransport, @unchecked Sendable {
         }
         let caps = try PushCapabilities.parse(data)
         lock.lock(); protocolVersion = caps.protocolVersion; lock.unlock()
+        // The reply also says whether the account must keep syncing; it is kept per account (`CloudSyncPolicy`).
+        if let owner = identity()?.ownerId { CloudSyncPolicyStore.shared.record(replyBody: data, forOwner: owner) }
         return .available(caps)
     }
 
