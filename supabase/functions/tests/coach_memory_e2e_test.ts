@@ -9,8 +9,9 @@ import {
 // the real PostgREST client against a disposable PostgreSQL with 20261007160000_coach_threads_memory.sql,
 // Supabase-Auth installation bearers, and a scripted OpenAI-compatible upstream that streams chat answers and
 // recognises every cheap-model pass by its prompt. The steps follow what the thread-aware iOS app does:
-//  1. status features; a new chat saved with its fallback title, streamed, answered, titled by follow-ups,
-//     and maintained inline into a summary plus curated memories (the guards drop advice and passing states);
+//  1. status features and the caller's sync health; a new chat saved with its fallback title, streamed, answered,
+//     titled by follow-ups, and maintained inline into a summary plus curated memories (the guards drop advice and
+//     passing states);
 //  2. a second chat titled through the title route, with a blocked turn that never reaches a prompt;
 //  3. thread lists, message pages and cursors, and persistence across a restarted function;
 //  4. the context library: manifest (ranked memories with the safety pin, relevant and recent chats, open
@@ -41,7 +42,7 @@ interface Row { clientId: string; threadId?: string; role: 'user' | 'assistant';
 Deno.test('coach memory e2e: threads, memory and the context library over real HTTP and PostgREST', {
   sanitizeOps: false, sanitizeResources: false,
 }, async (t) => {
-  const db = await startLocalPostgres({ authProvisioning: true, coachMemory: true });
+  const db = await startLocalPostgres({ authProvisioning: true, coachMemory: true, syncHealth: true });
   const upstream = startScriptedUpstream();
   const errors: unknown[] = [];
   const cfg = coachConfig({ FIREWORKS_AI_API_KEY: 'fw-e2e-test-key', COACH_UPSTREAM_URL: upstream.url });
@@ -81,6 +82,7 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
   await db.sql(`select 1`);
   await seedInstallation(db.sql, USER_A, TOKEN_A);
   await seedInstallation(db.sql, USER_B, TOKEN_B);
+  await db.sql(`update auth.users set email_confirmed_at = now() where id in ('${USER_A}', '${USER_B}')`);
 
   const T1 = uuid();
   const T2 = uuid();
@@ -103,6 +105,9 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       assert.equal(status.status, 200);
       assert.deepEqual(status.body.features, { threads: 1, context: 1 });
       assert.equal(status.body.configured, true);
+      // A signed-in account must keep syncing; this one has a phone linked and has never uploaded.
+      assert.deepEqual(status.body.syncPolicy, { required: true, staleAfterHours: 24 });
+      assert.deepEqual(status.body.sync, { required: true, lastUploadAt: null, stale: true, staleAfterHours: 24 });
       assert.equal((await coachClient(server.url, 'noop_not_a_token').get('status')).status, 401);
       const anonymous = await fetch(`${server.url}/threads`);
       assert.equal(anonymous.status, 401);

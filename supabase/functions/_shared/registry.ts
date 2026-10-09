@@ -8,6 +8,7 @@ import {
 import { OBJECT_LANE_STREAMS } from './keys.ts';
 import { isDeepStrictEqual } from 'node:util';
 import { scalarProvenance } from './scalarProvenance.ts';
+import { type SyncPolicy, syncPolicyBody, syncPolicyFromEnv } from './syncPolicy.ts';
 
 export const PUSH_PROTOCOL_VERSIONS = ['1.3', '1.2', '1.1', '1.0'];
 // Receiver support precedes advertisement. Add1.4 above only after the cross-stack golden gate.
@@ -662,6 +663,9 @@ export function negotiateProtocol(acceptHeader: unknown, versions: readonly stri
 /**
  * `objectLane` tells a 1.2 sender which streams bypass this endpoint entirely and go straight to
  * the bucket with a presigned PUT. Omitted below 1.2, so an older client keeps its inline behaviour.
+ *
+ * `syncPolicy` (_shared/syncPolicy.ts) is on every version: a signed-in account must keep syncing.
+ * It is additive (older senders ignore unknown keys). Omitted here, it is read from the environment.
  */
 export function capabilitiesBody({
   receiverStateId,
@@ -670,6 +674,7 @@ export function capabilitiesBody({
   sourceId,
   protocolVersion = '1.2',
   objectLane = null,
+  syncPolicy = syncPolicyFromEnv(),
 }: {
   receiverStateId: string;
   streams: string[];
@@ -677,6 +682,7 @@ export function capabilitiesBody({
   sourceId?: string | null;
   protocolVersion?: string;
   objectLane?: { endpoint: string; maxObjectBytes: number; urlTtlSec: number; completionModes?: string[] } | null;
+  syncPolicy?: SyncPolicy;
 }) {
   const advertised = [...streams].sort();
   const body: any = {
@@ -686,6 +692,7 @@ export function capabilitiesBody({
     streams: advertised,
     userId: userId || undefined,
     sourceId: sourceId || undefined,
+    syncPolicy: syncPolicyBody(syncPolicy),
   };
   if (OBJECT_PROTOCOL_VERSIONS.includes(protocolVersion) && objectLane) {
     body.objectLane = {

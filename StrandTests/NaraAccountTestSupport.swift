@@ -128,6 +128,8 @@ final class FakeProvisioningServer: CloudInstallationProvisioning, @unchecked Se
     var confirmFaults: [Error?] = []
     /// Make the next success answer for someone else (a misbehaving or spoofed server).
     var answerForOwner: String?
+    /// The `syncPolicy` every grant carries (nil: a server that sends none).
+    var grantSyncPolicy: CloudSyncPolicy?
 
     init(clock: TestClock) { self.clock = clock }
 
@@ -183,8 +185,10 @@ final class FakeProvisioningServer: CloudInstallationProvisioning, @unchecked Se
     func provisionInstallation(accessToken: String, expectedOwnerId: String, sourceId: String,
                                platform: CloudProvisioningPlatform, appVersion: String,
                                currentToken: String?) async throws -> CloudInstallationGrant {
-        try provision(accessToken: accessToken, expectedOwnerId: expectedOwnerId, sourceId: sourceId,
-                      currentToken: currentToken)
+        var grant = try provision(accessToken: accessToken, expectedOwnerId: expectedOwnerId, sourceId: sourceId,
+                                  currentToken: currentToken)
+        grant.syncPolicy = grantSyncPolicy
+        return grant
     }
 
     func confirmWearable(identity: CloudPushIdentity, provisionalExternalDeviceId: String,
@@ -248,4 +252,34 @@ final class FakeProvisioningServer: CloudInstallationProvisioning, @unchecked Se
         strapOwners[serial] = identity.ownerId
         return "whoop-\(serial.lowercased())"
     }
+}
+
+
+/// Coach `GET status` as the account layer sees it: the sync policy and upload health per account.
+final class FakeSyncStatus: @unchecked Sendable {
+    private let lock = NSLock()
+    private var replies: [String: CloudSyncStatus] = [:]
+    private var _asked: [String] = []
+
+    func set(_ status: CloudSyncStatus?, for owner: String) {
+        lock.lock(); replies[owner.lowercased()] = status; lock.unlock()
+    }
+
+    func reply(_ owner: String) -> CloudSyncStatus? {
+        lock.lock(); defer { lock.unlock() }
+        _asked.append(owner.lowercased())
+        return replies[owner.lowercased()]
+    }
+
+    var asked: [String] {
+        lock.lock(); defer { lock.unlock() }
+        return _asked
+    }
+}
+
+/// The owners whose Sana data the account layer asked to delete.
+@MainActor
+final class ChatWipeLog {
+    private(set) var owners: [String] = []
+    func record(_ owner: String) { owners.append(owner.lowercased()) }
 }

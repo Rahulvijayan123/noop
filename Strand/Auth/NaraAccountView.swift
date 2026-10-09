@@ -3,7 +3,7 @@ import StrandDesign
 
 /// The Nara account screen: create an account, enter the emailed code, choose between starting fresh and
 /// recovering an enrollment-code account, sign in, reset a password, and, once signed in, see that this phone
-/// is linked and switch cloud sync on or off.
+/// is linked and synced (and when the server last received anything from it).
 ///
 /// Every state shown here comes from `NaraAuthService` (who is signed in) and `NaraAccountController` (is this
 /// phone linked to them). The view holds no account logic of its own.
@@ -67,6 +67,8 @@ public struct NaraAccountView: View {
         .frame(maxWidth: .infinity, maxHeight: .infinity)
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
         .onAppear { applySuggestedEmail(auth.suggestedEmail) }
+        // The account screen is where "Not syncing since …" is read, so it asks for the server's current view.
+        .task { if isSignedIn { await account.refreshSyncStatus() } }
         .onChangeCompat(of: auth.suggestedEmail) { suggested in applySuggestedEmail(suggested) }
         .confirmationDialog("Sign out of Nara?", isPresented: $confirmSignOut, titleVisibility: .visible) {
             Button("Sign out", role: .destructive) {
@@ -442,7 +444,9 @@ public struct NaraAccountView: View {
         if CloudPushSettings.isConfigured {
             StrandCard {
                 VStack(alignment: .leading, spacing: 12) {
-                    if CloudPushSettings.isUserSwitchable {
+                    // Signed in ⇒ synced: the switch only exists for an account whose sync policy the server
+                    // relaxed. Otherwise the card states what is true; signing out is what stops uploads.
+                    if CloudPushSettings.isUserSwitchable && !account.syncIsMandatory {
                         Toggle(isOn: Binding(get: { CloudPushSettings.isEnabled },
                                              set: { account.setUploadsEnabled($0) })) {
                             VStack(alignment: .leading, spacing: 3) {
@@ -468,6 +472,14 @@ public struct NaraAccountView: View {
                         .accessibilityIdentifier("nara.account.syncAutomatic")
                     }
 
+                    if let staleness = syncStalenessText {
+                        Text(staleness)
+                            .font(StrandFont.footnote)
+                            .foregroundStyle(StrandPalette.statusWarning)
+                            .fixedSize(horizontal: false, vertical: true)
+                            .accessibilityIdentifier("nara.account.syncStale")
+                    }
+
                     if !account.ownsLocalHistory {
                         Text("This phone's saved history belongs to another Nara account. It is not uploaded and is never mixed into your data.")
                             .font(StrandFont.footnote)
@@ -485,6 +497,17 @@ public struct NaraAccountView: View {
         }
         .frame(maxWidth: 520)
         .accessibilityIdentifier("nara.account.signOut")
+    }
+
+    /// "Not syncing since …" when the server has received nothing from this account for longer than its sync
+    /// policy allows (coach `GET status` → `sync.stale`). Nil while uploads are current or not yet known.
+    private var syncStalenessText: String? {
+        guard let health = account.syncHealth, health.stale else { return nil }
+        guard let last = health.lastUploadAt else {
+            return String(localized: "Nothing from this account has reached Nara yet.")
+        }
+        let when = last.formatted(date: .abbreviated, time: .shortened)
+        return String(localized: "Not syncing since \(when).")
     }
 
     @ViewBuilder

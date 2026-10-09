@@ -395,6 +395,21 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertNil(inFlight)
     }
 
+    /// IMU retention keeps raw motion until the lane has uploaded it, so the lane hands each pass's receipted
+    /// cursor (by the cloud id) to the watermarks retention reads (by the store's local id).
+    func testTheLanesReceiptedCursorBecomesTheRetentionWatermarkUnderTheLocalId() async throws {
+        let progress = try ImuPushProgressStore(directory: directory)
+        try await progress.saveBinaryCursor(table: .rawImuSession, deviceId: "whoop-mgb0214654",
+                                            cursor: PushCursor(rowId: 1_758_000_300,
+                                                               naturalKeyFingerprint: String(repeating: "c", count: 64)))
+        let marks = ImuUploadWatermarks(defaults: isolatedDefaults())
+        await CloudPushRuntime.publishImuWatermarks(devices: [(localId: "my-whoop", cloudId: "whoop-mgb0214654"),
+                                                              (localId: "never-sent", cloudId: "whoop-other")],
+                                                    progress: progress, into: marks)
+        XCTAssertEqual(marks.uploadedThrough(localDeviceId: "my-whoop"), 1_758_000_300)
+        XCTAssertNil(marks.uploadedThrough(localDeviceId: "never-sent"), "no receipt, nothing counts as uploaded")
+    }
+
     func testInFlightObjectResumesAcrossReopen() async throws {
         let store = try ImuPushProgressStore(directory: directory)
         try await store.saveInFlightObject(
@@ -453,6 +468,27 @@ final class ImuObjectLaneTests: XCTestCase {
     }
 
     // MARK: - transport request shapes
+
+    /// The capabilities reply carries the account's sync policy, and the lane keeps it for that account while it
+    /// negotiates (the receiver's additive `syncPolicy`; an older receiver sends none and changes nothing).
+    func testCapabilitiesKeepTheAccountsSyncPolicy() async throws {
+        let owner = "11111111-1111-4111-8111-111111111111"
+        let key = "noop.cloud.syncPolicy.v1.\(owner)"
+        let saved = UserDefaults.standard.object(forKey: key)
+        defer { if let saved { UserDefaults.standard.set(saved, forKey: key) } else { UserDefaults.standard.removeObject(forKey: key) } }
+        UserDefaults.standard.removeObject(forKey: key)
+        let stub = ObjectLaneStub.self
+        stub.reset()
+        stub.response = try JSONSerialization.data(withJSONObject: [
+            "type": "capabilities", "protocolVersion": "1.2",
+            "receiverStateId": "22222222-2222-4222-8222-222222222222", "streams": ["rawImuSession"],
+            "syncPolicy": ["required": false, "staleAfterHours": 48],
+        ])
+        let caps = try await makeTransport(session: ObjectLaneStub.session()).capabilities()
+        guard case .available = caps else { return XCTFail("a receiver that sends syncPolicy still negotiates") }
+        XCTAssertEqual(CloudSyncPolicyStore.shared.policy(forOwner: owner),
+                       CloudSyncPolicy(required: false, staleAfterHours: 48))
+    }
 
     func testCreateObjectIntentRequestShape() async throws {
         let stub = ObjectLaneStub.self

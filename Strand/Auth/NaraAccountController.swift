@@ -54,7 +54,9 @@ public final class NaraAccountController: ObservableObject {
         case working
         /// The account is linked and the upload runtime is running.
         case ready
-        /// The person turned cloud sync off. Nothing is uploaded and nothing new is queued.
+        /// Cloud sync is off for this account. Only possible when the server's sync policy does not require it
+        /// (`CloudSyncPolicy`); while it does, a signed-in account is always synced. Nothing is uploaded and
+        /// nothing new is queued.
         case paused
         /// A temporary problem; Nara retries by itself.
         case retrying(String)
@@ -67,6 +69,10 @@ public final class NaraAccountController: ObservableObject {
     @Published public private(set) var ownsLocalHistory = true
     /// Why the last forced sign-out happened, for the sign-in screen.
     @Published public private(set) var notice: String?
+    /// The server's view of the signed-in account's uploads (coach `GET status` → `sync`), so the account screen
+    /// can say "Not syncing since …" when nothing has arrived for longer than the policy allows. Nil until the
+    /// server has answered for this account.
+    @Published public private(set) var syncHealth: CloudSyncHealth?
 
     /// The controller the app uses.
     public static let shared = NaraAccountController(auth: NaraAuthService.shared)
@@ -89,6 +95,10 @@ public final class NaraAccountController: ObservableObject {
     private let protectedDataAvailable: @MainActor () -> Bool
     private let now: () -> Date
     private let sleep: @Sendable (TimeInterval) async -> Void
+    /// The latest sync policy the server sent per account. Unknown means required.
+    private let syncPolicies: CloudSyncPolicyStore
+    /// Coach `GET status` for the account, as its sync policy and upload health. Nil when it could not be read.
+    private let fetchSyncStatus: @Sendable (String) async -> CloudSyncStatus?
 
     /// The local device id new records default to. Supplied by the app model once it exists.
     public var deviceIdProvider: @MainActor () -> String = { "my-whoop" }
@@ -97,7 +107,9 @@ public final class NaraAccountController: ObservableObject {
     /// Called after the account's runtime was stopped (cancel account-bound work).
     public var onAccountEnded: (@MainActor () async -> Void)?
     /// Deletes a signed-out account's Sana caches and unsent turns from this phone (`docs/COACH_MEMORY.md` §7.1).
-    /// Runs on sign-out only, never on an account switch. Replaceable in tests.
+    /// Runs on an explicit sign-out and when the server retired the account, never on an account switch and never
+    /// when the session merely ended (a failed refresh, a rejected session): those keep the account's unsent
+    /// turns for its next sign-in. Replaceable in tests.
     public var removeLocalChats: @MainActor (String) async -> Void = { owner in
         await CoachChatViewModel.removeAccountData(ownerId: owner)
     }
@@ -113,6 +125,12 @@ public final class NaraAccountController: ObservableObject {
     private var lastRejectionAt: Date?
     private var started = false
     private var signOutInFlight = false
+    /// The account whose Sana data an involuntary end must still delete: the server retired it. Every other
+    /// session end the person did not choose (a refresh that failed, a rejected session) keeps the account's
+    /// chats and unsent turns on this phone for its next sign-in; only `signOut()` and this delete them.
+    private var chatWipeOwner: String?
+    private var lastSyncStatusFetch: (owner: String, at: Date)?
+    private var syncStatusTask: Task<Void, Never>?
 
     init(auth: NaraAuthService,
          provisioner: any CloudInstallationProvisioning = CloudReceiverClient(),
@@ -127,6 +145,10 @@ public final class NaraAccountController: ObservableObject {
          now: @escaping () -> Date = { Date() },
          sleep: @escaping @Sendable (TimeInterval) async -> Void = { seconds in
              try? await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+         },
+         syncPolicies: CloudSyncPolicyStore? = nil,
+         fetchSyncStatus: @escaping @Sendable (String) async -> CloudSyncStatus? = { owner in
+             try? await CoachAPI.shared.syncStatus(expectedOwner: owner)
          }) {
         self.auth = auth
         self.provisioner = provisioner
@@ -140,6 +162,8 @@ public final class NaraAccountController: ObservableObject {
         self.protectedDataAvailable = protectedDataAvailable
         self.now = now
         self.sleep = sleep
+        self.syncPolicies = syncPolicies ?? CloudSyncPolicyStore(defaults: defaults)
+        self.fetchSyncStatus = fetchSyncStatus
     }
 
     // MARK: lifecycle
@@ -175,7 +199,8 @@ public final class NaraAccountController: ObservableObject {
         let previous = lastPhase
         lastPhase = phase
         // Signing in or signing up is the person's own decision to use a cloud account, so it turns the
-        // upload path on. A session that is merely restored at launch leaves their setting alone.
+        // upload path on. A restored session is turned on by `bind` while the account's policy requires sync;
+        // only an account whose policy was relaxed keeps the setting it had.
         if case .signedIn = phase {
             switch previous {
             case .signedOut, .awaitingSignupCode, .awaitingRecoveryCode, .choosingSetup:
@@ -230,13 +255,22 @@ public final class NaraAccountController: ObservableObject {
             // Another account was running and the session moved on without a sign-out. Retire it fully.
             store.removeCredential(forOwner: running.ownerId)
             await teardownRuntime()
+            syncHealth = nil
+            lastSyncStatusFetch = nil
         }
         retryTask?.cancel()
         store.activate(ownerId: owner)
         ownsLocalHistory = CloudLocalDataBinding.claimIfUnclaimed(by: owner, defaults: defaults)
+        // Signed in ⇒ syncing. This covers every way an account comes to be signed in, including a session
+        // restored from the Keychain after a reinstall, which finds the preferences (and so the flag) gone.
+        if syncPolicies.policy(forOwner: owner).required, !uploadsEnabled() {
+            setUploadsFlag(true)
+        }
         guard uploadsEnabled() else {
             await teardownRuntime()
             bootstrap = .paused
+            // A paused account still asks: the server may have made sync required again.
+            refreshSyncStatusIfDue(owner: owner)
             return
         }
         let alreadyReady: Bool = {
@@ -258,6 +292,7 @@ public final class NaraAccountController: ObservableObject {
             consecutiveFailures = 0
             bootstrap = .ready
             await onReady?(identity)
+            refreshSyncStatusIfDue(owner: owner)
         } catch {
             await handleFailure(error, account: account)
         }
@@ -281,8 +316,13 @@ public final class NaraAccountController: ObservableObject {
             RawDataSessionStore.clearPersistedCaptureIntent()
         }
         await teardownRuntime()
-        // The account is signed out on this phone: its chats leave the device with it.
-        if let owner { await removeLocalChats(owner) }
+        // A session that ended without the person asking (a refresh that failed, a session the server
+        // rejected) keeps the account's chats and unsent turns for its next sign-in; they stay in the
+        // account's own folder, where no other account reads them. A retired account's leave with it.
+        if let owner, chatWipeOwner == owner { await removeLocalChats(owner) }
+        chatWipeOwner = nil
+        syncHealth = nil
+        lastSyncStatusFetch = nil
         ownsLocalHistory = true
         consecutiveFailures = 0
         consecutiveRejections = 0
@@ -319,6 +359,7 @@ public final class NaraAccountController: ObservableObject {
                 guard grant.userId == owner, grant.sourceId == source else {
                     throw CloudReceiverError.ownershipMismatch
                 }
+                if let policy = grant.syncPolicy { syncPolicies.record(policy, forOwner: owner) }
                 if let token = grant.installationToken {
                     store.store(token: token, tokenId: grant.tokenId, expiresAt: grant.expiresAt,
                                 ownerId: owner, sourceId: source)
@@ -376,8 +417,10 @@ public final class NaraAccountController: ObservableObject {
         }
         switch receiver {
         case .sessionRejected, .emailNotConfirmed, .accountRetired:
-            // The server does not accept this account any more. Stop everything and sign out.
+            // The server does not accept this account any more. Stop everything and sign out. Only a retired
+            // account's Sana data is deleted with it; the others keep theirs for the next sign-in.
             notice = receiver.errorDescription
+            if receiver == .accountRetired { chatWipeOwner = account.userId.lowercased() }
             await auth.signOut()
             requestReconcile()
         case .installationRevoked:
@@ -543,11 +586,62 @@ public final class NaraAccountController: ObservableObject {
         await settle()
     }
 
-    /// The upload switch in the account screen.
-    public func setUploadsEnabled(_ enabled: Bool) {
+    /// The upload switch in the account screen, shown only while the account's policy does not require sync.
+    /// Returns false when the request was refused: a signed-in account whose policy requires sync cannot be
+    /// switched off (signing out is what stops it).
+    @discardableResult
+    public func setUploadsEnabled(_ enabled: Bool) -> Bool {
+        if !enabled, syncIsMandatory {
+            objectWillChange.send()
+            requestReconcile()
+            return false
+        }
         setUploadsFlag(enabled)
         objectWillChange.send()
         requestReconcile()
+        return true
+    }
+
+    /// True while an account is signed in and the server's sync policy for it (required until it says
+    /// otherwise) makes syncing mandatory: the account screen shows the synced state, not a switch.
+    public var syncIsMandatory: Bool {
+        guard isConfigured(), case .signedIn(let account) = auth.phase else { return false }
+        return syncPolicies.policy(forOwner: account.userId).required
+    }
+
+    // MARK: sync policy and health
+
+    /// How often the account's sync policy and upload health are asked for again while it stays signed in.
+    static let syncStatusRefreshSeconds: TimeInterval = 600
+
+    /// Ask the server for the signed-in account's sync policy and upload health (coach `GET status`), keep the
+    /// policy for the account and publish the health. A policy that changes whether sync is required is acted
+    /// on at once.
+    public func refreshSyncStatus() async {
+        guard case .signedIn(let account) = auth.phase else { return }
+        let owner = account.userId.lowercased()
+        lastSyncStatusFetch = (owner, now())
+        guard let status = await fetchSyncStatus(owner) else { return }
+        // The session may have moved on while the request was in flight.
+        guard case .signedIn(let current) = auth.phase, current.userId.lowercased() == owner else { return }
+        if let policy = status.policy {
+            let before = syncPolicies.policy(forOwner: owner)
+            syncPolicies.record(policy, forOwner: owner)
+            if policy != before { objectWillChange.send() }
+            if policy.required != before.required { requestReconcile() }
+        }
+        if let health = status.health, health != syncHealth { syncHealth = health }
+    }
+
+    private func refreshSyncStatusIfDue(owner: String) {
+        let owner = owner.lowercased()
+        if let last = lastSyncStatusFetch, last.owner == owner,
+           now().timeIntervalSince(last.at) < Self.syncStatusRefreshSeconds { return }
+        guard syncStatusTask == nil else { return }
+        syncStatusTask = Task { [weak self] in
+            await self?.refreshSyncStatus()
+            self?.syncStatusTask = nil
+        }
     }
 
     // MARK: environment

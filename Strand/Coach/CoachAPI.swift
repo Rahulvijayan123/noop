@@ -314,6 +314,9 @@ struct CoachServerStatus: Equatable, Sendable {
     var ok: Bool
     var configured: Bool
     var features: CoachFeatures
+    /// The account's sync policy and the server's view of its uploads (`syncPolicy` and `sync`); nil from a
+    /// server that sends neither.
+    var sync: CloudSyncStatus? = nil
 }
 
 /// A non-2xx answer from one of the thread, context or side-call routes, keeping the status so callers can tell
@@ -884,8 +887,25 @@ final class CoachAPI: @unchecked Sendable {
                 features = c.lossy(CoachFeatures.self, .features) ?? .none
             }
         }
-        let reply = try JSONDecoder().decode(Reply.self, from: try await send(try request("status", timeout: 10)))
-        return CoachServerStatus(ok: reply.ok, configured: reply.configured, features: reply.features)
+        let data = try await send(try request("status", timeout: 10))
+        let reply = try JSONDecoder().decode(Reply.self, from: data)
+        return CoachServerStatus(ok: reply.ok, configured: reply.configured, features: reply.features,
+                                 sync: Self.syncStatus(fromStatusBody: data))
+    }
+
+    /// `syncPolicy` and `sync` from a `GET status` body, or nil when it carries neither.
+    static func syncStatus(fromStatusBody data: Data) -> CloudSyncStatus? {
+        guard let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { return nil }
+        let status = CloudSyncStatus(policy: CloudSyncPolicy.parse(object["syncPolicy"]),
+                                     health: CloudSyncHealth.parse(object["sync"]))
+        return status.policy == nil && status.health == nil ? nil : status
+    }
+
+    /// The signed-in account's sync policy and upload health, as `GET status` reports them. Asked as
+    /// `expectedOwner` only, so an account switch in flight never reads another account's state.
+    func syncStatus(expectedOwner: String) async throws -> CloudSyncStatus? {
+        let data = try await send(try request("status", timeout: 10, expectedOwner: expectedOwner))
+        return Self.syncStatus(fromStatusBody: data)
     }
 
     // MARK: Model relay

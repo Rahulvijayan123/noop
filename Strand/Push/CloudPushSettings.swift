@@ -111,9 +111,12 @@ public enum CloudPushSettings {
     /// no offline mode, so cloud is not a preference there. It is on whenever the build is configured, and
     /// neither a stored override nor `setEnabled(_:)` can turn it off.
     ///
-    /// Any other build keeps cloud OPT-IN: carrying a receiver is not consent to upload, so nothing leaves
-    /// the phone until the user turns it on. An unconfigured build can never be enabled: there is no
-    /// receiver to point at, and the toggle is refused rather than silently accepted.
+    /// In any other build, signing in is the consent: while an account is signed in on this phone and the
+    /// server's sync policy for it is `required` (the default until the server says otherwise, see
+    /// `CloudSyncPolicy`), cloud is on and cannot be switched off; only signing out stops it. Signing in
+    /// itself stays optional, and carrying a receiver is still not consent to upload: with nobody signed in,
+    /// nothing leaves the phone. Should the server relax the policy for an account, the old opt-in switch
+    /// applies to it again. An unconfigured build can never be enabled: there is no receiver to point at.
     ///
     /// Enabled does not mean uploading: nothing leaves the phone until an account is signed in and has an
     /// installation credential (see `CloudPushIdentityStore.current()`).
@@ -121,15 +124,32 @@ public enum CloudPushSettings {
         guard isConfigured else { return false }
         if isHostedComputeBuild { return true }
         let defaults = UserDefaults.standard
-        if defaults.object(forKey: enabledOverrideKey) != nil {
-            return defaults.bool(forKey: enabledOverrideKey)
+        // Read on the BLE path: the stored flag (which the account layer sets on every bind) answers first, and
+        // the policy is only looked up when it does not already say on.
+        if defaults.object(forKey: enabledOverrideKey) != nil, defaults.bool(forKey: enabledOverrideKey) {
+            return true
         }
-        return false
+        return signedInSyncIsMandatory
+    }
+
+    /// Whether the signed-in account's sync policy makes uploading mandatory. Required until the server
+    /// has said otherwise for that account.
+    public static func syncRequired(forOwner ownerId: String, defaults: UserDefaults = .standard) -> Bool {
+        CloudSyncPolicyStore(defaults: defaults).policy(forOwner: ownerId).required
+    }
+
+    /// True while an account is signed in on this phone and its policy makes sync mandatory: there is then no
+    /// switch to offer, and `setEnabled(false)` is refused.
+    public static var signedInSyncIsMandatory: Bool {
+        guard isConfigured, !isHostedComputeBuild,
+              let owner = CloudPushIdentityStore.currentOwnerId() else { return false }
+        return syncRequired(forOwner: owner)
     }
 
     /// Whether the person can choose to switch cloud sync on or off. False in a hosted-compute build,
-    /// where there is nothing to switch to, so screens show the state instead of offering a control.
-    public static var isUserSwitchable: Bool { isConfigured && !isHostedComputeBuild }
+    /// where there is nothing to switch to, and while a signed-in account must sync, so screens show the
+    /// state instead of offering a control.
+    public static var isUserSwitchable: Bool { isConfigured && !isHostedComputeBuild && !signedInSyncIsMandatory }
 
     /// The receiver's project origin (`https://<project>.supabase.co`), derived from the configured
     /// receiver URL by dropping the function path.
@@ -154,11 +174,19 @@ public enum CloudPushSettings {
         return URL(string: origin)?.appendingPathComponent("auth").appendingPathComponent("v1")
     }
 
-    public static func setEnabled(_ enabled: Bool) {
+    /// Returns false when the request was refused: switching off a hosted-compute build, or switching off while
+    /// a signed-in account must sync (`signedInSyncIsMandatory`; signing out is what stops uploads then).
+    @discardableResult
+    public static func setEnabled(_ enabled: Bool) -> Bool {
         guard !isHostedComputeBuild else {
             // Cloud cannot be turned off here; a request to do so only makes sure it is running.
             Task { CloudPushRuntime.shared.startIfEnabled() }
-            return
+            return enabled
+        }
+        if !enabled, signedInSyncIsMandatory {
+            // Refused, and nothing stored: the account's runtime keeps (or starts) running.
+            Task { CloudPushRuntime.shared.startIfEnabled() }
+            return false
         }
         UserDefaults.standard.set(enabled, forKey: enabledOverrideKey)
         // The master switch is a lifecycle control, not just a flag. Flipping it off must stop the
@@ -173,6 +201,7 @@ public enum CloudPushSettings {
         } else {
             Task { await CloudPushRuntime.shared.stop() }
         }
+        return true
     }
 
     /// A build is configured once it knows where the receiver is and which project's Auth to talk to.

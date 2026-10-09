@@ -434,6 +434,8 @@ final class AppModel: ObservableObject {
         account.onAccountEnded = { [weak self] in await self?.cloudAccountEnded() }
         // The object lane reads banked v26 rows through the app's one store handle (anchored PPG, default off).
         PpgObjectSource.historyStore = { [weak self] in await self?.repo.storeHandle() }
+        // Raw IMU is kept until it is uploaded; evicting some that was not (the hard disk ceiling) is loud.
+        ImuSessionFileStore.shared.onUnuploadedEviction = { [weak self] line in self?.live.append(log: line) }
         Task { await account.start() }
     }
 

@@ -1,5 +1,6 @@
 import Compression
 import Foundation
+import os
 import WhoopProtocol
 
 /// Canonical decoded 100 Hz IMU storage: UTC half-hour files with appendable 30-second zlib blocks.
@@ -28,7 +29,7 @@ public final class ImuSessionFileStore {
     /// to the disk limit. During an active capture it now runs on this cadence (5 min, far below
     /// the 30-day age floor) so the active session's expired segments are still reaped.
     private static let evictionCadenceMs: Int64 = 5 * 60_000
-    private let defaults = UserDefaults.standard
+    private let defaults: UserDefaults
     private let key = "imu-session-windows-v1"
     private let directory: URL
     /// Timestamps DURABLE on disk per segment file (seeded by a scan on first touch, extended only
@@ -43,7 +44,16 @@ public final class ImuSessionFileStore {
         let base = (try? fm.url(for: .applicationSupportDirectory, in: .userDomainMask,
                                 appropriateFor: nil, create: true)) ?? fm.temporaryDirectory
         directory = base.appendingPathComponent("OpenWhoop/RawImuSessions", isDirectory: true)
+        defaults = .standard
         try? fm.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+
+    /// A store over its own directory and window list. For tests: `shared` is the app's real capture, and a
+    /// retention test must not be able to reach it.
+    init(directory: URL, defaults: UserDefaults) {
+        self.directory = directory
+        self.defaults = defaults
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
     }
 
     func start(id: String, deviceId: String, fromMs: Int64) {
@@ -253,20 +263,39 @@ public final class ImuSessionFileStore {
         }.values.flatMap { $0 }.map(\.ts).min()
     }
 
+    /// How far the object lane has uploaded a strap's raw IMU, by local device id. Replaceable in tests.
+    var uploadedThrough: (String) -> Int64? = { ImuUploadWatermarks.shared.uploadedThrough(localDeviceId: $0) }
+    /// Whether this build uploads raw IMU at all. Without a cloud, nothing would ever be uploaded and data is
+    /// evicted by age and size alone, as before. Replaceable in tests.
+    var uploadProtectionEnabled: () -> Bool = { CloudPushSettings.isConfigured }
+    /// Told whenever the hard ceiling evicted data that was not uploaded (besides the fault log).
+    var onUnuploadedEviction: ((String) -> Void)?
+    private static let log = Logger(subsystem: "com.noopapp.noop", category: "imu-retention")
+
     /// C8 Fix G + P2-4: apply the bounded NOOPIMU2 retention policy (age + size cap, conservative
     /// constants) plus the P2-4 active-session SEGMENT rule. Completed sessions are evicted whole;
     /// an active (open-ended) session is never evicted whole, but its expired segments that are
     /// fully before the active window ARE reaped (on the capture cadence) so continuous capture
     /// cannot grow without bound. Returns the evicted session ids.
+    ///
+    /// Age and size only ever take data the object lane has uploaded (`ImuRetentionPolicy.isUploaded` against
+    /// the lane's watermark for the strap). Raw IMU that has not reached the server is kept, however old,
+    /// until the footprint passes `hardCeilingBytes`; then the oldest is evicted anyway, uploaded or not, and
+    /// that is logged as a fault.
     @discardableResult
     func evictExpired(now: Int64 = Int64(Date().timeIntervalSince1970),
                       policy: ImuRetentionPolicy = .default) -> [String] {
         let all = windows()
         let activeIds = Set(all.filter { $0.to == nil }.map(\.id))
+        let protects = uploadProtectionEnabled()
+        func uploaded(_ deviceId: String, through endTs: Int64?) -> Bool {
+            !protects || ImuRetentionPolicy.isUploaded(endTs: endTs, uploadedThrough: uploadedThrough(deviceId))
+        }
         var evicted: [String] = []
         for window in all where !activeIds.contains(window.id) {
             let rule = ActivityImuCapture.isActivityWindow(window.id) ? policy.activityCapture : policy
-            if case .evict = rule.decision(active: false, endTs: window.to, now: now) {
+            if case .evict = rule.decision(active: false, endTs: window.to, now: now),
+               uploaded(window.deviceId, through: lastSegmentEnd(window.id)) {
                 evicted.append(window.id)
                 deleteFiles(window.id)
                 remove(id: window.id)
@@ -275,22 +304,87 @@ public final class ImuSessionFileStore {
         // P2-4: continuous capture keeps ONE active session open-ended, so the whole-session rules
         // above never touch it. Reap only segments that are fully expired AND fully before the
         // active window (the bucket currently being written) — never the active window, never
-        // seconds newer than the retention floor.
+        // seconds newer than the retention floor, never a segment not yet uploaded.
+        let deviceOf = Dictionary(all.map { ($0.id, $0.deviceId) }, uniquingKeysWith: { first, _ in first })
         for id in activeIds {
+            let device = deviceOf[id] ?? ""
             evictActiveSessionSegments(id, now: now,
-                                       policy: ActivityImuCapture.isActivityWindow(id) ? policy.activityCapture : policy)
+                                       policy: ActivityImuCapture.isActivityWindow(id) ? policy.activityCapture : policy,
+                                       isUploaded: { uploaded(device, through: $0) })
         }
         let survivors = windows()
         let totalBytes = survivors.reduce(Int64(0)) { $0 + sessionBytes($1.id) }
         let completed = survivors.filter { !activeIds.contains($0.id) }
+            .filter { uploaded($0.deviceId, through: lastSegmentEnd($0.id)) }
             .map { (id: $0.id, endTs: $0.to, bytes: sessionBytes($0.id)) }
+        var remainingBytes = totalBytes
+        let completedBytes = Dictionary(completed.map { ($0.id, $0.bytes) }, uniquingKeysWith: { first, _ in first })
         for id in policy.evictionsForSizeCap(totalBytes: totalBytes, completed: completed)
             where !evicted.contains(id) {
             evicted.append(id)
+            remainingBytes -= completedBytes[id] ?? 0
             deleteFiles(id)
             remove(id: id)
         }
+        if remainingBytes > policy.hardCeilingBytes {
+            evicted += evictOverHardCeiling(policy: policy, activeIds: activeIds, isUploaded: uploaded)
+        }
         return evicted
+    }
+
+    /// The last resort: over `hardCeilingBytes`, evict the oldest completed sessions and the oldest segments of
+    /// active sessions (never the bucket being written), uploaded or not, until the footprint is back under.
+    /// Anything evicted that was not uploaded is logged as a fault. Returns the completed sessions evicted.
+    private func evictOverHardCeiling(policy: ImuRetentionPolicy, activeIds: Set<String>,
+                                      isUploaded: (String, Int64?) -> Bool) -> [String] {
+        let survivors = windows()
+        let totalBytes = survivors.reduce(Int64(0)) { $0 + sessionBytes($1.id) }
+        guard totalBytes > policy.hardCeilingBytes else { return [] }
+        struct Unit { let id: String; let session: String; let device: String; let endTs: Int64?; let bytes: Int64; let file: URL? }
+        var units: [Unit] = []
+        for window in survivors {
+            if activeIds.contains(window.id) {
+                let files = segmentFiles(window.id)
+                let newest = files.compactMap(segmentBucket).max()
+                for url in files {
+                    guard let bucket = segmentBucket(url), bucket != newest,
+                          pending["\(window.id)/\(bucket)"]?.isEmpty != false else { continue }
+                    let bytes = Int64((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0)
+                    units.append(Unit(id: url.path, session: window.id, device: window.deviceId,
+                                      endTs: bucket + Self.segmentSeconds - 1, bytes: bytes, file: url))
+                }
+            } else {
+                units.append(Unit(id: window.id, session: window.id, device: window.deviceId,
+                                  endTs: lastSegmentEnd(window.id) ?? window.to, bytes: sessionBytes(window.id), file: nil))
+            }
+        }
+        let chosen = Set(policy.evictionsForHardCeiling(totalBytes: totalBytes,
+                                                        candidates: units.map { ($0.id, $0.endTs, $0.bytes) }))
+        var evictedSessions: [String] = []
+        var unuploadedBytes: Int64 = 0
+        for unit in units where chosen.contains(unit.id) {
+            if !isUploaded(unit.device, unit.endTs) { unuploadedBytes += unit.bytes }
+            if let file = unit.file {
+                deleteSegmentFile(file, sessionId: unit.session)
+            } else {
+                _ = deleteFiles(unit.session)
+                remove(id: unit.session)
+                evictedSessions.append(unit.session)
+            }
+        }
+        if unuploadedBytes > 0 {
+            let message = "IMU retention: over the \(policy.hardCeilingBytes)-byte hard ceiling (\(totalBytes) bytes); "
+                + "evicted \(unuploadedBytes) bytes of raw IMU that had NOT been uploaded"
+            Self.log.fault("\(message, privacy: .public)")
+            onUnuploadedEviction?(message)
+        }
+        return evictedSessions
+    }
+
+    /// The nominal last second of a session's newest segment file (conservative: a partial file ends earlier),
+    /// or nil when it has no segment files, i.e. no data.
+    private func lastSegmentEnd(_ id: String) -> Int64? {
+        segmentFiles(id).compactMap(segmentBucket).max().map { $0 + Self.segmentSeconds - 1 }
     }
 
     /// Quality notes from the most recent `readRecords(deviceId:fromTs:toTs:)` call — every
@@ -366,7 +460,8 @@ public final class ImuSessionFileStore {
     /// written — and has no still-buffered rows (a failing flush keeps the bucket, so its retry
     /// can land before any eviction). The live capture window and anything newer than the floor
     /// always survive.
-    private func evictActiveSessionSegments(_ id: String, now: Int64, policy: ImuRetentionPolicy) {
+    private func evictActiveSessionSegments(_ id: String, now: Int64, policy: ImuRetentionPolicy,
+                                            isUploaded: (Int64) -> Bool) {
         let files = segmentFiles(id)
         guard !files.isEmpty else { return }
         // Active window = the newest bucket among durable files and the RAM pending tail (bucket
@@ -388,7 +483,8 @@ public final class ImuSessionFileStore {
             let segmentEnd = bucket + Self.segmentSeconds - 1
             guard case .evict = policy.activeSessionSegmentDecision(segmentEndTs: segmentEnd,
                                                                     activeWindowStartTs: newestBucket,
-                                                                    now: now) else { continue }
+                                                                    now: now),
+                  isUploaded(segmentEnd) else { continue }
             deleteSegmentFile(url, sessionId: id)
         }
     }
