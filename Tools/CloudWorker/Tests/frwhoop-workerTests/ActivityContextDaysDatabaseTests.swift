@@ -53,7 +53,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
         addTeardownBlock {
             db.rollbackTransaction()
-            try? db.exec("delete from auth.users where id = '\(user)'")
+            try db.deleteFixtureOwners([user])
         }
         return Fixture(db: db, user: user, device: device)
     }
@@ -211,7 +211,9 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
         XCTAssertEqual(row["observed_s"], String(built.observedSeconds))
         XCTAssertEqual(row["day"], day)
         XCTAssertEqual(row["day_start"], String(dayStart))
-        XCTAssertEqual(row["known"], "false")
+        // The job day ended long before `now`, so its waking hours are awake, exactly as the stream day decodes
+        // them (audit D1-02: the raw-IMU decode used to leave every finished day "unknown" forever).
+        XCTAssertEqual(row["known"], "true")
         XCTAssertEqual(row["has_snapshot"], "false")
         XCTAssertEqual(row["job_fingerprint"], fingerprint("a"))
 
@@ -401,7 +403,7 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
             streams.events = events
             return ActivityContextDays.trackInput(
                 windows: sim.windows, streams: streams, sleep: sleep, exercise: exercise,
-                dayStart: dayStart, dayEnd: dayEnd, encoderVersion: model)
+                dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false, encoderVersion: model)
         }
 
         var shapes: [(name: String, input: ActivityContextTrackInput)] = []
@@ -463,5 +465,75 @@ final class ActivityContextDaysDatabaseTests: XCTestCase {
             }
         }
         XCTAssertTrue(db.isInTransaction)
+    }
+
+    // MARK: - Decoder reference and version registration (audits D1-01 / D5-12 / D5-03)
+
+    /// The reference is read as of the job day: the nights scored before it (never the day itself or later),
+    /// and the age on the day from the profile's date of birth.
+    func testTheDecoderReferenceIsReadAsOfTheDay() throws {
+        let f = try makeFixture()
+        try f.db.exec("""
+            insert into public.profiles(id, date_of_birth) values ('\(f.user)', '1986-09-16')
+            on conflict (id) do update set date_of_birth = excluded.date_of_birth
+            """)
+        _ = try f.db.query("""
+            insert into public.server_daily_scores(user_id, day, algorithm_version, resting_hr_bpm)
+            values ($1::uuid, '2026-09-09', 'frwhoop-server-1', 50), ($1::uuid, '2026-09-10', 'frwhoop-server-1', 48),
+                   ($1::uuid, '2026-09-11', 'frwhoop-server-1', null), ($1::uuid, '2026-09-12', 'frwhoop-server-1', 47.4),
+                   ($1::uuid, '2026-09-14', 'frwhoop-server-1', 49), ($1::uuid, '2026-09-15', 'frwhoop-server-1', 70),
+                   ($1::uuid, '2026-09-16', 'frwhoop-server-1', 71), ($1::uuid, '2026-09-13', 'other-algorithm', 90)
+            """, [f.user])
+        let reference = ActivityContextDays.loadDecoderReference(db: f.db, userId: f.user, day: day)
+        XCTAssertEqual(reference.restingNights, [50, 48, 47, 49], "oldest first, before the day, this algorithm only")
+        XCTAssertEqual(reference.ageYears, 39)
+        XCTAssertEqual(reference.provenance().tag, "srv-cfg-1:r48m180")
+        let nobody = ActivityContextDays.loadDecoderReference(db: f.db, userId: UUID().uuidString.lowercased(), day: day)
+        XCTAssertEqual(nobody, ActivityContextDays.DecoderReference())
+    }
+
+    /// The lane registers what it runs; the registered tag is what the day fingerprints carry.
+    func testTheLaneRegistersItsVersions() throws {
+        let f = try makeFixture()
+        let present = try f.db.query(
+            "select to_regclass('public.activity_context_lane_versions') is not null as present", [])
+        guard present.first?["present"] == "t" else {
+            throw XCTSkip("apply 20261008100000_activity_context_current_lineage_and_versions.sql")
+        }
+        // The registry is one row per lane for the whole database: put back whatever was there.
+        let previous = try f.db.query("""
+            select versions::text as v from public.activity_context_lane_versions
+             where algorithm_version = 'hart-activity-1'
+            """, []).first?["v"]
+        defer {
+            if let previous {
+                _ = try? f.db.query("""
+                    update public.activity_context_lane_versions set versions = $1::jsonb,
+                           versions_tag = $1::jsonb ->> 'tag' where algorithm_version = 'hart-activity-1'
+                    """, [previous])
+            } else {
+                try? f.db.exec("delete from public.activity_context_lane_versions where algorithm_version = 'hart-activity-1'")
+            }
+        }
+        var lane = makeLane(f.db)
+        let versions = ActivityContextDays.lanesVersions(model: model, preprocessing: preprocessing)
+        lane.reconcileVersions(algorithm: "hart-activity-1", versions: versions, limit: 0)
+        XCTAssertEqual(lane.stats.versionReconcileFailures, 0, lane.stats.lastVersionReconcileError ?? "")
+        let row = try XCTUnwrap(try f.db.query("""
+            select versions_tag, versions->>'model' as model, versions->>'decoder' as decoder
+              from public.activity_context_lane_versions where algorithm_version = 'hart-activity-1'
+            """, []).first)
+        XCTAssertEqual(row["versions_tag"], versions["tag"])
+        XCTAssertEqual(row["model"], model)
+        XCTAssertEqual(row["decoder"], ActivityContextVersions.decoder)
+        let digest = String(repeating: "f", count: 64)
+        let folded = try f.db.query(
+            "select internal.activity_hart_day_fingerprint(array[$1::text], $2::date) as fp", [digest, day]).first?["fp"]
+        let literal = try f.db.query("""
+            select public.activity_context_fingerprint(array[$1::text], $2::bigint, $3::bigint, 'hart-activity-1',
+              $4, $5, 'v1;' || $6 || ';settled') as fp
+            """, [digest, String(dayStart), String(dayEnd - 1), model, preprocessing, versions["tag"] ?? ""]).first?["fp"]
+        XCTAssertEqual(folded, literal,
+                       "the raw-IMU fingerprint carries this build's model, full tag and the settled fixture day")
     }
 }

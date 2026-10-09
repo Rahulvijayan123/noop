@@ -283,11 +283,15 @@ final class IntelligenceEngine: ObservableObject {
         /// (`RecoveryScorer.skinTempRelative`), or nil when no deviation is available. Surfaced as
         /// "+0.3 C vs your normal" with a relative tier tag; never a fake clinical absolute.
         var skinTempRel: SkinTempRelative? = nil
+        /// D4-04 provenance: true when the method-consistent (NOOP-computed) HRV baseline was still thin and
+        /// was shrunk toward the all-method (vendor-import) baseline for this day.
+        var baselineFallbackUsed: Bool = false
         var id: String { day }
 
         func withLegacyScore(hrv: Double, recovery: Double?) -> Computed {
             Computed(day: day, recovery: recovery, strain: strain, sleepMin: sleepMin, hrv: hrv, rhr: rhr,
-                     source: source, confidence: confidence, drivers: drivers, skinTempRel: skinTempRel)
+                     source: source, confidence: confidence, drivers: drivers, skinTempRel: skinTempRel,
+                     baselineFallbackUsed: baselineFallbackUsed)
         }
     }
 
@@ -2304,7 +2308,8 @@ final class IntelligenceEngine: ObservableObject {
             out.append(Computed(day: daily.day, recovery: recovery, strain: daily.strain,
                                 sleepMin: daily.totalSleepMin, hrv: daily.avgHrv,
                                 rhr: daily.restingHr, source: source, confidence: chargeConf,
-                                drivers: drivers, skinTempRel: skinRel))
+                                drivers: drivers, skinTempRel: skinRel,
+                                baselineFallbackUsed: chargeBaselines.hrvFallbackDays.contains(daily.day)))
             // ── Per-day scoring diagnostic (Sleep overhaul §2.5) ─────────────────────────────────────
             // ONE concise, privacy-safe line per scored day into the shareable strap log: the day key, the
             // FINAL computed total-sleep minutes (after any edit substitution), how many sleep blocks the

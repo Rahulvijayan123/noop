@@ -72,7 +72,7 @@ final class ActivityContextJoinTests: XCTestCase {
         XCTAssertEqual(s.unknownShare, 0, accuracy: 1e-9)
         XCTAssertEqual(s.shares[.running], nil)
         XCTAssertEqual(s.transitions, 1)
-        XCTAssertEqual(s.recentActivity, 10, "40 - (end of last walking epoch = base+30)")
+        XCTAssertEqual(s.recentActivity, 0, "the walking epoch overlaps the interval start: activity is ongoing")
         XCTAssertEqual(s.postureSource, "none")
     }
 
@@ -122,6 +122,72 @@ final class ActivityContextJoinTests: XCTestCase {
 
         let bad = ActivityContextJoin.context(for: base + 30, end: base + 30, epochs: epochs)
         XCTAssertTrue(bad.qualityReasons.contains("invalid_interval"))
+    }
+
+    func testRecentActivityIsMeasuredFromTheIntervalStart() {
+        // run1 D3-17: a walk ending 120 s before a 15-min slot. Measured from the slot END it read
+        // 1020 s (no recent_activity reason); from the START it is 120 s, inside the 600 s window.
+        let epochs = build(run(.walking, from: base - 300, to: base - 120)
+                           + run(.stationary, from: base - 120, to: base + 900),
+                           runStart: base - 300, runEnd: base + 900)
+        let s = ActivityContextJoin.context(for: base, end: base + 900, epochs: epochs)
+        XCTAssertEqual(s.recentActivity, 120)
+        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+    }
+
+    func testActivityOngoingAtTheIntervalStartReadsZero() {
+        // A walk that began before the interval and is still going as it starts is ongoing: 0 s.
+        let epochs = build(run(.walking, from: base - 90, to: base + 30)
+                           + run(.stationary, from: base + 30, to: base + 900),
+                           runStart: base - 90, runEnd: base + 900)
+        let s = ActivityContextJoin.context(for: base + 15, end: base + 900, epochs: epochs)
+        XCTAssertEqual(s.recentActivity, 0)
+        XCTAssertTrue(s.qualityReasons.contains("recent_activity"))
+        // An epoch starting exactly at the interval start covers its start instant: also ongoing.
+        let aligned = ActivityContextJoin.context(for: base - 90, end: base + 900, epochs: epochs)
+        XCTAssertEqual(aligned.recentActivity, 0)
+    }
+
+    func testActivityStartingInsideTheIntervalIsNotRecentActivity() {
+        // Review fix: a walk that starts inside the interval (even one still going at its end) is the
+        // measurement's own composition, reported through `shares`, not activity PRECEDING it.
+        let epochs = build(run(.stationary, from: base, to: base + 60)
+                           + run(.walking, from: base + 60, to: base + 150),
+                           runStart: base, runEnd: base + 150)
+        let s = ActivityContextJoin.context(for: base, end: base + 75, epochs: epochs)
+        XCTAssertNil(s.recentActivity)
+        XCTAssertFalse(s.qualityReasons.contains("recent_activity"))
+        XCTAssertGreaterThan(s.share(of: .walking), 0, "the in-interval walk is still visible in shares")
+    }
+
+    func testBriefWalkInsideANightIsNotRecentActivity() {
+        // Review fix: an 8 h night (23:00-07:00) with one 30-s supported walking epoch at +3 h (a
+        // bathroom trip). Counting in-interval activity as 'ongoing' made the whole night read
+        // recentActivity 0 and 'recent_activity', so the nightly hero said "Recent activity".
+        let night = 8 * 3600
+        let epochs = build(run(.stationary, from: base, to: base + 3 * 3600)
+                           + run(.walking, from: base + 3 * 3600, to: base + 3 * 3600 + 30)
+                           + run(.stationary, from: base + 3 * 3600 + 30, to: base + night),
+                           runStart: base, runEnd: base + night)
+        XCTAssertTrue(epochs.contains { $0.motion == .walking && $0.isSupportedNonStationary },
+                      "fixture must contain a supported walking epoch")
+        let s = ActivityContextJoin.context(for: base, end: base + night, epochs: epochs)
+        XCTAssertNil(s.recentActivity)
+        XCTAssertFalse(s.qualityReasons.contains("recent_activity"))
+        XCTAssertEqual(s.share(of: .walking), 30.0 / Double(night), accuracy: 1e-9)
+    }
+
+    func testTransitionAcrossAShortGapIsCounted() {
+        // D3-06: stationary [0,30), 3 s gap, walking [33,63): the label changed, a gap in between.
+        let epochs = [epoch(base, base + 30, motion: .stationary),
+                      epoch(base + 33, base + 63, motion: .walking)]
+        let s = ActivityContextJoin.context(for: base, end: base + 63, epochs: epochs)
+        XCTAssertEqual(s.transitions, 1)
+        let total = s.shares.values.reduce(0, +) + s.unknownShare
+        XCTAssertEqual(total, 1.0, accuracy: 1e-9, "the gap seconds still count unknown")
+        // A long gap is a real data hole: not counted as a transition.
+        let far = [epoch(base, base + 30, motion: .stationary), epoch(base + 90, base + 120, motion: .walking)]
+        XCTAssertEqual(ActivityContextJoin.context(for: base, end: base + 120, epochs: far).transitions, 0)
     }
 
     func testRecentActivityNilWhenNoSupportedActivity() {
@@ -294,7 +360,7 @@ final class ActivityContextJoinTests: XCTestCase {
                            + run(.stationary, from: base, to: base + 900),
                            runStart: base - 60, runEnd: base + 900)
         let slot = ActivityContextJoin.hrvSlotContexts(slots: [base], epochs: epochs)[0]
-        XCTAssertEqual(slot.recentActivityS, 900, "last supported epoch ends at slot start")
+        XCTAssertEqual(slot.recentActivityS, 0, "last supported epoch ends at slot start: 0 s before it")
         XCTAssertEqual(slot.postActivity, true, "the slot overlaps the post-activity window")
     }
 
@@ -509,8 +575,11 @@ final class ActivityContextJoinTests: XCTestCase {
         let obj = try! JSONSerialization.jsonObject(with: data) as! [String: Any]
         XCTAssertEqual(Set(obj.keys), ["schema_version", "ontology_version", "model_version",
                                        "preprocessing_version", "input_revision", "data_through",
-                                       "status", "reasons", "epochs", "summary", "contexts"])
+                                       "status", "reasons", "epochs", "summary", "contexts", "join_version"])
         XCTAssertEqual(obj["schema_version"] as? Int, 1)
+        // recent_activity_s is measured from the slot start since join-2 (WP6); the marker says so.
+        XCTAssertEqual(obj["join_version"] as? String, ActivityContextJoin.version)
+        XCTAssertEqual(ActivityContextJoin.version, "join-2")
         XCTAssertEqual(obj["ontology_version"] as? String, "v1")
         XCTAssertEqual(obj["model_version"] as? String, "hart-activity-1")
         XCTAssertEqual(obj["preprocessing_version"] as? String, "hart-pre-1")
@@ -533,6 +602,14 @@ final class ActivityContextJoinTests: XCTestCase {
         // Full round trip.
         let decoded = try! JSONDecoder().decode(ActivityContextDocument.self, from: data)
         XCTAssertEqual(decoded, doc)
+
+        // A document published before the marker (join-1 semantics) still decodes, with no join version.
+        var legacy = obj
+        legacy["join_version"] = nil
+        let old = try! JSONDecoder().decode(ActivityContextDocument.self,
+                                            from: JSONSerialization.data(withJSONObject: legacy))
+        XCTAssertNil(old.joinVersion)
+        XCTAssertEqual(old.contexts, doc.contexts)
     }
 
     func testActivityContextSummaryCodableRoundTrip() {

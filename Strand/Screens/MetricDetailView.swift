@@ -75,7 +75,8 @@ struct MetricDetailView: View {
     @State private var correlationsLoaded = false
 
     // MARK: Activity context (optional, feature-off default)
-    private static let activityMetrics: Set<String> = ["hrv", "resp_rate", "spo2"]
+    // The nightly heroes, each joined to the night it was measured over (`ActivityContextSelection.nightlyMetrics`).
+    static let activityMetrics: Set<String> = ["hrv", "rhr", "resp_rate", "spo2", "skin_temp"]
     @State private var activityContext: ActivityContextDocument?
     @State private var activityInterval: [Int]?
     @State private var activityDayWindow: [Int]?
@@ -941,13 +942,15 @@ struct MetricDetailView: View {
         guard Self.activityMetrics.contains(metric.key) else { return }
         guard let latestDay = series.last?.day else { return }
         guard CloudPushIdentityStore.current() != nil,
-              let repository = CloudPushRuntime.shared.scoreRepository(),
-              let dayWindow = ActivityContextSelection.dayWindow(day: latestDay) else { return }
+              let repository = CloudPushRuntime.shared.scoreRepository() else { return }
         let deviceIds = await IntradaySeriesStore.shared.readCandidates
         guard let cached = await repository.cachedDay(day: latestDay, deviceIds: deviceIds) else { return }
         let loadKey = "\(latestDay)|\(cached.resultRevision ?? "")"
         guard loadKey != activityLoadedKey else { return }
         guard let hosted = cached.hostedResult, let document = hosted.activityContext else { return }
+        // The hosted day is a LOCAL calendar day in the zone the worker scored it in (D6-07), never UTC.
+        let zone = ActivityContextSelection.timeZone(hostedSnapshot: cached.rawObject?["hosted_snapshot"] as? [String: Any])
+        guard let dayWindow = ActivityContextSelection.dayWindow(day: latestDay, timeZone: zone) else { return }
         let sessions = hosted.sleep.map { (start: $0.startTs, end: $0.endTs) }
         activityContext = document
         activityInterval = ActivityContextSelection.interval(metricKey: metric.key,

@@ -103,6 +103,8 @@ final class ActivityLaneDocumentTests: XCTestCase {
 
         let contexts = try XCTUnwrap(doc["contexts"] as? [String: Any])
         XCTAssertEqual(Set(contexts.keys), ["hrv_slots", "sleep_sessions"])
+        // The join semantics the contexts were computed with (recent_activity_s from the slot start, join-2).
+        XCTAssertEqual(doc["join_version"] as? String, "join-2")
         // One 15-min slot covers [dayStart, dayStart+900) but only 60 s of it
         // have epochs. The join normalizes over the FULL slot support (A02):
         // uncovered seconds count unknown, so stationary = 60/900 and

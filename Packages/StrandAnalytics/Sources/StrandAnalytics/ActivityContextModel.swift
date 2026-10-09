@@ -14,7 +14,7 @@ import Foundation
 // through a context prior. Heads are marginals of those two filtered posteriors; none is ever a raw
 // per-window classifier output.
 //
-// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.7`). They were set from this strap's own
+// ALL NUMBERS HERE ARE UNCALIBRATED PRIORS (decoder `hsmm-1.9`). They were set from this strap's own
 // distributions where those exist (dynamic-acceleration percentiles for still / walking / running
 // seconds) and from physiological plausibility elsewhere. They are versioned, centralized, and meant
 // to be replaced by fitted values once labelled data exists; tests pin behaviour, not the numbers.
@@ -97,8 +97,9 @@ struct ModeProfile {
     // Fixed soft mappings onto the public heads.
     let posture: [PostureClass: Double]
     let locomotion: [LocomotionClass: Double]
-    // Observation profile. `move`, `orientPath`, `hrRel`, `encoder` and `arm` are the fields a wearer's
-    // `ActivityPersonalProfile` may adapt (`ActivityContextModel.profiles(for:)`); the rest stay fixed.
+    // Observation profile. `move`, `orientPath`, `hrRel` (moving modes only), `encoder`, `arm` and the held
+    // forearm-orientation rows (stationary modes only) are the fields a wearer's `ActivityPersonalProfile` may
+    // adapt (`ActivityContextModel.profiles(for:)`); the rest stay fixed.
     var move: ClosedRange<Double>
     let moveIsBurst: Bool
     /// Judge `move` against the 30-s median instead of the 10-s mean: recumbent rest is almost always
@@ -111,6 +112,12 @@ struct ModeProfile {
     var hrRel: Double
     var encoder: [String: Double]
     var arm: [Double]          // compat with ArmBehaviorClass cases except unknown (7 values)
+    /// A wearer's own held-forearm category shares (hand above the elbow, flat, inclined, hanging; sums to 1)
+    /// for a stationary mode, with the forearm sign calibrated / not yet calibrated. nil (always, in the static
+    /// table) reads `ActivityContextModel.orientationRows` / `orientationRowsUnsigned`. Only an adopted
+    /// `ActivityPersonalProfile` sets them (channel 3c).
+    var orientation: [Double]? = nil
+    var orientationUnsigned: [Double]? = nil
     let sleepAsleep: Double
     let workout: Double
     /// Specialist modes (stairs, cycling, vehicle) have no evidence of their own in the current feature
@@ -151,6 +158,20 @@ enum ActivityContextModel {
     private static let transitionEnc: [String: Double] =
         ["other_movement": 0.45, "stationary": 0.35, "walking": 0.18, "running": 0.02]
 
+    /// The one relative heart-rate level every stationary posture (bed rest, seated, upright) expects (D9-02).
+    /// Heart rate tells resting from working; it does not tell lying from sitting from standing well enough
+    /// to be posture evidence (a seated wearer after coffee or under mild stress reads like a stander, and a
+    /// low rate reads like lying), and posture-stratified heart rate and HRV must not depend on the rate
+    /// being measured. So the HR channel is posture-neutral among the stationary modes: it separates them only
+    /// from the active and exertion modes. (hsmm-1.7/1.8 used 0.06 / 0.08 / 0.12.) A personal profile never
+    /// adapts it per posture (`profiles(for:)`, `ActivityPersonalProfileFitter.fitMode`).
+    static let stationaryHrRel = 0.08
+    /// The same for the four postural-transition modes (sit-to-stand, stand-to-sit, lying down, getting up): one
+    /// level, so the rate cannot pick the path into one posture over another. hsmm-1.8 had lying down at 0.15
+    /// against 0.20: a lower rate leaned an ambiguous shift toward the lie-down path and so toward bed rest,
+    /// which made heart rate posture evidence by the back door (hsmm-1.9).
+    static let transitionHrRel = 0.20
+
     /// Index == `BodyMode.rawValue`.
     static let profiles: [ModeProfile] = [
         // unknown — re-acquisition prior; observation profile unused (flat).
@@ -167,7 +188,7 @@ enum ActivityContextModel {
                     exits: [(.gettingUp, 0.60), (.seated, 0.10), (.upright, 0.05), (.walk, 0.05), (.unknown, 0.20)],
                     posture: [.recumbent: 0.88, .unknown: 0.12], locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.20, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.06, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: stationaryArm, sleepAsleep: 1.0, workout: 0.05, moveIsMedian: true),
         // seated
         ModeProfile(meanDwellS: 900, phases: 2,
@@ -177,7 +198,7 @@ enum ActivityContextModel {
                     posture: [.seatedLikely: 0.84, .uprightStationary: 0.10, .unknown: 0.06],
                     locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.50, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.08, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: stationaryArm, sleepAsleep: 0.2, workout: 0.35),
         // upright (standing, stationary)
         ModeProfile(meanDwellS: 100, phases: 2,
@@ -187,7 +208,7 @@ enum ActivityContextModel {
                     posture: [.uprightStationary: 0.72, .seatedLikely: 0.20, .unknown: 0.08],
                     locomotion: [.stationary: 0.97, .unknown: 0.03],
                     move: 0...0.50, moveIsBurst: false, gaitExpect: 0, cadence: nil, orientPath: 0...0.9,
-                    expectsPostureShift: false, hrRel: 0.12, encoder: stationaryEnc,
+                    expectsPostureShift: false, hrRel: stationaryHrRel, encoder: stationaryEnc,
                     arm: arm(0.38, 0.12, 0.20, 0.08, 0.16, 0.0, 0.06), sleepAsleep: 0.2, workout: 0.6),
         // walk
         ModeProfile(meanDwellS: 90, phases: 2,
@@ -261,7 +282,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.30...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.3, workout: 0.5),
         // standToSit
         ModeProfile(meanDwellS: 5, phases: 2,
@@ -269,7 +290,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.30...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.3, workout: 0.5),
         // lyingDown
         ModeProfile(meanDwellS: 8, phases: 2,
@@ -277,7 +298,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.25...0.85, moveIsBurst: true, gaitExpect: 0.05, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.15, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.6, workout: 0.3),
         // gettingUp
         ModeProfile(meanDwellS: 8, phases: 2,
@@ -285,7 +306,7 @@ enum ActivityContextModel {
                     posture: [.posturalTransition: 0.80, .unknown: 0.20],
                     locomotion: [.stationary: 0.85, .other: 0.10, .unknown: 0.05],
                     move: 0.25...0.85, moveIsBurst: true, gaitExpect: 0.10, cadence: nil, orientPath: 0.5...1.7,
-                    expectsPostureShift: true, hrRel: 0.20, encoder: transitionEnc,
+                    expectsPostureShift: true, hrRel: transitionHrRel, encoder: transitionEnc,
                     arm: arm(0.20, 0.05, 0.30, 0.02, 0.10, 0.0, 0.33), sleepAsleep: 0.6, workout: 0.5),
     ]
 
@@ -300,9 +321,14 @@ enum ActivityContextModel {
             var p = table[mode.rawValue]
             if let move = adj.move?.range { p.move = move }
             if let path = adj.orientPath?.range { p.orientPath = path }
-            if let hr = adj.hrRel { p.hrRel = hr }
+            // Never per stationary posture (D9-02): a profile fit before hsmm-1.8 may still carry one; it is ignored.
+            if let hr = adj.hrRel, !mode.isStationary { p.hrRel = hr }
             if let arm = adj.arm, arm.count == p.arm.count { p.arm = arm }
             if let enc = adj.encoder, !enc.isEmpty { p.encoder = enc }
+            if mode.isStationary {
+                if let row = adj.orientation.flatMap(orientationRow) { p.orientation = row }
+                if let row = adj.orientationUnsigned.flatMap(orientationRow) { p.orientationUnsigned = row }
+            }
             table[mode.rawValue] = p
         }
         return table
@@ -355,6 +381,8 @@ enum ActivityContextModel {
     static let uShift = 0.30, uTransition = 0.30
     /// Share of the posture-shift heuristic's weight kept while the learned transition expert speaks.
     static let shiftWeightWithExpert = 0.5
+    /// The least a confident "none" from the transition expert leaves a transition mode (see channel 4b).
+    static let expertNoneFloor = 0.30
 
     /// The transition expert's weight decay with window age (full to 2 s, then 0.8, then 0.5).
     static func transitionAgeFactor(_ age: Int?) -> Double {
@@ -392,6 +420,162 @@ enum ActivityContextModel {
         let burst = f.mBurst10 ?? 0
         let gait = f.gaitPresence ?? 0
         return acSigmoid((net - 50) / 10) * acSigmoid((burst - 0.38) / 0.05) * (1 - min(1, gait))
+    }
+
+    // MARK: Absolute forearm orientation (channel 3c, hsmm-1.8)
+
+    /// Soft membership of a forearm-axis gravity component (strap +x; +1 = forearm pointing down) in four
+    /// held-orientation categories: hand above the elbow, forearm flat, inclined, arm hanging. Sums to 1.
+    static func orientationCategories(_ ux: Double) -> (neg: Double, flat: Double, mid: Double, hang: Double) {
+        let a = acSigmoid((ux + 0.30) / 0.05), b = acSigmoid((ux - 0.30) / 0.05), c = acSigmoid((ux - 0.75) / 0.05)
+        return (1 - a, a - b, b - c, c)
+    }
+
+    /// How often each stationary posture holds the forearm in each category (neg, flat, mid, hang). A
+    /// population compromise, deliberately blunt: on this strap the owner's in-bed seconds are 69 % flat /
+    /// 9 % hand-up against 3 % / 0.6 % by day, but scripted lab sitting rests the forearm flat on the lap
+    /// 45–89 % of the time (FORTH, PAMAP2), and in free living (Capture-24) a raised hand separates sleep
+    /// (45 %) from sitting (11 %) far better than a flat forearm (26 % vs 34 %). So a raised hand is the
+    /// stronger recumbent cue, a flat forearm a mild one, and a hanging arm only weak upright evidence.
+    static let orientationRows: (bed: [Double], seated: [Double], upright: [Double]) = (
+        [0.35, 0.42, 0.17, 0.06], [0.12, 0.30, 0.40, 0.18], [0.04, 0.12, 0.36, 0.48])
+
+    /// The same rows for a strap whose forearm sign is not calibrated yet (`forearmAxis` reads |x|): a raised
+    /// hand and a hanging arm are both just "vertical" then, so the two categories merge (neg + hang).
+    static let orientationRowsUnsigned: (bed: [Double], seated: [Double], upright: [Double]) = (
+        [0, 0.42, 0.17, 0.41], [0, 0.30, 0.40, 0.30], [0, 0.12, 0.36, 0.52])
+
+    /// A stored per-wearer orientation row as channel 3c reads it: four finite, non-negative shares with a
+    /// positive sum, normalised; nil for anything else (the population row is used instead).
+    static func orientationRow(_ row: [Double]) -> [Double]? {
+        guard row.count == 4, row.allSatisfy({ $0.isFinite && $0 >= 0 }) else { return nil }
+        let total = row.reduce(0, +)
+        guard total > 0 else { return nil }
+        return row.map { $0 / total }
+    }
+
+    /// A forearm-axis gravity component as the orientation cues read it: signed by the calibrated forearm sign,
+    /// or |x| while the sign is unknown (nothing on the strap says which way round it is worn; the old code
+    /// refused absolute orientation for that reason).
+    @inline(__always) static func forearmAxis(_ ux: Double?, sign: Double?) -> Double? {
+        guard let ux else { return nil }
+        if let sign { return sign < 0 ? -ux : ux }
+        return abs(ux)
+    }
+
+    /// Forearm sign calibration from gait: walking seconds vote with their forearm-axis component (clipped),
+    /// in a memory that decays over gait seconds only. The sign is adopted once this many seconds of gait agree
+    /// on average by at least `forearmSignMinMean`; an arm carrying something, or a phone held while walking,
+    /// pulls the mean toward 0 and leaves the sign unknown rather than wrong.
+    static let forearmSignMinGaitS = 40.0, forearmSignMinMean = 0.30, forearmSignTauS = 3600.0
+    /// A gap this long (s) may have been a strap taken off and put back the other way round: re-calibrate.
+    static let forearmSignResetGapS = 3600
+
+    /// Per-second weights of the two orientation factors. Both are small on purpose: a held orientation
+    /// repeats every second, so what it may claim is bounded by the decoder's posture-evidence memory, and
+    /// these weights only set how many minutes it takes to get there (neither is more than a hedge on its own).
+    static let wOrientRecumbent = 0.08, wOrientUpright = 0.01
+    /// Weight of the direction terms the four transition modes take from the forearm axis during a shift.
+    static let wShiftDirection = 1.0
+
+    /// The transition modes' direction expectations from the forearm axis at both ends of a shift: standing
+    /// up lowers the hand (the arm ends hanging), sitting down raises it, lying down ends with the forearm
+    /// flat or the hand above the elbow, getting up starts there and leaves it. Values in (0, 1], index by
+    /// mode; 1 for every other mode.
+    static func shiftDirection(from a: Double, to b: Double) -> [Double] {
+        // Arguments are `forearmAxis` values: with the sign unknown they are ≥ 0, so "hand above the elbow"
+        // never fires and only flat vs inclined vs vertical, and the change between them, speak.
+        var v = [Double](repeating: 1, count: BodyMode.count)
+        let d = b - a
+        let to = orientationCategories(b), from = orientationCategories(a)
+        let lowFrom = from.flat + from.neg
+        v[BodyMode.sitToStand.rawValue] = 0.25 + 0.75 * acSigmoid((d - 0.15) / 0.08)
+        // Sitting down rarely ends with the hand raised above the elbow; lying down often does.
+        v[BodyMode.standToSit.rawValue] = (0.25 + 0.75 * acSigmoid((-d - 0.15) / 0.08)) * (1 - 0.7 * to.neg)
+        v[BodyMode.lyingDown.rawValue] = 0.2 + 0.8 * min(1, to.neg + 0.5 * to.flat) * (1 - 0.6 * lowFrom)
+        v[BodyMode.gettingUp.rawValue] = 0.2 + 0.8 * lowFrom * (1 - (to.flat + to.neg))
+        for m in 0..<BodyMode.count { v[m] = max(0.05, v[m]) }
+        return v
+    }
+
+    /// Seated-vs-upright evidence a wearer's adopted personal profile is allowed to carry (log-odds); the
+    /// population cap is `postureEvidenceCapSU`.
+    static let postureEvidenceCapSU = log(8.0), postureEvidenceCapSUPersonal = log(12.0)
+    /// The upright side of the wrist-only sources together (arm pattern, held orientation, a shift's direction):
+    /// below the lean at which "Standing" is committed. In free living (Capture-24) standing still is about a
+    /// tenth of still time and most stand-ups lead straight into walking: the standing claims these sources
+    /// committed were right 7 % of the time (75 of 1075; 4 % to 15 % across evidence strengths), while the lab
+    /// sets (FORTH) say 100 %. Without a learned or personal head, the wrist hedges toward standing only.
+    static let postureEvidenceCapUprightWrist = log(1.6)
+    /// Recumbent evidence cap (log-odds over the no-evidence ceiling `recumbentShareFloor`). Held orientation
+    /// alone reaches at most its own source cap (ln 2.5, recumbent ≤ ~23 % of the stationary mass: a hedge,
+    /// never a lying claim); a lie-down's direction and the staged night may go further.
+    static let postureEvidenceCapRecumbent = log(200.0)
+    /// How far the learned posture memory (`PostureEvidence.learned`: HART's fine sit / stand rows, Inertia's
+    /// posture head, an adopted personal profile's channels) must lean, in log-odds of seated over upright, before
+    /// it counts as agreeing with a sitting or standing claim (`ActivityEvidenceSummary.learnedPosture`): 2:1. The
+    /// memory's own cap is ln 3, so a learned source that keeps naming one posture reaches it within seconds, and
+    /// one that wavers between sitting and standing does not.
+    static let learnedPostureAgreementLogOdds = log(2.0)
+    /// The held orientation's recumbent cap for a wearer whose adopted profile carries their own lying row
+    /// (`ModeProfile.orientation`; the population cap is `PostureEvidence.caps[4]`, ln 2.5). It is a ceiling, not
+    /// a push: recumbent may then hold up to 0.12 × 6 of sitting + standing (~42 % of the stationary mass), still
+    /// short of a lying claim, which keeps needing the night, the in-bed window or a lie-down's direction. The
+    /// bed-rest mass itself still comes from the likelihood, and the held orientation cannot open bed-rest entry
+    /// (`recumbentEntryEvidence`), so the wearer's lying row on its own never produces a lying claim
+    /// (`ActivityContextPersonalRecumbentCapTests`); the fitter's per-class wrong-claim guard refuses a profile
+    /// whose rows make a labelled mode read as another.
+    static let recumbentOrientationCapPersonal = log(6.0)
+    /// Without recumbent evidence, recumbent rest may hold at most this share relative to seated + upright.
+    static let recumbentShareFloor = 0.12
+    /// Slack (log-odds) the seated / upright split may lean without any posture evidence: small enough that
+    /// the published heads stay hedged ("Still, sitting or standing").
+    static let postureNeutralSlack = log(1.25)
+    /// ln(seated / upright) at which the published posture head is even (seated_likely = upright_stationary):
+    /// the seated mode puts more of its mass on its own posture than the upright mode does, so an even split
+    /// of the modes would read as a seated lean. Evidence is measured from here.
+    static let postureNeutralLean: Double = {
+        let s = profiles[BodyMode.seated.rawValue].posture, u = profiles[BodyMode.upright.rawValue].posture
+        let ds = (s[.seatedLikely] ?? 0) - (s[.uprightStationary] ?? 0)
+        let du = (u[.uprightStationary] ?? 0) - (u[.seatedLikely] ?? 0)
+        let share = du / (ds + du)
+        return log(share / (1 - share))
+    }()
+
+    /// The learned transition expert's confident, non-abstained reading: the share of its mass that names a
+    /// posture change (1 − P(none)) and the four class probabilities, weighted by its age decay. nil when it
+    /// is absent, abstained, or not confident enough to start a transition on its own.
+    static func expertTransition(_ f: ActivityFeatures) -> (q: Double, p: [BodyMode: Double])? {
+        guard let t = f.transition, !t.abstained else { return nil }
+        let q = min(1, max(0, 1 - t.none)) * transitionAgeFactor(f.transitionAgeS)
+        guard q >= 0.5 else { return nil }
+        let raw: [(BodyMode, Double)] = [(.sitToStand, t.sitToStand), (.standToSit, t.standToSit),
+                                         (.lyingDown, t.lieDown), (.gettingUp, t.getUp)]
+        let total = raw.reduce(0) { $0 + max(0, $1.1) }
+        guard total > 0 else { return nil }
+        var p: [BodyMode: Double] = [:]
+        for (m, v) in raw { p[m] = max(0, v) / total }
+        return (q, p)
+    }
+
+    /// How strongly the encoder's FOLDED classes name a specialist label (channel 6b; the fine head, when
+    /// present, replaces this for stairs and generic exercise). An abstained window says nothing, here as in
+    /// channel 4 (D1V-02). The folded head files eating, drinking and brushing teeth under other_movement, so
+    /// it opens generic exercise only when the movement or the heart corroborates (D1-08).
+    static func encoderNames(_ label: String, mode: BodyMode, _ f: ActivityFeatures, effort: Double) -> Double {
+        guard let enc = f.encoder, !enc.abstained else { return 0 }
+        var said = enc.classProbs[label] ?? 0
+        if mode == .otherExercise, enc.fineProbs.flatMap(HartFineActivities.vector) == nil {
+            said *= max(acSigmoid(((f.m10 ?? 0) - 0.50) / 0.05), effort)
+        }
+        return said
+    }
+
+    /// No pulse, no wear event, and a strap stiller than any resting wrist (below ~5.4 mg median, no
+    /// rotation) for this long is a strap on a table, not a person sitting quietly.
+    static let noPulseStillOnsetS = 120
+    @inline(__always) static func implausiblyStill(_ f: ActivityFeatures) -> Bool {
+        (f.mMed30 ?? 1) <= 0.015 && (f.orientPath10 ?? 1) <= 0.1
     }
 
     // MARK: Exertion (what the heart says about effort)
@@ -473,6 +657,57 @@ enum ActivityContextModel {
         /// The terms the shared accelerometer budget bounds, one by one. Only filled while the gait channel is
         /// active (a held ElderNet window under an accepted config); nil otherwise.
         var accelerometerTerms: AccelerometerTerms? = nil
+        /// Posture evidence this second, by source, for the decoder's posture-evidence memory.
+        var postureEvidence = PostureEvidence()
+    }
+
+    /// Tempered log-odds of posture evidence one second contributed, split by source so that each source's
+    /// memory is capped on its own (`PostureEvidence.caps`): a wrist cue that is weak about posture must stay
+    /// weak however many seconds repeat it. Seated over upright: the arm pattern (channel 5), the held forearm
+    /// orientation, a shift's direction, and the learned / personal heads (fine HART, Inertia posture, any
+    /// channel a personal profile made differ). Never the heart-rate level or the context gates: those are
+    /// priors. Recumbent over sitting / standing: the held orientation and a shift into or out of lying.
+    struct PostureEvidence: Equatable {
+        var arm = 0.0, orientation = 0.0, direction = 0.0, learned = 0.0
+        var recumbentOrientation = 0.0, recumbentDirection = 0.0
+        /// The staged night (asleep, or awake in its in-bed window): set to its cap by the decoder, never by a
+        /// second's score, and remembered for a while after the night ends.
+        var recumbentNight = 0.0
+
+        var values: [Double] { [arm, orientation, direction, learned, recumbentOrientation, recumbentDirection,
+                                recumbentNight] }
+        /// Index of the first recumbent source in `values`.
+        static let recumbentStart = 4
+        /// Per-source caps (log-odds), in `values` order. On its own the arm pattern or the held orientation
+        /// leaves the published heads hedged; a shift whose direction the forearm shows may commit strongly, a
+        /// learned head moderately (HART's fine sit / stand rows separate sitting from standing at a balanced
+        /// accuracy of 0.74-0.81 on FORTH / PAMAP2, D7). The seated / upright total is capped again by the decoder (higher with an adopted
+        /// personal profile).
+        /// The held orientation's recumbent cap is ln 2.5: on its own it may lift recumbent to at most ~23 % of the
+        /// stationary mass (`recumbentShareFloor` × 2.5), below any lying claim, because a forearm flat on the lap
+        /// or a phone held up looks the same while seated (Capture-24: 357 daytime lying claims, none right, at
+        /// ln 25). A lie-down's direction is capped at ln 3: the forearm cannot tell lying back on a sofa from
+        /// raising a phone while seated, so the two together (ratio 0.9, recumbent just under half the
+        /// stationary mass) leave the posture unresolved ("Stationary") rather than claim lying. Lying awake is
+        /// claimed with the staged night or its in-bed window (the night source), not from the wrist alone.
+        static let caps: [Double] = [log(1.6), log(1.4), log(8.0), log(3.0), log(2.5), log(3.0), log(200.0)]
+        /// The lower (upright / not recumbent) side of each cap, where it differs. A stand-up's direction
+        /// carries less than a sit-down's: in free living standing still is about a tenth of still time and
+        /// most stand-ups lead straight into walking, so "standing" after a stand-up is committed at a lower
+        /// confidence than "sitting" after a sit-down.
+        static let lowerCaps: [Double] = [log(1.6), log(1.4), log(3.0), log(3.0), log(25.0), log(12.0), 0]
+        /// A shift is one event spread over a few seconds of tempered evidence: its direction is remembered at
+        /// this gain so that one clear, direction-resolved change of posture can carry the split on its own
+        /// (FORTH: 33 of 33 detected sit / stand shifts in the right direction once the forearm axis is read).
+        static let directionGain = 2.5
+        /// Memory time constants (s), in `values` order.
+        static let taus: [Double] = [180, 180, 180, 180, 600, 600, 600]
+        /// Index of the night source in `values`.
+        static let night = 6
+        /// Index of the held-orientation recumbent source in `values`.
+        static let recumbentOrientationIndex = 4
+        /// Index of the learned / personal heads' seated-over-upright source in `values`.
+        static let learnedIndex = 3
     }
 
     /// Every term the shared accelerometer budget bounds at one second, term by term, as the tempered, signed log
@@ -489,7 +724,9 @@ enum ActivityContextModel {
     }
 
     /// Instantaneous soft arm-behaviour likelihoods (not normalized) from movement-pattern features.
-    static func armPattern(_ f: ActivityFeatures) -> [Double] {
+    /// `includeWorkout: false` leaves a logged workout out: the body chain's channel 7 already counts it, so
+    /// the arm-pattern channel 5 must not count it a second time (D1-12). The arm chain keeps it.
+    static func armPattern(_ f: ActivityFeatures, includeWorkout: Bool = true) -> [Double] {
         var q = [Double](repeating: 0.2, count: ArmState.count)
         guard let m = f.m10 ?? f.m4 else {
             q[ArmState.unknown] = 1
@@ -516,11 +753,12 @@ enum ActivityContextModel {
         q[ArmState.gesture] = acSoftRange(m, 0.45...0.85, sigma: 0.08) * acSigmoid((path - 0.8) / 0.15) * notGait
         var exercise = acSoftRange(m, 0.72...1.0, sigma: 0.06)
         if let hr = f.hrRel, hr >= 0.45 { exercise = max(exercise, 0.6 * acSoftRange(m, 0.5...1.0, sigma: 0.1)) }
-        if f.loggedWorkout { exercise = max(exercise, 0.7) }
+        let workout = includeWorkout && f.loggedWorkout
+        if workout { exercise = max(exercise, 0.7) }
         // Ordinary walking swings the arm hard enough to look like exercise motion; gait explains it.
         // Running (movement above ~0.78) keeps the exercise reading.
         let walkSwing = (1 - notGait) * (1 - acSigmoid((m - 0.78) / 0.04))
-        if !f.loggedWorkout { exercise *= 1 - 0.85 * walkSwing }
+        if !workout { exercise *= 1 - 0.85 * walkSwing }
         q[ArmState.exercise] = exercise
         q[ArmState.other] = 0.30 + 0.5 * walkSwing
         q[ArmState.unknown] = 0.20
@@ -612,6 +850,41 @@ enum ActivityContextModel {
             add(v, unknownValue: uOrient, weight: wOrient)
         }
 
+        // 3c. Held absolute forearm orientation (hsmm-1.8). Two small factors, neither counted as an evidence
+        // channel: recumbent rest against sitting / standing (a raised hand or a flat forearm, held, favours
+        // lying; an inclined or hanging forearm argues against it), and seated against upright (a hanging arm
+        // leans upright, weakly). A forearm flat on a desk is the confound: while the hands are busy (desk-like,
+        // repetitive, gesturing) the recumbent factor reads the forearm as seated.
+        let bed = BodyMode.bedRest.rawValue, seat = BodyMode.seated.rawValue, up = BodyMode.upright.rawValue
+        var orientRecumbent = 0.0, orientSeated = 0.0
+        if let ux = forearmAxis(f.heldUx, sign: f.forearmSign) {
+            let c = orientationCategories(ux)
+            // A wearer's adopted profile may carry their own rows (the owner's in-bed seconds are 69 % flat
+            // against 3 % by day, a likelihood ratio the population compromise cannot hold).
+            let signed = f.forearmSign != nil
+            let rows = signed ? orientationRows : orientationRowsUnsigned
+            func row(_ m: Int, _ population: [Double]) -> [Double] {
+                (signed ? profiles[m].orientation : profiles[m].orientationUnsigned) ?? population
+            }
+            func held(_ row: [Double]) -> Double {
+                max(1e-3, row[0] * c.neg + row[1] * c.flat + row[2] * c.mid + row[3] * c.hang)
+            }
+            let fb = held(row(bed, rows.bed)), fs = held(row(seat, rows.seated)), fu = held(row(up, rows.upright))
+            let q = armPattern(f, includeWorkout: false)
+            let qs = q[0..<ArmState.unknown].reduce(0, +)
+            let busy = qs > 0 ? (q[ArmState.desk] + q[ArmState.repetitive] + q[ArmState.gesture]) / qs : 0
+            let fbed = fb * (1 - 0.8 * busy) + fs * 0.8 * busy
+            var v = [Double](repeating: 1, count: n)
+            v[bed] = max(0.01, fbed / max(fs, fu))
+            add(v, unknownValue: 1, weight: wOrientRecumbent, isEvidence: false)
+            orientRecumbent = wOrientRecumbent * log(v[bed])
+            var w = [Double](repeating: 1, count: n)
+            let ref = (fs + fu) / 2
+            w[seat] = fs / ref; w[up] = fu / ref
+            add(w, unknownValue: 1, weight: wOrientUpright, isEvidence: false)
+            orientSeated = wOrientUpright * (log(w[seat]) - log(w[up]))
+        }
+
         // 3b. Posture-shift signature: a burst of movement that leaves the wrist in a different
         // orientation. Stationary modes are penalized while it is present; the four transition modes
         // are only plausible while it is. (It also raises the hazard of entering a transition mode —
@@ -619,18 +892,35 @@ enum ActivityContextModel {
         // While the learned transition expert speaks it sees the same burst from the raw IMU, so the share
         // of the heuristic that reports that burst (its strength `s`) is discounted toward
         // `shiftWeightWithExpert`, scaled by the expert's own age decay. A quiet heuristic ("no shift") is a
-        // disagreement with the expert, not a duplicate, and keeps its full weight.
+        // disagreement with the expert, not a duplicate.
+        // hsmm-1.8: only the share of a firing heuristic that the expert CONFIRMS is a duplicate (a firing
+        // heuristic beside an expert that says "none" is a disagreement and keeps its weight: the expert's
+        // recall is low, so its "none" at a real transition must not halve the shift). And a quiet heuristic
+        // no longer vetoes a confident expert at full weight: the 1 Hz gravity heuristic is blind to a return
+        // within ~14 s, a bob-up, or a change of posture that barely rotates the wrist, which is exactly what
+        // the raw-IMU expert is for (D2V-01).
         let transitionShare = (f.transition.map { !$0.abstained } ?? false) ? transitionAgeFactor(f.transitionAgeS) : 0
+        let expertNamed = f.transition.map { $0.abstained ? 0 : min(1, max(0, 1 - $0.none)) } ?? 0
+        let shift = f.net5 != nil ? shiftStrength(f) : 0
         if f.net5 != nil {
-            let s = shiftStrength(f)
+            let s = shift
             var v = [Double](repeating: 1, count: n)
             for m in 0..<n where m != unknownIdx {
                 let mode = BodyMode(rawValue: m)!
                 if mode.isTransition { v[m] = 0.05 + 0.95 * s }
                 else if mode.isStationary { v[m] = 1 - 0.9 * s }
             }
-            let discount = 1 - (1 - shiftWeightWithExpert) * s * transitionShare
+            let duplicate = s * expertNamed
+            let deferToExpert = (1 - s) * smoothStep((expertNamed - 0.4) / 0.4)
+            let discount = 1 - transitionShare * ((1 - shiftWeightWithExpert) * duplicate + 0.85 * deferToExpert)
             add(v, unknownValue: uShift, weight: wShift * discount)
+        }
+
+        // 3d. Which way the shift went, from the forearm axis at both ends (hsmm-1.8). The four transition modes
+        // used to share one observation profile, so the event kind came from where the belief's mass was
+        // (D2-06, D7: direction right 15 of 35). Not an evidence channel; neutral for every other mode.
+        if let a = forearmAxis(f.shiftFromUx, sign: f.forearmSign), let b = forearmAxis(f.shiftToUx, sign: f.forearmSign) {
+            add(shiftDirection(from: a, to: b), unknownValue: 1, weight: wShiftDirection, isEvidence: false)
         }
 
         // 4. Short-window motion encoder (HART or any other), weighted by how much to trust it. With HART's
@@ -700,16 +990,20 @@ enum ActivityContextModel {
         // canonical order, and `add` accumulates modes in a fixed order, so no sum depends on dictionary
         // iteration order. The unknown mode takes the mean of the known values, so the channel never
         // moves mass into or out of "unknown" (it says nothing about whether the body state is knowable).
+        // hsmm-1.8: a "none" lowers the transition modes at most to `expertNoneFloor`. Measured on held-out
+        // FORTH, the expert names 1 of 8 real stand-to-sits (it never names the wrong direction), so its "none"
+        // is weak evidence and must not erase a transition the posture-shift heuristic sees (D7).
         if let trans = f.transition, !trans.abstained {
             let noneP = min(1, max(0, trans.none))
             var v = [Double](repeating: 1, count: n)
             var sum = 0.0, count = 0
+            func named(_ p: Double) -> Double { max(expertNoneFloor, 0.05 + 0.95 * min(1, max(0, p))) }
             for m in 0..<n where m != unknownIdx {
                 switch BodyMode(rawValue: m)! {
-                case .sitToStand: v[m] = 0.05 + 0.95 * min(1, max(0, trans.sitToStand))
-                case .standToSit: v[m] = 0.05 + 0.95 * min(1, max(0, trans.standToSit))
-                case .lyingDown: v[m] = 0.05 + 0.95 * min(1, max(0, trans.lieDown))
-                case .gettingUp: v[m] = 0.05 + 0.95 * min(1, max(0, trans.getUp))
+                case .sitToStand: v[m] = named(trans.sitToStand)
+                case .standToSit: v[m] = named(trans.standToSit)
+                case .lyingDown: v[m] = named(trans.lieDown)
+                case .gettingUp: v[m] = named(trans.getUp)
                 default: v[m] = 0.05 + 0.95 * noneP
                 }
                 sum += v[m]; count += 1
@@ -719,8 +1013,9 @@ enum ActivityContextModel {
         }
 
         // 5. Instantaneous arm pattern → body mode compat (couples desk-like motion to seated, etc.).
+        var armSeated = 0.0, armDiff = 0.0
         if f.m10 != nil || f.m4 != nil {
-            let q = armPattern(f)
+            let q = armPattern(f, includeWorkout: false)
             let qs = q[0..<ArmState.unknown].reduce(0, +)
             if qs > 0 {
                 var v = [Double](repeating: 1, count: n)
@@ -731,14 +1026,23 @@ enum ActivityContextModel {
                     v[m] = min(1, max(0.01, s * 3.2))
                 }
                 add(v, unknownValue: uArm, weight: wArm)
+                // Posture evidence only once the pattern is steady (4 s and 10 s means and the 30 s median agree):
+                // the seconds after a walk pass through a desk-like movement level on their way to still.
+                armDiff = wArm * (log(v[seat]) - log(v[up]))
+                if let m4 = f.m4, let m10 = f.m10, let med = f.mMed30, abs(m4 - m10) < 0.1, abs(m10 - med) < 0.1 {
+                    armSeated = armDiff
+                }
             }
         }
 
         // 6. Heart rate (weak: exertion, stress and caffeine all move it).
+        // A prior-like level, not posture evidence: kept out of the posture-evidence memory.
+        var notPostureEvidence = 0.0
         if let hr = f.hrRel {
             var v = [Double](repeating: 1, count: n)
             for m in 0..<n where m != unknownIdx { v[m] = max(0.05, acGauss(hr - profiles[m].hrRel, 0.3)) }
             add(v, unknownValue: uHR, weight: wHR)
+            notPostureEvidence += wHR * (log(v[seat]) - log(v[up]))
         }
 
         // 6a. Heart-rate trend. A rate that is clearly falling from an elevated level is recovery, which
@@ -773,7 +1077,7 @@ enum ActivityContextModel {
             let mode = BodyMode(rawValue: m)!
             // HART's fine head can name stairs (the folded head files it under other_movement) and ball
             // sports; eating, drinking or brushing teeth no longer open the generic-exercise gate.
-            var said = f.encoder?.classProbs[label] ?? 0
+            var said = encoderNames(label, mode: mode, f, effort: effort)
             if let fine {
                 switch mode {
                 case .stairs: said = HartFineActivities.stairsMass(fine)
@@ -802,20 +1106,35 @@ enum ActivityContextModel {
         }
         if specialists { add(support, unknownValue: 1.0, weight: 1.0, isEvidence: false) }
 
-        // 7. Context gates: sleep and logged workouts.
-        if f.sleep == .asleep || f.loggedWorkout || f.sleep == .awake {
+        // 7. Context gates: sleep, the night's in-bed window, and logged workouts.
+        // hsmm-1.8: lying awake in bed favours recumbent rest (it used to be penalised like any awake second,
+        // so the posture posterior said seated while the class said lying, D1-04). Outside bed, awake or
+        // unknown sleep is only a mild prior against lying: it used to compound per second into "never lying
+        // awake" (D2-06); the decoder's posture-evidence bound, not this gate, now keeps a quiet wrist from
+        // drifting into recumbent on the bed-rest dwell alone (D1V-01).
+        let awakeInBed = f.sleep == .awake && f.inBed
+        do {
             var v = [Double](repeating: 1, count: n)
             for m in 0..<n where m != unknownIdx {
                 let p = profiles[m]
+                let mode = BodyMode(rawValue: m)!
                 var l = 1.0
                 if f.sleep == .asleep { l *= p.sleepAsleep }
-                if f.sleep == .awake && BodyMode(rawValue: m) == .bedRest { l *= 0.8 }
+                if awakeInBed && (mode == .seated || mode == .upright) { l *= 0.3 }
+                if !f.inBed && f.sleep == .awake && mode == .bedRest { l *= 0.97 }
+                if !f.inBed && f.sleep == .unknown && mode == .bedRest { l *= 0.985 }
                 if f.loggedWorkout { l *= p.workout }
                 v[m] = max(0.01, l)
             }
             // Being awake alone favours no particular mode, so the unknown mode is not penalised for it.
-            let informative = f.sleep == .asleep || f.loggedWorkout
-            add(v, unknownValue: informative ? uGate : 1.0, weight: wGate)
+            let informative = f.sleep == .asleep || f.loggedWorkout || awakeInBed
+            if v.contains(where: { $0 != 1 }) || informative {
+                // Unknown sleep is a new (mild) gate, not an evidence channel: the missing-sensor bonus of
+                // the unknown mode is what it was.
+                add(v, unknownValue: informative ? uGate : 1.0, weight: wGate,
+                    isEvidence: f.sleep != .unknown || f.loggedWorkout)
+                notPostureEvidence += wGate * (log(v[seat]) - log(v[up]))
+            }
         }
 
         // 8. Inertia-1 heads: distinct, tempered channels (never averaged with the encoder above), all with
@@ -903,6 +1222,32 @@ enum ActivityContextModel {
         // stillness or gait without it, so the unknown mode earns a standing bonus.
         if !hasMotion { logL[unknownIdx] += wMotion * log(1 / uMotion) * 0.8 }
         if channels < minChannels { logL[unknownIdx] += Double(minChannels - channels) * missingChannelBonus }
+        // A strap stiller than a resting wrist with no pulse is no evidence anyone is there (D1-05): the unknown
+        // mode's bonus outweighs what the still channels say for a seated wearer (about 4 nats per second).
+        if f.noPulseStillS > noPulseStillOnsetS {
+            logL[unknownIdx] += 8.0 * min(1, Double(f.noPulseStillS - noPulseStillOnsetS) / 180)
+        }
+
+        // Posture evidence (before temperature): seated over upright from every channel that tells them apart
+        // except the priors above; during a shift (or a confident expert window) also the direction the
+        // transition modes say. Recumbent: the held orientation, and a shift into vs out of lying.
+        // A shift's sit / stand direction counts only for the share of it that is not a lie-down.
+        let directionWeight = max(shift, transitionShare * expertNamed)
+        let trans = { (m: BodyMode) in logL[m.rawValue] }
+        let kinds: [BodyMode] = [.sitToStand, .standToSit, .lyingDown, .gettingUp]
+        let top = kinds.map(trans).max() ?? 0
+        let z = kinds.reduce(0.0) { $0 + exp(temperature * (trans($1) - top)) }
+        let lieShare = exp(temperature * (trans(.lyingDown) - top)) / z
+        var evidence = PostureEvidence()
+        evidence.arm = temperature * armSeated
+        evidence.orientation = temperature * orientSeated
+        evidence.direction = PostureEvidence.directionGain * temperature * directionWeight * (1 - lieShare)
+            * (trans(.standToSit) - trans(.sitToStand))
+        evidence.learned = temperature * (logL[seat] - logL[up] - notPostureEvidence - armDiff - orientSeated)
+            + (postureShift.map { $0[seat] - $0[up] } ?? 0)
+        evidence.recumbentOrientation = temperature * orientRecumbent
+        evidence.recumbentDirection = PostureEvidence.directionGain * temperature * directionWeight
+            * (trans(.lyingDown) - max(trans(.standToSit), max(trans(.sitToStand), trans(.gettingUp))))
 
         for m in 0..<n { logL[m] *= temperature }
         if weightSum > 0 { for m in 0..<n { dis[m] /= weightSum } }
@@ -911,7 +1256,8 @@ enum ActivityContextModel {
                      specialistOpenedByMotionHeads: specialistOpenedByMotionHeads,
                      motionHeadsPostureOmitted: postureOmitted, briskShift: briskShift,
                      gaitQualityApplied: gaitApplied, gaitBudgetLimited: gaitLimited, gaitFavoursBrisk: favoursBrisk,
-                     accelerometerTerms: accelerometerTerms)
+                     accelerometerTerms: accelerometerTerms,
+                     postureEvidence: evidence)
     }
 
     /// Arm-chain emission context: how plausible each arm class is given the body posterior.

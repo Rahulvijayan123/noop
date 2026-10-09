@@ -18,7 +18,11 @@ final class WatchdogV40CloseoutTests: XCTestCase {
         let math = try XCTUnwrap(LongitudinalBaseline.toMath(mean, series: .awakeRestHRVLn))
         XCTAssertEqual(math, log(mean), accuracy: 1e-9)
         XCTAssertNotEqual(math, log(log(mean)), accuracy: 1e-6)
-        XCTAssertNil(tape.observation(series: .awakeRestHRVLn), "floor is 8 unique minutes")
+        // WP8: one window files every settled minute (30 − 5 settle), not one minute per tick.
+        // 25 still minutes clear the 8-minute floor but stay under the 30-minute coverage gate.
+        XCTAssertEqual(tape.restHRV.n, 25)
+        let obs = try XCTUnwrap(tape.observation(series: .awakeRestHRVLn))
+        XCTAssertEqual(obs.qualityReason, .lowCoverage)
     }
 
     func testOverlappingWindowDoesNotRaiseHRVCount() {

@@ -33,9 +33,16 @@ enum CoachActivityContext {
         }
     }
 
+    /// - Parameter days: each saved day's standing (`Repository.storedActivityContextWithStatus`). When given,
+    ///   a stretch is `provisional` when it overlaps a day the ledger has not finalised, and `from an older model` when it overlaps a day that is being re-derived
+    ///   (`.refreshing`); days of another rule set (`.stale`) serve no intervals and are named in one line.
+    ///   nil (no ledger read) falls back to the heuristic: today's stretches ending within `provisionalTailS`
+    ///   of the saved horizon.
     static func describe(intervals: [ActivityContextInterval], from: Int, to: Int,
                          activity: ActivityClass? = nil, storedThrough: Int? = nil,
-                         timeZone: TimeZone = .current, now: Date = Date(), maxStretches: Int = 16) -> String {
+                         days: [Repository.StoredActivityContextDay]? = nil,
+                         timeZone: TimeZone = .current, now: Date = Date(), maxStretches: Int = 16,
+                         provisionalTailS: Int = 300) -> String {
         let span = "\(stamp(from, timeZone)) to \(stamp(to, timeZone)) (\(timeZone.identifier))"
         guard !intervals.isEmpty else {
             return "No saved activity context between \(span). The classifier's output is saved after each sync, "
@@ -55,6 +62,21 @@ enum CoachActivityContext {
             coverage += " Saved through \(clock(through, timeZone))" + (ago > 90 ? " (\(duration(ago)) ago)." : ".")
         }
         lines.append(coverage)
+        if let days {
+            // One entry per device id: after a strap swap an old id can hold a stale ledger for a day the current
+            // id serves with a current one. Only a day nothing serves is unknown.
+            let served = Set(days.filter { $0.status != .stale }.map(\.dayStart))
+            let stale = days.filter { $0.status == .stale && !served.contains($0.dayStart)
+                && $0.dayEnd > from && $0.dayStart < to }.map(\.day)
+            if !stale.isEmpty {
+                lines.append("Saved context for \(Set(stale).sorted().joined(separator: ", ")) came from an older classifier with different labels and is not shown until it is processed again; treat that time as unknown, not as off-wrist.")
+            }
+        }
+        let correctedS = intervals.filter { $0.provenance == ActivityContextProvenance.userCorrection }
+            .reduce(0) { $0 + max(0, min($1.end, to) - max($1.start, from)) }
+        if correctedS > 0 {
+            lines.append("\(duration(correctedS)) of this window is labelled from the user's own corrections of the classifier (marked 'corrected by the user'), which take precedence over the classifier.")
+        }
 
         if let activity, scoped.isEmpty {
             let others = all.classes.prefix(4).map { "\($0.activityClass.displayName) \(duration($0.seconds))" }
@@ -76,19 +98,53 @@ enum CoachActivityContext {
             ? "Stretches, oldest first (the latest \(shown.count) of \(stretches.count)):"
             : "Stretches, oldest first:"
         lines.append(heading)
+        let horizon = storedThrough ?? intervals.map(\.end).max() ?? to
+        let tailIsToday = sameLocalDay(horizon, Int(now.timeIntervalSince1970), timeZone)
+        let standing = days.map { DayStanding($0) }
         for stretch in shown {
             let detail = ActivityContextAggregator.summarize(stretch.intervals, from: stretch.start, to: stretch.end)
                 .classes.first
             var line = "  \(clock(stretch.start, timeZone))-\(clock(stretch.end, timeZone)) \(stretch.activityClass.displayName), \(duration(stretch.end - stretch.start))"
             if let hr = detail?.hrMean { line += ", heart rate \(Int(hr.rounded())) bpm" }
             if let detail, let hrv = hrvPhrase(detail) { line += ", \(hrv)" }
+            line += ", confidence \(String(format: "%.2f", stretch.meanConfidence))"
+            if stretch.intervals.contains(where: { $0.provenance == ActivityContextProvenance.userCorrection }) {
+                line += ", corrected by the user"
+            }
+            if let standing {
+                // The ledger's own word on each day (WP3): not final yet, or derived by an older configuration.
+                if standing.isProvisional(stretch) { line += ", provisional" }
+                if standing.isFromOlderModel(stretch) { line += ", from an older model" }
+            } else if tailIsToday, stretch.end >= horizon - provisionalTailS {
+                // No ledger read: today's newest stretch is still being decided.
+                line += ", provisional"
+            }
             lines.append(line)
         }
         lines.append(notes)
         return lines.joined(separator: "\n")
     }
 
-    private static let notes = "Notes: sitting and standing cannot be told apart from a wrist, so 'Still (sitting or standing)' means the strap could not say and 'Sitting' / 'Standing' are best guesses. Cycling is only reported when the strap or a logged workout names it. HRV and respiratory rate are read only while the wrist is still, so a missing value means none could be read, not zero."
+    private static let notes = "Notes: sitting and standing cannot be told apart from a wrist, so 'Still (sitting or standing)' means the strap could not say and 'Sitting' / 'Standing' are best guesses. A stretch marked provisional comes from a day that is not final yet (today, or a night whose sleep had not settled) and can still be extended or relabelled when it is processed again; 'from an older model' means it was derived by an earlier classifier configuration and is queued to be processed again; a low confidence means the label is a weak guess. Cycling is only reported when the strap or a logged workout names it. HRV and respiratory rate are read only while the wrist is still, so a missing value means none could be read, not zero."
+
+    /// Per-day ledger standing, looked up by a stretch's span.
+    private struct DayStanding {
+        let days: [Repository.StoredActivityContextDay]
+        init(_ days: [Repository.StoredActivityContextDay]) { self.days = days.filter { $0.status != .stale } }
+
+        private func overlapping(_ s: Stretch) -> [Repository.StoredActivityContextDay] {
+            days.filter { $0.dayStart < s.end && $0.dayEnd > s.start }
+        }
+
+        /// Overlaps a day the ledger has not finalised.
+        func isProvisional(_ s: Stretch) -> Bool {
+            overlapping(s).contains(where: \.isProvisional)
+        }
+
+        func isFromOlderModel(_ s: Stretch) -> Bool {
+            overlapping(s).contains { $0.status == .refreshing }
+        }
+    }
 
     private static func describe(_ a: ActivityClassAggregate, of covered: Int) -> String {
         var parts = ["\(a.activityClass.displayName), \(duration(a.seconds)) (\(percent(covered > 0 ? Double(a.seconds) / Double(covered) : 0)))"]
@@ -113,23 +169,36 @@ enum CoachActivityContext {
 
     // MARK: Stretches
 
-    private struct Stretch {
+    struct Stretch {
         let activityClass: ActivityClass
+        let sleep: SleepContextState
+        let wear: WearContextState
         var start: Int
         var end: Int
         var intervals: [ActivityContextInterval]
+
+        /// Duration-weighted mean of the intervals' own classifier confidence.
+        var meanConfidence: Double {
+            let weight = intervals.reduce(0) { $0 + max(0, $1.end - $1.start) }
+            guard weight > 0 else { return intervals.first?.confidence ?? 0 }
+            return intervals.reduce(0.0) { $0 + $1.confidence * Double(max(0, $1.end - $1.start)) } / Double(weight)
+        }
     }
 
-    /// Consecutive intervals of the same class, with at most a few seconds between them, as one stretch.
-    private static func stretches(_ intervals: [ActivityContextInterval], maxGapS: Int = 10) -> [Stretch] {
+    /// Consecutive intervals of the same class AND the same sleep and wear context, with at most a few
+    /// seconds between them, as one stretch. A change of sleep state or wear is a different situation even
+    /// under the same label (lying awake vs asleep, worn vs not), so it splits the stretch.
+    static func stretches(_ intervals: [ActivityContextInterval], maxGapS: Int = 10) -> [Stretch] {
         var out: [Stretch] = []
         for iv in intervals.sorted(by: { $0.start < $1.start }) {
-            if var last = out.last, last.activityClass == iv.activityClass, iv.start - last.end <= maxGapS {
+            if var last = out.last, last.activityClass == iv.activityClass, last.sleep == iv.sleep,
+               last.wear == iv.wear, iv.start - last.end <= maxGapS {
                 last.end = max(last.end, iv.end)
                 last.intervals.append(iv)
                 out[out.count - 1] = last
             } else {
-                out.append(Stretch(activityClass: iv.activityClass, start: iv.start, end: iv.end, intervals: [iv]))
+                out.append(Stretch(activityClass: iv.activityClass, sleep: iv.sleep, wear: iv.wear,
+                                   start: iv.start, end: iv.end, intervals: [iv]))
             }
         }
         return out
@@ -160,6 +229,13 @@ enum CoachActivityContext {
     }
 
     private static func percent(_ v: Double) -> String { "\(Int((v * 100).rounded()))%" }
+
+    private static func sameLocalDay(_ a: Int, _ b: Int, _ zone: TimeZone) -> Bool {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = zone
+        return calendar.isDate(Date(timeIntervalSince1970: TimeInterval(a)),
+                               inSameDayAs: Date(timeIntervalSince1970: TimeInterval(b)))
+    }
 
     private static func stamp(_ ts: Int, _ zone: TimeZone) -> String { format(ts, zone, "EEE MMM d HH:mm") }
     private static func clock(_ ts: Int, _ zone: TimeZone) -> String { format(ts, zone, "HH:mm") }

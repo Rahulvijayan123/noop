@@ -12,17 +12,67 @@ extension Repository {
     ///
     /// The wearer's personal profile joins once a fit from their guided calibration runs beat the defaults on
     /// held-out runs (`ActivityPersonalProfileStore`); its tag is part of `cacheTag`, so cached days re-decode.
-    var activityDecoderConfig: ActivityDecoderConfig {
-        var config = activityBaseDecoderConfig
+    ///
+    /// This is today's config. A day decodes with `activityDecoderConfig(forDayStart:)`, whose resting rate is
+    /// taken as of that day.
+    var activityDecoderConfig: ActivityDecoderConfig { activityDecoderConfig(beforeDay: nil) }
+
+    /// The config the local day starting at `dayStart` decodes with: the resting-rate reference is the median of
+    /// the latest 14 nights BEFORE that day (D1-14). Not the day's own night either: that sleep ends on the morning
+    /// of the day, so its seconds after midnight would be judged against data from hours later, and the decode is
+    /// recorded as causal. A day with no earlier night uses the default reference. A past day's context
+    /// therefore does not depend on later nights, and its config tag — which the persisted ledger compares —
+    /// stays put as new nights arrive, so a moving reference re-derives only the days it actually applies to.
+    func activityDecoderConfig(forDayStart dayStart: Int) -> ActivityDecoderConfig {
+        activityDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))))
+    }
+
+    private func activityDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        var config = activityBaseDecoderConfig(beforeDay: beforeDay)
         config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
         return config
     }
 
     /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
-    var activityBaseDecoderConfig: ActivityDecoderConfig {
-        ActivityDecoderConfig.personalized(
-            restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: days.map(\.restingHr)),
+    var activityBaseDecoderConfig: ActivityDecoderConfig { activityBaseDecoderConfig(beforeDay: nil) }
+
+    /// `beforeDay` (`yyyy-MM-dd`) limits the resting reference to the nights keyed strictly before it; nil uses
+    /// every night.
+    private func activityBaseDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+        let nights = beforeDay.map { key in days.filter { $0.day < key } } ?? days
+        return ActivityDecoderConfig.personalized(
+            restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: nights.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)
+    }
+
+    /// The config the canonical decode of the day starting at `dayStart` runs with: that day's reference plus the
+    /// expert evidence the shared policy admits for its stored rows (`ActivityPhoneEvidence`).
+    func activityCanonicalDecoderConfig(dayStart: Int) -> ActivityDecoderConfig {
+        let start = Date(timeIntervalSince1970: TimeInterval(dayStart))
+        let end = Int((Calendar.current.date(byAdding: .day, value: 1, to: start) ?? start.addingTimeInterval(86_400))
+            .timeIntervalSince1970)
+        return ActivityPhoneEvidence.canonical(ActivityContextTrackInput(dayStart: dayStart, dayEnd: end),
+                                               base: activityDecoderConfig(forDayStart: dayStart)).config
+    }
+
+    /// The tag the persisted context's ledger records for the config the day starting at `dayStart` decodes with
+    /// (`activityContextDay.configTag`): the canonical config's `cacheTag` (heart-rate reference as of the day, the
+    /// expert evidence the policy admitted, personal profile). A day stored under another tag is derived again.
+    func activityContextLedgerConfigTag(dayStart: Int) -> String {
+        activityCanonicalDecoderConfig(dayStart: dayStart).cacheTag
+    }
+
+    /// Whether the server's windows (HART, ElderNet) may be attached to a day: they are computed from the raw
+    /// motion THIS phone uploads for the active strap, so a day owned by another id (an older strap, the canonical
+    /// history) never decodes with them. A day with no owner yet is the active strap's.
+    func serverWindowsApply(toDayOwnedBy ownerId: String?) -> Bool {
+        ownerId == nil || ownerId == deviceId
+    }
+
+    /// The cache key carries the heart-rate reference: a decoder resumed from state built against another
+    /// reference would carry that reference's reading of effort into the new one.
+    func activityContextSourceKey(dayStart: Int) -> String {
+        "\(importedReadIds.joined(separator: "+"))@\(activityContextLedgerConfigTag(dayStart: dayStart))"
     }
 
     var dayStateSourceKey: String { importedReadIds.joined(separator: "+") }
@@ -32,8 +82,8 @@ extension Repository {
     /// an older decoder.
     func cachedActivityContext(dayStart: Date) async -> ActivityContextDayDocument? {
         let reads = importedReadIds.joined(separator: "+")
-        let base = activityDecoderConfig
         let start = Int(dayStart.timeIntervalSince1970)
+        let base = activityDecoderConfig(forDayStart: start)
         let end = Int((Calendar.current.date(byAdding: .day, value: 1, to: dayStart) ?? dayStart.addingTimeInterval(86_400))
             .timeIntervalSince1970)
         return await Task.detached(priority: .userInitiated) {
@@ -81,10 +131,15 @@ extension Repository {
             workouts: s.workouts, offWrist: s.offWrist)
         // HART's verdicts on the raw motion this phone uploaded, when the server has produced any for the
         // day. They arrive minutes after the strap's own streams; the day builder re-decodes when they do.
-        input = ActivityPhoneEvidence.attachingEncoderWindows(input)
+        // Only for a day the active strap owns: the windows describe that strap's uploads (D5-15).
+        let windowsApply = serverWindowsApply(toDayOwnedBy: s.ownerId)
+        if windowsApply { input = ActivityPhoneEvidence.attachingEncoderWindows(input) }
         // Expert evidence (ElderNet's gait windows) only as the shared policy allows for the canonical decode: a
         // shadow or candidate row leaves the day exactly as without it.
-        let decode = ActivityPhoneEvidence.canonical(input, base: activityDecoderConfig)
+        let base = activityDecoderConfig(forDayStart: s.start)
+        let decode = windowsApply
+            ? ActivityPhoneEvidence.canonical(input, base: base)
+            : ActivityPhoneEvidence.canonical(input, base: base, revisions: [:], gaitQuality: [])
         return await ActivityContextWorker.shared.document(
             source: "\(s.sourceKey)@\(decode.config.cacheTag)", input: decode.input, config: decode.config,
             lane: lane, progress: progress)

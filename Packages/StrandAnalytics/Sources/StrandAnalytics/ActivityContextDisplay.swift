@@ -64,6 +64,18 @@ public enum ActivityDisplay {
         }
     }
 
+    /// `groups(after:)`, plus what starting or stopping a walk confirms: a start confirms entering the moving
+    /// kind, and a stop confirms leaving it for any still kind (only while the label is still on the moving kind,
+    /// so a stop never fast-tracks a later change between two still kinds).
+    static func groups(after kind: ActivityTransitionKind, leaving current: String) -> Set<String> {
+        switch kind {
+        case .walkStart, .runStart: return current == "moving" ? [] : ["moving"]
+        case .walkStop, .runStop:
+            return current == "moving" ? ["seated", "upright", "stationary", "transition", "lying"] : []
+        default: return groups(after: kind)
+        }
+    }
+
     /// Derives the label from the heads. `confidence` is the decoder's overall confidence.
     public static func derive(posture: HeadProbabilities<PostureClass>,
                               locomotion: HeadProbabilities<LocomotionClass>,
@@ -108,11 +120,9 @@ public enum ActivityDisplay {
         // Stationary: posture, then arm behaviour.
         if posture[.posturalTransition] >= 0.45 { return "Changing position" }
         if posture[.recumbent] >= 0.5 {
-            switch sleep {
-            case .asleep: return "Asleep"
-            case .awake: return "Resting in bed"
-            case .unknown: return "Lying down"
-            }
+            // Outside the in-bed window (handled above) awake lying is not "in bed": a sofa, the floor, a
+            // daytime lie-down. "Resting in bed" is the in-bed window's wording only.
+            return sleep == .asleep ? "Asleep" : "Lying down"
         }
         let seated = posture[.seatedLikely], upright = posture[.uprightStationary]
         let armTop = arm.top(excluding: .unknown)?.0
@@ -146,6 +156,9 @@ public enum ActivityDisplay {
             default: return "Stationary"
             }
         }
-        return unclear
+        // Clearly stationary (the guard above) but the posture is split between lying and sitting / standing,
+        // or unresolved: the coarse fact still holds. Publishing "Unclear" threw away the one thing the
+        // evidence did say, and joined the physiology to `unknown` (D1-11).
+        return "Stationary"
     }
 }

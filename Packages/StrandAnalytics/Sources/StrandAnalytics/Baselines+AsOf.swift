@@ -134,24 +134,30 @@ extension Baselines {
     /// Resolve one day's scoring baseline from a method-consistent CHILD fold and the all-method PARENT fold
     /// of the same regime (D4-04).
     ///
-    /// - The child is used alone once it is trusted (`nValid >= minNightsTrust`), or when the parent cannot
-    ///   help (absent, not usable, or no more nights than the child, i.e. the two folds saw the same data).
+    /// - The child is used alone once it is trusted (`nValid >= minNightsTrust`) and not stale, or when the
+    ///   parent cannot help (absent, not usable, or no more nights than the child, i.e. the two folds saw the
+    ///   same data).
     /// - Otherwise the centre and spread are shrunk toward the parent with a child weight that ramps
     ///   LINEARLY from 0 (no child nights) to 1 at `minNightsTrust`, so the hand-over to the child is
     ///   continuous rather than a step on the night the child becomes trusted. The result never claims
     ///   `.trusted` (it is at most `.provisional`, so Charge reads "building"), and `fallbackUsed` is set.
+    /// - A STALE child (its method has not produced a night for more than `staleDays` parent nights, e.g. a
+    ///   vendor-import-only stretch) gets weight 0: its centre is old news, and `.stale` is not usable, so
+    ///   using it alone would blank a Charge the parent can still honestly score.
     public static func resolveHierarchical(child: BaselineState, childAsOf: String?,
                                            parent: BaselineState?, parentAsOf: String?) -> AsOfBaseline {
-        guard let p = parent, p.usable, child.nValid < minNightsTrust, p.nValid > child.nValid else {
+        let childStale = child.status == .stale
+        guard let p = parent, p.usable, child.nValid < minNightsTrust || childStale,
+              p.nValid > child.nValid || childStale else {
             return AsOfBaseline(state: child, asOfDay: childAsOf, fallbackUsed: false, childWeight: 1)
         }
-        let w = Double(child.nValid) / Double(minNightsTrust)
-        let centre = child.nValid == 0 ? p.baseline : w * child.baseline + (1 - w) * p.baseline
-        let spread = child.nValid == 0 ? p.spread : w * child.spread + (1 - w) * p.spread
-        let since = child.nValid == 0 ? p.nightsSinceUpdate : Swift.min(child.nightsSinceUpdate, p.nightsSinceUpdate)
+        let w = childStale ? 0 : Double(child.nValid) / Double(minNightsTrust)
+        let centre = w == 0 ? p.baseline : w * child.baseline + (1 - w) * p.baseline
+        let spread = w == 0 ? p.spread : w * child.spread + (1 - w) * p.spread
+        let since = w == 0 ? p.nightsSinceUpdate : Swift.min(child.nightsSinceUpdate, p.nightsSinceUpdate)
         var status = computeStatus(nValid: p.nValid, nightsSinceUpdate: since)
         if status == .trusted { status = .provisional }
-        let asOf = [childAsOf, parentAsOf].compactMap { $0 }.max()
+        let asOf = (w == 0 ? [parentAsOf] : [childAsOf, parentAsOf]).compactMap { $0 }.max()
         return AsOfBaseline(state: BaselineState(baseline: centre, spread: spread, nValid: p.nValid,
                                                  nightsSinceUpdate: since, status: status),
                             asOfDay: asOf, fallbackUsed: true, childWeight: w)

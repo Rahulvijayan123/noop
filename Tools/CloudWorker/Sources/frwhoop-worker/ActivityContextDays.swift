@@ -35,6 +35,8 @@ enum ActivityContextDays {
         var observedSeconds: Int
         /// The decoded day document the payload carries (the joint candidate reuses it as its HART-alone arm).
         var document: ActivityContextDayDocument? = nil
+        /// The decoder-config tag recorded in the document (`decoder_config.tag`), nil without provenance.
+        var decoderConfigTag: String? = nil
     }
 
     enum PublishOutcome: Equatable {
@@ -145,7 +147,9 @@ enum ActivityContextDays {
 
     /// The decoder input for one job day. Sleep outside logged sessions stays "unknown" on the server
     /// unless the caller says the day has been through sleep detection (`sleepKnownOutsideSessions`):
-    /// the detector may not have run over a stretch yet, and stillness alone never means asleep.
+    /// the detector may not have run over a stretch yet, and stillness alone never means asleep. There is
+    /// no default: the raw-IMU lane took one and left every finished day's waking hours "unknown" forever
+    /// (audit D1-02), so each caller decides (`sleepKnown(now:dayEnd:)` for a stored day).
     ///
     /// `horizon` is how far the day has actually happened (`now` for the UTC day in progress, the day's end
     /// for a finished one). A WRIST_OFF with no WRIST_ON yet stays open only up to it: the decoder emits an
@@ -155,10 +159,10 @@ enum ActivityContextDays {
                            sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
                            exercise: [(start: Int, end: Int, sport: String)],
                            dayStart: Int, dayEnd: Int, horizon: Int? = nil,
+                           sleepKnownOutsideSessions: Bool,
                            encoderVersion: String,
                            transitionVersion: String = "unknown",
                            transitionPreprocessingVersion: String = "unknown",
-                           sleepKnownOutsideSessions: Bool = false,
                            gaitWindows: [ActivityGaitWindow] = []) -> ActivityContextTrackInput {
         let spanEnd = min(horizon ?? dayEnd, dayEnd)
         let offWrist = AnalyticsEngine
@@ -193,7 +197,7 @@ enum ActivityContextDays {
         var day: String
         var modelVersion: String
         var preprocessingVersion: String
-        var document: ActivityContextDayDocument
+        var document: ProvenancedDocument
 
         enum CodingKeys: String, CodingKey {
             case day, document
@@ -201,14 +205,39 @@ enum ActivityContextDays {
         }
     }
 
+    /// The shared day document with the server's additive `decoder_config` provenance beside its own keys
+    /// (readers decoding `ActivityContextDayDocument` ignore the extra key; the publish RPC stores the whole
+    /// object), so which heart-rate reference decoded a stored day is visible next to the phone's.
+    private struct ProvenancedDocument: Encodable {
+        var document: ActivityContextDayDocument
+        var decoderConfig: DecoderConfigProvenance?
+
+        private enum ExtraKeys: String, CodingKey { case decoderConfig = "decoder_config" }
+
+        func encode(to encoder: Encoder) throws {
+            try document.encode(to: encoder)
+            if let decoderConfig {
+                var extra = encoder.container(keyedBy: ExtraKeys.self)
+                try extra.encode(decoderConfig, forKey: .decoderConfig)
+            }
+        }
+    }
+
     /// Decode the day and encode the RPC payload. The decoder snapshot is left out: the server recomputes
     /// the whole day from stored inputs every time a job runs, so the snapshot would only add weight.
+    ///
+    /// `lookback` (the half hour before the day, see `lookbackInput`) warms the decoder up so the day does not
+    /// start from the prior at midnight; `provenance` is recorded as the document's `decoder_config`.
     static func build(input: ActivityContextTrackInput, day: String, modelVersion: String,
                       preprocessingVersion: String, generatedAt: Int,
-                      config: ActivityDecoderConfig = ActivityDecoderConfig()) throws -> Built {
-        let document = dayDocument(input: input, generatedAt: generatedAt, config: config)
+                      config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                      provenance: DecoderConfigProvenance? = nil,
+                      lookback: ActivityContextTrackInput? = nil) throws -> Built {
+        let document = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config,
+                                           lookback: lookback).document
         let envelope = Envelope(day: day, modelVersion: modelVersion,
-                                preprocessingVersion: preprocessingVersion, document: document)
+                                preprocessingVersion: preprocessingVersion,
+                                document: ProvenancedDocument(document: document, decoderConfig: provenance))
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys]
         let data = try encoder.encode(envelope)
@@ -216,50 +245,263 @@ enum ActivityContextDays {
             throw WorkerError.malformed("activity day document encoding failed")
         }
         return Built(payloadText: text, runs: document.runs.count, events: document.events.count,
-                     observedSeconds: document.observedSeconds, document: document)
+                     observedSeconds: document.observedSeconds, document: document,
+                     decoderConfigTag: provenance?.tag)
     }
 
     /// The day document for `input` (no snapshot), runs clipped to the day. Shared by the published v2
     /// document and the Inertia candidate comparison (`ActivityMotionHeadsDays`), which differ only in config.
     static func dayDocument(input: ActivityContextTrackInput, generatedAt: Int,
-                            config: ActivityDecoderConfig = ActivityDecoderConfig()) -> ActivityContextDayDocument {
-        dayDocumentAndReport(input: input, generatedAt: generatedAt, config: config).document
+                            config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                            lookback: ActivityContextTrackInput? = nil) -> ActivityContextDayDocument {
+        dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config, lookback: lookback).document
     }
 
     /// `dayDocument` plus the decode's motion-heads report (nil without a motion-heads config): how the Inertia
     /// windows were attached, dropped and used.
     static func dayDocumentAndReport(input: ActivityContextTrackInput, generatedAt: Int,
-                                     config: ActivityDecoderConfig = ActivityDecoderConfig())
+                                     config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                                     lookback: ActivityContextTrackInput? = nil)
         -> (document: ActivityContextDayDocument, report: MotionHeadsTrackReport?) {
-        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config, lookback: lookback)
         return (built.document, built.track.motionHeads)
     }
 
     /// `dayDocument` plus the decode's gait-quality report (nil without a gait config): how the ElderNet windows were
     /// attached, dropped and used (the ElderNet candidate comparison, `ActivityGaitWindowsDays`).
     static func dayDocumentAndGaitReport(input: ActivityContextTrackInput, generatedAt: Int,
-                                         config: ActivityDecoderConfig = ActivityDecoderConfig())
+                                         config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                                         lookback: ActivityContextTrackInput? = nil)
         -> (document: ActivityContextDayDocument, report: GaitQualityTrackReport?) {
-        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config)
+        let built = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config, lookback: lookback)
         return (built.document, built.track.gaitQuality)
     }
 
+    /// The decode behind every day document. With a `lookback` input that observed anything, the day resumes
+    /// from the decoder state at the end of the lookback (`resuming:`), so the first minutes after midnight are
+    /// decoded with the belief, dwell and evidence buffers the preceding half hour built instead of the prior
+    /// (audit D2-11). The lookback's own states and events are never part of the document (events are clipped
+    /// to the day like runs), and its observed seconds are not counted: only the day's own observations are.
     static func dayDocumentAndTrack(input: ActivityContextTrackInput, generatedAt: Int,
-                                    config: ActivityDecoderConfig = ActivityDecoderConfig())
+                                    config: ActivityDecoderConfig = ActivityDecoderConfig(),
+                                    lookback: ActivityContextTrackInput? = nil)
         -> (document: ActivityContextDayDocument, track: ActivityContextTrack) {
-        let track = ActivityContextTrackBuilder.build(input, config: config)
-        var document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
+        let warm = lookback.map { ActivityContextTrackBuilder.build($0, config: config) }
+        let seed = (warm?.observedSeconds ?? 0) > 0 ? warm?.snapshot : nil
+        let track = ActivityContextTrackBuilder.build(input, config: config, resuming: seed)
+        let document = ActivityContextDayDocument(track: track, input: input, generatedAt: generatedAt,
                                                   config: config, includeSnapshot: false)
-        // A run is stamped one publish interval past its last state, so the run that is still open when
-        // the data reaches midnight would spill into the next UTC day. A day document describes its own
-        // day only; the neighbour's document starts where this one stops.
+        return (clippedToDay(document), track)
+    }
+
+    /// The document restricted to its own day `[dayStart, dayEnd)`, the last step of every day decode.
+    ///
+    /// Runs: a run is stamped one publish interval past its last state, so the run that is still open when
+    /// the data reaches midnight would spill into the next UTC day. A day document describes its own day
+    /// only; the neighbour's document starts where this one stops.
+    ///
+    /// Events: the resumed snapshot carries the lookback's recent transition events, and the first in-day
+    /// state may re-emit one stamped up to the event hold before midnight. Those belong to the previous day's
+    /// document (publish_activity_context_day rejects an event whose `ts` is outside the day), so only the
+    /// day's are kept. The filter is on `ts`, the detection second (when the change became known, which is
+    /// what a causal reader filters on), not on `onsetTs`: an event detected just after midnight whose onset
+    /// was back-dated (at most `ActivityTransitionEvent.maxOnsetLeadS`) into the previous day stays in this
+    /// day's document with its onset unchanged, and the server's validator checks only `ts`.
+    static func clippedToDay(_ document: ActivityContextDayDocument) -> ActivityContextDayDocument {
+        var document = document
+        let dayEnd = document.dayEnd, dayStart = document.dayStart
         document.runs = document.runs.compactMap { run in
             var clipped = run
-            clipped.end = min(run.end, input.dayEnd)
+            clipped.end = min(run.end, dayEnd)
             return clipped.end > clipped.start ? clipped : nil
         }
+        document.events = document.events.filter { $0.ts >= dayStart && $0.ts < dayEnd }
         document.summary = ActivityContextDaySummary(runs: document.runs)
-        return (document, track)
+        return document
+    }
+
+    // MARK: - Decoder config and versions (audit D1-01 / D5-12 / D5-03)
+
+    /// How the server derives a day's decoder config from stored data. Part of the registered versions tag, so
+    /// changing the recipe re-derives stored days. srv-cfg-1: `ActivityDecoderConfig.personalized` with the
+    /// median resting heart rate of the (at most 14) nights before the day in `server_daily_scores`, and the
+    /// Tanaka maximum for the wearer's age on the day (the phone's `effortHRmax` without its manual override,
+    /// which the server does not store); each missing input keeps the decoder default (rest 60, max 190).
+    /// The phone's adopted personal profile and its ElderNet gait pin are not on the server and are not used.
+    static let decoderConfigRecipe = "srv-cfg-1"
+
+    /// Nights of resting heart rate the reference reads (the phone reads its latest 14) and how far back.
+    static let referenceNights = 14
+    static let referenceLookbackDays = 60
+
+    /// The wearer's heart-rate reference as of one day, from server data only, so the same stored day always
+    /// decodes with the same config.
+    struct DecoderReference: Equatable {
+        /// Nightly resting heart rates before the day, oldest first (at most `referenceNights`).
+        var restingNights: [Int] = []
+        /// The wearer's age on the day, when the profile has a date of birth.
+        var ageYears: Int? = nil
+
+        var restingHeartRate: Double? { ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: restingNights) }
+        var maxHeartRate: Double? { ageYears.flatMap { $0 > 0 ? StrainScorer.tanakaHRmax(age: Double($0)) : nil } }
+        var config: ActivityDecoderConfig {
+            .personalized(restingHeartRate: restingHeartRate, maxHeartRate: maxHeartRate)
+        }
+
+        /// The provenance the document records.
+        func provenance(gaitWindows: Int = 0) -> DecoderConfigProvenance {
+            let c = config
+            // `personalized` ignores an implausible input, so the source says what the decoder actually used.
+            let usedRest = restingHeartRate.map { ActivityDecoderConfig.restingHeartRateBounds.contains($0) } ?? false
+            let usedMax = maxHeartRate.map { ActivityDecoderConfig.maxHeartRateBounds.contains($0) } ?? false
+            return DecoderConfigProvenance(
+                tag: "\(ActivityContextDays.decoderConfigRecipe):\(c.cacheTag)",
+                recipe: ActivityContextDays.decoderConfigRecipe,
+                restingHeartRate: c.restingHeartRate,
+                restingHeartRateSource: usedRest ? "server_daily_scores" : "default",
+                restingHeartRateNights: restingNights.count,
+                maxHeartRate: c.maxHeartRate,
+                maxHeartRateSource: usedMax ? "tanaka_age" : "default",
+                gaitWindows: gaitWindows)
+        }
+    }
+
+    /// The `decoder_config` object of a server day document: which heart-rate reference decoded it and where
+    /// each value came from, so a phone/server divergence is visible in the stored row.
+    struct DecoderConfigProvenance: Encodable, Equatable {
+        var tag: String
+        var recipe: String
+        var restingHeartRate: Double
+        var restingHeartRateSource: String
+        var restingHeartRateNights: Int
+        var maxHeartRate: Double
+        var maxHeartRateSource: String
+        /// In-process HART ElderNet gait windows the decode read (channel 4c). The standalone ElderNet stage
+        /// (shadow / candidate) never reaches the published decode.
+        var gaitWindows: Int
+
+        enum CodingKeys: String, CodingKey {
+            case tag, recipe
+            case restingHeartRate = "resting_hr", restingHeartRateSource = "resting_hr_source"
+            case restingHeartRateNights = "resting_hr_nights"
+            case maxHeartRate = "max_hr", maxHeartRateSource = "max_hr_source"
+            case gaitWindows = "gait_windows"
+        }
+    }
+
+    /// The wearer's age in whole years on `day` ("yyyy-MM-dd") for a "yyyy-MM-dd" date of birth.
+    static func ageYears(dateOfBirth: String, on day: String) -> Int? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        guard let dob = f.date(from: String(dateOfBirth.prefix(10))), let on = f.date(from: day), dob <= on else {
+            return nil
+        }
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        guard let years = cal.dateComponents([.year], from: dob, to: on).year, years >= 0 else { return nil }
+        return years
+    }
+
+    /// The reference for `day` (a UTC job day): the nights scored before it, and the profile's date of birth.
+    /// Never throws: an unreadable table leaves the decoder defaults, recorded as such.
+    static func loadDecoderReference(db: PostgresClient, userId: String, day: String) -> DecoderReference {
+        var reference = DecoderReference()
+        if let rows = try? db.isolatingFailures({ try db.query("""
+            select round(resting_hr_bpm)::int::text as r from public.server_daily_scores
+             where user_id = $1::uuid and algorithm_version = 'frwhoop-server-1'
+               and day < $2::date and day >= $2::date - $3::integer and resting_hr_bpm is not null
+             order by day desc limit $4::integer
+            """, [userId, day, String(referenceLookbackDays), String(referenceNights)]) }) {
+            reference.restingNights = rows.compactMap { Int($0["r"] ?? "") }.reversed()
+        }
+        if let rows = try? db.isolatingFailures({ try db.query(
+            "select date_of_birth::text as dob from public.profiles where id = $1::uuid", [userId]) }),
+           let dob = rows.first?["dob"], !dob.isEmpty {
+            reference.ageYears = ageYears(dateOfBirth: dob, on: day)
+        }
+        return reference
+    }
+
+    /// What this worker build runs for a lane, as `reconcile_activity_context_versions` takes it: the decoder,
+    /// ontology and feature schema the stored day documents are compared with, and a tag (folded into the day
+    /// fingerprints) that also carries the schema, the activity taxonomy and interval versions (the stored runs
+    /// carry `activity_class` derived on write and intervals are built from them, so a taxonomy or interval bump
+    /// changes the stored day even when the decoder string does not), publish interval, decoder-config recipe,
+    /// lookback and — for
+    /// the raw-IMU lane — the HART model and preprocessing the service reported. `ordinal` is
+    /// `versionsOrdinal`: the registry refuses a lower one, so an older build left running during a rolling
+    /// deploy cannot take the registration back and re-queue the recent days on every reconcile.
+    static func lanesVersions(model: String? = nil, preprocessing: String? = nil) -> [String: String] {
+        var parts = ["d=\(ActivityContextVersions.decoder)", "o=\(ActivityContextVersions.ontology)",
+                     "f=\(ActivityContextVersions.featureSchema)", "s=\(ActivityContextVersions.schema)",
+                     "t=\(ActivityClassVersions.taxonomy)", "n=\(ActivityClassVersions.interval)",
+                     "i=\(ActivityDecoderConfig().publishIntervalS)", "c=\(decoderConfigRecipe)",
+                     "l=\(lookbackSeconds)"]
+        var out = ["decoder": ActivityContextVersions.decoder, "ontology": ActivityContextVersions.ontology,
+                   "feature_schema": ActivityContextVersions.featureSchema,
+                   "ordinal": String(versionsOrdinal)]
+        if let model, let preprocessing {
+            parts += ["m=\(model)", "p=\(preprocessing)"]
+            out["model"] = model
+            out["preprocessing"] = preprocessing
+        }
+        out["tag"] = versionsTag(parts)
+        return out
+    }
+
+    /// Increases whenever a build changes anything the versions tag names (decoder, ontology, feature schema,
+    /// document schema, taxonomy, interval version, publish interval, decoder-config recipe, lookback). Not part
+    /// of the tag: equal builds with different ordinals would otherwise fingerprint differently.
+    /// 2: hsmm-1.9, and the tag names the taxonomy and interval versions.
+    static let versionsOrdinal = 2
+
+    /// `parts` joined with ';', every character outside the registry's tag alphabet replaced, at most 256.
+    static func versionsTag(_ parts: [String]) -> String {
+        let allowed = Set("abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:;=+-")
+        let joined = parts.joined(separator: ";")
+        return String(String(joined.map { allowed.contains($0) ? $0 : "_" }).prefix(256))
+    }
+
+    static func versionsJSON(_ versions: [String: String]) throws -> String {
+        let data = try JSONSerialization.data(withJSONObject: versions, options: [.sortedKeys])
+        return String(decoding: data, as: UTF8.self)
+    }
+
+    // MARK: - Lookback (audit D2-11)
+
+    /// Seconds before a day's start decoded only to warm the decoder up; their states never reach the document.
+    static let lookbackSeconds = 1_800
+
+    /// The streams split at the day's start: the day's own samples, and the lookback before it. Wear events keep
+    /// their own reach-back in both.
+    static func split(_ streams: Streams, at dayStart: Int) -> (day: Streams, lookback: Streams) {
+        var day = streams, before = streams
+        day.hr = streams.hr.filter { $0.ts >= dayStart }
+        day.gravity = streams.gravity.filter { $0.ts >= dayStart }
+        day.steps = streams.steps.filter { $0.ts >= dayStart }
+        before.hr = streams.hr.filter { $0.ts < dayStart }
+        before.gravity = streams.gravity.filter { $0.ts < dayStart }
+        before.steps = streams.steps.filter { $0.ts < dayStart }
+        return (day, before)
+    }
+
+    /// The lookback decode input for `input`: the `lookbackSeconds` before its day, from the same windows and
+    /// stored streams, with the same sleep / workout spans; nil when the lookback holds nothing to decode.
+    static func lookbackInput(windows: [ActivityPythonService.WindowPrediction], streams: Streams,
+                              sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)],
+                              exercise: [(start: Int, end: Int, sport: String)],
+                              dayStart: Int, sleepKnownOutsideSessions: Bool, encoderVersion: String,
+                              transitionVersion: String = "unknown",
+                              transitionPreprocessingVersion: String = "unknown",
+                              gaitWindows: [ActivityGaitWindow] = []) -> ActivityContextTrackInput? {
+        guard !streams.isEmpty else { return nil }
+        return trackInput(windows: windows, streams: streams, sleep: sleep, inBed: inBed, exercise: exercise,
+                          dayStart: dayStart - lookbackSeconds, dayEnd: dayStart, horizon: dayStart,
+                          sleepKnownOutsideSessions: sleepKnownOutsideSessions, encoderVersion: encoderVersion,
+                          transitionVersion: transitionVersion,
+                          transitionPreprocessingVersion: transitionPreprocessingVersion, gaitWindows: gaitWindows)
     }
 
     // MARK: - Stream days
@@ -275,6 +517,13 @@ enum ActivityContextDays {
     /// "awake". The night that straddles midnight is only logged once the scorer has seen its morning.
     static let streamsSleepSettleSeconds = 12 * 3600
 
+    /// Whether a stored UTC day's time outside logged sleep counts as awake: once the day has been over for
+    /// `streamsSleepSettleSeconds`. Shared by the stream-day and the raw-IMU decodes so a day is the same day
+    /// whichever lane decoded it.
+    /// The database settles a day 10 minutes later (`internal.activity_day_settled`) and folds it into both day
+    /// fingerprints, so a day decoded before it settled is queued again, and decoded as settled, once it has.
+    static func sleepKnown(now: Int, dayEnd: Int) -> Bool { now >= dayEnd + streamsSleepSettleSeconds }
+
     enum StreamDayOutcome: Equatable {
         /// A document was stored (its result revision).
         case stored(revision: Int64)
@@ -289,16 +538,25 @@ enum ActivityContextDays {
     ///
     /// `encoder` is the day's stored HART windows (`activity_encoder_windows`), when the raw-IMU lane has
     /// produced any: the stream day then decodes with the same encoder evidence the phone does.
-    static func buildStreamDay(day: String, dayBounds: (start: Int, end: Int), streams: Streams,
+    ///
+    /// `streams` may reach back `lookbackSeconds` before the day (`loadStreams(... lookback: true)`): those
+    /// samples only warm the decoder up. `reference` is the wearer's heart-rate reference as of the day.
+    static func buildStreamDay(day: String, dayBounds: (start: Int, end: Int), streams loaded: Streams,
                                sleep: [(start: Int, end: Int)], inBed: [(start: Int, end: Int)] = [],
                                exercise: [(start: Int, end: Int, sport: String)],
-                               now: Int, encoder: ActivityEncoderWindowSet? = nil) throws -> Built? {
+                               now: Int, encoder: ActivityEncoderWindowSet? = nil,
+                               reference: DecoderReference = DecoderReference()) throws -> Built? {
+        let (streams, before) = split(loaded, at: dayBounds.start)
         guard !streams.isEmpty else { return nil }
+        let known = sleepKnown(now: now, dayEnd: dayBounds.end)
+        let lookback = lookbackInput(windows: [], streams: before, sleep: sleep, inBed: inBed, exercise: exercise,
+                                     dayStart: dayBounds.start, sleepKnownOutsideSessions: known,
+                                     encoderVersion: streamsPreprocessingVersion)
         var input = trackInput(
             windows: [], streams: streams, sleep: sleep, inBed: inBed, exercise: exercise,
             dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
-            encoderVersion: streamsPreprocessingVersion,
-            sleepKnownOutsideSessions: now >= dayBounds.end + streamsSleepSettleSeconds)
+            sleepKnownOutsideSessions: known,
+            encoderVersion: streamsPreprocessingVersion)
         if let encoder, !encoder.isEmpty {
             input.encoderWindows = encoder.windows
             input.imuWindows = encoder.features
@@ -314,10 +572,12 @@ enum ActivityContextDays {
         // HART-embedded ElderNet windows record no release of their own, so they are shadow and left out.
         let canonical = ActivityExpertSelection.select(
             embeddedGait: input.gaitWindows.isEmpty ? nil : EmbeddedGaitSource(windows: input.gaitWindows))
-            .canonical(input, base: ActivityDecoderConfig())
+            .canonical(input, base: reference.config)
         let built = try build(input: canonical.input, day: day, modelVersion: streamsModelVersion,
                               preprocessingVersion: streamsPreprocessingVersion, generatedAt: now,
-                              config: canonical.config)
+                              config: canonical.config,
+                              provenance: reference.provenance(gaitWindows: canonical.input.gaitWindows.count),
+                              lookback: lookback)
         return (built.runs > 0 || built.events > 0) ? built : nil
     }
 
@@ -325,9 +585,13 @@ enum ActivityContextDays {
 
     /// The day's streams, read with the same predicates the scoring lane uses so a sample the scorer sees
     /// is a sample the decoder sees.
+    ///
+    /// `lookback` also reads the `lookbackSeconds` before the day (heart rate, gravity and steps), for the
+    /// decoder warm-up; `split(_:at:)` separates them again.
     static func loadStreams(db: PostgresClient, userId: String, deviceId: String,
-                            dayStart: Int, dayEnd: Int) throws -> Streams {
-        let range = [userId, deviceId, String(dayStart), String(dayEnd)]
+                            dayStart: Int, dayEnd: Int, lookback: Bool = false) throws -> Streams {
+        let from = lookback ? dayStart - lookbackSeconds : dayStart
+        let range = [userId, deviceId, String(from), String(dayEnd)]
         var streams = Streams()
 
         streams.hr = try db.query("""

@@ -881,7 +881,7 @@ final class SensorBiomarkerInputsDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values "
                     + "('\(device)','\(user)','noop_push'), ('\(otherDevice)','\(otherUser)','noop_push')")
         addTeardownBlock {
-            try? db.exec("delete from auth.users where id in ('\(user)','\(otherUser)')")
+            try db.deleteFixtureOwners([user, otherUser])
         }
 
         let dayStart = 1_780_915_200   // 2026-06-08 00:00:00 UTC

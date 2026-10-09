@@ -510,9 +510,13 @@ enum ActivityMotionHeadsDays {
     ///
     /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
     /// nil): HART plus the motion-heads channel exactly, with the config and release the policy built from the row.
+    /// `config` and `lookback` are the published document's (`ContextDayBuild.config` / `.lookback`: the wearer's
+    /// reference as of the day and the warm-up half hour), so the comparison differs from it only by the expert.
     static func candidate(mode: InertiaSettings.Mode, heads: MotionHeadsTrackInput,
                           input: ActivityContextTrackInput?, generatedAt: Int,
-                          expectedBundleSHA256: String?, selection: ActivityExpertSelection? = nil) -> Candidate {
+                          expectedBundleSHA256: String?, selection: ActivityExpertSelection? = nil,
+                          config base: ActivityDecoderConfig = ActivityDecoderConfig(),
+                          lookback: ActivityContextTrackInput? = nil) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedBundleSHA256 else { return .withheld("bundle_sha256_not_pinned") }
         // The candidate defaults (INERTIA1.md §7).
@@ -525,8 +529,9 @@ enum ActivityMotionHeadsDays {
         guard selection.use(of: .motionHeads) != .none else {
             return .withheld(selection.decision(for: .motionHeads)?.reason ?? "motion_heads_not_admitted")
         }
-        let d = selection.decode(input, base: ActivityDecoderConfig(), channels: [.motionHeads])
-        let built = ActivityContextDays.dayDocumentAndReport(input: d.input, generatedAt: generatedAt, config: d.config)
+        let d = selection.decode(input, base: base, channels: [.motionHeads])
+        let built = ActivityContextDays.dayDocumentAndReport(input: d.input, generatedAt: generatedAt, config: d.config,
+                                                             lookback: lookback)
         // A comparison must name the evidence that shaped it; a decode the evidence never reached is withheld.
         guard built.document.versions.motionHeads != nil else {
             return .withheld(built.report?.refusal ?? "motion_heads_not_accepted")

@@ -79,12 +79,18 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
 
         mutating func hold(_ seconds: Int) { for _ in 0..<seconds { second(state) } }
 
+        /// Forearm-axis gravity held in each state: inclined while sitting or standing (the same, so only motion
+        /// tells them apart), flat while lying (the owner's production data: 69 % of in-bed still seconds flat
+        /// against 3 % by day).
+        static func forearm(_ s: State) -> Double { s == .lying ? 0.05 : 0.55 }
+
         /// Move to `next`: a 3-s posture shift.
         mutating func move(to next: State) {
             guard let degrees = ActivityPersonalCalibrationEndToEndTests.shift(from: state, to: next) else { return }
             var opt = ActivitySim.Options()
             opt.hr = w.standHR
-            sim.postureShift(netDegrees: degrees, opt: opt)
+            let to = Self.forearm(next)
+            sim.postureShift(netDegrees: degrees, toForearm: to == Self.forearm(state) ? nil : to, opt: opt)
             state = next
         }
     }
@@ -95,6 +101,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
     static func session(_ w: Wearer, id: String, seed: UInt64, start: Int, leadIn: Int = 600,
                         skipping: Set<String> = []) -> Session {
         var p = Player(sim: ActivitySim(start: start, seed: seed), w: w)
+        p.sim.forearm(Player.forearm(.seated))
         var labels: [ActivityGroundTruthLabel] = []
         p.hold(leadIn)
         for activity in ActivityCalibrationProtocols.current.activities where !skipping.contains(activity.id) {
@@ -137,19 +144,24 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
     struct DayScore {
         var balanced: Double
         var recall: [BodyMode: Double]
+        /// Share of labelled seconds the published class claimed as another mode.
+        var wrong: Double
     }
 
+    /// Scored on the published class (`ActivityPersonalProfileFitter.replay`): a hedged "stationary" second claims
+    /// nothing, so it is neither a hit nor a wrong claim.
     static func score(_ run: ActivityCalibrationRun, config: ActivityDecoderConfig) -> DayScore {
         let replay = ActivityPersonalProfileFitter.replay(run, config: config)
-        var total: [BodyMode: Int] = [:], hit: [BodyMode: Int] = [:]
+        var total: [BodyMode: Int] = [:], hit: [BodyMode: Int] = [:], wrong = 0
         for s in replay.samples {
             total[s.truth, default: 0] += 1
             if s.predicted == s.truth { hit[s.truth, default: 0] += 1 }
+            else if s.predicted != .unknown { wrong += 1 }
         }
         var recall: [BodyMode: Double] = [:]
         for (mode, n) in total where n >= 10 { recall[mode] = Double(hit[mode] ?? 0) / Double(n) }
         let balanced = recall.isEmpty ? 0 : recall.values.reduce(0, +) / Double(recall.count)
-        return DayScore(balanced: balanced, recall: recall)
+        return DayScore(balanced: balanced, recall: recall, wrong: Double(wrong) / Double(max(1, replay.samples.count)))
     }
 
     /// Fit on `calibrationRuns` guided runs, then decode a fresh run (new seed, new day) with and without the result.
@@ -172,8 +184,28 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
             return "\(m.personalKey) \(Int(b * 100))->\(Int(a * 100))"
         }
         return "\(w.name): \(c.result.status.rawValue), unseen day balanced \(Int(c.before.balanced * 100))% -> "
-            + "\(Int(c.after.balanced * 100))% [\(classes.joined(separator: ", "))], adapted "
-            + "\(c.result.profile?.modes.keys.sorted() ?? [])"
+            + "\(Int(c.after.balanced * 100))% [\(classes.joined(separator: ", "))], wrong claims "
+            + "\(Int(c.before.wrong * 100))% -> \(Int(c.after.wrong * 100))%, adapted "
+            + "\(c.result.profile?.modes.keys.sorted() ?? []), validation "
+            + (c.result.validation.map { v in
+                v.classes.sorted { $0.key < $1.key }.map { k, s in
+                    "\(k) recall \(s.baselineRecall)->\(s.personalRecall) wrong \(s.baselineWrongClaims ?? -1)->\(s.personalWrongClaims ?? -1)"
+                }.joined(separator: "; ")
+            } ?? "none")
+    }
+
+    /// The held-out validation behind a refusal: the candidate profile made some class's own seconds be claimed as
+    /// another mode more than the per-class guard allows (personal-profile-3).
+    static func refusedForAWrongClaimRise(_ c: (result: ActivityPersonalFitResult, before: DayScore, after: DayScore))
+        -> (mode: String, rise: Double)? {
+        guard c.result.status == .notBetter, let v = c.result.validation,
+              let worst = v.classes.max(by: { $0.value.wrongClaimRise < $1.value.wrongClaimRise }),
+              worst.value.wrongClaimRise > ActivityPersonalProfileFitter.maxClassWrongClaimRise else { return nil }
+        return (worst.key, worst.value.wrongClaimRise)
+    }
+
+    static func gain(_ c: (result: ActivityPersonalFitResult, before: DayScore, after: DayScore), _ m: BodyMode) -> Double {
+        (c.after.recall[m] ?? 0) - (c.before.recall[m] ?? 0)
     }
 
     // MARK: Tests
@@ -192,22 +224,28 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
         XCTAssertEqual(ActivityPersonalProfileFitter.runsNeeded([run]), ActivityCalibrationProtocols.runsToPersonalise)
     }
 
-    func testCalibrationFixesAWearerTheDefaultsMisread() {
+    /// personal-profile-3. For the busy stander the defaults hedge every still second ("stationary", recall 0) or
+    /// read the busy stand as desk sitting. A profile that narrows the seated mode resolves sitting on held-out
+    /// runs, but it also makes the wearer's quiet, awake lie-down read as sitting: lying's own seconds go from
+    /// never to almost always mis-claimed, which the pooled guard missed (lying is a minority of the labelled
+    /// seconds, and the profile removed other wrong claims). The per-class guard refuses that profile, and a refused
+    /// profile leaves the decoder exactly as it was.
+    func testAProfileThatWouldMisclaimTheWearersLyingIsRefused() throws {
         for w in [Self.busyStander, Self.fitBusyStander] {
             let c = Self.calibrate(w)
             let line = Self.describe(w, c)
             print("CALIBRATION", line)
-            XCTAssertEqual(c.result.status, .adopted, line)
-            XCTAssertGreaterThanOrEqual(c.after.balanced - c.before.balanced, 0.05, line)
-            XCTAssertGreaterThan((c.after.recall[.upright] ?? 0) - (c.before.recall[.upright] ?? 0), 0.3,
-                                 "standing is what the defaults got wrong: \(line)")
-            for (mode, before) in c.before.recall {
-                XCTAssertGreaterThanOrEqual(c.after.recall[mode] ?? 0, before - 0.05, "\(mode.personalKey) got worse: \(line)")
-            }
+            XCTAssertEqual(c.result.status, .notBetter, line)
+            let refusal = try XCTUnwrap(Self.refusedForAWrongClaimRise(c), "refused by the per-class guard: \(line)")
+            XCTAssertEqual(refusal.mode, "bedRest", line)
+            XCTAssertNil(c.result.profile)
+            XCTAssertEqual(c.after.balanced, c.before.balanced, "a refused profile leaves the decoder untouched")
+            XCTAssertEqual(c.after.wrong, c.before.wrong)
         }
     }
 
-    /// The same result across independent noise draws, not one lucky seed.
+    /// The same result across independent noise draws, not one lucky seed: whatever the fitter decides, the unseen
+    /// day loses no class's recall and gains no class's wrong claims beyond the guards (plus one day's noise).
     func testCalibrationHoldsAcrossSeeds() {
         for seed: UInt64 in [2, 17, 404, 8_191] {
             for w in [Self.busyStander, Self.fitBusyStander, Self.typical] {
@@ -217,9 +255,11 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
                 for (mode, before) in c.before.recall {
                     XCTAssertGreaterThanOrEqual(c.after.recall[mode] ?? 0, before - 0.05, "\(mode.personalKey) got worse: \(line)")
                 }
-                if w.name != Self.typical.name {
-                    XCTAssertEqual(c.result.status, .adopted, line)
+                XCTAssertLessThanOrEqual(c.after.wrong, c.before.wrong + 0.03, "more wrong claims: \(line)")
+                if c.result.status == .adopted {
                     XCTAssertGreaterThanOrEqual(c.after.balanced - c.before.balanced, 0.05, line)
+                } else {
+                    XCTAssertEqual(c.after.balanced, c.before.balanced, line)
                 }
             }
         }
@@ -231,15 +271,21 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
         XCTAssertEqual(c.after.balanced, c.before.balanced)
     }
 
-    /// No bed or sofa: the wearer skips lying every time. Sitting and standing still calibrate.
-    func testSkippingTheLyingActivityStillCalibratesSittingAndStanding() {
+    /// No bed or sofa: the wearer skips lying every time. personal-profile-3: the profile is refused. Narrowing a
+    /// stationary mode moves where the wearer's lying seconds land, and with no lying labels no guard can see it:
+    /// measured here before the rule, the profile adopted on these runs (upright adapted) took the unseen day's
+    /// sitting recall from 0 to 73 % but doubled its wrong claims (25 % to 50 %), the lie-down read as sitting. So
+    /// stationary adaptations need all three postures validated (`validatesEveryStationaryPosture`), and the
+    /// decoder stays as it was.
+    func testSkippingTheLyingActivityLeavesTheStationaryPosturesUncalibrated() {
         let c = Self.calibrate(Self.busyStander, skipping: ["lie-down"])
         let line = Self.describe(Self.busyStander, c)
         print("CALIBRATION", line)
-        XCTAssertEqual(c.result.status, .adopted, line)
-        XCTAssertNotNil(c.result.profile?.modes["upright"], line)
-        XCTAssertNil(c.result.profile?.modes["bedRest"], "nothing labelled lying, nothing adapted: \(line)")
-        XCTAssertGreaterThan((c.after.recall[.upright] ?? 0) - (c.before.recall[.upright] ?? 0), 0.3, line)
+        XCTAssertNil(c.result.validation?.classes["bedRest"], "nothing labelled lying: \(line)")
+        XCTAssertNotEqual(c.result.status, .adopted, line)
+        XCTAssertNil(c.result.profile, line)
+        XCTAssertEqual(c.after.balanced, c.before.balanced, line)
+        XCTAssertEqual(c.after.wrong, c.before.wrong, "no new wrong claims on the unseen day: \(line)")
     }
 
     func testAWearerTheDefaultsAlreadyFitIsNeverMadeWorse() {

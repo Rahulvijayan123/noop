@@ -109,6 +109,25 @@ public enum WatchdogActivityFeatures: Sendable {
         }
     }
 
+    /// Per-minute: did any motion channel actually report? A measured motion scalar, an IMU sample,
+    /// or a step tick counts. A zero feature row without any of them is missing evidence, not rest.
+    public static func motionEvidence(window: WatchdogWindow) -> [Bool] {
+        let n = window.seqLen
+        guard n > 0 else { return [] }
+        let span = max(window.nowUnix - window.startUnix, 1)
+        func minuteIndex(_ ts: Int) -> Int {
+            min(n - 1, max(0, ((ts - window.startUnix) * n) / span))
+        }
+        var seen = (0..<n).map { i in i < window.motion.count && window.motion[i] != nil }
+        for g in window.imu where g.ts >= window.startUnix && g.ts < window.nowUnix {
+            seen[minuteIndex(g.ts)] = true
+        }
+        for s in window.steps where s.ts >= window.startUnix && s.ts < window.nowUnix {
+            seen[minuteIndex(s.ts)] = true
+        }
+        return seen
+    }
+
     public static func occupancyDebug(from features: [[Double]]) -> [Double] {
         features.map { row in
             guard row.count > 8 else { return 0 }

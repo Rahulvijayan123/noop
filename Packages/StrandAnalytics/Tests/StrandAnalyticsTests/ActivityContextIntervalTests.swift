@@ -409,4 +409,111 @@ final class ActivityContextIntervalTests: XCTestCase {
         XCTAssertGreaterThan(walking.stepTicks, 100)
         XCTAssertNotNil(walking.cadenceSpm)
     }
+
+    // MARK: Riding in a vehicle (D9-03)
+
+    /// A seated ride: the locomotion head reads vehicle motion, the posture head is unresolved.
+    private func vehicle(_ from: Int, _ to: Int, intensity: Double? = 0.3) -> ActivityContextRun {
+        let run = ActivityContextRun(
+            start: from, end: to, posture: Posture([.seatedLikely: 0.4, .unknown: 0.6]),
+            locomotion: HeadProbabilities<LocomotionClass>([.vehicleMotion: 0.8, .unknown: 0.2]),
+            armBehavior: HeadProbabilities<ArmBehaviorClass>([.quiet: 0.8, .unknown: 0.2]),
+            intensity: intensity, overallConfidence: 0.8, overallUncertainty: 0.2, displayContext: "In a vehicle",
+            sleep: .awake, wear: .onWrist, count: max(1, (to - from) / 5))
+        XCTAssertEqual(ActivityClassifier.classify(run: run).activityClass, .sitting)
+        XCTAssertEqual(ActivityClassifier.classify(run: run).detail, .inVehicle)
+        return run
+    }
+
+    func testARideInAVehicleStaysSittingButCarriesItsDetailAndIsNeverMergedWithPlainSitting() throws {
+        let out = build([run(.sitting, t0, t0 + 300), vehicle(t0 + 300, t0 + 1_500), run(.sitting, t0 + 1_500, t0 + 1_800)])
+        XCTAssertEqual(out.map(\.activityClass), [.sitting, .sitting, .sitting, .sitting])
+        XCTAssertEqual(out.map(\.detail), [nil, .inVehicle, .inVehicle, nil], "the drive is its own rows, cut at the cap")
+        XCTAssertEqual(out.map(\.start), [t0, t0 + 300, t0 + 900, t0 + 1_500])
+        XCTAssertEqual(try XCTUnwrap(out[1].detailConfidence), 0.8, accuracy: 1e-9)
+        XCTAssertNil(out[0].detailConfidence)
+        XCTAssertTrue(out[1].isInVehicle)
+    }
+
+    func testAShortRideFragmentIsNeverAbsorbedByThePlainSittingAroundIt() {
+        // An eight-second fragment of the same class would be folded into the sitting stretch; a ride never is.
+        let out = build([run(.sitting, t0, t0 + 300), vehicle(t0 + 300, t0 + 308), run(.sitting, t0 + 308, t0 + 600)])
+        XCTAssertEqual(out.map(\.detail), [nil, .inVehicle, nil])
+        XCTAssertEqual(out.map(\.end), [t0 + 300, t0 + 308, t0 + 600])
+        XCTAssertEqual(out.first?.absorbedSeconds, 0)
+    }
+
+    func testARideGetsNoRestStatistics() throws {
+        let beats = rsa(perMinute: 15, from: t0, seconds: 1_200)
+        let hr = (0..<1_200).map { HRSample(ts: t0 + $0, bpm: 80) }
+        let out = build([run(.walking, t0 - 300, t0, intensity: 0.6), vehicle(t0, t0 + 600), run(.sitting, t0 + 600, t0 + 1_200)],
+                        hr: hr, rr: beats)
+        let ride = try XCTUnwrap(out.first { $0.isInVehicle })
+        XCTAssertNil(ride.rmssd, "a drive's beat timing is not seated rest")
+        XCTAssertNil(ride.respRateBpm)
+        XCTAssertEqual(ride.rrBeats, 0)
+        XCTAssertNil(ride.hrMeanSettled)
+        XCTAssertNil(ride.rmssdSettled)
+        XCTAssertEqual(ride.hrMean, 80, "its heart rate is still measured and reported for what it is")
+        let seated = try XCTUnwrap(out.last)
+        XCTAssertNil(seated.detail)
+        XCTAssertNotNil(seated.rmssd, "plain sitting next to it keeps its reading")
+    }
+
+    // MARK: Preceding class and settled statistics (D8-09)
+
+    func testARowKnowsTheClassBeforeItOnlyWhenTheyTouch() {
+        let out = build([run(.walking, t0, t0 + 120, intensity: 0.6), run(.sitting, t0 + 125, t0 + 400),
+                         run(.standing, t0 + 460, t0 + 700)])
+        XCTAssertEqual(out.map(\.activityClass), [.walking, .sitting, .standing])
+        XCTAssertEqual(out.map(\.precedingClass), [nil, .walking, nil], "a minute's gap is not 'just before'")
+    }
+
+    func testSittingAfterAWalkReportsItsSettledHeartRateAndRMSSDBesideTheWholeRow() throws {
+        // The walk ends at t0; the first two minutes of sitting carry the recovery (HR 100 -> 70, shallow RSA).
+        let hr = (0..<600).map { HRSample(ts: t0 + $0, bpm: $0 < 120 ? 100 : 70) }
+        let beats = rsa(perMinute: 15, from: t0, seconds: 120, baseMs: 600, depthMs: 10)
+            + rsa(perMinute: 15, from: t0 + 120, seconds: 480, baseMs: 860, depthMs: 60)
+        let out = build([run(.walking, t0 - 300, t0, intensity: 0.6), run(.sitting, t0, t0 + 600)], hr: hr, rr: beats)
+        let seated = try XCTUnwrap(out.last)
+        XCTAssertEqual(seated.precedingClass, .walking)
+        XCTAssertEqual(seated.settlingSeconds, 120)
+        XCTAssertEqual(seated.settledFrom, t0 + 120)
+        XCTAssertEqual(seated.hrMean, 76, "the whole row includes the transient")
+        XCTAssertEqual(seated.hrMeanSettled, 70)
+        XCTAssertEqual(seated.hrSamplesSettled, 480)
+        let whole = try XCTUnwrap(seated.rmssd), settled = try XCTUnwrap(seated.rmssdSettled)
+        XCTAssertGreaterThan(settled, whole, "the settled part leaves the shallow recovery beats out")
+        let sumSq = try XCTUnwrap(seated.rrDiffSqSumMs2Settled), count = try XCTUnwrap(seated.rrDiffCountSettled)
+        XCTAssertEqual((sumSq / Double(count)).squareRoot(), settled, accuracy: 0.051)
+        XCTAssertLessThan(count, seated.rrDiffCount)
+        // The walk itself: settling does not apply.
+        XCTAssertNil(out.first?.settledFrom)
+        XCTAssertNil(out.first?.hrMeanSettled)
+    }
+
+    func testNoSettledValueWithoutSettlingOrWithUnderAMinuteLeft() throws {
+        let hr = (0..<900).map { HRSample(ts: t0 + $0, bpm: 70) }
+        // Nothing before it: the whole row is already settled, so it carries no separate settled value.
+        let calm = try XCTUnwrap(build([run(.sitting, t0, t0 + 600)], hr: hr).first)
+        XCTAssertEqual(calm.settlingSeconds, 0)
+        XCTAssertEqual(calm.settledFrom, t0)
+        XCTAssertNil(calm.hrMeanSettled)
+        // 150 s of sitting after a walk: 30 s remain after the settling, under the minute.
+        let short = try XCTUnwrap(build([run(.walking, t0 - 300, t0, intensity: 0.6), run(.sitting, t0, t0 + 150)], hr: hr).last)
+        XCTAssertEqual(short.settledFrom, t0 + 120)
+        XCTAssertNil(short.hrMeanSettled)
+        XCTAssertNil(short.rmssdSettled)
+    }
+
+    func testAConfidentChangeOfPositionInsideARowMovesItsSettledStartAndAWeakOneDoesNot() throws {
+        let hr = (0..<900).map { HRSample(ts: t0 + $0, bpm: 70) }
+        let runs = [run(.sitting, t0, t0 + 900)]
+        let strong = ActivityTransitionEvent(kind: .sitToStandLike, probability: 0.6, ts: t0 + 300)
+        let weak = ActivityTransitionEvent(kind: .standToSitLike, probability: 0.3, ts: t0 + 600)
+        let iv = try XCTUnwrap(ActivityContextIntervalBuilder.build(runs: runs, events: [strong, weak], hr: hr).first)
+        XCTAssertEqual(iv.transitionCount, 2)
+        XCTAssertEqual(iv.settledFrom, t0 + 420)
+        XCTAssertEqual(iv.hrSamplesSettled, 480)
+    }
 }

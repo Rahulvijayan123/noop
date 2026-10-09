@@ -157,43 +157,74 @@ enum ActivityRibbon {
 
 /// Maps a hosted day + metric key onto the support interval and day window the read-out joins on.
 enum ActivityContextSelection {
-    /// The UTC day window `[start, end)` for a "YYYY-MM-DD" day key, or nil when unparseable.
-    /// The hosted day string is UTC (the worker's local-midnight/DST helpers render epochs in UTC),
-    /// so UTC midnight is the correct window even for non-UTC wearers.
-    static func dayWindow(day: String) -> [Int]? {
+    /// Metrics whose hero value is a NIGHTLY estimate (measured over the main sleep session), so their
+    /// activity read-out must describe that night, never a daytime slot (D3-01 / D6-07).
+    static let nightlyMetrics: Set<String> = ["hrv", "rhr", "resp_rate", "spo2", "skin_temp"]
+
+    /// The time zone the hosted day was scored in: the snapshot's own `timezone` (the worker scores
+    /// LOCAL days in the claim's IANA zone) when it is a valid identifier, else the device's zone. Never
+    /// UTC by default — a hosted day is a local calendar day.
+    static func timeZone(identifier: String?) -> TimeZone {
+        identifier.flatMap { TimeZone(identifier: $0) } ?? TimeZone.current
+    }
+
+    /// The zone carried by a hosted snapshot object (`hosted_snapshot.timezone`), resolved as above.
+    static func timeZone(hostedSnapshot: [String: Any]?) -> TimeZone {
+        timeZone(identifier: hostedSnapshot?["timezone"] as? String)
+    }
+
+    /// The LOCAL day window `[local midnight, next local midnight)` for a "YYYY-MM-DD" day key in `timeZone`,
+    /// or nil when unparseable. Calendar arithmetic, so a 23 h / 25 h DST day keeps its real length — the
+    /// same bounds the worker's `DayScoring.dayStartUnix`/`nextDayStartUnix` score the day over.
+    static func dayWindow(day: String, timeZone: TimeZone) -> [Int]? {
         let formatter = DateFormatter()
         formatter.locale = Locale(identifier: "en_US_POSIX")
-        formatter.timeZone = TimeZone(identifier: "UTC")
+        formatter.timeZone = timeZone
         formatter.dateFormat = "yyyy-MM-dd"
         guard let date = formatter.date(from: day) else { return nil }
-        let start = Int(date.timeIntervalSince1970)
-        return [start, start + 86_400]
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = timeZone
+        let startDate = calendar.startOfDay(for: date)
+        guard let next = calendar.date(byAdding: .day, value: 1, to: startDate) else { return nil }
+        return [Int(startDate.timeIntervalSince1970), Int(next.timeIntervalSince1970)]
+    }
+
+    /// The main sleep session of the local day: among sessions overlapping `dayWindow`, the ones that END
+    /// inside it (the night the wearer woke from on this day, which is what the day's nightly values are
+    /// computed over) win, then the longest. nil when none overlaps.
+    static func mainSleep(in sessions: [(start: Int, end: Int)], dayWindow: [Int]) -> (start: Int, end: Int)? {
+        let overlapping = sessions.filter { $0.end > $0.start && $0.start < dayWindow[1] && $0.end > dayWindow[0] }
+        return overlapping.max { a, b in
+            let aEnds = a.end > dayWindow[0] && a.end <= dayWindow[1]
+            let bEnds = b.end > dayWindow[0] && b.end <= dayWindow[1]
+            if aEnds != bEnds { return !aEnds }
+            if (a.end - a.start) != (b.end - b.start) { return (a.end - a.start) < (b.end - b.start) }
+            return a.start > b.start
+        }
     }
 
     /// The interval whose epochs describe the metric's measurement:
-    ///   • `hrv`        — the last published 15-min HRV slot `[slot_s, slot_s + 900)`. The worker's
-    ///                    slot is the actual measurement bucket (physiology-policy §5.2), so the
-    ///                    read-out is duration-weighted across the whole slot, never its last second.
-    ///   • `resp_rate` / `spo2` — the primary sleep session overlapping the day (both are nightly
-    ///                    estimates over the in-bed span).
-    ///   • otherwise    — the whole day.
+    ///   • nightly metrics (`hrv`, `rhr`, `resp_rate`, `spo2`, `skin_temp`) — the main sleep session of the
+    ///     local day (the snapshot's sleep sessions, else the C10 document's own `sleep_sessions`). The
+    ///     hero is the NIGHTLY value, so a daytime 15-min HRV slot is never its context. nil when the day
+    ///     has no night to point at: the read-out is hidden rather than describing the wrong span.
+    ///   • `hrv` with `selectedSlotStart` — the 15-min slot `[slot_s, slot_s + 900)` the user selected on
+    ///     the intraday chart (the worker's slot is the actual measurement bucket, physiology-policy §5.2).
+    ///   • otherwise — the whole local day.
     static func interval(metricKey: String,
                          document: ActivityContextDocument,
                          dayWindow: [Int],
-                         sleepSessions: [(start: Int, end: Int)]) -> [Int] {
-        switch metricKey {
-        case "hrv":
-            if let slot = document.contexts.hrvSlots.last {
-                return [slot.slotS, slot.slotS + 900]
-            }
-        case "resp_rate", "spo2":
-            if let night = sleepSessions.first(where: { $0.start < dayWindow[1] && $0.end > dayWindow[0] }) {
-                return [night.start, night.end]
-            }
-        default:
-            break
+                         sleepSessions: [(start: Int, end: Int)],
+                         selectedSlotStart: Int? = nil,
+                         slotSeconds: Int = 900) -> [Int]? {
+        if metricKey == "hrv", let slot = selectedSlotStart {
+            return [slot, slot + slotSeconds]
         }
-        return dayWindow
+        guard nightlyMetrics.contains(metricKey) else { return dayWindow }
+        let documentNights = document.contexts.sleepSessions.map { (start: $0.start, end: $0.end) }
+        guard let night = mainSleep(in: sleepSessions, dayWindow: dayWindow)
+                ?? mainSleep(in: documentNights, dayWindow: dayWindow) else { return nil }
+        return [night.start, night.end]
     }
 }
 
@@ -279,7 +310,7 @@ enum ActivityContextDetailSheetData {
 /// ribbon shows the honest "Activity unavailable" placeholder instead of any segments.
 struct ActivityTimelineView: View {
     let document: ActivityContextDocument
-    /// UTC day window `[start, end)` the ribbon spans.
+    /// Local day window `[start, end)` the ribbon spans (see `ActivityContextSelection.dayWindow`).
     let dayStart: Int
     let dayEnd: Int
 
@@ -350,7 +381,7 @@ struct ActivityContextLine: View {
     let document: ActivityContextDocument
     /// The support interval joined for the read-out (see `ActivityContextSelection`).
     let interval: [Int]
-    /// UTC day window for the ribbon.
+    /// Local day window for the ribbon.
     let dayStart: Int
     let dayEnd: Int
     @State private var showingDetail = false

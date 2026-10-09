@@ -7,7 +7,9 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var hrv: Double?
     /// Established awake-rest HRV (ms). Never averaged with sleep. Nil unless that copy is shown.
     public var hrvAwake: Double?
-    /// `hrv` came from overnight sleep HRV. No sleep÷wake multiplier; live rest stays that sleep usual until a shown awake copy exists.
+    /// `hrv` came from overnight sleep HRV and no awake-rest copy is shown. Live AWAKE minutes are then compared
+    /// to `daytimeHRV`, the EXPLICIT sleep-scaled fallback (D4-08), with a wider relative sigma (unscaled sleep MAD
+    /// on a 0.65x centre, plus the cold-start widening); never silently the sleep usual. Sleep-phase minutes use `hrv`.
     public var hrvAnchoredInSleep: Bool
     public var source: WatchdogPromptSource
     public var temp: Double?
@@ -20,6 +22,10 @@ public struct UniTSPrompt: Equatable, Sendable {
     public var scaleTemp: Double
     public var scaleResp: Double
     public var scaleSpO2: Double
+    /// The tick is in the SLEEP phase (D4-08). Sleep-phase minutes compare to the overnight usual (`hrv`) with its
+    /// own MAD; only awake minutes use the `daytimeHRV` fallback. `UniTSRuntime.reconstruct` also sets this from
+    /// the window (a bound sleep interval open at `nowUnix`), so a caller that does not set it is still phased.
+    public var sleepPhase: Bool
 
     public init(hr: Double? = nil, rhr: Double? = nil, hrv: Double? = nil,
                 hrvAwake: Double? = nil, hrvAnchoredInSleep: Bool = false,
@@ -30,7 +36,8 @@ public struct UniTSPrompt: Equatable, Sendable {
                 scaleHRV: Double = WatchdogConfig.hrvScale,
                 scaleTemp: Double = WatchdogConfig.tempScale,
                 scaleResp: Double = WatchdogConfig.respScale,
-                scaleSpO2: Double = WatchdogConfig.spo2Scale) {
+                scaleSpO2: Double = WatchdogConfig.spo2Scale,
+                sleepPhase: Bool = false) {
         self.hr = hr
         self.rhr = rhr
         self.hrv = hrv
@@ -46,6 +53,7 @@ public struct UniTSPrompt: Equatable, Sendable {
         self.scaleTemp = scaleTemp
         self.scaleResp = scaleResp
         self.scaleSpO2 = scaleSpO2
+        self.sleepPhase = sleepPhase
     }
 
     /// One Layer 1 copy for both hat and TRUST. Long wins if shown; else week. Held copies older than 7 days are not current.
@@ -85,10 +93,13 @@ public struct UniTSPrompt: Equatable, Sendable {
         }
         let sleepHRV = center(.sleepHRVLn)
         let awakeHRV = shownCenter(.awakeRestHRVLn)
-        // Sleep HRV / sleep SpO₂ usuals are 24-hour: live daytime minutes still compare to
-        // those recorded overnight copies. They are not wiped just because it is wake.
-        // Instant HR usual is daytime rest / all-day HR. Sleep RHR never fills this slot.
-        let hr = shownCenter(.awakeRestHR) ?? shownCenter(.continuousHR)
+        // Sleep SpO₂ usual is 24-hour: live daytime minutes still compare to the overnight copy. Sleep HRV
+        // is carried as `hrv` but a daytime minute reads it only through `daytimeHRV` (sleep-scaled,
+        // flagged, widened sigma) until an awake-rest copy is shown (D4-08).
+        // Instant HR usual is daytime REST HR only. Sleep RHR never fills this slot, and neither does the
+        // continuous (24-h, sleep + effort minutes) mean: with no awake-rest copy the slot stays nil, so
+        // the population prior and the cold-start (widened) HR sigma apply instead (D4-08).
+        let hr = shownCenter(.awakeRestHR)
         // Still RHR usual is overnight / still-gated only. Daytime HR never fills this slot.
         let rhr = shownCenter(.sleepRHR) ?? center(.sleepRHR)
         let source: WatchdogPromptSource
@@ -112,10 +123,12 @@ public struct UniTSPrompt: Equatable, Sendable {
             resp: center(.sleepResp),
             spo2: center(.sleepSpO2Mean),
             scaleHR: displayMAD(evaluations, .awakeRestHR, shownOnly: true)
-                ?? displayMAD(evaluations, .continuousHR, shownOnly: true)
                 ?? WatchdogConfig.hrScale,
             scaleRHR: displayMAD(evaluations, .sleepRHR, shownOnly: false)
                 ?? WatchdogConfig.hrScale,
+            // The sleep MAD is carried UNSCALED in ms. In the sleep phase it is the overnight usual's own
+            // dispersion; on an awake tick it rides the 0.65x fallback centre, which makes it ~1.5x wider in
+            // relative terms (the intended widening for an unestablished regime), on top of the cold-start sigma.
             scaleHRV: (awakeHRV != nil ? displayMAD(evaluations, .awakeRestHRVLn, shownOnly: true) : nil)
                 ?? displayMAD(evaluations, .sleepHRVLn, shownOnly: false)
                 ?? WatchdogConfig.hrvScale,
@@ -123,6 +136,40 @@ public struct UniTSPrompt: Equatable, Sendable {
             scaleResp: displayMAD(evaluations, .sleepResp, shownOnly: false) ?? WatchdogConfig.respScale,
             scaleSpO2: displayMAD(evaluations, .sleepSpO2Mean, shownOnly: false) ?? WatchdogConfig.spo2Scale
         )
+    }
+
+    /// Population awake-rest ÷ overnight RMSSD ratio for the explicit daytime-HRV fallback (D4-08). A seated
+    /// daytime RMSSD runs well below the overnight (recumbent, vagally dominant) value, so comparing a daytime
+    /// minute with the sleep usual itself reads a persistent, stress-like deficit. TUNING SEAM: a population
+    /// prior (~0.6-0.7), used ONLY until the person's own awake-rest copy is shown.
+    public static let awakeToSleepHRVRatio: Double = 0.65
+
+    /// The HRV a live daytime minute is compared against: the shown awake-rest usual; else the SLEEP usual
+    /// scaled by `awakeToSleepHRVRatio` (an explicit, flagged fallback: `daytimeHRVFallbackUsed`, and the HRV
+    /// sigma is widened via `hrvAnchoredInSleep`); else nil (the population prior applies).
+    public var daytimeHRV: Double? {
+        hrvAwake ?? hrv.map { $0 * Self.awakeToSleepHRVRatio }
+    }
+
+    /// True when `daytimeHRV` is the sleep-scaled fallback rather than an awake-rest usual (provenance).
+    public var daytimeHRVFallbackUsed: Bool { hrvAwake == nil && hrv != nil }
+
+    /// The phase-correct HRV centre for THIS tick: the overnight usual in the sleep phase (the awake usual only if
+    /// no sleep copy exists, as before); `daytimeHRV` on an awake tick. Every UniTS HRV seed / fill / coupling base
+    /// reads this, never `daytimeHRV` directly, so a sleeping RMSSD is never judged against the 0.65x daytime centre.
+    public var hrvCentre: Double? {
+        sleepPhase ? (hrv ?? hrvAwake) : daytimeHRV
+    }
+
+    /// True when this tick's HRV centre is the sleep-scaled daytime fallback (awake tick, no awake-rest copy).
+    public var hrvCentreFallbackUsed: Bool { !sleepPhase && daytimeHRVFallbackUsed }
+
+    /// Copy with `sleepPhase` set when either the caller or the window says the tick is asleep.
+    func phased(_ window: WatchdogWindow) -> UniTSPrompt {
+        guard !sleepPhase, UniTSRuntime.windowInSleep(window) else { return self }
+        var p = self
+        p.sleepPhase = true
+        return p
     }
 
     /// Half the Layer 1 usual band in display units, divided by k → 1 MAD. Same copy as the prompt; never averaged.
@@ -165,6 +212,8 @@ public struct UniTSResidual: Equatable, Sendable {
     public var reconstructedSpO2: [Double?]
     public var modelVersion: String
     public var jointEnergy: Double
+    /// The residual was built for a sleep-phase tick (see `UniTSPrompt.sleepPhase`); `pathCenter` re-phases from it.
+    public var sleepPhase: Bool = false
 
     public func energy(for channel: WatchdogWindow.Channel) -> Double {
         energy[channel] ?? 0
@@ -192,6 +241,11 @@ public struct UniTSResidual: Equatable, Sendable {
 /// never imitates a model. The real UniTS / TimesFM run on the VPS (`Tools/AnomalyService`).
 public struct UniTSRuntime: Sendable {
     public init() {}
+
+    /// A bound sleep interval is open at the window's `nowUnix` (the Watchdog's `sleepNow` interval test).
+    static func windowInSleep(_ window: WatchdogWindow) -> Bool {
+        window.sleepIntervals.contains { $0.contains(window.nowUnix) }
+    }
 
     /// Painted half-width per channel = the reference's own per-minute spread (no motion-coupled widening:
     /// that was part of the removed physics prior).

@@ -93,14 +93,7 @@ public struct ActivityContextTrack: Sendable {
     /// This track followed by one that continued it from `snapshot` (events the decoder keeps flagging
     /// across the join are listed once).
     public func appending(_ next: ActivityContextTrack) -> ActivityContextTrack {
-        var merged = events
-        for e in next.events {
-            if let i = merged.lastIndex(where: { $0.kind == e.kind && $0.ts == e.ts }) {
-                merged[i].probability = max(merged[i].probability, e.probability)
-            } else {
-                merged.append(e)
-            }
-        }
+        let merged = ActivityTransitionEvent.merging(events, next.events)
         var report = motionHeads
         if let n = next.motionHeads { report = report?.merged(with: n) ?? n }
         var gait = gaitQuality
@@ -192,20 +185,33 @@ public enum ActivityContextTrackBuilder {
         var events: [ActivityTransitionEvent] = []
         var index: [String: Int] = [:]
         var accepted = 0
+        // Every event the decoder flags, drained from its own history after each second (D2-01): a published
+        // state shows at most one event, so harvesting `state.transition` lost the earlier of two events inside
+        // one 5-s tick and kept a postural event at the probability it had when last shown, not its peak. Events
+        // restored with a snapshot were harvested by the decode that wrote it; they are listed again only if they
+        // change. The same rule as `ActivityTransitionEvent.merging`: a newer reading replaces kind, onset and
+        // source and keeps the higher probability.
+        var seen = decoder.recordedEvents
         for o in observations {
             if let floor, o.ts <= floor { continue }
             accepted += 1
-            guard let s = decoder.ingest(o) else { continue }
-            states.append(s)
-            if let t = s.transition {
-                let key = "\(t.kind.rawValue)@\(t.ts)"
-                if let i = index[key] {
-                    events[i].probability = max(events[i].probability, t.probability)
-                } else {
-                    index[key] = events.count
-                    events.append(t)
+            let s = decoder.ingest(o)
+            let now = decoder.recordedEvents
+            if now != seen {
+                for e in now where !seen.contains(e) {
+                    let key = e.identity
+                    if let i = index[key] {
+                        let p = max(events[i].probability, e.probability)
+                        events[i] = e
+                        events[i].probability = p
+                    } else {
+                        index[key] = events.count
+                        events.append(e)
+                    }
                 }
+                seen = now
             }
+            if let s { states.append(s) }
         }
         return ActivityContextTrack(states: states, events: events, snapshot: decoder.snapshot(),
                                     restore: decoder.restoreOutcome, observedSeconds: accepted,
@@ -346,6 +352,17 @@ public enum ActivityContextTrackBuilder {
 
         var hrAt: [Int: Int] = [:]
         for s in input.hr where s.ts >= lo && s.ts < hi && (30...220).contains(s.bpm) { hrAt[s.ts] = s.bpm }
+        // Valid pulse seconds (including the look-back before the day) for the wear evidence, ascending. A pulse
+        // this recent is contact evidence.
+        let wearPulseWindowS = 60
+        let pulseTs = input.hr.filter { $0.ts < hi && $0.ts >= lo - wearPulseWindowS
+            && (30...220).contains($0.bpm) }.map(\.ts).sorted()
+        var pulseCursor = 0
+        func lastPulseTs(atOrBefore ts: Int) -> Int? {
+            while pulseCursor + 1 < pulseTs.count, pulseTs[pulseCursor + 1] <= ts { pulseCursor += 1 }
+            guard pulseCursor < pulseTs.count, pulseTs[pulseCursor] <= ts else { return nil }
+            return pulseTs[pulseCursor]
+        }
 
         var gravAt: [Int: GravitySample] = [:]
         for s in input.gravity where s.ts >= lo && s.ts < hi { gravAt[s.ts] = s }
@@ -407,7 +424,14 @@ public enum ActivityContextTrackBuilder {
                 out.append(o)
                 continue
             }
-            o.wear = .onWrist
+            // On the wrist only with contact evidence: a valid pulse in the last `wearPulseWindowS` (causal, so
+            // a progressive decode agrees with a whole-day one). Gravity, steps or IMU alone are no evidence
+            // anyone is wearing the strap: a strap on a table has them too (D1-05, D1V-03).
+            if let last = lastPulseTs(atOrBefore: ts), ts - last <= wearPulseWindowS {
+                o.wear = .onWrist
+            } else {
+                o.wear = .unknown
+            }
             if let g = gravAt[ts] {
                 o.gravity = [g.x, g.y, g.z]
                 o.dynAccelG = g.dynAccel
@@ -446,7 +470,8 @@ public enum ActivityContextTrackBuilder {
 /// Probabilities are the mean over the stretch, so a run is a faithful summary rather than its first tick.
 /// Transition events are not part of a run: they are short and listed once, in the document's `events`.
 public struct ActivityContextRun: Codable, Equatable, Sendable {
-    /// First published second and one past the last (the states describe evidence up to their `ts`).
+    /// First published second and one past the last (the states describe evidence up to their `ts`). A boundary
+    /// that a flagged event explains is back-dated to the event's onset (`ActivityContextRuns.aligned`).
     public var start: Int
     public var end: Int
     public var posture: HeadProbabilities<PostureClass>
@@ -534,6 +559,32 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     /// The canonical class of the run (see `ActivityClassifier`).
     public var classification: ActivityClassification { ActivityClassifier.classify(run: self) }
 
+    /// The run exactly as its stored JSON reads back: probabilities to 0.001 (entries under the report floor
+    /// dropped), confidence, uncertainty and intensity to 0.01, the gait fields to their stored precision. The
+    /// decoder hands out runs in this form, so a run, its class and everything built from it (intervals, the
+    /// day summary) are the same in memory and read back from a document.
+    var quantized: ActivityContextRun {
+        func r(_ x: Double, _ scale: Double) -> Double { (x * scale).rounded() / scale }
+        func head<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ h: HeadProbabilities<C>) -> HeadProbabilities<C>
+            where C.RawValue == String {
+            var m: [C: Double] = [:]
+            for (c, p) in h.values where p >= HeadProbabilities<C>.reportFloor { m[c] = r(p, 1000) }
+            return HeadProbabilities(m)
+        }
+        var q = self
+        q.posture = head(posture); q.locomotion = head(locomotion); q.armBehavior = head(armBehavior)
+        q.intensity = intensity.map { r($0, 100) }
+        q.overallConfidence = r(overallConfidence, 100)
+        q.overallUncertainty = r(overallUncertainty, 100)
+        q.gaitProbability = gaitStates > 0 ? gaitProbability.map { r($0, 1000) } : nil
+        q.gaitCadenceSpm = gaitCadenceSpm.map { r($0, 10) }
+        // The gait summary rounds itself on write; reading it back is the one exact way to get its stored form.
+        if let g = gait, let data = try? JSONEncoder().encode(g) {
+            q.gait = try? JSONDecoder().decode(ActivityGaitSummary.self, from: data)
+        }
+        return q
+    }
+
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(start, forKey: .start)
@@ -599,19 +650,39 @@ public enum ActivityContextRuns {
     /// edge from splitting the run every few seconds.
     static let headTolerance = 0.45
 
-    /// Coalesce consecutive states that describe the same situation: same display label, same wear and
-    /// sleep context, and the body heads (posture, locomotion) within `headTolerance` of the run's mean.
-    /// The arm head is a fast hand pattern that flips between desk-like, quiet and fidgeting every few
-    /// seconds inside one situation, so it does not split a run: the run keeps its average.
+    /// Coalesce consecutive states that describe the same situation: the same canonical class at the state
+    /// itself (`ActivityClassifier.runKey`, no label hysteresis), the same wear, sleep and in-bed context, and the
+    /// body heads (posture, locomotion) within `headTolerance` of the run's mean. The arm head is a fast hand
+    /// pattern that flips between desk-like, quiet and fidgeting every few seconds inside one situation, so it
+    /// does not split a run: the run keeps its average.
+    ///
+    /// Runs used to split on the display label, which holds a wording for 10-30 s so a timeline does not
+    /// flicker: every persisted boundary inherited that lag, and the seconds after a walk ended (already standing
+    /// or sitting at the state) were stored as walking (D2-03). The label is now only a run attribute (the
+    /// wording most of the run's states carried).
     ///
     /// A state's `gait` block is its walking stretch so far, so a run counts what each state ADDED to the stretch
     /// (the windows since the previous state of the same stretch): a stretch that spans two runs is split
     /// between them, never counted twice.
-    public static func coalesce(_ states: [ActivityContextState], intervalS: Int = 5) -> [ActivityContextRun] {
-        var runs: [ActivityContextRun] = []
-        var acc: Accumulator?
+    public static func coalesce(_ states: [ActivityContextState], intervalS: Int = 5,
+                                events: [ActivityTransitionEvent] = []) -> [ActivityContextRun] {
+        coalesce(states, intervalS: intervalS, events: events, resuming: nil, final: []).runs
+    }
+
+    /// `coalesce`, continued from where an earlier pass stopped (D2-09). `tail` is the pass's open part (the raw
+    /// runs of its last, still revisable runs and the run still accumulating) and `final` the runs it had already
+    /// settled. The result, and the new tail, are exactly what one pass over all the states would give: a resumed
+    /// day and a day decoded from scratch store the same runs, at any offload cadence.
+    static func coalesce(_ states: [ActivityContextState], intervalS: Int, events: [ActivityTransitionEvent],
+                         resuming tail: ActivityContextRunsTail?, final: [ActivityContextRun],
+                         offWrist: [DayStateSpan] = [])
+        -> (runs: [ActivityContextRun], tail: ActivityContextRunsTail) {
+        // Raw runs are kept as their exact running sums (a run's JSON is rounded), so a continuation folds the
+        // same numbers a single pass does.
+        var rawSums = tail?.raw ?? []
+        var acc = tail?.open
         let maxGap = max(intervalS, 1) * 2
-        var previousGait: GaitTotals?
+        var previousGait = tail?.previousGait
         for s in states {
             var added: GaitTotals?
             if let g = s.gait {
@@ -623,26 +694,150 @@ public enum ActivityContextRuns {
                 }
             }
             previousGait = s.gait.map(GaitTotals.init(summary:))
-            if var a = acc, a.accepts(s, maxGap: maxGap) {
+            let key = ActivityClassifier.runKey(ActivityClassifier.classify(state: s))
+            if var a = acc, a.accepts(s, key: key, maxGap: maxGap) {
                 a.add(s, gait: added)
                 acc = a
             } else {
-                if let a = acc { runs.append(a.run(intervalS: intervalS)) }
-                acc = Accumulator(first: s, gait: added)
+                if let a = acc { rawSums.append(a) }
+                acc = Accumulator(first: s, key: key, gait: added)
             }
         }
-        if let a = acc { runs.append(a.run(intervalS: intervalS)) }
-        return foldFragments(runs, maxFragmentS: 2 * max(intervalS, 1))
+        let closed = rawSums.count
+        var all = rawSums.map { $0.run(intervalS: intervalS) }
+        if let a = acc { all.append(a.run(intervalS: intervalS)) }
+        let (unrounded, firstRaw) = foldFragmentsIndexed(all, maxFragmentS: 2 * max(intervalS, 1), events: events,
+                                                         intervalS: intervalS)
+        // In their stored form, so a settled run read back from the document is the run this pass produced.
+        let folded = unrounded.map(\.quantized)
+
+        // The settled runs, the last one's end put back where it was before the seam was aligned, then the rest.
+        var runs = final
+        if let end = tail?.finalEnd, !runs.isEmpty { runs[runs.count - 1].end = end }
+        let seam = runs.count
+        runs += folded
+        let wearChanges = offWrist.flatMap { [$0.start, $0.end] }.sorted()
+        runs = aligned(runs, to: events, intervalS: intervalS, fromBoundary: max(1, seam), wearChanges: wearChanges)
+
+        // What stays revisable: every run holding one of the last `revisableRawRuns` raw runs (a fold decision
+        // looks one raw run ahead, and the last raw run is still growing), so everything before is settled.
+        let keepFrom = max(0, all.count - revisableRawRuns)
+        let fj = firstRaw.lastIndex { $0 <= keepFrom } ?? 0
+        let rawStart = firstRaw.isEmpty ? closed : min(closed, firstRaw[fj])
+        let finalEnd: Int? = fj > 0 ? folded[fj - 1].end : (seam > 0 ? (tail?.finalEnd ?? final.last?.end) : nil)
+        let next = ActivityContextRunsTail(finalRuns: seam + fj, finalEnd: finalEnd,
+                                           raw: Array(rawSums[rawStart..<closed]), open: acc, previousGait: previousGait)
+        return (runs, next)
     }
 
-    /// A run of a couple of ticks that sits next to a run with the same label, wear and sleep context is a
-    /// wobble inside that situation (a posture head dipping for one tick), not a separate one: fold it in.
-    static func foldFragments(_ runs: [ActivityContextRun], maxFragmentS: Int) -> [ActivityContextRun] {
+    /// Raw runs at the end of a pass that stay revisable (`ActivityContextRunsTail`).
+    static let revisableRawRuns = 3
+
+    /// Whether `event` explains a change from a run of key `from` to one of key `to` (`ActivityClassifier.runKey`).
+    /// A change of position explains only boundaries between still or changing-position runs, and a walk or
+    /// run start / stop only boundaries into or out of moving, so each event moves the one boundary it is about.
+    static func explains(_ event: ActivityTransitionEvent, from: String, to: String) -> Bool {
+        let moving: Set<String> = ["walking", "running", "cycling", "active"]
+        let gait: Set<String> = ["walking", "running"]
+        if event.isPostural, gait.contains(from) || gait.contains(to) { return false }
+        switch event.kind {
+        case .walkStart, .runStart: return moving.contains(to) && !moving.contains(from)
+        case .walkStop, .runStop: return gait.contains(from) && !gait.contains(to)
+        case .sitToStandLike: return ["upright", "active", "stationary"].contains(to) && from != to
+        case .standToSitLike: return ["seated", "active", "stationary"].contains(to) && from != to
+        case .lyingDownLike: return ["lying", "active"].contains(to) && from != to
+        case .gettingUpLike: return ["lying", "sleeping"].contains(from) && !["lying", "sleeping"].contains(to)
+        }
+    }
+
+    /// Back-dates each boundary between two touching runs to the onset of the event that explains it (D2-08).
+    /// A run starts on the first published state that carries its class, which is up to a tick after the decoder
+    /// flagged the change and some seconds after the change began. When a flagged event of a compatible kind
+    /// (a walk start into walking, a stand-up into standing or changing position …) was detected within a tick of
+    /// the boundary, the boundary moves back to the event's onset (`ActivityTransitionEvent.onsetTs`, its
+    /// detection second when the onset is unknown), never later than it was, and never so far that the earlier run
+    /// keeps less than its own first tick. The onset is the decoder's own causal reading (at most `maxOnsetLeadS`
+    /// before detection), so a boundary moves by at most ~15 s, and only where the decoder said the change began.
+    ///
+    /// Wear is a hard gate known to the second: a boundary into or out of an off-wrist run moves to the off-wrist
+    /// span's own start or end (`wearChanges`) when that second falls inside the tick before the boundary, so a
+    /// strap taken off at 10:00:03 is off from 10:00:03, not from the next 5-s tick.
+    static func aligned(_ runs: [ActivityContextRun], to events: [ActivityTransitionEvent],
+                        intervalS: Int, fromBoundary first: Int = 1,
+                        wearChanges: [Int] = []) -> [ActivityContextRun] {
+        guard runs.count > 1, !(events.isEmpty && wearChanges.isEmpty), first < runs.count else { return runs }
+        let step = max(1, intervalS)
+        let ordered = events.sorted { $0.ts < $1.ts }
+        var out = runs
+        let keys = runs.map { ActivityClassifier.runKey($0.classification) }
+        var cursor = 0
+        for i in max(1, first)..<out.count {
+            let a = out[i - 1], b = out[i]
+            guard a.end == b.start, keys[i - 1] != keys[i] else { continue }
+            let offWrist = ActivityClass.offWrist.rawValue
+            if (keys[i - 1] == offWrist) != (keys[i] == offWrist) {
+                if let c = wearChanges.last(where: { $0 > b.start - step && $0 <= b.start }), c > a.start, c < b.start {
+                    out[i - 1].end = c
+                    out[i].start = c
+                }
+                continue
+            }
+            while cursor < ordered.count, ordered[cursor].ts < b.start - step { cursor += 1 }
+            var target: Int?
+            var j = cursor
+            while j < ordered.count, ordered[j].ts < b.start + step {
+                let e = ordered[j]
+                if explains(e, from: keys[i - 1], to: keys[i]) {
+                    let t = e.onsetTs ?? e.ts
+                    target = min(target ?? t, t)
+                }
+                j += 1
+            }
+            guard let t = target else { continue }
+            let boundary = max(a.start + step, min(b.start, t))
+            guard boundary < b.start else { continue }
+            out[i - 1].end = boundary
+            out[i].start = boundary
+        }
+        return out
+    }
+
+    /// A run of a couple of ticks that sits next to a run with the same class key, wear and sleep context is a
+    /// wobble inside that situation (a posture head dipping for one tick), not a separate one: fold it in. A short
+    /// run of a DIFFERENT class (a five-second stand between two sitting runs) is not a wobble and stays: the
+    /// interval layer decides what a sustained stretch absorbs, and records it (`ActivityContextInterval`).
+    ///
+    /// One exception looks at the events: a single still tick straight before a walk or run whose start event
+    /// was flagged at that boundary is the walk's own first reading (the class lags the first steps by a tick), and
+    /// it joins the walk. Left alone it is a five-second still row carrying the walk's first raised heart rate.
+    static func foldFragments(_ runs: [ActivityContextRun], maxFragmentS: Int,
+                              events: [ActivityTransitionEvent] = [], intervalS: Int = 5) -> [ActivityContextRun] {
+        foldFragmentsIndexed(runs, maxFragmentS: maxFragmentS, events: events, intervalS: intervalS).runs
+    }
+
+    /// `foldFragments`, with the index of the first input run behind each output run.
+    static func foldFragmentsIndexed(_ runs: [ActivityContextRun], maxFragmentS: Int,
+                                     events: [ActivityTransitionEvent] = [], intervalS: Int = 5)
+        -> (runs: [ActivityContextRun], firstRaw: [Int]) {
+        let step = max(1, intervalS)
+        let still: Set<String> = ["seated", "upright", "stationary", "lying"]
+        let starts = events.filter { $0.kind == .walkStart || $0.kind == .runStart }.map(\.ts).sorted()
+        /// `r` is one still tick touching `next`, a walk or run whose start was flagged at their boundary.
+        func leadsInto(_ r: ActivityContextRun, _ next: ActivityContextRun) -> Bool {
+            guard r.count == 1, next.start == r.end, r.wear == next.wear, r.sleep == next.sleep, r.inBed == next.inBed
+            else { return false }
+            let from = ActivityClassifier.runKey(r.classification), to = ActivityClassifier.runKey(next.classification)
+            guard still.contains(from), to == "walking" || to == "running",
+                  starts.contains(where: { $0 >= next.start - step && $0 < next.start + step }) else { return false }
+            return ActivityClassifier.runKey(merged(r, next).classification) == to
+        }
         func sameSituation(_ a: ActivityContextRun, _ b: ActivityContextRun) -> Bool {
-            a.displayContext == b.displayContext && a.wear == b.wear && a.sleep == b.sleep && a.inBed == b.inBed
+            ActivityClassifier.runKey(a.classification) == ActivityClassifier.runKey(b.classification)
+                && a.wear == b.wear && a.sleep == b.sleep && a.inBed == b.inBed
                 && b.start - a.end <= 10
         }
         var out: [ActivityContextRun] = []
+        var firstRaw: [Int] = []
         var i = 0
         while i < runs.count {
             var r = runs[i]
@@ -652,23 +847,25 @@ public enum ActivityContextRuns {
                     i += 1
                     continue
                 }
-                if i + 1 < runs.count, sameSituation(r, runs[i + 1]) {
+                if i + 1 < runs.count, sameSituation(r, runs[i + 1]) || leadsInto(r, runs[i + 1]) {
                     r = merged(r, runs[i + 1])
+                    out.append(r); firstRaw.append(i)
                     i += 2
-                    out.append(r)
                     continue
                 }
             }
-            out.append(r)
+            out.append(r); firstRaw.append(i)
             i += 1
         }
-        return out
+        return (out, firstRaw)
     }
 
-    /// Two adjacent runs as one, probabilities averaged by the number of states each covers.
+    /// Two adjacent runs as one, probabilities averaged by the number of states each covers. The label is the
+    /// one that covers more states (the first on a tie).
     static func merged(_ first: ActivityContextRun, _ second: ActivityContextRun) -> ActivityContextRun {
         var last = first
         let a = Double(first.count), b = Double(second.count), n = a + b
+        if second.count > first.count { last.displayContext = second.displayContext }
         func mix<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ x: HeadProbabilities<C>, _ y: HeadProbabilities<C>) -> HeadProbabilities<C>
             where C.RawValue == String {
             var m: [C: Double] = [:]
@@ -717,51 +914,42 @@ public enum ActivityContextRuns {
         return out
     }
 
-    /// `new` after `old`, folding the last old run into the first new one when they describe the same
-    /// situation without a gap, so repeatedly extending a day does not leave a seam at every extension.
-    public static func append(_ old: [ActivityContextRun], _ new: [ActivityContextRun]) -> [ActivityContextRun] {
-        guard let last = old.last, let first = new.first else { return old + new }
-        guard first.start - last.end <= 5, last.displayContext == first.displayContext,
-              last.wear == first.wear, last.sleep == first.sleep,
-              distance(last.posture, first.posture) <= headTolerance,
-              distance(last.locomotion, first.locomotion) <= headTolerance else { return old + new }
-        var out = Array(old.dropLast())
-        out.append(merged(last, first))
-        out.append(contentsOf: new.dropFirst())
-        return out
-    }
-
-    static func distance<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ x: HeadProbabilities<C>, _ y: HeadProbabilities<C>) -> Double
-        where C.RawValue == String {
-        C.allCases.reduce(0) { $0 + abs(x[$1] - y[$1]) }
-    }
-
-    private struct Accumulator {
-        var first: ActivityContextState
+    /// The running sums of one raw run. Codable, so a pass can stop with a run still open and continue it
+    /// exactly (`ActivityContextRunsTail`).
+    struct Accumulator: Codable, Equatable, Sendable {
+        var startTs: Int
+        var wear: WearContextState
+        var sleep: SleepContextState
+        var inBed: Bool
+        /// `ActivityClassifier.runKey` of the first state: what every state of the run is.
+        var key: String
         var lastTs: Int
+        /// States per display label ("" = none), and the order labels first appeared in (ties go to the earliest).
+        var labelCounts: [String: Int] = [:]
+        var labelOrder: [String] = []
         var count = 0
-        var posture: [PostureClass: Double] = [:]
-        var locomotion: [LocomotionClass: Double] = [:]
-        var arm: [ArmBehaviorClass: Double] = [:]
+        var posture: [String: Double] = [:]
+        var locomotion: [String: Double] = [:]
+        var arm: [String: Double] = [:]
         var intensitySum = 0.0, intensityN = 0
         var confidenceSum = 0.0, uncertaintySum = 0.0
         var gait: GaitTotals?
         var experts: [String] = []
         var gaitSum = 0.0, gaitN = 0, cadenceSum = 0.0, cadenceN = 0
 
-        init(first: ActivityContextState, gait: GaitTotals? = nil) {
-            self.first = first; self.lastTs = first.ts
+        init(first: ActivityContextState, key: String, gait: GaitTotals? = nil) {
+            startTs = first.ts; wear = first.wear.state; sleep = first.sleep.state; inBed = first.sleep.inBed
+            self.key = key; self.lastTs = first.ts
             add(first, gait: gait)
         }
 
-        func accepts(_ s: ActivityContextState, maxGap: Int) -> Bool {
-            guard s.ts - lastTs <= maxGap, s.displayContext == first.displayContext,
-                  s.wear.state == first.wear.state, s.sleep.state == first.sleep.state,
-                  s.sleep.inBed == first.sleep.inBed else { return false }
+        func accepts(_ s: ActivityContextState, key: String, maxGap: Int) -> Bool {
+            guard s.ts - lastTs <= maxGap, key == self.key,
+                  s.wear.state == wear, s.sleep.state == sleep, s.sleep.inBed == inBed else { return false }
             let n = Double(count)
-            func far<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ h: HeadProbabilities<C>, _ sums: [C: Double]) -> Bool
+            func far<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ h: HeadProbabilities<C>, _ sums: [String: Double]) -> Bool
                 where C.RawValue == String {
-                C.allCases.reduce(0) { $0 + abs(h[$1] - (sums[$1] ?? 0) / n) } > ActivityContextRuns.headTolerance
+                C.allCases.reduce(0) { $0 + abs(h[$1] - (sums[$1.rawValue] ?? 0) / n) } > ActivityContextRuns.headTolerance
             }
             return !(far(s.posture, posture) || far(s.locomotion, locomotion))
         }
@@ -772,9 +960,12 @@ public enum ActivityContextRuns {
             }
             count += 1
             lastTs = s.ts
-            for c in PostureClass.allCases { posture[c, default: 0] += s.posture[c] }
-            for c in LocomotionClass.allCases { locomotion[c, default: 0] += s.locomotion[c] }
-            for c in ArmBehaviorClass.allCases { arm[c, default: 0] += s.armBehavior[c] }
+            let label = s.displayContext ?? ""
+            if labelCounts[label] == nil { labelOrder.append(label) }
+            labelCounts[label, default: 0] += 1
+            for c in PostureClass.allCases { posture[c.rawValue, default: 0] += s.posture[c] }
+            for c in LocomotionClass.allCases { locomotion[c.rawValue, default: 0] += s.locomotion[c] }
+            for c in ArmBehaviorClass.allCases { arm[c.rawValue, default: 0] += s.armBehavior[c] }
             if let i = s.intensity { intensitySum += i; intensityN += 1 }
             confidenceSum += s.overallConfidence
             uncertaintySum += s.overallUncertainty
@@ -786,27 +977,53 @@ public enum ActivityContextRuns {
             }
         }
 
+        /// The wording most of the run's states carried (nil = "Unclear").
+        var label: String? {
+            var best: String?, bestN = 0
+            for l in labelOrder where labelCounts[l]! > bestN { best = l; bestN = labelCounts[l]! }
+            return best.flatMap { $0.isEmpty ? nil : $0 }
+        }
+
         func run(intervalS: Int) -> ActivityContextRun {
             let n = Double(count)
             // Mean over the stretch, thin classes dropped and the rest renormalized: a run is a summary, and
             // a long tail of 1–2 % entries only costs bytes.
-            func head<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ sums: [C: Double], floor: Double) -> HeadProbabilities<C>
+            func head<C: RawRepresentable & Hashable & CaseIterable & Sendable>(_ sums: [String: Double], floor: Double) -> HeadProbabilities<C>
                 where C.RawValue == String {
-                HeadProbabilities(sums.mapValues { $0 / n }.filter { $0.value >= floor }).normalized()
+                var m: [C: Double] = [:]
+                for c in C.allCases { if let v = sums[c.rawValue], v / n >= floor { m[c] = v / n } }
+                return HeadProbabilities(m).normalized()
             }
             return ActivityContextRun(
-                start: first.ts, end: lastTs + max(1, intervalS),
+                start: startTs, end: lastTs + max(1, intervalS),
                 posture: head(posture, floor: 0.02),
                 locomotion: head(locomotion, floor: 0.02),
                 armBehavior: head(arm, floor: 0.04),
                 intensity: intensityN > 0 ? intensitySum / Double(intensityN) : nil,
                 overallConfidence: confidenceSum / n, overallUncertainty: uncertaintySum / n,
-                displayContext: first.displayContext, sleep: first.sleep.state, inBed: first.sleep.inBed,
-                wear: first.wear.state, count: count, gait: gait.flatMap { $0.isEmpty ? nil : $0.summary },
+                displayContext: label, sleep: sleep, inBed: inBed,
+                wear: wear, count: count, gait: gait.flatMap { $0.isEmpty ? nil : $0.summary },
                 experts: experts,
                 gaitProbability: gaitN > 0 ? gaitSum / Double(gaitN) : nil, gaitStates: gaitN,
                 gaitCadenceSpm: cadenceN > 0 ? cadenceSum / Double(cadenceN) : nil)
         }
+    }
+}
+
+/// Where a coalescing pass stopped, so the next one continues it exactly (D2-09): which of the document's runs
+/// are settled, the unaligned end of the last settled one, the raw (unfolded) runs behind the runs still
+/// revisable, the raw run still accumulating, and the gait stretch so far. Opaque to readers. A document written
+/// before it existed has none and is decoded again from the start once.
+public struct ActivityContextRunsTail: Codable, Equatable, Sendable {
+    var finalRuns: Int
+    var finalEnd: Int?
+    var raw: [ActivityContextRuns.Accumulator]
+    var open: ActivityContextRuns.Accumulator?
+    var previousGait: GaitTotals?
+
+    enum CodingKeys: String, CodingKey {
+        case finalRuns = "final_runs", finalEnd = "final_end", raw, open
+        case previousGait = "previous_gait"
     }
 }
 
@@ -879,6 +1096,9 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
     public var summary: ActivityContextDaySummary
     /// Decoder state after the last observation (restart / continuation). Opaque to readers.
     public var snapshot: ActivityDecoderSnapshot?
+    /// Where coalescing the states into `runs` stopped, so a continuation stores exactly the runs a decode from
+    /// scratch would (D2-09). Opaque to readers; nil on documents written before it existed (and without a snapshot).
+    public var runsTail: ActivityContextRunsTail?
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion = "schema_version", versions
@@ -886,12 +1106,15 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
         case generatedAt = "generated_at", dataThrough = "data_through", observedSeconds = "observed_s"
         case sleepKnownOutsideSessions = "sleep_known_outside", contextFingerprint = "context_fp"
         case runs, events, latest, summary, snapshot
+        case runsTail = "runs_tail"
     }
 
     public init(track: ActivityContextTrack, input: ActivityContextTrackInput, generatedAt: Int,
                 config: ActivityDecoderConfig = ActivityDecoderConfig(), includeSnapshot: Bool = true) {
         let interval = max(1, config.publishIntervalS)
-        let runs = ActivityContextRuns.coalesce(track.states, intervalS: interval)
+        let coalesced = ActivityContextRuns.coalesce(track.states, intervalS: interval, events: track.events,
+                                                      resuming: nil, final: [], offWrist: input.offWrist)
+        let runs = coalesced.runs
         self.schemaVersion = ActivityContextVersions.schema
         self.versions = track.snapshot.versions
         self.dayStart = input.dayStart; self.dayEnd = input.dayEnd
@@ -907,6 +1130,7 @@ public struct ActivityContextDayDocument: Codable, Equatable, Sendable {
         self.latest = track.states.last
         self.summary = ActivityContextDaySummary(runs: runs)
         self.snapshot = includeSnapshot ? track.snapshot : nil
+        self.runsTail = includeSnapshot ? coalesced.tail : nil
     }
 
     /// True when this document was written by the current ontology / decoder / feature schema, so it can
@@ -1126,6 +1350,8 @@ public enum ActivityContextDayBuilder {
         guard cached.dayStart == input.dayStart else { return fresh("day_changed") }
         guard cached.publishIntervalS == max(1, config.publishIntervalS) else { return fresh("config_changed") }
         guard let through = cached.dataThrough, let snapshot = cached.snapshot else { return fresh("no_snapshot") }
+        // Without the coalescing tail the stored runs cannot be continued exactly (a document from before it).
+        guard let runsTail = cached.runsTail, runsTail.finalRuns <= cached.runs.count else { return fresh("no_runs_tail") }
         guard cached.sleepKnownOutsideSessions == input.sleepKnownOutsideSessions else { return fresh("sleep_context_changed") }
         let covered = all.prefix { $0.ts < through }.count
         guard covered == cached.observedSeconds else { return fresh("late_data") }
@@ -1145,14 +1371,15 @@ public enum ActivityContextDayBuilder {
 
         var doc = cached
         let interval = cached.publishIntervalS
-        doc.runs = ActivityContextRuns.append(cached.runs, ActivityContextRuns.coalesce(track.states, intervalS: interval))
-        for e in track.events {
-            if let i = doc.events.lastIndex(where: { $0.kind == e.kind && $0.ts == e.ts }) {
-                doc.events[i].probability = max(doc.events[i].probability, e.probability)
-            } else {
-                doc.events.append(e)
-            }
-        }
+        doc.events = ActivityTransitionEvent.merging(cached.events, track.events)
+        // The settled runs stay; the revisable tail is coalesced again together with the new states (D2-09), so
+        // the seam folds and aligns exactly as one pass over the whole day would.
+        let coalesced = ActivityContextRuns.coalesce(track.states, intervalS: interval, events: doc.events,
+                                                      resuming: runsTail,
+                                                      final: Array(cached.runs.prefix(runsTail.finalRuns)),
+                                                      offWrist: input.offWrist)
+        doc.runs = coalesced.runs
+        doc.runsTail = coalesced.tail
         doc.latest = track.states.last ?? cached.latest
         doc.dayEnd = max(cached.dayEnd, input.dayEnd)
         doc.generatedAt = now

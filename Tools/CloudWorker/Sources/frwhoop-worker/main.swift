@@ -807,6 +807,11 @@ if activityState.read().enabled {
                     "stream_days_empty": activity.stats.streamDaysEmpty,
                     "stream_days_superseded": activity.stats.streamDaysSuperseded,
                     "stream_day_failures": activity.stats.streamDayFailures,
+                    // Version-driven re-derivation (reconcile_activity_context_versions): days re-queued, failed
+                    // calls, and whether the last call failed (its reason is on stderr, once per distinct reason).
+                    "version_rederived": activity.stats.versionRederived,
+                    "version_reconcile_failures": activity.stats.versionReconcileFailures,
+                    "version_reconcile_failing": activity.stats.lastVersionReconcileError == nil ? 0 : 1,
                 ]
                 // Only with Inertia on, so the heartbeat of a worker without it is unchanged.
                 if activity.inertia != nil {

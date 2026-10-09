@@ -13,16 +13,18 @@ import Foundation
 //
 //   • Sitting vs standing is NOT observable from a wrist. The wrist cannot see body height, so a still
 //     awake wearer stays `stationary` ("sitting or standing") until the heads lean clearly one way —
-//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged.
+//     and every committed `sitting` / `standing` is a likelihood the decoder already hedged. Since hsmm-1.8
+//     the lean is bounded by real posture evidence (a sit-down / stand-up whose direction the forearm axis
+//     shows, desk-like hands with a resting forearm, a learned head), never by how long the stillness lasted.
 //   • Cycling is only claimed when something *names* it: the motion encoder (HART) says so, or a cycling
 //     workout covers the time. Pedalling leaves almost no wrist signature and no steps, and HR alone
 //     cannot tell it from a desk under stress — so it is never inferred from HR + stillness.
 //   • Higher-intensity activity is the honest name for "vigorous effort without a gait" (strength
 //     circuits, rowing, HIIT …): sustained high heart rate *with* vigorous arm movement and no stride.
-//   • No absolute wrist-orientation cue is used for lying down: how a strap sits on a wrist differs per
-//     person, per wrist and per day, and there is no labelled data to calibrate it. Lying is therefore
-//     the detected night (asleep on its sleep epochs, in bed on its wake ones), or a recumbent reading the
-//     decoder reaches through a lying-down movement signature.
+//   • Lying down is the detected night (asleep on its sleep epochs, in bed on its wake ones), a lie-down
+//     the forearm axis shows (it ends flat or with the hand above the elbow), or — slowly, over several
+//     minutes — a forearm held flat or raised and quiet (hsmm-1.8). That held-orientation cue is deliberately
+//     weak: a forearm resting flat on a lap or desk looks the same, and how a strap sits differs per person.
 //
 // `displayContext` strings ("Desk sitting", "Brisk walking" …) stay a *view* for people; this taxonomy is
 // what code may branch on. It is derived from the heads by the same rules as the display label
@@ -38,11 +40,17 @@ public enum ActivityClassVersions {
     /// from the posture head's recumbent lean.
     /// 3: `ActivityClassification.confidence` is the chosen class's own (subclass) posterior mass, with the
     /// family mass in `familyConfidence` (I9), so stored class confidences are derived again.
-    public static let taxonomy = "act-class-3"
+    /// 4: a sitting / standing claim backed only by the wrist's own posture cues carries at most
+    /// `ActivityClassifier.wristOnlyPostureConfidenceCap` (D9-08). Class codes and the label mapping are unchanged.
+    public static let taxonomy = "act-class-4"
     /// Version of how runs become persisted intervals (merge / fold / split rules and the per-interval
     /// HR, HRV, respiration and cadence statistics). Bump when any of those rules change so stored days
     /// are derived again.
-    public static let interval = "ctx-int-1"
+    /// 2: runs split on the per-state class rather than the display label, boundaries back-dated to the flagged
+    /// event's onset, the fold never absorbs off-wrist / unknown / another context and records what it absorbed,
+    /// split parts re-derive from their own runs, and rows carry in-bed, uncertainty, experts, transition count,
+    /// gap and settling (WP2).
+    public static let interval = "ctx-int-2"
 }
 
 /// One canonical activity state per moment. Raw values are the persisted / wire codes: never rename them.
@@ -161,19 +169,19 @@ extension ActivityClass {
             evidence: "a sleep epoch of a detected night (the sleep stager's call) + stillness",
             limitation: "naps outside a detected session read as lying down; lying awake in bed is lying down, not sleeping"),
         ActivityClassCapability(activityClass: .lyingDown, basis: .sessionContext,
-            evidence: "awake inside a detected night's in-bed window, or a recumbent mode reached through a lying-down movement signature",
-            limitation: "no absolute wrist-orientation cue is used, so a daytime lie-down without a movement signature is not seen"),
+            evidence: "awake inside a detected night's in-bed window, a lie-down the forearm axis shows, or minutes of a held flat / raised quiet forearm",
+            limitation: "the held-orientation cue is weak and slow (a forearm resting flat on a lap looks the same), so a short daytime lie-down may read as stationary"),
         ActivityClassCapability(activityClass: .sitting, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans seated (reached after sitting-down movement, long quiet spells)",
+            evidence: "stationary wrist whose posture head leans seated (a sit-down whose direction the forearm shows, desk-like hands)",
             limitation: "a wrist cannot see body height: sitting vs standing is a likelihood, never a measurement"),
         ActivityClassCapability(activityClass: .sittingDesk, basis: .hedged,
             evidence: "seated lean + desk-like arm behaviour (low, steady, orientation-stable movement)",
             limitation: "typing at a standing desk looks the same; the posture lean is still only a likelihood"),
         ActivityClassCapability(activityClass: .standing, basis: .hedged,
-            evidence: "stationary wrist whose posture head leans upright (typically right after walking or standing up)",
+            evidence: "stationary wrist whose posture head leans upright (a stand-up whose direction the forearm shows, an arm left hanging)",
             limitation: "needs a committed upright lean; otherwise the state stays `stationary`"),
         ActivityClassCapability(activityClass: .stationary, basis: .hedged,
-            evidence: "awake, on the wrist, no movement",
+            evidence: "awake, still, posture not resolved (including a stationary second split between lying and sitting)",
             limitation: "deliberately unresolved between sitting and standing"),
         ActivityClassCapability(activityClass: .fidgeting, basis: .streams,
             evidence: "bursty low-amplitude movement without gait, high burst-to-mean ratio",
@@ -248,7 +256,7 @@ public struct ActivityClassification: Equatable, Sendable {
     }
 }
 
-/// Refinements below `ActivityClass`. Additive: the class codes (`act-class-3`) do not change, so a reader
+/// Refinements below `ActivityClass`. Additive: the class codes (`act-class-4`) do not change, so a reader
 /// that ignores `activity_detail` reads exactly what it read before.
 public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
     case stairs
@@ -270,6 +278,39 @@ public enum ActivityDetail: String, Codable, CaseIterable, Sendable {
 // MARK: - Classifier
 
 public enum ActivityClassifier {
+
+    /// The most confidence a sitting, standing or restless ("Sitting, restless" / "Standing, restless") claim may
+    /// carry unless a learned posture source AGREES with the posture claimed (D9-08). The wrist's own posture cues
+    /// (arm pattern, held forearm orientation, a shift's direction) all come from one IMU and are correlated, so
+    /// their posterior mass is not a calibrated probability: on the D7 replays wrist-only sitting / standing stayed
+    /// at or below 0.81 (hsmm-1.7) and 0.72 (hsmm-1.8), while "Sitting, restless" reached 0.88-0.90 because its
+    /// confidence summed the seated AND upright mass (Capture-24: 815 of 851 fidgeting states above 0.75 while
+    /// about 62 % of them were sitting); and in free living (Capture-24) the wrist's sitting / standing claims are
+    /// right far less often than their mass says. Until a fitted calibration map exists, the class confidence of
+    /// such a claim is capped here. A vehicle detail is the encoder's call (it names vehicle motion) and is not
+    /// capped.
+    public static let wristOnlyPostureConfidenceCap = 0.75
+    /// The ceiling once a learned posture source agrees with the posture claimed
+    /// (`ActivityEvidenceSummary.learnedPosture`). Softer, never lifted: HART's fine sit / stand rows separate
+    /// sitting from standing at an AUC of only ~0.68 in free living (D7; FORTH 0.74-0.81 scripted), and HART reads
+    /// the same IMU the wrist cues do, so its agreement is not independent confirmation.
+    public static let learnedPostureConfidenceCap = 0.85
+
+    /// The ceiling on a claim of `claimed` (seated or upright) given the posture the learned posture memory
+    /// leans toward: the softer learned cap only when the two agree, the wrist-only cap otherwise (no learned
+    /// source, one that is undecided, or one that leans the OTHER way).
+    public static func postureConfidenceCap(claimed: PostureClass, learnedPosture: PostureClass?) -> Double {
+        learnedPosture == claimed ? learnedPostureConfidenceCap : wristOnlyPostureConfidenceCap
+    }
+
+    /// Whether a learned source that reads posture spoke at all: HART's fine distribution or the transition expert
+    /// (`ActivityEvidenceSummary.experts`: "hart_fine", "transition"). Provenance only since hsmm-1.9: a source
+    /// that spoke is not a source that agreed (the transition expert "speaks" whenever it does not abstain, which
+    /// in steady state means "no transition"), so this no longer moves the confidence cap; agreement does
+    /// (`postureConfidenceCap(claimed:learnedPosture:)`).
+    public static func learnedPostureEvidence(experts: [String]) -> Bool {
+        experts.contains("hart_fine") || experts.contains("transition")
+    }
 
     /// The display label → class mapping. Total over `ActivityDisplay.allLabels` (a test pins it), and
     /// anything unrecognised — a future label an older reader does not know — is `unknown`, never a guess.
@@ -313,7 +354,8 @@ public enum ActivityClassifier {
                                 sleep: SleepContextState,
                                 inBed: Bool = false,
                                 wear: WearContextState,
-                                evidenceQuality: Double) -> ActivityClassification {
+                                evidenceQuality: Double,
+                                learnedPosture: PostureClass? = nil) -> ActivityClassification {
         let quality = min(1, max(0, evidenceQuality))
         if wear == .offWrist {
             return ActivityClassification(activityClass: .offWrist, confidence: 1, familyConfidence: 1,
@@ -336,6 +378,21 @@ public enum ActivityClassifier {
         // them, not the posture head's lean (which reads a still sleeper as seated; see `ActivityDisplay`).
         let lying = (sleep == .asleep || inBed) ? stationary : stationary * recumbent
 
+        // D9-08: the sitting / standing mass the evidence may claim (the wrist-only cap unless a learned posture
+        // source agrees with that posture, and then the softer learned cap).
+        let seatedCap = postureConfidenceCap(claimed: .seatedLikely, learnedPosture: learnedPosture)
+        let uprightCap = postureConfidenceCap(claimed: .uprightStationary, learnedPosture: learnedPosture)
+        let seatedStill = min(seatedCap, stationary * seated)
+        let uprightStill = min(uprightCap, stationary * upright)
+        // The vehicle mass counts toward sitting (a passenger is seated) uncapped only when the claim IS the
+        // vehicle ("In a vehicle", the encoder's call). Added to a still-posture claim ("Sitting quietly" with some
+        // vehicle mass beside it) it would carry a wrist-only seated claim past the posture cap (0.57 + 0.40 =
+        // 0.97 with no learned agreement; review r5), so there the sum is capped like the seated mass itself.
+        let vehicleClaim = label == "In a vehicle"
+        let sittingMass = vehicleClaim ? seatedStill + locomotion[.vehicleMotion]
+            : min(seatedCap, seatedStill + locomotion[.vehicleMotion])
+        let standingMass = uprightStill
+
         var candidates: [ActivityClass: Double] = [
             .running: locomotion[.running],
             .briskWalking: locomotion[.briskWalking],
@@ -343,8 +400,8 @@ public enum ActivityClassifier {
             .cycling: locomotion[.cycling],
             .vigorousActivity: other * exerciseShare,
             .lightActivity: other * (1 - exerciseShare) + stationary * transition,
-            .sitting: stationary * seated + locomotion[.vehicleMotion],
-            .standing: stationary * upright,
+            .sitting: sittingMass,
+            .standing: standingMass,
             .stationary: stationary * unresolved,
         ]
         if sleep == .asleep { candidates[.sleeping] = lying }
@@ -368,11 +425,16 @@ public enum ActivityClassifier {
         case .sleeping: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
         case .lyingDown: confidence = lying; family = confidence; sameFamily = [.sleeping, .lyingDown]
         case .sitting, .sittingDesk:
-            confidence = stationary * seated + locomotion[.vehicleMotion]
+            confidence = sittingMass
             family = confidence
             sameFamily = [.sitting, .sittingDesk]
-        case .standing: confidence = stationary * upright; family = confidence
-        case .fidgeting: confidence = stationary * (seated + upright); family = confidence
+        case .standing: confidence = standingMass; family = confidence
+        // "Sitting, restless" / "Standing, restless" name the posture the hands were restless in: the claim is
+        // that posture's mass, capped like sitting / standing. (hsmm-1.8 summed seated + upright, so a restless
+        // seated wrist carried the standing mass too and reached ~0.9 wrist-only.)
+        case .fidgeting:
+            confidence = seated >= upright ? seatedStill : uprightStill
+            family = confidence
         case .stationary: confidence = stationary * (1 - recumbent); family = confidence
         }
 
@@ -395,14 +457,57 @@ public enum ActivityClassifier {
             detail: detail?.0, detailConfidence: min(1, max(0, detail?.1 ?? 0)))
     }
 
+    /// The body state a canonical run holds (`ActivityContextRuns.coalesce`): the class with the distinctions only
+    /// the hand pattern makes folded together (desk vs quiet sitting, restless hands on a seated or upright body,
+    /// exercising vs moving, brisk vs ordinary walking). The arm head flips between those every few seconds inside
+    /// one situation, so splitting runs on them would fragment a sitting stretch; the run keeps the arm's average
+    /// and its own class says which wording won. Everything the body did differently (sitting, standing, still and
+    /// unresolved, lying, asleep, walking, running, cycling, off the wrist, no claim) is its own key.
+    public static func runKey(_ k: ActivityClassification) -> String {
+        switch k.activityClass {
+        case .sitting, .sittingDesk: return "seated"
+        case .standing: return "upright"
+        case .fidgeting:
+            switch k.posture {
+            case .seatedLikely: return "seated"
+            case .uprightStationary: return "upright"
+            default: return "stationary"
+            }
+        case .stationary: return "stationary"
+        case .walking, .briskWalking: return "walking"
+        case .vigorousActivity, .lightActivity: return "active"
+        case .lyingDown, .sleeping, .running, .cycling, .offWrist, .unknown: return k.activityClass.rawValue
+        }
+    }
+
+    /// A run keeps the union of the experts that spoke, not whether a learned source agreed with its posture
+    /// second by second, so a run's sitting / standing confidence stays at the wrist-only cap (hsmm-1.9): the
+    /// stored rows never claim more than the wrist can justify.
     public static func classify(run: ActivityContextRun) -> ActivityClassification {
         classify(posture: run.posture, locomotion: run.locomotion, armBehavior: run.armBehavior,
-                 sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence)
+                 sleep: run.sleep, inBed: run.inBed, wear: run.wear, evidenceQuality: run.overallConfidence,
+                 learnedPosture: nil)
     }
 
     public static func classify(state: ActivityContextState) -> ActivityClassification {
         classify(posture: state.posture, locomotion: state.locomotion, armBehavior: state.armBehavior,
                  sleep: state.sleep.state, inBed: state.sleep.inBed, wear: state.wear.state,
-                 evidenceQuality: state.overallConfidence)
+                 evidenceQuality: state.overallConfidence,
+                 learnedPosture: state.evidence.learnedPosture)
+    }
+
+    /// The hsmm-1.8 signature. A learned source's presence no longer lifts the cap (it is not agreement with the
+    /// posture claimed), so `learnedPostureEvidence` is ignored: this classifies as wrist-only.
+    @available(*, deprecated, message: "presence is not agreement; pass learnedPosture")
+    public static func classify(posture: HeadProbabilities<PostureClass>,
+                                locomotion: HeadProbabilities<LocomotionClass>,
+                                armBehavior: HeadProbabilities<ArmBehaviorClass>,
+                                sleep: SleepContextState,
+                                inBed: Bool = false,
+                                wear: WearContextState,
+                                evidenceQuality: Double,
+                                learnedPostureEvidence: Bool) -> ActivityClassification {
+        classify(posture: posture, locomotion: locomotion, armBehavior: armBehavior, sleep: sleep, inBed: inBed,
+                 wear: wear, evidenceQuality: evidenceQuality, learnedPosture: nil)
     }
 }

@@ -99,6 +99,8 @@ final class WatchdogService {
         if Task.isCancelled { return false }
         await rebindIfNeeded(model)
         let key = stateKey
+        // Layer 1 awake tape + IMU usual belong to one strap era (the bound strap + its serial).
+        model.baseline.bindLayer1Tapes(deviceId: key, strapSerial: CloudStrapSerialStore.shared.serial(forLocalId: key))
         // One clock for the whole tick.
         let now = Int(Date().timeIntervalSince1970)
         captureLive(model, now: now)
@@ -169,12 +171,16 @@ final class WatchdogService {
         if let data = evaluated.1 {
             UserDefaults.standard.set(data, forKey: Self.carryKey(deviceId: key))
         }
-        if case .success(let built) = window,
-           Watchdog.shouldTrainUsual(result: result, dayLog: log) {
-            model.baseline.ingestImu(samples: built.imu, nowUnix: now)
-            model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
-                                              lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
-                                              sleepIntervals: sleepIntervals)
+        if case .success(let built) = window {
+            if Watchdog.shouldTrainUsual(result: result, dayLog: log) {
+                model.baseline.ingestImu(samples: built.imu, nowUnix: now, sleepIntervals: sleepIntervals)
+                model.baseline.ingestWatchdogTape(window: built, nowUnix: now,
+                                                  lastWorkoutEndUnix: carry.lastWorkoutEndUnix,
+                                                  sleepIntervals: sleepIntervals)
+            } else {
+                // Tape and IMU usual consume the whole window; a later quiet tick must not back-fill it.
+                model.baseline.skipWatchdogTape(window: built, nowUnix: now)
+            }
         }
         model.baseline.activityContextNote = await activityContextNote(model: model, now: now)
         model.baseline.applyWatchdog(result)

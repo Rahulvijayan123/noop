@@ -74,11 +74,24 @@ extension PhysiologyContext {
                                                heartRateDependent: false, availableBy: causal ? cutoff : nil)
             let strap = MotionEvidence.strapTrack(motion: observations.motion, steps: observations.steps,
                                                   window: readWindow, config: policy.eligibility.motion)
-            let intervalInputs = input.activityIntervals.filter { !causal || $0.interval.start < cutoff }
+            // Decoder records smoothed after their day was final (D8-10) are never read here, in either mode: the
+            // posture context and the display track describe what the decoder said causally.
+            let intervalInputs = input.activityIntervals.filter {
+                !$0.isRetrospective && (!causal || $0.interval.start < cutoff)
+            }
+            // Rides (a decoder run in a vehicle): a passenger is seated, but heart rate in a moving vehicle is not
+            // seated rest, so these seconds never key a context stratum (review r5).
+            let vehicle = intervalInputs.filter { $0.locomotion == PostureEvidence.vehicleLocomotion }.map(\.interval)
             let decoder = IntervalAlgebra.resolve(IntervalAlgebra.records(fromIntervals: intervalInputs),
                                                   source: .decoderIntervals, heartRateDependent: true,
                                                   availableBy: causal ? cutoff : nil)
             if hart.spans.isEmpty && strap.spans.isEmpty { statusReasons.append(activityUnavailable) }
+            // Heart-rate free posture evidence (gravity, sorted once), the decoder's in-bed window, its transition
+            // events and the HART lane's wear-signal quality: joined to each support below.
+            let gravity = observations.motion.sorted { $0.ts < $1.ts }
+            let inBed = PostureEvidence.inBedTrack(intervalInputs, availableBy: causal ? cutoff : nil)
+            let transitions = TransitionEvents.prepare(input.activityTransitions, causalCutoff: causal ? cutoff : nil)
+            let wearSignal = WearSignal.track(epochInputs, availableBy: causal ? cutoff : nil)
 
             let timeline = SignalValidityEngine.regimeTimeline(input, config: policy.validity)
             let episodes = SleepRhythm.episodes(sessions: input.sleepSessions, priorSleep: history.value.priorSleep,
@@ -123,11 +136,27 @@ extension PhysiologyContext {
                                                            config: policy.validity)
                 let regime = SignalValidityEngine.regime(for: m, timeline: timeline, device: input.regime)
                 registry[regime.key] = regime
-                let activity = IntervalAlgebra.composition(over: m.support, track: primary, config: policy.join)
+                var activity = IntervalAlgebra.composition(over: m.support, track: primary, config: policy.join)
                 let decoderActivity = decoder.spans.isEmpty ? nil
                     : IntervalAlgebra.composition(over: m.support, track: decoder, config: policy.join)
-                let preceding = IntervalAlgebra.precedingHistory(before: m.support.start, track: primary,
-                                                                 lookbackS: policy.join.precedingLookbackS)
+                var preceding = IntervalAlgebra.precedingHistory(before: m.support.start, track: primary,
+                                                                 lookbackS: policy.join.precedingLookbackS,
+                                                                 transitionBridgeS: policy.join.transitionBridgeS)
+                TransitionEvents.annotate(&activity, &preceding, support: m.support, events: transitions,
+                                          coverage: decoder)
+                let settling = TransitionEvents.summary(
+                    transitions, over: Interval(m.support.start - max(0, policy.eligibility.posturalSettlingS),
+                                                m.support.end), coverage: decoder)
+                // A heart-rate or HRV measurement's posture stratum is gravity only: the in-bed window comes from the
+                // heart-rate confirmed sleep detector, so it would make that measurement's reference circular.
+                let recumbency = PostureEvidence.context(over: m.support, motion: gravity, inBed: inBed,
+                                                         config: policy.eligibility.posture,
+                                                         heartRateTarget: Eligibility.opticalPulseMetrics.contains(m.metric))
+                // The context stratum (seated / lying awake / standing still) from confident, heart-rate free decoder
+                // posture claims that the forearm's gravity does not contradict (D4-09).
+                let posture = PostureEvidence.withContext(recumbency, over: m.support, decoder: decoder, inBed: inBed,
+                                                          config: policy.eligibility.posture, vehicle: vehicle)
+                let wear = WearSignal.summary(over: m.support, track: wearSignal)
                 let sleepWear = SleepRhythm.sleepWear(for: m.support, episodes: episodes,
                                                       observations: observations, config: policy.sleep,
                                                       excludingSplitGaps: m.method.aggregation == .session)
@@ -145,7 +174,8 @@ extension PhysiologyContext {
                 let verdicts = Eligibility.comparisons(for: m.metric, method: m.method).map { kind in
                     Eligibility.evaluate(kind, metric: m.metric, support: m.support, validity: validity,
                                          activity: activity, preceding: preceding, sleepWear: sleepWear,
-                                         exertion: exertion, recentBouts: recent, config: policy.eligibility)
+                                         exertion: exertion, recentBouts: recent, config: policy.eligibility,
+                                         settlingTransitions: settling, wearSignal: wear)
                 }
                 envelopes.append(MeasurementEnvelope(
                     id: MeasurementEnvelope.makeId(method: m.method, support: m.support), metric: m.metric,
@@ -154,7 +184,8 @@ extension PhysiologyContext {
                     localTime: localTime(at: m.support.start, timezoneId: identity.timezoneId),
                     validity: validity, regimeKey: regime.key, activity: activity,
                     decoderActivity: decoderActivity, preceding: preceding, sleepWear: sleepWear, history: history,
-                    eligibility: verdicts, comparisons: [], finality: .provisional))
+                    eligibility: verdicts, comparisons: [], finality: .provisional, posture: posture,
+                    wearSignal: wear))
             }
 
             let finality = documentFinality(input, policy: policy)
@@ -186,12 +217,16 @@ extension PhysiologyContext {
                                               units: "s", supportCount: 1, supportUnit: "day",
                                               supportS: today.observedS, mode: mode, finality: finality))
             }
+            if let quality = opticalValidShare(envelopes, identity: identity, mode: mode, finality: finality) {
+                dailyValues.append(quality)
+            }
             dailyValues.sort { ($0.seriesKey, $0.regimeKey) < ($1.seriesKey, $1.regimeKey) }
 
             let fingerprint = policy.fingerprint
-            let compared = ContextReferences.compare(dailyValues, history: history.value.dailyValues,
-                                                     frozen: history.value.frozenReferences, day: identity.day,
-                                                     policyFingerprint: fingerprint, config: policy.reference)
+            let compared = ContextReferences.compare(
+                dailyValues, history: history.value.dailyValues, frozen: history.value.frozenReferences,
+                day: identity.day, policyFingerprint: fingerprint, config: policy.reference,
+                lineage: .init(device: input.regime, predecessors: history.value.predecessors))
             attach(compared.comparisons, to: &envelopes, values: dailyValues)
 
             let dependence = dependenceNotes(sleep: sleep)
@@ -286,7 +321,12 @@ extension PhysiologyContext {
             }
             out.workouts = input.workouts.filter { ok($0.interval.start, $0.availableAt) }
             out.activityEpochs = input.activityEpochs.filter { ok($0.epoch.startTs, $0.availableAt) }
-            out.activityIntervals = input.activityIntervals.filter { ok($0.interval.start, $0.availableAt) }
+            // A retrospective record was smoothed with seconds after its own (D8-10): never causal evidence,
+            // whenever it was stored.
+            out.activityIntervals = input.activityIntervals.filter {
+                !$0.isRetrospective && ok($0.interval.start, $0.availableAt)
+            }
+            out.activityTransitions = input.activityTransitions.filter { ok($0.ts, $0.availableAt) }
             out.placements = input.placements.filter { ok($0.start, $0.recordedAt) }
             out.exposures = input.exposures.filter { $0.availableAt <= c }
             let removed = (input.heartRate.count - out.heartRate.count)
@@ -298,11 +338,33 @@ extension PhysiologyContext {
                 + (input.workouts.count - out.workouts.count)
                 + (input.activityEpochs.count - out.activityEpochs.count)
                 + (input.activityIntervals.count - out.activityIntervals.count)
+                + (input.activityTransitions.count - out.activityTransitions.count)
                 + (input.placements.count - out.placements.count)
             let exposures = input.exposures.count - out.exposures.count
             return (out, [Diagnostic("causal_excluded_observations", Double(removed)),
                           Diagnostic("causal_excluded_records", Double(records)),
                           Diagnostic("causal_excluded_exposure_revisions", Double(exposures))])
+        }
+
+        /// Minimum optical windows behind a day's signal-quality value (one hour of 5-minute windows).
+        static let opticalQualityMinWindows = 12
+
+        /// The day's optical signal quality (`coverage.optical_valid_share`): the share of its 5-minute heart-rate
+        /// and HRV windows whose validity is `valid`. Bookkeeping, never compared (`coverage.`); it lets a
+        /// predecessor regime be refused when its signal quality differs materially (D4-09).
+        static func opticalValidShare(_ envelopes: [MeasurementEnvelope], identity: DayIdentity, mode: ProcessingMode,
+                                      finality: Finality) -> DailyValue? {
+            var n = 0, valid = 0
+            for e in envelopes where !e.method.id.hasPrefix("snapshot.") && e.method.windowS == 300
+                && (e.metric == .heartRate || e.metric == .hrvRmssd) && identity.dayWindow.contains(e.support.start) {
+                n += 1
+                if e.validity.state == .valid { valid += 1 }
+            }
+            guard n >= opticalQualityMinWindows else { return nil }
+            let share = (Double(valid) / Double(n) * 10_000).rounded() / 10_000
+            return DailyValue(day: identity.day, seriesKey: ContextReferences.opticalValidShareSeries,
+                              regimeKey: "coverage", metric: nil, value: share, units: "share", supportCount: n,
+                              supportUnit: "window", supportS: n * 300, mode: mode, finality: finality)
         }
 
         /// Drop any history element from the day itself or later (it could not be prior history).
@@ -320,9 +382,18 @@ extension PhysiologyContext {
                 ? h.frozenReferences
                 : h.frozenReferences.filter { $0.toDay < day && $0.createdForDay < day }
             let sleep = h.priorSleep.filter { $0.interval.end <= dayStart || ($0.sourceDay.map { $0 < day } ?? false) }
+            // A predecessor's values are history too: only strictly earlier days, same mode.
+            var droppedPredecessor = 0
+            let predecessors = h.predecessors.map { p -> PredecessorRegimeHistory in
+                var q = p
+                q.dailyValues = p.dailyValues.filter { $0.day < day && $0.mode == mode }
+                droppedPredecessor += p.dailyValues.filter { $0.day >= day }.count
+                return q
+            }
             let dropped = (h.dailyValues.count - values.count) + (h.bouts.count - bouts.count)
-                + (h.frozenReferences.count - frozen.count) + (h.priorSleep.count - sleep.count)
-            return (HistoryInput(dailyValues: values, bouts: bouts, frozenReferences: frozen, priorSleep: sleep),
+                + (h.frozenReferences.count - frozen.count) + (h.priorSleep.count - sleep.count) + droppedPredecessor
+            return (HistoryInput(dailyValues: values, bouts: bouts, frozenReferences: frozen, priorSleep: sleep,
+                                 predecessors: predecessors),
                     dropped)
         }
 
@@ -491,6 +562,7 @@ extension PhysiologyContext {
                 let workouts: [WorkoutInput]
                 let activityEpochs: [ActivityEpochInput]
                 let activityIntervals: [ActivityIntervalInput]
+                let activityTransitions: [TransitionEventInput]
                 let placements: [PlacementInput]
                 let regime: DeviceRegimeInput
                 let exposures: [ExposureEventRevision]
@@ -500,7 +572,7 @@ extension PhysiologyContext {
             let records = Records(identity: input.identity, measurements: measurements,
                                   sleepSessions: input.sleepSessions, workouts: input.workouts,
                                   activityEpochs: input.activityEpochs, activityIntervals: input.activityIntervals,
-                                  placements: input.placements, regime: input.regime, exposures: input.exposures,
+                                  activityTransitions: input.activityTransitions, placements: input.placements, regime: input.regime, exposures: input.exposures,
                                   inputRevisions: input.inputRevisions.sorted { ($0.input, $0.revision) < ($1.input, $1.revision) },
                                   history: history)
             h.add("|rec")

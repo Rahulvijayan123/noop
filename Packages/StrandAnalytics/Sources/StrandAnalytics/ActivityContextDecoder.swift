@@ -81,6 +81,9 @@ struct PosturalEventTrack: Codable, Equatable {
     var kind: ActivityTransitionKind
     var ts: Int
     var probability: Double
+    /// hsmm-1.8: a published state has shown this event. Until then its kind may still follow whichever
+    /// direction comes to lead (older snapshots never have the key).
+    var shown: Bool?
 }
 
 struct DisplayState: Codable, Equatable {
@@ -118,6 +121,32 @@ struct DecoderTracking: Codable, Equatable {
     /// The in-process ElderNet window behind the last second, and its age then (for `gaitReading`).
     var lastGait: GaitExpertEvidence?
     var lastGaitAgeS: Int?
+    /// Posture-evidence memory (hsmm-1.8): per source, decaying, capped tempered log-odds in
+    /// `ActivityContextModel.PostureEvidence.values` order. nil (= none yet), so a snapshot without it still decodes.
+    var postureEvidence: [Double]?
+    /// Consecutive seconds of a pulseless, implausibly still strap (see `ActivityContextModel.implausiblyStill`).
+    var noPulseStillS: Int?
+    /// The last second inside the night's in-bed window: a burst just after it is getting up.
+    var lastInBedTs: Int?
+    /// A postural event whose excursion ended before any published state showed it: shown next.
+    var showNext: ActivityTransitionEvent?
+    /// The second the current excursion of the transition modes' summed mass (>= `onsetMass`), of the moving mass
+    /// and of the running mass (>= `onsetMovingMass`) began: an event's `onsetTs`. nil outside one (and in older
+    /// snapshots, whose events then carry no onset until the next excursion).
+    var transitionRiseTs: Int?
+    var movingRiseTs: Int?
+    var runRiseTs: Int?
+    /// The last second the running mass stood at half (a run stop's onset; `lastMovingTs` is the moving mass).
+    /// nil in older snapshots, whose next run stop then carries no onset.
+    var lastRunningTs: Int?
+    /// Whether the learned transition expert spoke (confident, not abstained) during the open postural
+    /// excursion: the event's `source`.
+    var expertInExcursion: Bool?
+    /// Forearm sign calibration (hsmm-1.8): gait seconds' decaying, clipped vote of the forearm-axis component
+    /// and its decaying weight (`ActivityContextModel.forearmSignMinGaitS`). nil until the first walk, so a
+    /// snapshot without them still decodes (and re-calibrates on the next walk).
+    var forearmSignVotes: Double?
+    var forearmSignWeight: Double?
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -132,7 +161,7 @@ private struct BodyLayout {
     let exitsUnknownSleep: [[(Int, Double)]]
     let total: Int
 
-    private static func scaled(_ exits: [[(Int, Double)]], by k: Double) -> [[(Int, Double)]] {
+    static func scaled(_ exits: [[(Int, Double)]], by k: Double) -> [[(Int, Double)]] {
         let bed = BodyMode.bedRest.rawValue, lying = BodyMode.lyingDown.rawValue
         return exits.map { row in
             let w = row.map { ($0.0, ($0.0 == bed || $0.0 == lying) ? $0.1 * k : $0.1) }
@@ -212,6 +241,15 @@ public struct ActivityContextDecoder: Sendable {
 
     /// A transition mode needs at least this much posterior mass to be flagged as an event.
     private static let posturalEventFloor = 0.20
+    /// Seconds a postural event may settle its direction before a published state shows it (hsmm-1.8).
+    static let posturalEventSettleS = 3
+
+    /// Gaps longer than this (and up to `gapResetS`) flatten the belief toward the re-acquisition prior in
+    /// proportion to their length: a posture is not carried with confidence across a 30–120 s dropout (D2-13).
+    static let gapFlattenOnsetS = 20
+    static let gapFlattenScaleS = 40.0
+    /// Seconds after the night's in-bed window ends during which a burst from sitting is getting up.
+    static let afterBedS = 120
 
     /// Fixed-share floor mixed into the belief each step: no mode can be driven to zero, and the odds
     /// between any two modes stay bounded, so a feature that repeats for minutes cannot lock one in.
@@ -299,24 +337,31 @@ public struct ActivityContextDecoder: Sendable {
         }
 
         let firstEver = lastTs == nil
+        var gapS = 0
         if let last = lastTs {
             let gap = obs.ts - last
+            if gap > ActivityContextModel.forearmSignResetGapS { resetForearmSign() }
             if gap > config.gapResetS {
                 resetBelief()
             } else if gap > 1 {
                 // Time passed with no evidence: let the belief diffuse by the elapsed seconds.
-                for _ in 1..<gap { predictBody(shift: 0); predictArm() }
+                for _ in 1..<gap { predictBody(shift: 0, ts: last); predictArm() }
+                gapS = gap
+                decayPostureEvidence(seconds: gap - 1)
             }
         }
 
         tracking.lastSleep = obs.sleep
         tracking.lastInBed = obs.inBed
         tracking.lastWear = obs.wear
+        if obs.inBed { tracking.lastInBedTs = obs.ts }
 
         if obs.wear == .offWrist {
             if tracking.offWristSinceTs == nil {
                 tracking.offWristSinceTs = obs.ts
                 resetBelief()
+                // It may go back on the other way round.
+                resetForearmSign()
             }
             lastTs = obs.ts
             return publishIfDue(obs.ts)
@@ -328,13 +373,28 @@ public struct ActivityContextDecoder: Sendable {
 
         // Without accepted Inertia evidence the hold is 0: a window on the observation is neither kept in the
         // feature window (so the snapshot is unchanged) nor scored.
-        let f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
+        var f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
                             motionHeadsHoldS: motionHeads?.holdS ?? 0, gaitQualityHoldS: gaitQuality?.holdS ?? 0)
+        if gapS > Self.gapFlattenOnsetS { flattenAfterGap(gapS) }
+        f.forearmSign = calibrateForearmSign(f)
+        // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05). Never on the staged night
+        // or in its in-bed window: a sleeper is very still, and sleep staging already says someone is there.
+        if obs.wear == .unknown, f.hr == nil, obs.sleep != .asleep, !obs.inBed, ActivityContextModel.implausiblyStill(f) {
+            tracking.noPulseStillS = (tracking.noPulseStillS ?? 0) + 1
+        } else {
+            tracking.noPulseStillS = nil
+        }
+        f.noPulseStillS = tracking.noPulseStillS ?? 0
 
-        if !firstEver { predictBody(shift: ActivityContextModel.shiftStrength(f)); predictArm() }
+        if !firstEver {
+            predictBody(shift: ActivityContextModel.shiftStrength(f), ts: obs.ts,
+                        expert: ActivityContextModel.expertTransition(f))
+            predictArm()
+        }
         let score = ActivityContextModel.score(f, temperature: config.evidenceTemperature, motionHeads: motionHeads,
                                                gaitQuality: gaitQuality, table: observationProfiles)
         applyBody(score)
+        boundPosture(score, f, sleep: obs.sleep, inBed: obs.inBed)
         applyArm(f, motionHeads: score.arm)
         smoothArmForDisplay()
         if motionHeads != nil, motionHeadsReport != nil {
@@ -371,7 +431,7 @@ public struct ActivityContextDecoder: Sendable {
         tracking.lastIntensity = f.m10
         tracking.lastGait = f.gait
         tracking.lastGaitAgeS = f.gaitAgeS
-        updateTracking(post, ts: obs.ts)
+        updateTracking(post, ts: obs.ts, expertSpoke: ActivityContextModel.expertTransition(f) != nil)
         if let gaitQuality { updateGaitStretch(post, arrived: obs.gaitQuality, held: f.gaitQuality, gait: gaitQuality) }
         lastTs = obs.ts
         return publishIfDue(obs.ts)
@@ -403,6 +463,10 @@ public struct ActivityContextDecoder: Sendable {
         tracking.running = false
         tracking.stationarySinceTs = nil
         tracking.activePostural = nil
+        tracking.transitionRiseTs = nil
+        tracking.movingRiseTs = nil
+        tracking.runRiseTs = nil
+        tracking.expertInExcursion = nil
         tracking.lastGait = nil
         tracking.lastGaitAgeS = nil
         tracking.lastWindowFill = 0
@@ -413,11 +477,225 @@ public struct ActivityContextDecoder: Sendable {
         // observation adopt its own label immediately.
         tracking.display = DisplayState()
         tracking.gaitStretch = nil
+        tracking.postureEvidence = nil
+        tracking.noPulseStillS = nil
     }
 
-    private mutating func predictBody(shift: Double) {
+    // MARK: Posture honesty (hsmm-1.8)
+
+    /// Seated-vs-upright evidence cap: an adopted personal profile that adapts a stationary mode was validated on
+    /// the wearer's own held-out runs, so it may carry more.
+    private var postureCapSU: Double {
+        let personal = config.personalProfile?.modes.keys.contains { ["bedRest", "seated", "upright"].contains($0) } ?? false
+        return personal ? ActivityContextModel.postureEvidenceCapSUPersonal : ActivityContextModel.postureEvidenceCapSU
+    }
+
+    private typealias Evidence = ActivityContextModel.PostureEvidence
+
+    /// Per-source memory caps (upper side): the population caps, except that a wearer whose adopted profile
+    /// carries their own held-orientation row for lying (fitted and validated on their labelled lie-downs) lets
+    /// the held orientation hedge further toward recumbent (`recumbentOrientationCapPersonal`).
+    var postureEvidenceCaps: [Double] {
+        var caps = Evidence.caps
+        let bed = observationProfiles[BodyMode.bedRest.rawValue]
+        if bed.orientation != nil || bed.orientationUnsigned != nil {
+            caps[Evidence.recumbentOrientationIndex] = ActivityContextModel.recumbentOrientationCapPersonal
+        }
+        return caps
+    }
+
+    /// Fold this second's gait forearm axis into the sign calibration; the calibrated sign, or nil while unknown.
+    private mutating func calibrateForearmSign(_ f: ActivityFeatures) -> Double? {
+        var votes = tracking.forearmSignVotes ?? 0, weight = tracking.forearmSignWeight ?? 0
+        if let ux = f.gaitUx {
+            let k = exp(-1 / ActivityContextModel.forearmSignTauS)
+            votes = votes * k + min(1, max(-1, ux))
+            weight = weight * k + 1
+            tracking.forearmSignVotes = votes
+            tracking.forearmSignWeight = weight
+        }
+        guard weight >= ActivityContextModel.forearmSignMinGaitS,
+              abs(votes / weight) >= ActivityContextModel.forearmSignMinMean else { return nil }
+        return votes > 0 ? 1 : -1
+    }
+
+    private mutating func resetForearmSign() {
+        tracking.forearmSignVotes = nil
+        tracking.forearmSignWeight = nil
+    }
+
+    private mutating func decayPostureEvidence(seconds: Int) {
+        guard seconds > 0, var e = tracking.postureEvidence else { return }
+        for i in e.indices { e[i] *= exp(-Double(seconds) / Evidence.taus[i]) }
+        tracking.postureEvidence = e
+    }
+
+    /// The posture the learned posture memory (`PostureEvidence.learned`) agrees with, when it leans at least
+    /// `learnedPostureAgreementLogOdds` one way (hsmm-1.9). Only learned sources feed that memory (HART's fine sit /
+    /// stand rows, Inertia's posture head, an adopted personal profile's channels): the arm pattern, the held
+    /// orientation and a shift's direction have their own sources, and the heart-rate level and the context gates
+    /// are kept out of it (`ActivityContextModel.score`).
+    var learnedPostureLean: PostureClass? {
+        guard let e = tracking.postureEvidence, e.count > Evidence.learnedIndex else { return nil }
+        let lean = e[Evidence.learnedIndex], bar = ActivityContextModel.learnedPostureAgreementLogOdds
+        if lean >= bar { return .seatedLikely }
+        if lean <= -bar { return .uprightStationary }
+        return nil
+    }
+
+    /// The recumbent memory without the held orientation (lie-down direction, the night): what may open entry.
+    private var recumbentEntryEvidence: Double {
+        guard let e = tracking.postureEvidence else { return 0 }
+        let k = Evidence.recumbentStart
+        return max(0, e[k...].reduce(0, +) - e[Evidence.recumbentOrientationIndex])
+    }
+
+    /// The memory's seated-over-upright total and recumbent total (0 without a memory).
+    private var postureEvidenceTotals: (seated: Double, recumbent: Double) {
+        guard let e = tracking.postureEvidence else { return (0, 0) }
+        let k = Evidence.recumbentStart
+        // The wrist's own upright evidence (arm pattern, held orientation, a stand-up's direction) is capped on
+        // its own: it may hedge toward standing but never commit it. Learned / personal heads may go further.
+        let wrist = e[0] + e[1] + e[2]
+        let su = max(-ActivityContextModel.postureEvidenceCapUprightWrist, wrist) + e[3], rec = e[k...].reduce(0, +)
+        let capRec = ActivityContextModel.postureEvidenceCapRecumbent
+        return (min(postureCapSU, max(-postureCapSU, su)), min(capRec, max(-capRec, rec)))
+    }
+
+    /// The posture split inside the stationary modes may lean only as far as real posture evidence supports.
+    ///
+    /// The dwell priors (seated 900 s, upright 100 s, bed rest 1800 s) are about how long a posture lasts once
+    /// it is known. On a wrist that cannot see the posture they used to decide it: quiet standing decayed into
+    /// confident sitting within two minutes, any stillness slid toward recumbent after half an hour, and the
+    /// lean tracked the time since walking identically for people sitting and standing (D7: AUC 0.52-0.6).
+    /// So each second the evidence that does tell postures apart (arm pattern, encoder, held forearm
+    /// orientation, a shift's direction, an adopted personal profile; sleep and the in-bed window for
+    /// recumbent) is folded into a decaying memory, capped because consecutive seconds are not independent,
+    /// and the belief is clamped to it: ln(seated / upright) within a small slack of the evidence, and
+    /// recumbent at most `recumbentShareFloor` × e^E of sitting + standing. The total stationary mass, and so
+    /// every moving / stationary claim, is untouched; with no posture evidence the heads stay hedged and the
+    /// published class is `stationary`.
+    private mutating func boundPosture(_ score: ActivityContextModel.Score, _ f: ActivityFeatures,
+                                       sleep: SleepEvidence, inBed: Bool) {
+        var memory = tracking.postureEvidence ?? [Double](repeating: 0, count: Evidence.caps.count)
+        let caps = postureEvidenceCaps
+        let fresh = score.postureEvidence.values
+        // Moving about makes what was known about the posture before obsolete: the memory fades fast while the
+        // body is in a moving mode (about 3 s at full belief), so a walk resets it.
+        let post = bodyPosterior()
+        var moving = 0.0
+        for m in 0..<BodyMode.count where !(BodyMode(rawValue: m)!.isStationary || BodyMode(rawValue: m)!.isTransition
+                                            || m == BodyMode.unknown.rawValue) { moving += post[m] }
+        // So does a movement burst the shift heuristic did not resolve (a transition it missed must not leave the
+        // old posture asserted for minutes): a burst well above the wearer's own background (desk work and
+        // fidgets are not bursts here) that left the wrist somewhere else over the last 30 s.
+        let burstBar = max(0.5, (f.mMed30 ?? 0) + 0.2)
+        let burst = acSigmoid(((f.mBurst10 ?? 0) - burstBar) / 0.05) * (1 - min(1, f.gaitPresence ?? 0))
+            * acSigmoid(((f.net30 ?? 0) - 25) / 5)
+        let shift = ActivityContextModel.shiftStrength(f)
+        // A posture shift whose direction the forearm axis cannot tell (a roll about the forearm) may have
+        // changed the posture either way: what was known before it fades too, and the transition modes decide.
+        var clarity = 0.0
+        if let a = ActivityContextModel.forearmAxis(f.shiftFromUx, sign: f.forearmSign),
+           let b = ActivityContextModel.forearmAxis(f.shiftToUx, sign: f.forearmSign) {
+            let v = ActivityContextModel.shiftDirection(from: a, to: b)
+            clarity = min(1, abs(log(v[BodyMode.standToSit.rawValue] / v[BodyMode.sitToStand.rawValue])) / log(4))
+        }
+        let movingFade = 1 - 0.3 * min(1, max(0, moving))
+        let burstFade = 1 - 0.15 * burst * (1 - shift)
+        let direction = 2  // index of the direction source in `Evidence.values`
+        for i in memory.indices {
+            // Bursts fade the sitting / standing memory only: turning over or getting out of bed is the
+            // transition modes' call, and the night stays recumbent evidence until then. A shift makes what the
+            // arm, the orientation and the learned heads said before it stale whichever way it went; the
+            // direction memory itself fades only when the shift's own direction is unclear. Getting up ends
+            // the recumbent evidence (the night included) as fast as it is believed.
+            let shiftFade = i == direction ? 1 - 0.25 * shift * (1 - clarity) : 1 - 0.25 * shift
+            let fade = i < Evidence.recumbentStart ? movingFade * burstFade * shiftFade
+                : movingFade * (1 - 0.5 * min(1, post[BodyMode.gettingUp.rawValue] / 0.3))
+            memory[i] = min(caps[i], max(-Evidence.lowerCaps[i], memory[i] * exp(-1 / Evidence.taus[i]) * fade + fresh[i]))
+        }
+        // The staged night (asleep, or awake inside its in-bed window) is recumbent evidence in full.
+        let night = sleep == .asleep || inBed
+        if night { memory[Evidence.night] = Evidence.caps[Evidence.night] }
+        tracking.postureEvidence = memory
+        let (eSU, eRec) = postureEvidenceTotals
+
+        func mass(_ m: BodyMode) -> Double {
+            let start = bodyLayout.start[m.rawValue]
+            var t = 0.0
+            for j in 0..<bodyLayout.phases[m.rawValue] { t += body[start + j] }
+            return t
+        }
+        func scale(_ m: BodyMode, _ k: Double) {
+            let start = bodyLayout.start[m.rawValue]
+            for j in 0..<bodyLayout.phases[m.rawValue] { body[start + j] *= k }
+        }
+        var seated = mass(.seated), upright = mass(.upright)
+        let slack = ActivityContextModel.postureNeutralSlack, c0 = ActivityContextModel.postureNeutralLean
+        if seated > 0, upright > 0 {
+            let lean = log(seated / upright) - c0
+            // The split follows the evidence: never past it (or past the slack when there is none), and the
+            // dwell prior may pull it back toward neutral only by the slack.
+            let hi = eSU >= 0 ? max(eSU, slack) : eSU + slack
+            let lo = eSU <= 0 ? min(eSU, -slack) : eSU - slack
+            let target = min(hi, max(lo, lean))
+            if target != lean {
+                let total = seated + upright
+                let s = total / (1 + exp(-(target + c0)))
+                scale(.seated, s / seated); scale(.upright, (total - s) / upright)
+                seated = s; upright = total - s
+            }
+        }
+        guard !night else { return }
+        let bed = mass(.bedRest), su = seated + upright
+        let ratio = ActivityContextModel.recumbentShareFloor * exp(max(0, eRec))
+        let ceiling = (bed + su) * ratio / (1 + ratio)
+        if bed > ceiling {
+            let excess = bed - ceiling
+            scale(.bedRest, ceiling / bed)
+            // The excess goes to sitting / standing in their current split (an even posture head when there
+            // is none yet, e.g. straight out of a night spent in bed rest).
+            let share = su > 1e-9 ? seated / su : 1 / (1 + exp(-ActivityContextModel.postureNeutralLean))
+            func add(_ m: BodyMode, _ amount: Double) {
+                let start = bodyLayout.start[m.rawValue]
+                let k = bodyLayout.phases[m.rawValue]
+                var t = 0.0
+                for j in 0..<k { t += body[start + j] }
+                if t > 1e-12 { for j in 0..<k { body[start + j] += amount * body[start + j] / t } }
+                else { body[start] += amount }
+            }
+            add(.seated, excess * share); add(.upright, excess * (1 - share))
+        }
+    }
+
+    /// Mix the belief toward the re-acquisition prior after a data gap, by its length.
+    private mutating func flattenAfterGap(_ gap: Int) {
+        let alpha = 1 - exp(-Double(gap - Self.gapFlattenOnsetS) / Self.gapFlattenScaleS)
+        let prior = bodyLayout.expand(ActivityContextModel.prior)
+        for i in body.indices { body[i] = (1 - alpha) * body[i] + alpha * prior[i] }
+        if let e = tracking.postureEvidence { tracking.postureEvidence = e.map { $0 * (1 - alpha) } }
+    }
+
+    private mutating func predictBody(shift: Double, ts: Int,
+                                      expert: (q: Double, p: [BodyMode: Double])? = nil) {
         var next = [Double](repeating: 0, count: bodyLayout.total)
-        let exitTable = bodyLayout.exits(for: tracking.lastSleep)
+        // Entry into recumbent modes: free in the night's in-bed window (lying awake in bed is still lying,
+        // D1-04), otherwise damped by the sleep evidence and opened again by a lie-down whose direction the
+        // forearm showed, or the night just ended (a daytime lie-down, D2-06). Never by the held orientation
+        // alone: a forearm flat on the lap or a phone held up reads the same while seated, so on its own it
+        // may only hedge the posture toward unresolved (its source cap), not open the way to lying.
+        let support = max(0, min(1, recumbentEntryEvidence / ActivityContextModel.postureEvidenceCapRecumbent))
+        let exitTable: [[(Int, Double)]]
+        if tracking.lastInBed {
+            exitTable = bodyLayout.exits(for: .asleep)
+        } else if support > 0 {
+            let base = ActivityContextModel.bedEntryScale(tracking.lastSleep)
+            let k = base + (1 - base) * 0.8 * support
+            exitTable = k >= 1 ? bodyLayout.exits(for: .asleep) : BodyLayout.scaled(bodyLayout.exits(for: .asleep), by: k)
+        } else {
+            exitTable = bodyLayout.exits(for: tracking.lastSleep)
+        }
         for m in 0..<BodyMode.count {
             let start = bodyLayout.start[m], k = bodyLayout.phases[m], p = bodyLayout.advance[m]
             for j in 0..<k {
@@ -448,13 +726,39 @@ public struct ActivityContextDecoder: Sendable {
                 }
                 next[bodyLayout.start[to.rawValue]] += moved
             }
-            divert(.seated, .sitToStand, 1.0)
+            // Just out of the night's bed, a burst from sitting is getting up, not standing up from a chair.
+            let afterBed = !tracking.lastInBed && (tracking.lastInBedTs.map { ts - $0 <= Self.afterBedS } ?? false)
+            divert(.seated, afterBed ? .gettingUp : .sitToStand, 1.0)
             divert(.upright, .standToSit, 1.0)
-            divert(.seated, .lyingDown, 0.25)
-            divert(.upright, .lyingDown, 0.15)
+            // hsmm-1.8: the direction a burst went is decided by its evidence (the forearm axis at both ends),
+            // not only by where the belief's mass was: a share also goes the "other" way, so a stand-up the
+            // decoder missed does not make the next sit-down invisible (D7: direction right 15 of 35).
+            divert(.seated, .standToSit, 0.3)
+            divert(.upright, .sitToStand, 0.3)
+            // hsmm-1.8: lying down has its own direction evidence now (it ends with the forearm flat or the hand
+            // raised), so its share of the burst no longer has to be held far below sitting down.
+            divert(.seated, .lyingDown, 0.4)
+            divert(.upright, .lyingDown, 0.3)
             // Turning over in bed looks the same from the wrist, so while the band says asleep a burst is
             // much more likely a roll than a get-up.
             divert(.bedRest, .gettingUp, tracking.lastSleep == .asleep ? 0.35 : 1.0)
+        }
+        // A confident, non-abstained transition-expert window raises the hazard too, and its direction comes
+        // from its own class probabilities, not from where the belief's mass is (D2V-01, D2-12): the
+        // expert can see a return or a bob-up the gravity heuristic cannot.
+        if let expert {
+            let h = min(0.5, ActivityContextModel.shiftHazard * expert.q)
+            let kinds: [BodyMode] = [.sitToStand, .standToSit, .lyingDown, .gettingUp]
+            for from in [BodyMode.seated, .upright, .bedRest] {
+                let s0 = bodyLayout.start[from.rawValue]
+                var pool = 0.0
+                for j in 0..<bodyLayout.phases[from.rawValue] {
+                    let d = next[s0 + j] * h
+                    next[s0 + j] -= d
+                    pool += d
+                }
+                for k in kinds { next[bodyLayout.start[k.rawValue]] += pool * (expert.p[k] ?? 0) }
+            }
         }
         body = next
     }
@@ -586,62 +890,151 @@ public struct ActivityContextDecoder: Sendable {
 
     // MARK: Tracking (events, history)
 
-    private mutating func updateTracking(_ post: [Double], ts: Int) {
+    /// Mass at which an excursion toward an event is taken to have begun (`ActivityTransitionEvent.onsetTs`).
+    static let onsetMass = 0.05
+    static let onsetMovingMass = 0.2
+
+    /// The other direction of a change of position: standing up is undone by sitting down, lying down by
+    /// getting up.
+    static func inverse(_ kind: ActivityTransitionKind) -> ActivityTransitionKind? {
+        switch kind {
+        case .sitToStandLike: return .standToSitLike
+        case .standToSitLike: return .sitToStandLike
+        case .lyingDownLike: return .gettingUpLike
+        case .gettingUpLike: return .lyingDownLike
+        case .walkStart, .walkStop, .runStart, .runStop: return nil
+        }
+    }
+
+    /// Share of its peak the open event's own direction must have fallen to before the inverse direction may
+    /// open a second event inside the same excursion (D2-12): the first change has passed, this is a new one.
+    static let inverseAfterPeakShare = 0.6
+
+    private mutating func updateTracking(_ post: [Double], ts: Int, expertSpoke: Bool = false) {
         let pMoving = post[BodyMode.walk.rawValue] + post[BodyMode.briskWalk.rawValue]
             + post[BodyMode.run.rawValue] + post[BodyMode.stairs.rawValue]
         let pRun = post[BodyMode.run.rawValue]
         let pStationary = post[BodyMode.bedRest.rawValue] + post[BodyMode.seated.rawValue] + post[BodyMode.upright.rawValue]
 
-        if pMoving >= 0.5 { tracking.lastMovingTs = ts }
+        // Where each excursion began (the events' onset), causal: the first second of the current rise.
+        func rise(_ since: Int?, _ mass: Double, _ floor: Double) -> Int? { mass >= floor ? (since ?? ts) : nil }
+        func onset(_ since: Int?) -> Int? {
+            since.map { max($0, ts - ActivityTransitionEvent.maxOnsetLeadS) }
+        }
+        tracking.movingRiseTs = rise(tracking.movingRiseTs, pMoving, Self.onsetMovingMass)
+        tracking.runRiseTs = rise(tracking.runRiseTs, pRun, Self.onsetMovingMass)
+        let decoderSource = ActivityTransitionEvent.sourceDecoder
 
         if !tracking.moving, pMoving >= 0.6 {
             tracking.moving = true
-            record(.walkStart, p: pMoving, ts: ts)
+            record(.walkStart, p: pMoving, ts: ts, onset: onset(tracking.movingRiseTs), source: decoderSource)
         } else if tracking.moving, pMoving <= 0.3 {
             tracking.moving = false
-            record(.walkStop, p: 1 - pMoving, ts: ts)
+            // The stop began the second after the moving mass last stood at half.
+            let stop = tracking.lastMovingTs.map { min(ts, $0 + 1) }
+            record(.walkStop, p: 1 - pMoving, ts: ts, onset: onset(stop), source: decoderSource)
         }
         if !tracking.running, pRun >= 0.55 {
             tracking.running = true
-            record(.runStart, p: pRun, ts: ts)
+            record(.runStart, p: pRun, ts: ts, onset: onset(tracking.runRiseTs), source: decoderSource)
         } else if tracking.running, pRun <= 0.25 {
             tracking.running = false
-            record(.runStop, p: 1 - pRun, ts: ts)
+            // On the running mass, not the moving one: a run that slows into a walk keeps the moving mass high.
+            let stop = tracking.lastRunningTs.map { min(ts, $0 + 1) }
+            record(.runStop, p: 1 - pRun, ts: ts, onset: onset(stop), source: decoderSource)
         }
+        if pMoving >= 0.5 { tracking.lastMovingTs = ts }
+        if pRun >= 0.5 { tracking.lastRunningTs = ts }
 
         // Stationary run length.
         if pStationary >= 0.6 { if tracking.stationarySinceTs == nil { tracking.stationarySinceTs = ts } }
         else if pStationary <= 0.4 { tracking.stationarySinceTs = nil }
 
-        // Posture-change events: one event per excursion of a transition mode above 0.30.
+        // Posture-change events: one event per excursion of the transition modes above the floor.
         let kinds: [(BodyMode, ActivityTransitionKind)] = [
             (.sitToStand, .sitToStandLike), (.standToSit, .standToSitLike),
             (.lyingDown, .lyingDownLike), (.gettingUp, .gettingUpLike),
         ]
-        if var active = tracking.activePostural {
-            let mass = post[kinds.first { $0.1 == active.kind }!.0.rawValue]
+        func massOf(_ kind: ActivityTransitionKind) -> Double { post[kinds.first { $0.1 == kind }!.0.rawValue] }
+        let transitionTotal = kinds.reduce(0.0) { $0 + post[$1.0.rawValue] }
+        tracking.transitionRiseTs = rise(tracking.transitionRiseTs, transitionTotal, Self.onsetMass)
+        if tracking.transitionRiseTs == nil { tracking.expertInExcursion = nil }
+        else if expertSpoke { tracking.expertInExcursion = true }
+        let posturalSource = tracking.expertInExcursion == true
+            ? ActivityTransitionEvent.sourceTransitionExpert : decoderSource
+
+        // D2-12: once the open event has settled its direction and its own mass has fallen well below its peak, the
+        // inverse direction rising above the floor is a second change (stand up, then sit straight back down), not
+        // a wobble of the first: close the first and open the second rather than relabel or swallow it.
+        if let active = tracking.activePostural, ts - active.ts >= Self.posturalEventSettleS,
+           let back = Self.inverse(active.kind), massOf(back) >= Self.posturalEventFloor,
+           massOf(back) > massOf(active.kind),
+           massOf(active.kind) <= Self.inverseAfterPeakShare * active.probability {
+            if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
+                tracking.showNext = tracking.events[i]
+            }
+            tracking.activePostural = PosturalEventTrack(kind: back, ts: ts, probability: massOf(back))
+            record(back, p: massOf(back), ts: ts, onset: ts, source: expertSpoke
+                   ? ActivityTransitionEvent.sourceTransitionExpert : decoderSource)
+            tracking.transitionRiseTs = ts
+            tracking.expertInExcursion = expertSpoke ? true : nil
+        } else if var active = tracking.activePostural {
+            let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts })
+            var mass = massOf(active.kind)
+            // Until a published state has shown it, the event follows the direction that comes to lead
+            // (hsmm-1.8: a burst is no longer assigned a direction up front, so it may resolve a second or two
+            // after the excursion began). Once shown it keeps its kind, so no reader ever sees two.
+            // (A kind takes over only by exceeding the current kind's PEAK, so the event names the direction
+            // whose mass rose highest, not whichever lingers last.)
+            if active.shown != true, let best = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
+               best.1 != active.kind, post[best.0.rawValue] > active.probability {
+                active.kind = best.1
+                mass = post[best.0.rawValue]
+                active.probability = mass
+                tracking.activePostural = active
+                if let i { tracking.events[i].kind = best.1; tracking.events[i].probability = mass }
+            }
             if mass > active.probability {
                 active.probability = mass
                 tracking.activePostural = active
-                if let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
-                    tracking.events[i].probability = mass
-                }
+                if let i { tracking.events[i].probability = mass }
             }
-            if mass < Self.posturalEventFloor / 2 { tracking.activePostural = nil }
+            // The expert speaking at any second of the excursion marks the event; it never un-marks it.
+            if let i, tracking.expertInExcursion == true { tracking.events[i].source = posturalSource }
+            if transitionTotal < Self.posturalEventFloor / 2 {
+                if active.shown != true, let i = tracking.events.lastIndex(where: { $0.kind == active.kind && $0.ts == active.ts }) {
+                    tracking.showNext = tracking.events[i]
+                }
+                tracking.activePostural = nil
+                // The excursion is over: a later rise is its own, with its own onset and source.
+                tracking.transitionRiseTs = nil
+                tracking.expertInExcursion = nil
+            }
         } else if let hit = kinds.max(by: { post[$0.0.rawValue] < post[$1.0.rawValue] }),
-                  post[hit.0.rawValue] >= Self.posturalEventFloor {
+                  // hsmm-1.8: the floor is on the transition modes' summed mass. A burst whose direction is
+                  // still open now spreads over the kinds, and a change of position must not vanish because no
+                  // single direction reached the floor; the event names the leading kind at its own mass.
+                  transitionTotal >= Self.posturalEventFloor {
             tracking.activePostural = PosturalEventTrack(kind: hit.1, ts: ts, probability: post[hit.0.rawValue])
-            record(hit.1, p: post[hit.0.rawValue], ts: ts)
+            record(hit.1, p: post[hit.0.rawValue], ts: ts, onset: onset(tracking.transitionRiseTs),
+                   source: posturalSource)
         }
 
         let cutoff = ts - config.historyWindowS
         tracking.events.removeAll { $0.ts < cutoff }
     }
 
-    private mutating func record(_ kind: ActivityTransitionKind, p: Double, ts: Int) {
-        tracking.events.append(ActivityTransitionEvent(kind: kind, probability: min(1, max(0, p)), ts: ts))
+    private mutating func record(_ kind: ActivityTransitionKind, p: Double, ts: Int, onset: Int? = nil,
+                                 source: String? = nil) {
+        tracking.events.append(ActivityTransitionEvent(kind: kind, probability: min(1, max(0, p)), ts: ts,
+                                                       onsetTs: onset.map { min(ts, $0) }, source: source))
         if tracking.events.count > 24 { tracking.events.removeFirst(tracking.events.count - 24) }
     }
+
+    /// Every event the decoder flagged in its history window, newest last, each at its current (highest)
+    /// probability. `ActivityContextTrackBuilder` drains this after every second, so an event reaches the
+    /// day's document whether or not a published state showed it (D2-01).
+    var recordedEvents: [ActivityTransitionEvent] { tracking.events }
 
     // MARK: Publishing
 
@@ -683,13 +1076,13 @@ public struct ActivityContextDecoder: Sendable {
         case .unknown: sleepState = .unknown
         }
         let sleep = SleepContext(state: sleepState, probability: nil, inBed: tracking.lastInBed)
-        let evidence = tracking.lastEvidence ?? ActivityEvidenceSummary(
+        var evidence = tracking.lastEvidence ?? ActivityEvidenceSummary(
             imu: false, encoder: false, dynAccel: false, gravity: false, steps: false,
             heartRate: false, sleep: false, coverage: 0)
 
         let sinceLoco = tracking.lastMovingTs.map { max(0, ts - $0) }
         let stationaryFor = tracking.stationarySinceTs.map { max(0, ts - $0) } ?? 0
-        let history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
+        var history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
                                              recentEvents: tracking.events)
 
         if tracking.offWristSinceTs != nil {
@@ -707,6 +1100,8 @@ public struct ActivityContextDecoder: Sendable {
                 history: ActivityHistorySummary(sinceLocomotionS: nil, stationaryForS: 0, recentEvents: []),
                 evidence: evidence, versions: versions)
         }
+
+        evidence.learnedPosture = learnedPostureLean
 
         let post = bodyPosterior()
         var posture: [PostureClass: Double] = [:]
@@ -753,8 +1148,34 @@ public struct ActivityContextDecoder: Sendable {
                                          confidence: confidence)
         let label = applyHysteresis(raw: raw, ts: ts)
 
-        // The event field shows only fresh events.
-        let fresh = tracking.events.last { ts - $0.ts <= config.eventHoldS && ts >= $0.ts }
+        // The event field shows only fresh events. hsmm-1.8: a postural event is held back for its first
+        // `posturalEventSettleS` seconds (its direction may still resolve), and then shown even if a later event
+        // arrived meanwhile, so the one-event-per-state field never drops a change of position.
+        let hold = config.eventHoldS
+        let isFresh = { (e: ActivityTransitionEvent) in ts - e.ts <= hold && ts >= e.ts }
+        var fresh: ActivityTransitionEvent?
+        var decided = false
+        if let next = tracking.showNext {
+            tracking.showNext = nil
+            if isFresh(next) { fresh = next; decided = true }
+        }
+        if !decided, let active = tracking.activePostural, active.shown != true {
+            let isActive = { (e: ActivityTransitionEvent) in e.kind == active.kind && e.ts == active.ts }
+            if ts - active.ts >= Self.posturalEventSettleS, let event = tracking.events.last(where: isActive) {
+                fresh = event
+                tracking.activePostural?.shown = true
+            } else {
+                fresh = tracking.events.last { isFresh($0) && !isActive($0) }
+            }
+            decided = true
+        }
+        if !decided { fresh = tracking.events.last(where: isFresh) }
+        // A postural event that no state has shown yet may still change its kind: it stays out of the published
+        // history too until it is shown, so no reader sees one event under two kinds.
+        if let active = tracking.activePostural, active.shown != true {
+            history = ActivityHistorySummary(sinceLocomotionS: sinceLoco, stationaryForS: stationaryFor,
+                                             recentEvents: tracking.events.filter { !($0.kind == active.kind && $0.ts == active.ts) })
+        }
 
         let wearValidity: Double
         switch tracking.lastWear {
@@ -798,16 +1219,28 @@ public struct ActivityContextDecoder: Sendable {
 
         let hold = ActivityDisplay.holdSeconds(to: raw, default: config.displayHoldS)
         if hold <= 0 { d.label = raw; clear(); return d.label }
+        // "Asleep" is the stager's call, already smoothed: once the staged sleep says awake the label follows at
+        // once rather than waiting out the 30 s refinement hold inside the lying kind (D2-17).
+        if d.label == "Asleep", tracking.lastSleep != .asleep { d.label = raw; clear(); return d.label }
 
-        let crossKind = ActivityDisplay.group(raw) != ActivityDisplay.group(d.label)
-        if crossKind, confirmedByEvent(group: ActivityDisplay.group(raw), ts: ts) {
+        let rawGroup = ActivityDisplay.group(raw), currentGroup = ActivityDisplay.group(d.label)
+        let crossKind = rawGroup != currentGroup
+        if crossKind, confirmedByEvent(group: rawGroup, leaving: currentGroup, ts: ts) {
             d.label = raw; clear(); return d.label
         }
         if crossKind {
-            if d.candidateGroup == ActivityDisplay.group(raw), let since = d.candidateSince {
-                if ts - since >= hold { d.label = raw; clear() }
+            if d.candidateGroup != nil, let since = d.candidateSince {
+                // The clock measures how long the current label has gone unsupported, not how long one new kind
+                // has led: leaving "Walking" through "Standing" and "Changing position" to "Sitting" is one change,
+                // and restarting the hold at each step held a stale label for 30 s (D2-08). The label still only
+                // moves to a kind seen on two ticks running, so a one-tick wobble never shows.
+                if d.candidateGroup == rawGroup {
+                    if ts - since >= hold { d.label = raw; clear() }
+                } else {
+                    d.candidate = raw; d.candidateGroup = rawGroup
+                }
             } else {
-                d.candidate = raw; d.candidateGroup = ActivityDisplay.group(raw); d.candidateSince = ts
+                d.candidate = raw; d.candidateGroup = rawGroup; d.candidateSince = ts
             }
         } else {
             if d.candidate == raw, d.candidateGroup == nil, let since = d.candidateSince {
@@ -824,12 +1257,13 @@ public struct ActivityContextDecoder: Sendable {
     static let eventConfirmsS = 30
 
     /// The hold guards against flicker, which a flagged change of position is the evidence against: a fresh,
-    /// confident event that ends in `group` lets the label follow at once, so a short stand still shows.
-    private func confirmedByEvent(group: String, ts: Int) -> Bool {
+    /// confident event that ends in `group` lets the label follow at once, so a short stand still shows. A walk
+    /// or run start confirms entering the moving kind, and its stop confirms leaving it (D2-08).
+    private func confirmedByEvent(group: String, leaving current: String, ts: Int) -> Bool {
         tracking.events.contains { event in
             ts >= event.ts && ts - event.ts <= Self.eventConfirmsS
                 && event.probability >= PositionChanges.minimumProbability
-                && ActivityDisplay.groups(after: event.kind).contains(group)
+                && ActivityDisplay.groups(after: event.kind, leaving: current).contains(group)
         }
     }
 }

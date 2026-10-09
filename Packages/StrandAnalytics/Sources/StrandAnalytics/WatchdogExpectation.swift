@@ -142,6 +142,6 @@ public enum WatchdogExpectation {
             scaleHR: sHR, scaleRHR: sRHR, scaleHRV: sHRV, scaleTemp: sTemp, scaleResp: sResp, scaleSpO2: sSpO2,
             reconstructedHR: hr.center, reconstructedRHR: rhr.center, reconstructedHRV: hrv.center,
             reconstructedTemp: temp.center, reconstructedResp: resp.center, reconstructedSpO2: spo2.center,
-            modelVersion: version, jointEnergy: joint)
+            modelVersion: version, jointEnergy: joint, sleepPhase: UniTSRuntime.windowInSleep(window))
     }
 }

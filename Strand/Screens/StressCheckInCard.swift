@@ -27,12 +27,16 @@ final class StressNudgeCenter: ObservableObject {
         let baselineRMSSD: Double?
         /// When it fired.
         let firedAt: Date
+        /// The stored activity context showed the wearer still and awake when it fired (D6-04). When it did
+        /// not, the card does not claim stillness it never observed.
+        var stillnessVerified: Bool = false
     }
 
     /// Post a nudge (the central L3 hook calls this on a fire). Idempotent-ish: a newer fire replaces an
     /// un-acted one.
-    func present(fastRMSSD: Double?, baselineRMSSD: Double?) {
-        pending = Nudge(fastRMSSD: fastRMSSD, baselineRMSSD: baselineRMSSD, firedAt: Date())
+    func present(fastRMSSD: Double?, baselineRMSSD: Double?, stillnessVerified: Bool = false) {
+        pending = Nudge(fastRMSSD: fastRMSSD, baselineRMSSD: baselineRMSSD, firedAt: Date(),
+                        stillnessVerified: stillnessVerified)
     }
 
     func dismiss() { pending = nil }
@@ -62,7 +66,9 @@ struct StressCheckInCard: View {
                         StatePill("Passive", tone: .neutral, showsDot: true)
                     }
 
-                    Text("Your HRV dipped while you were still. Want a minute to breathe?")
+                    Text(nudge.stillnessVerified
+                         ? "Your HRV dipped while you were still. Want a minute to breathe?"
+                         : "Your HRV dipped. Want a minute to breathe?")
                         .font(StrandFont.subhead)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)

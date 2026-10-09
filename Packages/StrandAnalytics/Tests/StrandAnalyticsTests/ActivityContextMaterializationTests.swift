@@ -15,13 +15,19 @@ final class ActivityContextMaterializationTests: XCTestCase {
         return M.Day(key: "d\(offset)", start: start, end: start + 86_400)
     }
 
+    /// A ledger as the v50 materializer writes it: stamped with the current feature schema, and `final` unless
+    /// a test asks for a provisional one (a finished day confirmed after its sleep settled).
     private func ledger(_ d: M.Day, through: Int? = nil, computedAt: Int? = nil,
-                        decoder: String = ActivityContextVersions.decoder) -> ActivityContextDayRow {
+                        decoder: String = ActivityContextVersions.decoder,
+                        finality: String = ActivityContextDayRow.final, configTag: String? = nil,
+                        fingerprint: String? = nil) -> ActivityContextDayRow {
         ActivityContextDayRow(
             day: d.key, dayStart: d.start, dayEnd: d.end, taxonomyVersion: ActivityClassVersions.taxonomy,
             decoderVersion: decoder, ontologyVersion: ActivityContextVersions.ontology,
             intervalVersion: ActivityClassVersions.interval, dataThrough: through ?? d.end - 600,
-            observedSeconds: 50_000, intervalCount: 200, computedAt: computedAt ?? d.end + 60)
+            observedSeconds: 50_000, intervalCount: 200, computedAt: computedAt ?? d.end + 60,
+            featureSchema: ActivityContextVersions.featureSchema, configTag: configTag,
+            inputFingerprint: fingerprint, finality: finality)
     }
 
     private func candidate(_ d: M.Day, ledger: ActivityContextDayRow? = nil, newest: Int? = nil,
@@ -159,6 +165,112 @@ final class ActivityContextMaterializationTests: XCTestCase {
                                   lastCheck: M.Check(at: now, newestHeartRateTs: newest, inputFingerprint: "v4|g300"),
                                   inputFingerprint: "v4|g300", storedInputFingerprint: "v4|g300")
         XCTAssertFalse(M.needsWork(settled, now: now))
+    }
+
+    // MARK: v50: derivation key, persisted fingerprint, finality
+
+    func testAChangedDecoderConfigMakesADayStaleAndItReplansThroughTheBacklog() {
+        let config = "r55m190-eg01b2"
+        let all = (0...10).map { i -> M.Candidate in
+            let d = day(i)
+            return M.Candidate(day: d, ledger: ledger(d, configTag: config), newestHeartRateTs: d.end - 700,
+                               configTag: config)
+        }
+        XCTAssertTrue(M.plan(all, now: now).filter { !M.isRecent($0, now: now) }.isEmpty, "the same config asks for nothing old")
+        let changed = all.map { c -> M.Candidate in var c = c; c.configTag = "r52m190-eg01b2"; return c }
+        let plan = M.plan(changed, now: now)
+        XCTAssertEqual(plan.filter { !M.isRecent($0, now: now) }.count, M.Config().maxBacklogPerPass,
+                       "a new HR reference re-derives old days, two per pass")
+        XCTAssertFalse(M.needsWork(M.Candidate(day: day(2), ledger: ledger(day(2), configTag: config),
+                                               newestHeartRateTs: day(2).end - 700), now: now),
+                       "a caller that does not pass a tag does not compare it")
+    }
+
+    func testALedgerWrittenBeforeItRecordedItsFeatureSchemaIsDerivedAgain() {
+        let d = day(2)
+        var legacy = ledger(d)
+        legacy.featureSchema = nil
+        XCTAssertTrue(M.needsWork(candidate(d, ledger: legacy, newest: d.end - 700), now: now))
+        legacy.featureSchema = "feat-0"
+        XCTAssertTrue(M.needsWork(candidate(d, ledger: legacy, newest: d.end - 700), now: now))
+    }
+
+    func testTheLedgersOwnFingerprintCatchesAnOldDaysBackfillAfterARelaunch() {
+        // D5-05: the fingerprint the day was derived from is in its ledger, so a relaunched process (no
+        // lastCheck) still sees that the input moved.
+        let old = day(2)
+        let done = ledger(old, fingerprint: "acx1|a|sl1|wk1|enc[]")
+        let newest = done.dataThrough! - 1
+        XCTAssertTrue(M.needsWork(M.Candidate(day: old, ledger: done, newestHeartRateTs: newest,
+                                              inputFingerprint: "acx1|a|sl2|wk1|enc[]"), now: now),
+                      "a re-staged night under an unchanged HR horizon")
+        XCTAssertFalse(M.needsWork(M.Candidate(day: old, ledger: done, newestHeartRateTs: newest,
+                                               inputFingerprint: "acx1|a|sl1|wk1|enc[]"), now: now))
+    }
+
+    func testNewEncoderWindowsForARecentDayDoNotWaitForTheRecheckInterval() {
+        let recent = day(10)   // today
+        let newest = now - 120
+        let fresh = ledger(recent, through: newest + 1, computedAt: now - 60, finality: ActivityContextDayRow.provisional,
+                           fingerprint: M.inputFingerprint(store: "s", configTag: "t"))
+        let looked = M.Check(at: now - 60, newestHeartRateTs: newest, inputFingerprint: fresh.inputFingerprint)
+        let unchanged = M.Candidate(day: recent, ledger: fresh, newestHeartRateTs: newest, lastCheck: looked,
+                                    inputFingerprint: fresh.inputFingerprint)
+        XCTAssertFalse(M.needsWork(unchanged, now: now), "looked a minute ago, nothing new")
+        var arrived = unchanged
+        arrived.inputFingerprint = M.inputFingerprint(store: "s", encoderRevisions: [String(recent.key): "rev-7"], configTag: "t")
+        XCTAssertTrue(M.needsWork(arrived, now: now), "HART windows for the day bypass the 30-minute throttle")
+    }
+
+    func testAProvisionalDayIsConfirmedOnceItsSleepHasSettled() {
+        let d = day(9)   // yesterday
+        let early = d.end + 3_600
+        let row = ledger(d, through: d.end - 600, computedAt: d.end + 300, finality: ActivityContextDayRow.provisional)
+        let c = candidate(d, ledger: row, newest: d.end - 700)
+        XCTAssertFalse(M.needsWork(c, now: early, config: { var k = M.Config(); k.recentWindowS = 0; return k }()),
+                       "before the night is settled there is nothing to confirm")
+        let settled = d.end + ActivityContextPersistence.sleepSettleS
+        var noRecent = M.Config()
+        noRecent.recentWindowS = 0
+        XCTAssertTrue(M.needsWork(c, now: settled, config: noRecent))
+        let looked = M.Check(at: settled, newestHeartRateTs: d.end - 700)
+        XCTAssertFalse(M.needsWork(candidate(d, ledger: row, newest: d.end - 700, check: looked), now: settled + 60, config: noRecent),
+                       "looked at once after settling: not again this launch")
+        let confirmed = ledger(d, through: d.end - 600, computedAt: d.end + 300, finality: ActivityContextDayRow.final)
+        XCTAssertFalse(M.needsWork(candidate(d, ledger: confirmed, newest: d.end - 700), now: settled + 86_400, config: noRecent))
+    }
+
+    func testTheInputFingerprintNamesEveryNonStoreInput() {
+        let base = M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "b"],
+                                      gaitRevisions: ["2026-10-07": "g"], configTag: "r55", dismissedWorkouts: "")
+        XCTAssertEqual(base, M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-07": "b", "2026-10-06": "a"],
+                                                gaitRevisions: ["2026-10-07": "g"], configTag: "r55"),
+                       "revision order does not matter")
+        let variants = [
+            M.inputFingerprint(store: "s2", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "b"], gaitRevisions: ["2026-10-07": "g"], configTag: "r55"),
+            M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "c"], gaitRevisions: ["2026-10-07": "g"], configTag: "r55"),
+            M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "b"], gaitRevisions: [:], configTag: "r55"),
+            M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "b"], gaitRevisions: ["2026-10-07": "g"], configTag: "r52"),
+            M.inputFingerprint(store: "s", encoderRevisions: ["2026-10-06": "a", "2026-10-07": "b"], gaitRevisions: ["2026-10-07": "g"], configTag: "r55", dismissedWorkouts: "1-2"),
+        ]
+        for v in variants { XCTAssertNotEqual(v, base) }
+        XCTAssertEqual(Set(variants).count, variants.count)
+    }
+
+    func testDaysThatLostTheirHeartRateAreOrphaned() {
+        let days = (0...4).map(day)
+        let orphans = M.orphanedDays(days, ledgerDays: [day(1).start, day(2).start, day(3).start],
+                                     owned: [day(2).start, day(4).start])
+        XCTAssertEqual(orphans.map(\.key), ["d1", "d3"])
+    }
+
+    func testAFailedOwnerProbeOrphansNothingThatPass() {
+        let days = (0...4).map(day)
+        let ledgers: Set<Int> = [day(1).start, day(2).start, day(3).start]
+        // d3's probe threw: it is not "no heart rate", and neither is any other day trusted this pass.
+        XCTAssertEqual(M.orphanedDays(days, ledgerDays: ledgers, owned: [day(2).start], unanswered: [day(3).start]).map(\.key), [])
+        XCTAssertEqual(M.orphanedDays(days, ledgerDays: ledgers, owned: [day(2).start], unanswered: []).map(\.key),
+                       ["d1", "d3"])
     }
 
     // MARK: Planning

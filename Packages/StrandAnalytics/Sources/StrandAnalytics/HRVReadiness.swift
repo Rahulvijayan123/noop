@@ -156,4 +156,73 @@ public enum HRVReadiness {
                                   normalHighMs: exp(normalHigh),
                                   overreachingWatch: overreachingWatch)
     }
+
+    // MARK: - Calendar-day windows (run1 D4-15)
+
+    /// Minimum VALID nights inside the trailing `rollWindow` CALENDAR days for the calendar-windowed read.
+    /// Below it the "7-night baseline" would be mostly old nights, so the read is nil (stale) instead.
+    public static let minNightsInRollWindow: Int = 4
+
+    /// The same reading with its windows in CALENDAR days, not valid nights (run1 D4-15).
+    ///
+    /// The night-indexed `evaluate(avgHrv:)` takes the last 7 / 60 VALID nights, so after a three-week
+    /// break its "7-night baseline" spans nights from a month ago plus the first nights back, with no stale
+    /// flag. Here the short window is the `rollWindow` calendar days ending `asOfDay` (default: the newest
+    /// key) and must hold `minNightsInRollWindow` valid nights; the long window is the trailing `longWindow`
+    /// calendar days when the history spans that many days, else `longWindowFallback`, and must hold
+    /// `minNights` valid nights. Either shortfall returns nil. The informational CV trend keeps its
+    /// night-indexed definition over the long window's nights. Keys are `yyyy-MM-dd`, any order; a
+    /// repeated day keeps its first value; days after `asOfDay` are ignored.
+    public static func evaluate(avgHrv: [Double?], dayKeys: [String], asOfDay: String? = nil) -> HRVReadinessResult? {
+        let cfg = Baselines.hrvCfg
+        var byDay: [Int: Double?] = [:]
+        for (k, v) in zip(dayKeys, avgHrv) {
+            guard let d = Baselines.isoEpochDay(k), byDay[d] == nil else { continue }
+            byDay[d] = v
+        }
+        guard let newest = byDay.keys.max(), let oldest = byDay.keys.min() else { return nil }
+        let end = asOfDay.flatMap { Baselines.isoEpochDay($0) } ?? newest
+        let nights: [(day: Int, ell: Double)] = byDay
+            .compactMap { day, v -> (day: Int, ell: Double)? in
+                guard day <= end, let v, cfg.minVal <= v && v <= cfg.maxVal else { return nil }
+                return (day, log(max(v, 1.0)))
+            }
+            .sorted { $0.day < $1.day }
+        let short = nights.filter { $0.day > end - rollWindow }.map(\.ell)
+        guard short.count >= minNightsInRollWindow else { return nil }
+        let longDays = end - oldest + 1 >= longWindow ? longWindow : longWindowFallback
+        let long = nights.filter { $0.day > end - longDays }.map(\.ell)
+        guard long.count >= minNights else { return nil }
+        return reading(short: short, long: long, cvEll: long)
+    }
+
+    /// Tier + band + overreaching watch from log-domain windows (shared definition).
+    private static func reading(short: [Double], long: [Double], cvEll ell: [Double]) -> HRVReadinessResult {
+        let baseline7 = RecoveryForecaster.mean(short)
+        let longMean = RecoveryForecaster.mean(long)
+        let longSDraw = long.count >= 2 ? RecoveryForecaster.sampleSD(long) : RecoveryForecaster.sampleSD(short)
+        let longSD = max(longSDraw, longSDFloor)
+        let swcHalf = swcK * longSD
+        let normalLow = longMean - swcHalf
+        let normalHigh = longMean + swcHalf
+        let tier: ReadinessTier
+        if baseline7 > normalHigh {
+            tier = .primed
+        } else if baseline7 >= normalLow {
+            tier = .normal
+        } else {
+            tier = .suppressed
+        }
+        var cvSeries: [Double] = []
+        var i = max(rollWindow - 1, ell.count - cvTrendWindow)
+        while i < ell.count {
+            let w = Array(ell[(i - rollWindow + 1)...i])
+            let m = RecoveryForecaster.mean(w)
+            cvSeries.append(m != 0.0 ? 100.0 * RecoveryForecaster.sampleSD(w) / m : 0.0)
+            i += 1
+        }
+        let overreachingWatch = RecoveryForecaster.leastSquaresSlope(cvSeries) < 0.0 && baseline7 < longMean
+        return HRVReadinessResult(tier: tier, baseline7Ms: exp(baseline7), normalLowMs: exp(normalLow),
+                                  normalHighMs: exp(normalHigh), overreachingWatch: overreachingWatch)
+    }
 }

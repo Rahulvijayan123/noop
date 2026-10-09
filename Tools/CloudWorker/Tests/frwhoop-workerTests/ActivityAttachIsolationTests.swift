@@ -137,4 +137,83 @@ final class ActivityAttachIsolationTests: XCTestCase {
         let document = try XCTUnwrap(daily["activity_context"] as? [String: Any])
         XCTAssertEqual((document["input_revision"] as? NSNumber)?.int64Value, 3)
     }
+
+    /// A Los Angeles local day [07:00Z D, 07:00Z D+1) is published by two UTC-day jobs, each with its own
+    /// revision. Scoring must read the newest publish of EACH UTC day, clipped to the local window, and never
+    /// an older lineage of a day (audit D5-01 / D3V-01 / D6-V01). The old reader kept only the single highest
+    /// revision in the window, so UTC day D (the local morning and afternoon) vanished.
+    func testLocalDayReadsTheNewestPublishOfEveryOverlappingUtcDay() throws {
+        let db = try client()
+        try db.beginTransaction(.repeatableRead)
+        defer { db.rollbackTransaction() }
+        let ready = try db.query("select to_regclass('public.activity_context_jobs') is not null as ok", [])
+        guard ready.first?["ok"] == "t" else {
+            throw XCTSkip("apply the activity migrations to the scratch database")
+        }
+        let user = "00000000-0000-4000-8000-0000000000b1"
+        let device = "00000000-0000-4000-8000-0000000000b2"
+        try db.exec("insert into auth.users(id) values ('\(user)')")
+        try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
+        let utcD = 1_791_244_800          // 2026-10-06T00:00Z
+        let utcD1 = utcD + 86_400         // 2026-10-07T00:00Z
+        let localStart = utcD + 7 * 3600  // 2026-10-06 00:00 PDT
+        let localEnd = localStart + 86_400
+        let fpOld = String(repeating: "a", count: 64)
+        let fpD = String(repeating: "b", count: 64)
+        let fpD1 = String(repeating: "c", count: 64)
+        _ = try db.query("""
+            insert into public.activity_context_jobs(user_id,device_id,day,algorithm_version,fingerprint,
+                                                     input_revision,completed_revision)
+            values ($1::uuid,$2::uuid,'2026-10-06','hart-activity-1',$3,5,5),
+                   ($1::uuid,$2::uuid,'2026-10-07','hart-activity-1',$4,7,7),
+                   ($1::uuid,$2::uuid,'2026-10-06','streams-activity-1',$4,40,40)
+            """, [user, device, fpD, fpD1])
+        func epoch(_ day: String, _ start: Int, _ fp: String, _ rev: Int, _ label: String) throws {
+            _ = try db.query("""
+                insert into public.activity_context_epochs(user_id,device_id,day,start_ts,end_ts,motion_label,
+                    confidence,observed_s,valid_s,model_version,preprocessing_version,ontology_version,
+                    fingerprint,result_revision,computed_at)
+                values ($1::uuid,$2::uuid,$3::date,$4::bigint,$4::bigint + 30,$5,0.8,30,30,
+                        'hart-wisdm-v0','hart-activity-preprocess-v1','v1',$6,$7::bigint,now())
+                """, [user, device, day, String(start), label, fp, String(rev)])
+        }
+        // UTC day D: an older lineage (rev 10) with a slot the newest publish (rev 20) left out, plus a slot
+        // before the local window.
+        try epoch("2026-10-06", utcD + 20 * 3600, fpOld, 10, "running")
+        try epoch("2026-10-06", utcD + 8 * 3600, fpOld, 10, "running")
+        try epoch("2026-10-06", utcD + 3 * 3600, fpD, 20, "walking")
+        try epoch("2026-10-06", utcD + 8 * 3600, fpD, 20, "stationary")
+        try epoch("2026-10-06", utcD + 12 * 3600, fpD, 20, "walking")
+        try epoch("2026-10-06", utcD1 - 30, fpD, 20, "stationary")
+        // UTC day D+1 (rev 30, the higher revision): the local evening, plus a slot past the window.
+        try epoch("2026-10-07", utcD1, fpD1, 30, "walking")
+        try epoch("2026-10-07", localEnd - 30, fpD1, 30, "stationary")
+        try epoch("2026-10-07", localEnd + 3600, fpD1, 30, "walking")
+
+        let published = DayScorer.readPublishedActivityEpochs(
+            db: db, userId: user, deviceId: device, day: "2026-10-06",
+            dayStart: localStart, dayEnd: localEnd)
+        XCTAssertEqual(published.epochs.map(\.startTs),
+                       [utcD + 8 * 3600, utcD + 12 * 3600, utcD1 - 30, utcD1, localEnd - 30],
+                       "both UTC days' newest publishes, clipped to the local window, nothing from rev 10")
+        XCTAssertEqual(published.epochs.first?.motion, .stationary, "rev 20 wins its own day")
+        XCTAssertEqual(published.lineages.map(\.day), ["2026-10-06", "2026-10-07"])
+        XCTAssertEqual(published.lineages.map(\.resultRevision), [20, 30])
+        XCTAssertEqual(published.lineages.map(\.epochs), [3, 2])
+        XCTAssertEqual(published.epochs.reduce(0) { $0 + ($1.endTs - $1.startTs) }, 5 * 30,
+                       "covered seconds are the sum of both days, one epoch per slot")
+
+        var daily: [String: Any] = [:]
+        DayScorer.attachActivityContext(to: &daily, db: db, userId: user, deviceId: device,
+                                        day: "2026-10-06", dayStart: localStart, dayEnd: localEnd,
+                                        published: published)
+        let document = try XCTUnwrap(daily["activity_context"] as? [String: Any])
+        XCTAssertEqual((document["epochs"] as? [Any])?.count, 5)
+        XCTAssertEqual((document["input_revision"] as? NSNumber)?.int64Value, 7,
+                       "the raw-IMU jobs of the epochs' UTC days, never the stream-day job")
+        let lineages = try XCTUnwrap(document["lineages"] as? [[String: Any]])
+        XCTAssertEqual(lineages.compactMap { $0["day"] as? String }, ["2026-10-06", "2026-10-07"])
+        XCTAssertEqual(lineages.compactMap { ($0["input_revision"] as? NSNumber)?.int64Value }, [5, 7])
+        XCTAssertEqual(lineages.compactMap { $0["fingerprint"] as? String }, [fpD, fpD1])
+    }
 }

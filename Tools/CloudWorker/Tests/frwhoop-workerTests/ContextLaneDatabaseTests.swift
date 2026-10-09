@@ -50,17 +50,11 @@ final class ContextLaneDatabaseTests: XCTestCase {
     }
 
     override func tearDownWithError() throws {
-        for user in owners {
-            // `sessions` rows first: their delete trigger (`bump_user_revision`) upserts `user_sync_state` for the
-            // user, which fails inside the account cascade and would leave the owner (and its queued work) behind.
-            try? db?.exec("delete from public.sessions where user_id = '\(user)'")
-            do {
-                try db?.exec("delete from auth.users where id = '\(user)'")
-            } catch {
-                XCTFail("fixture owner \(user) was not removed: \(error)")
-            }
-        }
+        // The account cascade runs with the owners' sessions still there (20261008100400 made that work); a
+        // failure throws instead of leaving an owner whose queued work a later suite would claim.
+        let users = owners
         owners = []
+        try db?.deleteFixtureOwners(users)
     }
 
     private func makeOwner(timezone: String = "UTC", family: String = "WHOOP 5.0 / MG") throws -> Owner {
@@ -379,6 +373,51 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(j["outcome"], "unchanged")
     }
 
+    /// A policy version bump (the INT-C review's `EligibilityConfig` pc-eligibility-3 → 4 and join pc-join-2 → 3)
+    /// changes the policy fingerprint, so the same inputs re-run under the new policy store a NEW revision that
+    /// supersedes the old one, instead of `unchanged`, and the stored provenance (`versions`, `policy_fingerprint`)
+    /// names the new versions. The SQL side has no copy of the version strings (only the format checks), so any
+    /// value passes. Uses explicit next versions so it holds whatever the default policy carries.
+    func testAPolicyVersionBumpStoresANewRevisionStampedWithTheNewVersions() throws {
+        let o = try makeOwner()
+        try seed(o, morningSim(dayStart))
+        try score(o)
+        try invalidate(o)
+        var lane = contextLane()
+        lane.drain(budget: 8)
+        let first = try contextDays(o)
+        XCTAssertEqual(first.count, 1, "\(first) \(lane.stats.lastError ?? "")")
+        XCTAssertEqual(first.first?["policy_fingerprint"], PC.Policy.default.fingerprint)
+
+        var bumped = PC.Policy.default
+        bumped.eligibility.version = "pc-eligibility-next-test"
+        bumped.join.version = "pc-join-next-test"
+        XCTAssertNotEqual(bumped.fingerprint, PC.Policy.default.fingerprint, "the versions are part of the fingerprint")
+        var next = contextLane()
+        next.policy = bumped
+        try invalidate(o, reason: "policy")
+        next.drain(budget: 8)
+        XCTAssertEqual(next.stats.unchanged, 0, next.stats.lastError ?? "")
+        XCTAssertGreaterThanOrEqual(next.stats.published, 1, next.stats.lastError ?? "")
+
+        let rows = try contextDays(o)
+        let current = rows.filter { $0["current"] == "true" }
+        XCTAssertEqual(current.count, 1, "\(rows)")
+        XCTAssertEqual(current.first?["policy_fingerprint"], bumped.fingerprint)
+        XCTAssertNotEqual(current.first?["rev"], first.first?["rev"])
+        XCTAssertEqual(rows.first { $0["rev"] == first.first?["rev"] }?["current"], "false",
+                       "the old policy's revision is superseded, not left current beside the new one")
+        let stamped = try db.query("""
+            select versions::text as versions, (document #>> '{header,policy_fingerprint}') as doc_policy
+            from public.physiology_context_days
+            where user_id = $1::uuid and device_id = $2::uuid and day = $3::date and superseded_by is null
+              and mode = 'retrospective'
+            """, [o.user, o.device, day]).first ?? [:]
+        XCTAssertTrue(stamped["versions"]?.contains("pc-eligibility-next-test") ?? false, "\(stamped)")
+        XCTAssertTrue(stamped["versions"]?.contains("pc-join-next-test") ?? false, "\(stamped)")
+        XCTAssertEqual(stamped["doc_policy"], bumped.fingerprint)
+    }
+
     func testAWorkerThatDiesMidJobIsReplacedByOneThatPublishesOnce() throws {
         let o = try makeOwner()
         try seed(o, morningSim(dayStart))
@@ -483,7 +522,10 @@ final class ContextLaneDatabaseTests: XCTestCase {
         lane.enqueueIntervalSeconds = 3_600
         lane.lastEnqueueAt = Date()  // only the replay job is due
         lane.drain(budget: 2)
-        XCTAssertEqual(lane.stats.published, 1, lane.stats.lastError ?? "")
+        // This owner's outcome, not the lane's global count: the shared scratch database can hold other suites'
+        // due jobs, which the same drain may claim.
+        XCTAssertEqual(try job(o, mode: "causal_live")["outcome"], "published", lane.stats.lastError ?? "")
+        XCTAssertEqual(try contextDays(o, mode: "causal_live").count, 1)
         let first = try XCTUnwrap(try contextDays(o, mode: "causal_live").last)
         let stored = try XCTUnwrap(try db.query("""
             select availability_cutoff::text as cutoff, generated_at::text as generated,
@@ -513,7 +555,8 @@ final class ContextLaneDatabaseTests: XCTestCase {
 
         try replay()
         lane.drain(budget: 4)
-        XCTAssertEqual(lane.stats.unchanged, 1, "same cutoff, same visible inputs: \(lane.stats.lastError ?? "")")
+        XCTAssertEqual(try job(o, mode: "causal_live")["outcome"], "unchanged",
+                       "same cutoff, same visible inputs: \(lane.stats.lastError ?? "")")
         let after = try contextDays(o, mode: "causal_live")
         XCTAssertEqual(after.count, 1)
         XCTAssertEqual(after.last?["input_fingerprint"], first["input_fingerprint"])
@@ -586,7 +629,9 @@ final class ContextLaneDatabaseTests: XCTestCase {
         }
         try invalidate(o)
         var lane = contextLane()
-        lane.drain(budget: 8)
+        // One claim at a time until the job has failed: with one drain of budget 8 a slow machine outlives the
+        // first 5-s backoff and the same job fails a second time inside the drain.
+        for _ in 0..<8 where try job(o)["failures"] == "0" { lane.drain(budget: 1) }
         XCTAssertGreaterThanOrEqual(lane.stats.failed, 1)
         XCTAssertGreaterThanOrEqual(lane.stats.failuresPersisted, 1)
         let failedJob = try job(o)
@@ -709,6 +754,140 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(early.historyAfterCutoff, expected, "telemetry for the replay limit (P5)")
         print("context-history-load: days=\(ContextInputs.historyDays) series_per_day=\(seriesPerDay) "
               + "rows=\(expected) " + timings.joined(separator: " "))
+    }
+
+    // MARK: - Predecessor regime (D4-09), run against Postgres
+
+    /// The predecessor read after a strap change: the owner's OTHER devices' parent daily values of the same mode
+    /// over D-84 ... D-1, never the scored device's own, never another owner's, never a stratum, never the scored
+    /// day or later; a causal job only what was published by its cutoff. The family of each side comes from its
+    /// device row, and the loaded history reaches the reference engine, which borrows from the compatible
+    /// predecessor only.
+    func testPredecessorDailyValuesAreReadAcrossAStrapChangeUnderTheCausalCutoff() throws {
+        let o = try makeOwner(family: "WHOOP 4.0")                     // B: the new strap being scored
+        let old = UUID().uuidString.lowercased()                         // A: same family, the predecessor
+        let other = UUID().uuidString.lowercased()                       // C: a WHOOP 5.0 the owner also had
+        let bare = UUID().uuidString.lowercased()                        // E: a bare "WHOOP" label (unknown)
+        try addDevice(user: o.user, device: old, family: "WHOOP 4.0")
+        try addDevice(user: o.user, device: other, family: "WHOOP 5.0 / MG")
+        try addDevice(user: o.user, device: bare, family: "WHOOP")
+        let stranger = try makeOwner(family: "WHOOP 4.0")               // another owner's same-family strap
+        let now = Int(Date().timeIntervalSince1970)
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        let parent = "heart_rate.stable_awake_5min"
+
+        func publish(_ device: String, user: String, day: String, mode: String, at: Int) throws -> String {
+            try XCTUnwrap(try db.query("""
+                insert into public.physiology_context_days(user_id, device_id, day, mode, job_revision, finality,
+                  status, availability_cutoff, generated_at, contract_version, schema_version, policy_fingerprint,
+                  input_fingerprint, document, document_bytes, published_at)
+                values ($1::uuid, $2::uuid, $3::date, $4, 1, 'final', 'available', $5::bigint, $5::bigint,
+                        'pc-contract-1', 1, 'pred-test', 'pred-test', '{}'::jsonb, 2, to_timestamp($5::bigint))
+                returning context_revision::text as rev
+                """, [user, device, day, mode, String(at)]).first?["rev"])
+        }
+        func put(_ device: String, user: String, mode: PC.ProcessingMode, offset: Int, series: String,
+                 value: Double, revision: String) throws {
+            let key = ContextInputs.shiftDay(day, by: offset)!
+            let v = PC.DailyValue(day: key, seriesKey: series, regimeKey: "r1", metric: .heartRate, value: value,
+                                  units: "bpm", supportCount: 4, supportUnit: "window", supportS: 1_200, mode: mode,
+                                  finality: .final)
+            _ = try db.query("""
+                insert into public.physiology_context_daily_values(user_id, device_id, mode, day, series_key,
+                  regime_key, metric, value, units, support_count, support_unit, support_s, finality,
+                  context_revision, payload)
+                values ($1::uuid, $2::uuid, $3, $4::date, $5, 'r1', 'heart_rate', $6::float8, 'bpm', 4, 'window',
+                        1200, 'final', $7::bigint, $8::jsonb)
+                """, [user, device, mode.rawValue, key, series, String(value), revision,
+                      String(decoding: try PC.encoder().encode(v), as: UTF8.self)])
+        }
+
+        let horizon = ContextInputs.predecessorHorizonDays
+        for mode in [PC.ProcessingMode.retrospective, .causalLive] {
+            let early = try publish(old, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                    mode: mode.rawValue, at: now - 3 * 86_400)
+            let late = try publish(old, user: o.user, day: ContextInputs.shiftDay(day, by: -41)!,
+                                   mode: mode.rawValue, at: now - 600)
+            // A: D-(horizon+1) (outside), D-horizon ... D-3 every few days, D-2 published late, D and D+1 (never).
+            for offset in [-(horizon + 1), -horizon, -30, -20, -12, -10, -9, -8, -7, -6, -5, -4, -3, 0, 1] {
+                try put(old, user: o.user, mode: mode, offset: offset, series: parent, value: 60, revision: early)
+            }
+            try put(old, user: o.user, mode: mode, offset: -2, series: parent, value: 60, revision: late)
+            for stratum in [".band_06_12", ".posture_recumbent_likely", ".ctx_seated"] {
+                try put(old, user: o.user, mode: mode, offset: -5, series: parent + stratum, value: 61,
+                        revision: early)
+            }
+            try put(old, user: o.user, mode: mode, offset: -5, series: PC.ContextReferences.opticalValidShareSeries,
+                    value: 0.8, revision: early)
+            let c = try publish(other, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(other, user: o.user, mode: mode, offset: -6, series: parent, value: 70, revision: c)
+            let e = try publish(bare, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(bare, user: o.user, mode: mode, offset: -6, series: parent, value: 71, revision: e)
+            let own = try publish(o.device, user: o.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                  mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(o.device, user: o.user, mode: mode, offset: -1, series: parent, value: 64, revision: own)
+            let s = try publish(stranger.device, user: stranger.user, day: ContextInputs.shiftDay(day, by: -40)!,
+                                mode: mode.rawValue, at: now - 3 * 86_400)
+            try put(stranger.device, user: stranger.user, mode: mode, offset: -4, series: parent, value: 99,
+                    revision: s)
+        }
+
+        let lowest = ContextInputs.shiftDay(day, by: -horizon)!
+        for (mode, claimedAt, expectLate) in [(PC.ProcessingMode.retrospective, now - 1_800, true),
+                                              (.causalLive, now - 1_800, false),
+                                              (.causalLive, now - 4 * 86_400, false)] {
+            let label = "\(mode.rawValue)@\(claimedAt)"
+            let job = contextJob(o, mode: mode, claimedAt: claimedAt)
+            let loaded = try ContextInputs.load(db: db, job: job, windows: windows)
+            XCTAssertFalse(loaded.unavailable.contains("predecessor_daily_values_unavailable"), label)
+            if claimedAt == now - 4 * 86_400 {
+                XCTAssertTrue(loaded.predecessors.isEmpty, "\(label): nothing was published by the cutoff")
+                continue
+            }
+            XCTAssertEqual(loaded.predecessors.map(\.deviceScope), [old, other, bare].sorted(), label)
+            XCTAssertFalse(loaded.predecessors.contains { $0.deviceScope == o.device || $0.deviceScope == stranger.device })
+            for p in loaded.predecessors {
+                XCTAssertEqual(p.successorHardwareFamily, "whoop4", label)
+                XCTAssertTrue(p.dailyValues.allSatisfy { $0.mode == mode }, label)
+                XCTAssertTrue(p.dailyValues.allSatisfy { $0.day >= lowest && $0.day < day }, label)
+                XCTAssertFalse(p.dailyValues.contains { PC.ContextReferences.isStratum($0.seriesKey) }, label)
+                XCTAssertFalse(p.dailyValues.contains { $0.value == 99 }, "another owner's strap is never read")
+            }
+            let a = try XCTUnwrap(loaded.predecessors.first { $0.deviceScope == old })
+            XCTAssertEqual(a.hardwareFamily, "whoop4")
+            XCTAssertEqual(loaded.predecessors.first { $0.deviceScope == other }?.hardwareFamily, "whoop5")
+            XCTAssertNil(loaded.predecessors.first { $0.deviceScope == bare }?.hardwareFamily)
+            let aParentDays = a.dailyValues.filter { $0.seriesKey == parent }.map(\.day)
+            XCTAssertEqual(aParentDays.first, lowest, "\(label): the horizon's first day is read, the one before is not")
+            XCTAssertEqual(aParentDays.contains(ContextInputs.shiftDay(day, by: -2)!), expectLate,
+                           "\(label): a value published after the causal cutoff is not read")
+            XCTAssertEqual(aParentDays.count, expectLate ? 13 : 12, label)  // D-84, D-30, D-20, D-12, D-10 ... D-3 (+ D-2)
+            XCTAssertTrue(a.dailyValues.contains { $0.seriesKey == PC.ContextReferences.opticalValidShareSeries })
+            // The device's own value stays in its own history, never in a predecessor.
+            XCTAssertEqual(loaded.historyValues.map(\.value), [64], label)
+
+            // Through assembly to the reference engine: today's value borrows the same-family predecessor's
+            // history (provisional, named), never the 5.0's or the unknown-family strap's.
+            let assembled = ContextInputs.assemble(loaded, job: job, windows: windows)
+            XCTAssertEqual(assembled.history.predecessors.map(\.deviceScope), [old, other, bare].sorted())
+            XCTAssertTrue(assembled.input.inputRevisions.contains {
+                $0.input == "predecessor_daily_values" && $0.revision.contains("\(old):\(a.dailyValues.count):whoop4")
+            })
+            let today = PC.DailyValue(day: day, seriesKey: parent, regimeKey: "r1", metric: .heartRate, value: 66,
+                                      units: "bpm", supportCount: 4, supportUnit: "window", supportS: 1_200,
+                                      mode: mode, finality: .final)
+            let compared = PC.ContextReferences.compare(
+                [today], history: assembled.history.dailyValues, frozen: [], day: day, policyFingerprint: "x",
+                config: PC.ReferenceConfig(),
+                lineage: .init(device: assembled.input.regime, predecessors: assembled.history.predecessors))
+            let rolling = try XCTUnwrap(compared.comparisons.first { $0.view == .rolling }, label)
+            XCTAssertEqual(rolling.predecessorScope, old, "\(label): \(rolling.reasons)")
+            XCTAssertEqual(rolling.status, .provisional, label)
+            XCTAssertEqual(rolling.center ?? 0, 60 + (64 - 60) * 1 / 8.0, accuracy: 1.0, label)
+            XCTAssertTrue(rolling.reasons.contains(PC.ContextReferences.predecessorRegime), label)
+        }
     }
 
     static func planNodes(_ json: String) -> [[String: Any]] {

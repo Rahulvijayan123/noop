@@ -773,6 +773,54 @@ public struct HrvSeriesPoint: Equatable, Sendable {
     public let rmssd: Double
     /// Clean beats behind the reading; a thin slot is a weaker reading.
     public let cleanBeats: Int
+    /// The worker's context flags for this slot (`hrv_series.context`, audit D6-14). Nil when the
+    /// snapshot predates them: the point then renders as it always did.
+    public let context: HrvSlotQuality?
+
+    public init(startTs: Int, rmssd: Double, cleanBeats: Int, context: HrvSlotQuality? = nil) {
+        self.startTs = startTs; self.rmssd = rmssd; self.cleanBeats = cleanBeats; self.context = context
+    }
+}
+
+/// How well one intraday HRV slot is supported, as the worker published it. The reading itself stays
+/// valid; a `weak` slot is one to show but not to lean on.
+public struct HrvSlotQuality: Equatable, Sendable {
+    public enum Reason: String, Equatable, Sendable, CaseIterable {
+        /// A quarter or more of the slot was walking, running or other movement.
+        case movement
+        /// Half or more of the slot has no activity context (not covered, or the model abstained).
+        case unknownContext = "unknown_context"
+        /// The clean beats cover less than a third of the slot.
+        case sparseBeats = "sparse_beats"
+        /// The activity lane has not published this slot yet. Not a weakness of the reading: it never makes a
+        /// point weak on its own (review R10).
+        case contextPending = "context_pending"
+    }
+
+    public let weak: Bool
+    /// Known reasons only; a code this build does not know still leaves `weak` as the worker set it.
+    public let reasons: [Reason]
+    public let movingShare: Double?
+    public let unknownShare: Double?
+    public let cleanCoverage: Double?
+
+    public init(weak: Bool, reasons: [Reason], movingShare: Double? = nil, unknownShare: Double? = nil,
+                cleanCoverage: Double? = nil) {
+        self.weak = weak; self.reasons = reasons
+        self.movingShare = movingShare; self.unknownShare = unknownShare; self.cleanCoverage = cleanCoverage
+    }
+
+    /// Parse one `hrv_series.context` entry; nil when it is malformed.
+    init?(json: [String: Any]) {
+        guard let weak = json["weak"] as? Bool else { return nil }
+        let reasons = ((json["reasons"] as? [Any]) ?? []).compactMap { ($0 as? String).flatMap(Reason.init(rawValue:)) }
+        // A slot flagged only because its context is not published yet is a normal reading, whatever the flag says.
+        self.weak = weak && !(reasons == [.contextPending])
+        self.reasons = reasons
+        self.movingShare = (json["moving_share"] as? NSNumber)?.doubleValue
+        self.unknownShare = (json["unknown_share"] as? NSNumber)?.doubleValue
+        self.cleanCoverage = (json["clean_coverage"] as? NSNumber)?.doubleValue
+    }
 }
 
 /// The hosted worker's published day result, in the shapes the dashboard already stores.
@@ -866,12 +914,19 @@ public struct HostedDayResult: Equatable, Sendable {
         let series = daily["hrv_series"] as? [String: Any]
         let slot = Self.number(series?["slot_s"]).flatMap { Int(exactly: $0) } ?? 900
         self.hrvSlotSeconds = (60...3_600).contains(slot) ? slot : 900
+        var slotContext: [Int: HrvSlotQuality] = [:]
+        for entry in (series?["context"] as? [Any]) ?? [] {
+            guard let object = entry as? [String: Any],
+                  let start = Self.number(object["slot_s"]).flatMap({ Int(exactly: $0) }),
+                  let quality = HrvSlotQuality(json: object) else { continue }
+            slotContext[start] = quality
+        }
         self.hrvSeries = ((series?["points"] as? [Any]) ?? []).compactMap { entry -> HrvSeriesPoint? in
             guard let point = entry as? [Any], point.count >= 3,
                   let start = Self.number(point[0]).flatMap({ Int(exactly: $0) }),
                   let rmssd = Self.number(point[1]), rmssd > 0,
                   let beats = Self.number(point[2]).flatMap({ Int(exactly: $0) }) else { return nil }
-            return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats)
+            return HrvSeriesPoint(startTs: start, rmssd: rmssd, cleanBeats: beats, context: slotContext[start])
         }.sorted { $0.startTs < $1.startTs }
         self.activityContext = Self.activityContext(from: daily)
         self.sleepFeatures = Self.sleepFeatures(from: daily)

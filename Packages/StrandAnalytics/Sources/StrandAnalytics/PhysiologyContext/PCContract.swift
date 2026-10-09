@@ -375,8 +375,20 @@ extension PhysiologyContext {
         public var epoch: ActivityEpoch
         public var revision: Int
         public var availableAt: Int?
-        public init(epoch: ActivityEpoch, revision: Int, availableAt: Int? = nil) {
+        /// Producing model and preprocessing versions (provenance; `activity_context_epochs.model_version`).
+        /// The epoch's own `wearSignal` (`activity_context_epochs.wear_signal`) carries the wear-signal quality.
+        public var modelVersion: String? = nil
+        public var preprocessingVersion: String? = nil
+        public init(epoch: ActivityEpoch, revision: Int, availableAt: Int? = nil,
+                    modelVersion: String? = nil, preprocessingVersion: String? = nil) {
             self.epoch = epoch; self.revision = revision; self.availableAt = availableAt
+            self.modelVersion = modelVersion; self.preprocessingVersion = preprocessingVersion
+        }
+
+        /// `model@preprocessing` (provenance key), nil when the model is unknown.
+        public var provenance: String? {
+            guard let m = modelVersion, !m.isEmpty else { return nil }
+            return preprocessingVersion.map { $0.isEmpty ? m : "\(m)@\($0)" } ?? m
         }
     }
 
@@ -392,12 +404,79 @@ extension PhysiologyContext {
         public var wear: String?
         public var revision: Int
         public var availableAt: Int?
+        /// Inside the detected night's in-bed window (the run's `in_bed`); nil when the document did not say.
+        /// The window comes from the heart-rate confirmed sleep detector.
+        public var inBed: Bool? = nil
+        /// Producing decoder (`decoder_version`, e.g. `hsmm-1.7`) and document algorithm (`streams-activity-1`).
+        public var decoderVersion: String? = nil
+        public var algorithmVersion: String? = nil
+        /// `causal` (nil: the decoder's runs, which are causal) or `retrospective` (smoothed after the day was final,
+        /// `ActivityContextDerivation`). A causal document never reads a retrospective record (`Engine.causalView`).
+        public var derivation: String? = nil
         public init(interval: Interval, activityClass: String, confidence: Double, locomotion: String? = nil,
                     posture: String? = nil, sleep: String? = nil, wear: String? = nil, revision: Int,
-                    availableAt: Int? = nil) {
+                    availableAt: Int? = nil, inBed: Bool? = nil, decoderVersion: String? = nil,
+                    algorithmVersion: String? = nil, derivation: String? = nil) {
             self.interval = interval; self.activityClass = activityClass; self.confidence = confidence
             self.locomotion = locomotion; self.posture = posture; self.sleep = sleep; self.wear = wear
-            self.revision = revision; self.availableAt = availableAt
+            self.revision = revision; self.availableAt = availableAt; self.inBed = inBed
+            self.decoderVersion = decoderVersion; self.algorithmVersion = algorithmVersion
+            self.derivation = derivation
+        }
+
+        /// Smoothed with later seconds of its day: never an input to a causal decision.
+        public var isRetrospective: Bool { derivation == ActivityContextDerivation.retrospective.rawValue }
+
+        /// `algorithm/decoder` (provenance key), nil when neither is known.
+        public var provenance: String? {
+            switch (algorithmVersion, decoderVersion) {
+            case let (a?, d?): return "\(a)/\(d)"
+            case let (a?, nil): return a
+            case let (nil, d?): return d
+            default: return nil
+            }
+        }
+    }
+
+    /// A typed transition event the v2 decoder flagged (`activity_context_days.document.events`, the
+    /// `activity_context_transitions` view), from the same document per UTC day as the decoder runs. The decoder
+    /// reads heart rate, so the events are heart-rate dependent evidence: a gate built on them is declared
+    /// (`Eligibility.gateDecoderTransitionEvents`). The decoder's direction is unreliable (measured: about half of
+    /// the flagged posture events have the wrong direction), so the layer uses only "a postural change happened".
+    public struct TransitionEventInput: Codable, Equatable, Sendable {
+        /// Unix second the decoder first flagged the event.
+        public var ts: Int
+        /// `ActivityTransitionKind` raw value (`sit_to_stand_like`, `walk_start`, ...); unknown kinds are kept
+        /// verbatim and counted as `other`.
+        public var kind: String
+        /// The decoder's probability that the change happened, in [0, 1].
+        public var probability: Double
+        /// The publishing document's result revision.
+        public var revision: Int
+        /// When the document became available (`computed_at`); nil when unknown.
+        public var availableAt: Int?
+        public var decoderVersion: String?
+        public var algorithmVersion: String?
+        /// The decoder's causal back-date of the change (`events[].onset_ts`, `ActivityTransitionEvent.onsetTs`):
+        /// where its posterior began to rise, at most `ActivityTransitionEvent.maxOnsetLeadS` before `ts`. nil on
+        /// documents decoded before it was recorded. Optional and decoded if present, so older inputs decode.
+        public var onsetTs: Int? = nil
+        /// Which detector flagged the event (`hsmm` | `transition_expert`); nil when the document does not say.
+        public var source: String? = nil
+        public init(ts: Int, kind: String, probability: Double, revision: Int, availableAt: Int? = nil,
+                    decoderVersion: String? = nil, algorithmVersion: String? = nil, onsetTs: Int? = nil,
+                    source: String? = nil) {
+            self.ts = ts; self.kind = kind; self.probability = min(1, max(0, probability.isFinite ? probability : 0))
+            self.revision = revision; self.availableAt = availableAt; self.decoderVersion = decoderVersion
+            self.algorithmVersion = algorithmVersion; self.onsetTs = onsetTs; self.source = source
+        }
+
+        /// The second the change began: `onsetTs` when recorded (kept within `[ts - maxOnsetLeadS, ts]`), else
+        /// `ts`. Windows count an event over its span `[changeTs, ts]` (`TransitionEvents.summary`); causal
+        /// availability and "seconds since the last transition" stay on `ts`, the detection second.
+        public var changeTs: Int {
+            guard let onset = onsetTs else { return ts }
+            return max(ts - ActivityTransitionEvent.maxOnsetLeadS, min(ts, onset))
         }
     }
 
@@ -437,6 +516,35 @@ extension PhysiologyContext {
             self.vendor = vendor; self.deviceFamily = deviceFamily; self.sourceKind = sourceKind
             self.firmware = firmware; self.decoderVersion = decoderVersion
             self.scoringAlgorithmVersion = scoringAlgorithmVersion; self.seriesAlgorithmVersion = seriesAlgorithmVersion
+        }
+    }
+
+    /// Daily values of another device of the same user (D4-09): the regime the wearer measured in before a strap
+    /// change. Used only as a shrinkage prior / fallback for the new device's references, with its own provenance
+    /// and inflated uncertainty, when the two are comparable (same vendor and source, same hardware family, no
+    /// known firmware change, similar signal quality; per series the same regime key: method, algorithm, window,
+    /// units, placement). Never pooled into the new device's own statistics, frozen references or episodes.
+    public struct PredecessorRegimeHistory: Codable, Equatable, Sendable {
+        /// The predecessor's device scope (its device id).
+        public var deviceScope: String
+        public var vendor: String
+        public var sourceKind: String?
+        /// Canonical hardware family of the predecessor and of the scored (successor) device (`whoop4`, `whoop5`),
+        /// each positively identified from its device row, or nil when the row does not say (a bare "WHOOP"
+        /// label). Kept here, not on `DeviceRegimeInput`: a hardware family is a device-level fact for this
+        /// comparison only, so it never enters the regime key or a day's own regime (review RC-13). Unknown on
+        /// either side makes the predecessor incompatible.
+        public var hardwareFamily: String?
+        public var successorHardwareFamily: String?
+        public var firmware: String?
+        /// Its daily values (same mode), strictly before the scored day; anything later is ignored.
+        public var dailyValues: [DailyValue]
+        public init(deviceScope: String, vendor: String = "whoop", sourceKind: String? = nil,
+                    hardwareFamily: String? = nil, successorHardwareFamily: String? = nil, firmware: String? = nil,
+                    dailyValues: [DailyValue]) {
+            self.deviceScope = deviceScope; self.vendor = vendor; self.sourceKind = sourceKind
+            self.hardwareFamily = hardwareFamily; self.successorHardwareFamily = successorHardwareFamily
+            self.firmware = firmware; self.dailyValues = dailyValues
         }
     }
 }
@@ -565,6 +673,8 @@ extension PhysiologyContext {
         public var workouts: [WorkoutInput]
         public var activityEpochs: [ActivityEpochInput]
         public var activityIntervals: [ActivityIntervalInput]
+        /// Decoder transition events from the same documents as `activityIntervals` (empty when none were read).
+        public var activityTransitions: [TransitionEventInput] = []
         public var placements: [PlacementInput]
         public var regime: DeviceRegimeInput
         /// All revisions of exposure events overlapping the exposure read window.
@@ -579,7 +689,8 @@ extension PhysiologyContext {
                     sleepSessions: [SleepSessionInput] = [], workouts: [WorkoutInput] = [],
                     activityEpochs: [ActivityEpochInput] = [], activityIntervals: [ActivityIntervalInput] = [],
                     placements: [PlacementInput] = [], regime: DeviceRegimeInput,
-                    exposures: [ExposureEventRevision] = [], inputRevisions: [InputRevision] = []) {
+                    exposures: [ExposureEventRevision] = [], inputRevisions: [InputRevision] = [],
+                    activityTransitions: [TransitionEventInput] = []) {
             self.identity = identity; self.mode = mode; self.availabilityCutoff = availabilityCutoff
             self.generatedAt = generatedAt; self.heartRate = heartRate; self.beatIntervals = beatIntervals
             self.motion = motion; self.steps = steps; self.skinTemperature = skinTemperature
@@ -587,6 +698,39 @@ extension PhysiologyContext {
             self.sleepSessions = sleepSessions; self.workouts = workouts; self.activityEpochs = activityEpochs
             self.activityIntervals = activityIntervals; self.placements = placements; self.regime = regime
             self.exposures = exposures; self.inputRevisions = inputRevisions
+            self.activityTransitions = activityTransitions
+        }
+
+        enum CodingKeys: String, CodingKey {
+            case identity, mode, availabilityCutoff, generatedAt, heartRate, beatIntervals, motion, steps
+            case skinTemperature, wearEvents, bandSleepStates, measurements, sleepSessions, workouts
+            case activityEpochs, activityIntervals, activityTransitions, placements, regime, exposures, inputRevisions
+        }
+
+        /// Inputs written before `activityTransitions` existed decode with none.
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            identity = try c.decode(DayIdentity.self, forKey: .identity)
+            mode = try c.decode(ProcessingMode.self, forKey: .mode)
+            availabilityCutoff = try c.decode(Int.self, forKey: .availabilityCutoff)
+            generatedAt = try c.decode(Int.self, forKey: .generatedAt)
+            heartRate = try c.decode([HeartRateObservation].self, forKey: .heartRate)
+            beatIntervals = try c.decode([BeatIntervalObservation].self, forKey: .beatIntervals)
+            motion = try c.decode([MotionObservation].self, forKey: .motion)
+            steps = try c.decode([StepObservation].self, forKey: .steps)
+            skinTemperature = try c.decode([SkinTemperatureObservation].self, forKey: .skinTemperature)
+            wearEvents = try c.decode([WearEventObservation].self, forKey: .wearEvents)
+            bandSleepStates = try c.decode([BandSleepStateObservation].self, forKey: .bandSleepStates)
+            measurements = try c.decode([MeasurementInput].self, forKey: .measurements)
+            sleepSessions = try c.decode([SleepSessionInput].self, forKey: .sleepSessions)
+            workouts = try c.decode([WorkoutInput].self, forKey: .workouts)
+            activityEpochs = try c.decode([ActivityEpochInput].self, forKey: .activityEpochs)
+            activityIntervals = try c.decode([ActivityIntervalInput].self, forKey: .activityIntervals)
+            activityTransitions = try c.decodeIfPresent([TransitionEventInput].self, forKey: .activityTransitions) ?? []
+            placements = try c.decode([PlacementInput].self, forKey: .placements)
+            regime = try c.decode(DeviceRegimeInput.self, forKey: .regime)
+            exposures = try c.decode([ExposureEventRevision].self, forKey: .exposures)
+            inputRevisions = try c.decode([InputRevision].self, forKey: .inputRevisions)
         }
     }
 
@@ -601,12 +745,37 @@ extension PhysiologyContext {
         public var frozenReferences: [FrozenReference]
         /// Sleep sessions of earlier days (for recent sleep loss and timing change; 14 nights by default).
         public var priorSleep: [SleepSessionInput]
+        /// The user's other devices' daily values (D4-09), for the predecessor-regime fallback after a strap
+        /// change. Empty when none were read.
+        public var predecessors: [PredecessorRegimeHistory] = []
         public init(dailyValues: [DailyValue] = [], bouts: [ExertionBout] = [],
-                    frozenReferences: [FrozenReference] = [], priorSleep: [SleepSessionInput] = []) {
+                    frozenReferences: [FrozenReference] = [], priorSleep: [SleepSessionInput] = [],
+                    predecessors: [PredecessorRegimeHistory] = []) {
             self.dailyValues = dailyValues; self.bouts = bouts; self.frozenReferences = frozenReferences
-            self.priorSleep = priorSleep
+            self.priorSleep = priorSleep; self.predecessors = predecessors
         }
         public static let empty = HistoryInput()
+
+        enum CodingKeys: String, CodingKey { case dailyValues, bouts, frozenReferences, priorSleep, predecessors }
+
+        public init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            dailyValues = try c.decode([DailyValue].self, forKey: .dailyValues)
+            bouts = try c.decode([ExertionBout].self, forKey: .bouts)
+            frozenReferences = try c.decode([FrozenReference].self, forKey: .frozenReferences)
+            priorSleep = try c.decode([SleepSessionInput].self, forKey: .priorSleep)
+            predecessors = try c.decodeIfPresent([PredecessorRegimeHistory].self, forKey: .predecessors) ?? []
+        }
+
+        /// `predecessors` only when there are any, so a history without them encodes (and fingerprints) as before.
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(dailyValues, forKey: .dailyValues)
+            try c.encode(bouts, forKey: .bouts)
+            try c.encode(frozenReferences, forKey: .frozenReferences)
+            try c.encode(priorSleep, forKey: .priorSleep)
+            if !predecessors.isEmpty { try c.encode(predecessors, forKey: .predecessors) }
+        }
     }
 }
 
@@ -643,19 +812,27 @@ extension PhysiologyContext {
         /// Filled for measurements that are themselves daily context-conditioned values (nightly products).
         public var comparisons: [ReferenceComparison]
         public var finality: Finality
+        /// Heart-rate free recumbency likelihood over the whole support (forearm-axis gravity, plus the in-bed
+        /// window): the posture stratum of the stable-awake references. Never sitting vs standing. nil on
+        /// documents written before it existed.
+        public var posture: PostureContext? = nil
+        /// Per-epoch wear-signal quality over the whole support (HART epochs only); nil when no epoch carried one.
+        public var wearSignal: WearSignalSummary? = nil
 
         public init(id: String, metric: MetricKind, method: MethodRef, source: SourceRef, value: Double?,
                     support: Interval, displayBucket: Interval?, localTime: LocalTimeRef,
                     validity: SignalValidity, regimeKey: String, activity: ActivityComposition,
                     decoderActivity: ActivityComposition?, preceding: PrecedingHistory,
                     sleepWear: SleepWearContext, history: HistoryContext,
-                    eligibility: [EligibilityVerdict], comparisons: [ReferenceComparison], finality: Finality) {
+                    eligibility: [EligibilityVerdict], comparisons: [ReferenceComparison], finality: Finality,
+                    posture: PostureContext? = nil, wearSignal: WearSignalSummary? = nil) {
             self.id = id; self.metric = metric; self.method = method; self.source = source; self.value = value
             self.support = support; self.displayBucket = displayBucket; self.localTime = localTime
             self.validity = validity; self.regimeKey = regimeKey; self.activity = activity
             self.decoderActivity = decoderActivity; self.preceding = preceding
             self.sleepWear = sleepWear; self.history = history; self.eligibility = eligibility
             self.comparisons = comparisons; self.finality = finality
+            self.posture = posture; self.wearSignal = wearSignal
         }
 
         public func verdict(_ kind: ComparisonKind) -> EligibilityVerdict? {
@@ -727,6 +904,18 @@ extension PhysiologyContext {
         /// Seconds where overlapping records disagreed and were resolved by revision order.
         public var resolvedOverlapS: Int
         public var reasons: [ReasonCode]
+        /// Labelled-seconds weighted mean of the source's own classification confidence (HART epoch / decoder run
+        /// confidence); nil when the source carries none (strap motion is thresholded, not classified).
+        public var meanConfidence: Double? = nil
+        /// Labelled seconds whose confidence is below `JoinConfig.lowConfidenceFloor` (nil with `meanConfidence`).
+        public var lowConfidenceS: Double? = nil
+        /// Distinct producing models / decoders of the spans inside the interval (`model@preprocessing` for HART
+        /// epochs, `algorithm/decoder` for decoder runs), sorted; nil when none is known.
+        public var provenance: [String]? = nil
+        /// Decoder transition events inside the interval, counted from the events themselves (`transitions`
+        /// above stays the count of label changes between spans). nil when no decoder document covers the
+        /// interval (events unobserved, which is not "no transition").
+        public var transitionEvents: TransitionEventSummary? = nil
 
         public init(interval: Interval, intervalS: Int, source: ActivitySource, heartRateDependent: Bool,
                     labels: [LabelShare], unknownS: Double, uncoveredS: Double, transitions: Int, mixed: Bool,
@@ -755,6 +944,13 @@ extension PhysiologyContext {
         public var lastSupportedActivityLabel: String?
         public var coveredS: Int
         public var transitions: Int
+        /// Decoder transition events inside the lookback (nil when no decoder document covers it).
+        public var transitionEvents: TransitionEventSummary? = nil
+        /// Seconds from the last decoder postural / locomotion transition event before the measurement start to
+        /// that start (any distance back within the read window); nil when none was seen.
+        public var secondsSinceLastPosturalTransition: Int? = nil
+        public var secondsSinceLastLocomotionTransition: Int? = nil
+        public var lastPosturalTransitionKind: String? = nil
         public init(lookback: Interval, source: ActivitySource, stillRunS: Int, stillRunEndedBy: ReasonCode?,
                     secondsSinceSupportedActivity: Int?, lastSupportedActivityLabel: String?, coveredS: Int,
                     transitions: Int) {
@@ -965,7 +1161,7 @@ extension PhysiologyContext {
 
     /// Join tunables (owned by the lead, implemented in PCIntervalAlgebra.swift).
     public struct JoinConfig: Codable, Equatable, Sendable {
-        public var version = "pc-join-1"
+        public var version = IntervalAlgebra.version
         /// Seconds of history before a measurement that the preceding-history window inspects.
         public var precedingLookbackS = 1800
         /// A label is "mixed" when a second supported label holds at least this share of the interval.
@@ -977,6 +1173,11 @@ extension PhysiologyContext {
         /// A retrospective document is final once its cutoff is this long after the day ends (the following
         /// night's sleep can still be attributed to the day until then).
         public var finalAfterDayEndS = 30 * 3600
+        /// Two labelled spans separated by at most this much unlabelled / uncovered time are adjacent for the
+        /// label-change count (the interval builder's merge gap); a change across a longer gap is not counted.
+        public var transitionBridgeS = 10
+        /// Labelled seconds whose source confidence is below this count as low confidence.
+        public var lowConfidenceFloor = 0.5
         public init() {}
     }
 }

@@ -22,7 +22,8 @@ import Foundation
 //   4. Rate-limit + quiet hours + master toggle, and never while a manual Breathe/L1/L2 session runs.
 //
 // HONEST / NON-CLINICAL: "stress" is an autonomic PROXY (HRV-down vs the user's OWN baseline), never a
-// diagnosis. The card the caller shows says "HRV dipped while you were still" — never "you are stressed".
+// diagnosis. The card may say "while you were still" only when `Decision.stillnessVerified` (stationary
+// context was supplied); otherwise it must not claim stillness. Never "you are stressed".
 // On fire: a single confirming buzz + a passive in-app card; NEVER a push notification unless the user
 // opted into notifications (matches DaytimeStress's "passive suggestion, never a notification" stance).
 //
@@ -59,6 +60,50 @@ public enum StressOnsetDetector {
     /// Recent smoothed wrist-motion (g) at/above this means "moving" → exercise gate suppresses the fire
     /// (reuses the `SedentaryDetector` move threshold so the two gates agree on what "moving" is).
     public static let motionGateG: Double = SedentaryDetector.defaultMoveThresholdG
+    /// After a known postural transition (e.g. sit-to-stand) RMSSD drops orthostatically for a minute or
+    /// two. A dip ARMED or confirmed within this many seconds of one is a posture change, not stress, and
+    /// the slow baseline does not absorb those ticks either (D4-10 / D6-04).
+    public static let transitionSuppressSeconds: Int = 120
+    /// After a workout / locomotion bout ends, HRV stays suppressed while the body recovers. Ticks within
+    /// this many seconds of the bout's end neither fire nor move the slow baseline.
+    public static let postExertionSeconds: Int = 1_800
+
+    // MARK: - Context (D4-10 / D6-04)
+
+    /// What the wrist / decoder knows about the user's activity near now.
+    public enum ActivityEvidence: String, Equatable, Sendable {
+        /// Nothing supplied (no stored context or step/gravity sample near now). Stillness is UNVERIFIED:
+        /// the HR band carries the gate as before, and the decision says so.
+        case none
+        /// Stationary evidence near now (a stationary-class context run, or motion below the gate).
+        case still
+        /// Locomotion / activity near now.
+        case moving
+        /// The decoder ran but could not say (unknown / off-wrist): suppress, never assume still.
+        case unknown
+    }
+
+    /// The best available context for this tick. Every field defaults to "not known", so a caller that
+    /// supplies nothing keeps the pre-context behaviour except that stillness is reported unverified.
+    public struct LiveContext: Equatable, Sendable {
+        public var activity: ActivityEvidence
+        /// True when the user is in a detected sleep / in-bed block (a sleeping RMSSD is not a rest one).
+        public var asleep: Bool
+        /// Unix seconds of the latest KNOWN postural transition, or nil.
+        public var lastTransitionAt: Int?
+        /// Unix seconds the latest workout / locomotion bout ENDED, or nil.
+        public var lastExertionEndAt: Int?
+
+        public init(activity: ActivityEvidence = .none, asleep: Bool = false,
+                    lastTransitionAt: Int? = nil, lastExertionEndAt: Int? = nil) {
+            self.activity = activity
+            self.asleep = asleep
+            self.lastTransitionAt = lastTransitionAt
+            self.lastExertionEndAt = lastExertionEndAt
+        }
+
+        public static let none = LiveContext()
+    }
 
     // MARK: - Config
 
@@ -143,6 +188,11 @@ public enum StressOnsetDetector {
         case awaitingSustain
         /// Suppressed by the exercise gate (HR out of band and/or recent motion = metabolic, not stress).
         case exerciseGated
+        /// Suppressed by context: locomotion / unknown activity near now, asleep, or inside the
+        /// post-exertion window (D6-04). Not "stress".
+        case contextGated
+        /// Suppressed because the dip followed a known postural transition (orthostatic, D4-10).
+        case transitionGated
         /// Inside the rate-limit window or quiet hours, or a manual session is running.
         case suppressed
     }
@@ -163,11 +213,19 @@ public enum StressOnsetDetector {
         public let baselineRMSSD: Double?
         /// The state to persist for the next evaluation (always carries the advanced EMA / edge / clock).
         public let nextState: State
+        /// True only when stationary context was actually supplied for this tick. A nudge with this false
+        /// must not claim the user was "still" (D6-04: that was never verified).
+        public let stillnessVerified: Bool
+        /// True when this tick's fast RMSSD moved the slow baseline (it passed every rest gate). The EMA is
+        /// frozen otherwise, so exercise, sleep, post-workout or a posture change cannot drag it (D4-10).
+        public let baselineUpdated: Bool
 
         public init(shouldNudge: Bool, reason: Reason, buzzLoops: Int,
-                    fastRMSSD: Double?, baselineRMSSD: Double?, nextState: State) {
+                    fastRMSSD: Double?, baselineRMSSD: Double?, nextState: State,
+                    stillnessVerified: Bool = false, baselineUpdated: Bool = false) {
             self.shouldNudge = shouldNudge; self.reason = reason; self.buzzLoops = buzzLoops
             self.fastRMSSD = fastRMSSD; self.baselineRMSSD = baselineRMSSD; self.nextState = nextState
+            self.stillnessVerified = stillnessVerified; self.baselineUpdated = baselineUpdated
         }
     }
 
@@ -188,6 +246,12 @@ public enum StressOnsetDetector {
     /// motion at/above `motionGateG`. A missing HR is treated as out-of-band (can't confirm resting);
     /// missing motion alone does NOT gate (HR-band can carry it — gravity is offloaded and lags, spec Q3),
     /// so the resting-HR band is the real-time gate and motion is a secondary confirm when present.
+    ///
+    /// `context` (D4-10 / D6-04): locomotion or unknown activity near now, being asleep, or the
+    /// post-exertion window suppress a fire (`.contextGated`), and a dip armed or confirmed within
+    /// `transitionSuppressSeconds` of a known postural transition is `.transitionGated`. The slow baseline
+    /// EMA only absorbs a tick that passes EVERY rest gate (HR band, not moving, not asleep, not
+    /// post-exertion, not just after a transition, activity not moving/unknown); otherwise it is frozen.
     public static func evaluate(rrBuffer: [Int],
                                 currentHR: Double?,
                                 recentMotionG: Double?,
@@ -195,7 +259,8 @@ public enum StressOnsetDetector {
                                 state: State,
                                 config: Config,
                                 nowSec: Int,
-                                tzOffsetSec: Int) -> Decision {
+                                tzOffsetSec: Int,
+                                context: LiveContext = .none) -> Decision {
 
         // 1) Master gates: off / auto-nudge off → never nudge, state untouched.
         if !config.enabled || !config.autoNudge {
@@ -216,11 +281,42 @@ public enum StressOnsetDetector {
                             nextState: state)
         }
 
-        // 3) Advance the slow baseline EMA (seed on first trusted value), exactly like evaluateStress.
+        // 3) The rest gates, evaluated BEFORE the EMA so a non-rest tick cannot move the slow baseline.
+        //    HR out of the resting band (or unknown) or recent motion at/above the gate -> metabolic.
+        let hrInBand: Bool = {
+            guard let hr = currentHR else { return false }   // unknown HR can't confirm resting -> gate
+            return hr >= restingHRLow && hr <= restingHRHigh
+        }()
+        let moving: Bool = {
+            guard let m = recentMotionG else { return false } // no recent gravity -> motion inconclusive
+            return m >= motionGateG
+        }()
+        func afterTransition(_ t: Int) -> Bool {
+            guard let at = context.lastTransitionAt else { return false }
+            return t >= at && t - at < transitionSuppressSeconds
+        }
+        let postExertion: Bool = {
+            guard let end = context.lastExertionEndAt else { return false }
+            return nowSec >= end && nowSec - end < postExertionSeconds
+        }()
+        let contextBlocks = context.activity == .moving || context.activity == .unknown
+            || context.asleep || postExertion
+        let restTick = hrInBand && !moving && !contextBlocks && !afterTransition(nowSec)
+        let stillVerified = context.activity == .still
+
+        // Advance the slow baseline EMA (seed on the first trusted REST value) only on a rest tick.
         var next = state
-        next.baselineRMSSD = state.baselineRMSSD == 0
-            ? fast
-            : state.baselineRMSSD * baselineEmaAlpha + fast * (1.0 - baselineEmaAlpha)
+        if restTick {
+            next.baselineRMSSD = state.baselineRMSSD == 0
+                ? fast
+                : state.baselineRMSSD * baselineEmaAlpha + fast * (1.0 - baselineEmaAlpha)
+        }
+        guard next.baselineRMSSD > 0 else {
+            // No rest tick has seeded the baseline yet: nothing honest to compare against.
+            return Decision(shouldNudge: false, reason: hrInBand && !moving ? .contextGated : .exerciseGated,
+                            buzzLoops: config.buzzLoops, fastRMSSD: fast, baselineRMSSD: nil,
+                            nextState: next, stillnessVerified: stillVerified, baselineUpdated: false)
+        }
         let baseline = next.baselineRMSSD
 
         // 4) Is the fast RMSSD below the drop threshold? (the dip test)
@@ -240,7 +336,8 @@ public enum StressOnsetDetector {
 
         func decide(_ nudge: Bool, _ reason: Reason) -> Decision {
             Decision(shouldNudge: nudge, reason: reason, buzzLoops: config.buzzLoops,
-                     fastRMSSD: fast, baselineRMSSD: baseline, nextState: next)
+                     fastRMSSD: fast, baselineRMSSD: baseline, nextState: next,
+                     stillnessVerified: stillVerified, baselineUpdated: restTick)
         }
 
         if !isBelow { return decide(false, .noDip) }
@@ -248,19 +345,13 @@ public enum StressOnsetDetector {
         // arm was already consumed — either way there is no fresh crossing to act on.
         guard next.pendingEdgeAt != 0 else { return decide(false, .notAnEdge) }
         if nowSec - next.pendingEdgeAt < sustainSeconds { return decide(false, .awaitingSustain) }
+        let armedAt = next.pendingEdgeAt
         next.pendingEdgeAt = 0   // consumed: proven sustained, now subject to the gates below
 
-        // 5) Exercise gate (the credibility line). HR out of the resting band (or unknown) → metabolic.
-        //    Recent motion at/above the gate → metabolic. Either suppresses.
-        let hrInBand: Bool = {
-            guard let hr = currentHR else { return false }   // unknown HR can't confirm resting → gate
-            return hr >= restingHRLow && hr <= restingHRHigh
-        }()
-        let moving: Bool = {
-            guard let m = recentMotionG else { return false } // no recent gravity → motion inconclusive
-            return m >= motionGateG
-        }()
+        // 5) Exercise gate (the credibility line), then the context gates. Either suppresses.
         if !hrInBand || moving { return decide(false, .exerciseGated) }
+        if contextBlocks { return decide(false, .contextGated) }
+        if afterTransition(nowSec) || afterTransition(armedAt) { return decide(false, .transitionGated) }
 
         // 6) Suppressors: a manual session is running, the rate limit, or quiet hours.
         if sessionActive { return decide(false, .suppressed) }
@@ -275,8 +366,76 @@ public enum StressOnsetDetector {
             }
         }
 
-        // 7) Fire — a fresh, non-metabolic HRV dip while still. Stamp the rate-limit clock.
+        // 7) Fire — a fresh, non-metabolic HRV dip (still only when `stillnessVerified`). Stamp the clock.
         next.lastFireAt = nowSec
         return decide(true, .onset)
+    }
+
+    // MARK: - Context from stored activity intervals
+
+    /// How fresh the newest stored context run must be to speak for "now". Stored context lags the live
+    /// stream (gravity is offloaded), so an older run is no evidence at all (`.none`), never "still".
+    public static let contextMaxAgeSeconds: Int = 300
+
+    /// Shortest active / locomotion BOUT that counts as exertion for the post-exertion gate. Adjacent active
+    /// runs (gap <= `exertionBoutMergeGapSeconds`) form one bout. A two-minute shuffle to the kitchen is
+    /// `.moving` while it lasts, but it must not open the full `postExertionSeconds` window (which blocks
+    /// firing and freezes the slow EMA): repeated short light runs would disable the detector all day.
+    public static let exertionMinBoutSeconds: Int = 300
+    public static let exertionBoutMergeGapSeconds: Int = 60
+
+    /// The best available `LiveContext` from the stored activity-context intervals (any order).
+    ///
+    /// - `activity`: from the run covering `nowSec`, or the newest run ending within
+    ///   `contextMaxAgeSeconds`: active / locomotion classes -> `.moving`; stationary classes (sitting,
+    ///   standing, lying, stationary, fidgeting) -> `.still`; `unknown` / `off_wrist` -> `.unknown`;
+    ///   `sleeping` -> `.still` with `asleep`. No fresh run -> `.none` (stillness unverified).
+    /// - `lastTransitionAt`: the newest boundary between two adjacent runs whose posture family differs
+    ///   (recumbent / seated / upright / active), the coarse transitions the wrist can support. A change
+    ///   between `stationary` (posture unresolved) and a resolved posture is NOT counted: that is the
+    ///   decoder resolving, not the body moving.
+    /// - `lastExertionEndAt`: the end of the newest ended active / locomotion BOUT (adjacent active runs
+    ///   merged) lasting at least `exertionMinBoutSeconds`. Shorter bouts never set it.
+    public static func liveContext(intervals: [ActivityContextInterval], nowSec: Int) -> LiveContext {
+        let runs = intervals.filter { $0.end > $0.start && $0.start <= nowSec }.sorted { $0.start < $1.start }
+        guard !runs.isEmpty else { return .none }
+        func family(_ c: ActivityClass) -> String? {
+            switch c {
+            case .sleeping, .lyingDown: return "recumbent"
+            case .sitting, .sittingDesk: return "seated"
+            case .standing: return "upright"
+            case .lightActivity, .walking, .briskWalking, .running, .cycling, .vigorousActivity: return "active"
+            case .stationary, .fidgeting, .unknown, .offWrist: return nil
+            }
+        }
+        func isActive(_ c: ActivityClass) -> Bool { family(c) == "active" }
+        var ctx = LiveContext()
+        let current = runs.last { $0.start <= nowSec && nowSec < $0.end }
+            ?? runs.last { $0.end <= nowSec && nowSec - $0.end <= contextMaxAgeSeconds }
+        if let c = current {
+            switch c.activityClass {
+            case .sleeping: ctx.activity = .still; ctx.asleep = true
+            case .unknown, .offWrist: ctx.activity = .unknown
+            default: ctx.activity = isActive(c.activityClass) ? .moving : .still
+            }
+        }
+        var lastFamily: String? = nil
+        for r in runs {
+            guard let f = family(r.activityClass) else { continue }
+            if let lf = lastFamily, lf != f, r.start <= nowSec { ctx.lastTransitionAt = r.start }
+            lastFamily = f
+        }
+        var bouts: [(start: Int, end: Int)] = []
+        for r in runs where isActive(r.activityClass) {
+            if let last = bouts.last, r.start - last.end <= exertionBoutMergeGapSeconds {
+                bouts[bouts.count - 1].end = max(last.end, r.end)
+            } else {
+                bouts.append((r.start, r.end))
+            }
+        }
+        ctx.lastExertionEndAt = bouts
+            .filter { $0.end <= nowSec && $0.end - $0.start >= exertionMinBoutSeconds }
+            .map(\.end).max()
+        return ctx
     }
 }

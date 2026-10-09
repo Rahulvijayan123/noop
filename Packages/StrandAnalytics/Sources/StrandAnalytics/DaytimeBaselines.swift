@@ -65,9 +65,22 @@ public extension DaytimeStress {
     ///     fabricate variability); `nil` when no waking hour had enough clean R-R (e.g. an HR-only day).
     /// Either field is `nil` independently. Bucketing keys off the HR buckets (like the scorer), so an
     /// hour with R-R but no HR contributes neither.
+    ///
+    /// D4-05 / D6-05: the SAME per-hour mask as the scorer (`DaytimeStress.hourMask`) drops hours mostly
+    /// inside a detected sleep / in-bed block (a sleep-in or nap would otherwise pull the P10 floor down to
+    /// sleeping HR, so every later seated hour reads as stress), ambulatory hours (the gravity gate, or the
+    /// context's active / locomotion share), and upright-committed hours (an orthostatic lift is not the
+    /// seated calm floor). With no `gravity` and no `context` it is byte-identical to the clock-only
+    /// aggregate. The scorer's one-hour post-exercise shadow is not applied: it only withholds hours whose HR
+    /// is still ABOVE the calm reference, which a P10 floor does not read.
     static func dayDaytimeAggregate(hr: [HRSample], rr: [RRInterval],
-                                    tzOffsetSeconds: Int) -> (hr: Double?, rmssd: Double?) {
+                                    tzOffsetSeconds: Int,
+                                    gravity: [GravitySample] = [],
+                                    context: DayContext = .none) -> (hr: Double?, rmssd: Double?) {
         guard !hr.isEmpty else { return (nil, nil) }
+        let activeFrac = gravity.isEmpty ? [:]
+            : activeFractions(WorkoutDetector.activitySeries(gravity), tzOffsetSeconds: tzOffsetSeconds, phase: 0)
+        let ctxIndex = ContextIndex(context)
 
         // Bucket HR + R-R into LOCAL hour-of-day buckets, byte-for-byte the scorer's step 1.
         var hrByBucket: [Int: [Double]] = [:]
@@ -88,6 +101,9 @@ public extension DaytimeStress {
         var wakingMeanHRs: [Double] = []
         var wakingRMSSDs: [Double] = []
         for (bucket, hrs) in hrByBucket where isWakingHour(bucket) {
+            let m = hourMask(gravityActiveFraction: activeFrac[bucket],
+                             context: ctxIndex.hour(localBucket: bucket, tzOffsetSeconds: tzOffsetSeconds))
+            if m.asleep || m.ambulatory || m.upright { continue }
             if hrs.count >= minHourHRSamples, let m = mean(hrs) { wakingMeanHRs.append(m) }
             if let rmssd = HRVAnalyzer.analyze(rawRR: rrByBucket[bucket] ?? []).rmssd {
                 wakingRMSSDs.append(rmssd)

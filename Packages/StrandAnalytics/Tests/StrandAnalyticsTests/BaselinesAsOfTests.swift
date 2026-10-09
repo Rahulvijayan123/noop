@@ -207,4 +207,61 @@ final class BaselinesAsOfTests: XCTestCase {
         XCTAssertEqual(Baselines.foldHistory(v, dayKeys: keys, cfg: cfg, baselineEpoch: 0, rejectHardOutliers: false),
                        Baselines.foldHistory(v, cfg: cfg, rejectHardOutliers: false))
     }
+
+    /// The D4-04 measurement on a series where the two folds can actually differ for a regime reason: 60
+    /// nights of an Oura ring (RMSSD ~120 ms) then 40 WHOOP nights (~70 ms). The old Charge HRV fold pooled
+    /// both brands over the whole history; the reference is an INDEPENDENT plain `foldHistory` over only the
+    /// earlier same-era nights. Reported: the old pooled fold's |dz| against that reference on the newest 21
+    /// nights, and the as-of (regime-scoped) fold's.
+    func testMeasuredZDriftOnABrandSwitch() {
+        var seed: UInt64 = 11
+        func uniform() -> Double {
+            seed = seed &* 6364136223846793005 &+ 1442695040888963407
+            return Double((seed >> 11) & ((1 << 53) - 1)) / Double(1 << 53)
+        }
+        func gauss(_ mu: Double, _ sd: Double) -> Double {
+            let u1 = max(uniform(), 1e-12), u2 = uniform()
+            return mu + sd * (-2 * log(u1)).squareRoot() * cos(2 * .pi * u2)
+        }
+        let n = 100, switchAt = 60
+        let vals: [Double?] = (0..<n).map { $0 < switchAt ? gauss(120, 9) : gauss(70, 6) }
+        let keys = (0..<n).map(key)
+        var source: [String: String] = [:]
+        for i in 0..<n { source[keys[i]] = i < switchAt ? "oura-import" : "my-whoop" }
+        var map: [String: Double?] = [:]
+        for i in 0..<n { map[keys[i]] = vals[i] }
+        let cfg = Baselines.hrvCfg
+        let whole = Baselines.foldHistory(vals, cfg: cfg)
+        let asOf = Baselines.regimeScopedAsOf(merged: map, computed: nil, sourceByDay: source,
+                                              defaultSource: "my-whoop", cfg: cfg, baselineEpoch: 0).byDay
+        var oldDz: [Double] = [], newDz: [Double] = []
+        for d in (n - 21)..<n {
+            let reference = Baselines.foldHistory(Array(vals[switchAt..<d]), cfg: cfg)
+            let zr = Baselines.deviation(vals[d]!, state: reference).z
+            oldDz.append(abs(Baselines.deviation(vals[d]!, state: whole).z - zr))
+            newDz.append(abs(Baselines.deviation(vals[d]!, state: asOf[keys[d]]!.state).z - zr))
+        }
+        let oldMean = oldDz.reduce(0, +) / Double(oldDz.count)
+        let newMean = newDz.reduce(0, +) / Double(newDz.count)
+        print("D4-04 measurement (brand switch): old pooled fold mean|dz|=\(oldMean) max=\(oldDz.max()!); "
+              + "as-of regime-scoped mean|dz|=\(newMean) max=\(newDz.max()!)")
+        XCTAssertGreaterThan(oldMean, 0.2)
+        XCTAssertLessThan(newMean, 1e-9)
+    }
+
+    /// A NOOP history that went quiet through a long vendor-import-only stretch is STALE (not usable):
+    /// scoring against it alone would blank a Charge the parent can still score, so it falls back fully.
+    func testStaleChildFallsBackToTheParent() {
+        var merged: [String: Double?] = [:]
+        var computed: [String: Double?] = [:]
+        for i in 0..<20 { merged[key(i)] = 60; computed[key(i)] = 60 }       // NOOP nights
+        for i in 20..<40 { merged[key(i)] = 70; computed[key(i)] = .some(nil) } // vendor-only stretch
+        merged[key(40)] = 62; computed[key(40)] = 62
+        let r = Baselines.regimeScopedAsOf(merged: merged, computed: computed, sourceByDay: [:],
+                                           defaultSource: "my-whoop", cfg: Baselines.hrvCfg, baselineEpoch: 0)
+        let d = r.byDay[key(40)]!
+        XCTAssertTrue(d.fallbackUsed)
+        XCTAssertEqual(d.childWeight, 0)
+        XCTAssertTrue(d.state.usable, "the parent still scores the night")
+    }
 }

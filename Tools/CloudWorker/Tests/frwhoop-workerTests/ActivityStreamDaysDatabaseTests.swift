@@ -61,7 +61,11 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         try db.exec("insert into public.devices(id,user_id,source_kind) values ('\(device)','\(user)','noop_push')")
         addTeardownBlock {
             db.rollbackTransaction()
-            try? db.exec("delete from auth.users where id = '\(user)'")
+            // The account cascade must succeed with the owner's workouts (`sessions`) still there: that is the
+            // regression for 20261008100400 (`bump_user_revision` used to upsert `user_sync_state` inside the
+            // cascade and abort it). A failed delete is reported, never swallowed: a silently left owner and its
+            // queued work were claimed by later suites (ContextLaneDatabaseTests' causal replay saw two publishes).
+            try db.deleteFixtureOwners([user])
         }
         let today = Int(Date().timeIntervalSince1970) / 86_400 * 86_400
         return Fixture(db: db, user: user, device: device, dayStart: today - 86_400)
@@ -444,6 +448,56 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         XCTAssertEqual(lane.stats.lastStreamDayError, before)
     }
 
+    // MARK: - The midnight lookback (audit D2-11)
+
+    /// The decode warms up on the half hour before midnight, so it reads the night and the workout that
+    /// ended in it (and nothing older); walking that stops seconds before midnight leaves a transition in the
+    /// warm-up snapshot that must never reach the day document, which `complete_activity_stream_day` validates.
+    func testTheLookbackReadsSpansEndingBeforeMidnightAndPublishesOnlyTheDaysEvents() throws {
+        let f = try makeFixture()
+        let lookback = ActivityContextDays.lookbackSeconds
+        _ = try f.db.query("""
+            insert into public.sessions(user_id, device_id, kind, start_at, end_at, summary) values
+              ($1::uuid, $2::uuid, 'workout', to_timestamp($3::bigint), to_timestamp($4::bigint), '{"sport":"running"}'),
+              ($1::uuid, $2::uuid, 'workout', to_timestamp($5::bigint), to_timestamp($6::bigint), '{}')
+            """, [f.user, f.device, String(f.dayStart - 1_500), String(f.dayStart - 300),
+                  String(f.dayStart - 7_200), String(f.dayStart - lookback - 60)])
+        _ = try f.db.query("""
+            insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version,
+                                                    input_revision, computed_at, payload)
+            select $1::uuid, $2::uuid, $3::date - 1, 'frwhoop-server-1', 1, clock_timestamp(),
+                   jsonb_build_object('sleep', jsonb_build_array(
+                     jsonb_build_object('start_at', to_timestamp($4::bigint), 'end_at', to_timestamp($5::bigint))))
+            """, [f.user, f.device, f.day, String(f.dayStart - 6 * 3_600), String(f.dayStart - 600)])
+        let lane = makeLane(f.db)
+        let spans = try lane.daySpans(userId: f.user, deviceId: f.device, dayBounds: (f.dayStart, f.dayEnd))
+        XCTAssertEqual(spans.nights.map(\.end), [f.dayStart - 600], "the night that ended 10 minutes before midnight")
+        XCTAssertEqual(spans.exercise.map(\.end), [f.dayStart - 300],
+                       "the workout ending in the lookback, not the one that ended before it")
+        XCTAssertEqual(spans.exercise.first?.sport, "running")
+
+        // Walking until 10 s before midnight, then sitting: the stream day publishes (no
+        // invalid_activity_day_event) with only the day's own transitions.
+        var sim = DaySim(start: f.dayStart - 1_200)
+        sim.still(600)
+        sim.walk(590)
+        sim.still(1_200)
+        try seed(f, sim: sim)
+        try completeScoring(f)
+        var streams = makeLane(f.db)
+        streams.drainStreamDays(budget: 20)
+        XCTAssertEqual(streams.stats.streamDayFailures, 0, streams.stats.lastStreamDayError ?? "")
+        let docs = try f.db.query("""
+            select (select min((e->>'ts')::bigint) from jsonb_array_elements(document->'events') e)::text as first_event
+              from public.activity_context_days
+             where user_id=$1::uuid and device_id=$2::uuid and day=$3::date
+            """, [f.user, f.device, f.day])
+        XCTAssertEqual(docs.count, 1, "the day was published")
+        if let first = docs.first?["first_event"].flatMap({ Int($0) }) {
+            XCTAssertGreaterThanOrEqual(first, f.dayStart)
+        }
+    }
+
     // MARK: - The reconcile call
 
     func testTheReconcileCallTheLaneMakesIsAValidCall() throws {
@@ -453,5 +507,25 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         XCTAssertNoThrow(try f.db.callFunctionForJSON(ActivityLane.reconcileSQL, [ActivityLane.reconcileLookback]))
         XCTAssertThrowsError(try f.db.callFunctionForJSON(ActivityLane.reconcileSQL, ["'7 days'::interval"]),
                              "the quoted form is not an interval literal")
+    }
+}
+/// Fixture-owner cleanup for the database suites.
+extension PostgresClient {
+    struct FixtureOwnerLeftBehind: Swift.Error, CustomStringConvertible {
+        var users: [String]
+        var description: String { "fixture owners still present after delete: \(users)" }
+    }
+
+    /// Deletes the test owners from `auth.users`, which cascades to everything they own, and checks they are gone.
+    /// Throws on a failed cascade (it was swallowed by `try?` before, which hid a broken account deletion), so a
+    /// teardown reports it instead of leaving an owner whose queued work a later suite claims.
+    func deleteFixtureOwners(_ users: [String]) throws {
+        guard !users.isEmpty else { return }
+        let ids = users.map { $0.lowercased() }
+        precondition(ids.allSatisfy { UUID(uuidString: $0) != nil }, "fixture owners are UUIDs")
+        let list = ids.map { "'\($0)'" }.joined(separator: ",")
+        try exec("delete from auth.users where id in (\(list))")
+        let left = try query("select id::text as id from auth.users where id in (\(list))", [])
+        if !left.isEmpty { throw FixtureOwnerLeftBehind(users: left.compactMap { $0["id"] }) }
     }
 }

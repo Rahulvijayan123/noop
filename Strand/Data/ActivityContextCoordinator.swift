@@ -26,13 +26,25 @@ final class ActivityContextCoordinator {
     private let log: (String) -> Void
     private let timeZone: () -> TimeZone
     private let horizonDays: Int
+    private let smooth: Smoother
+
+    /// The retrospective smoother (D8-10): `ActivityContextPersistence.retrospectiveIntervals` in production;
+    /// injectable so a test can drive a final day whose smoothing yields nothing.
+    typealias Smoother = @Sendable (_ document: ActivityContextDayDocument, _ events: [ActivityTransitionEvent],
+                                    _ hr: [HRSample], _ steps: [StepSample], _ rr: [RRInterval],
+                                    _ from: Int, _ to: Int, _ finality: String) -> [ActivityContextInterval]
+    nonisolated static let defaultSmoother: Smoother = { document, events, hr, steps, rr, from, to, finality in
+        ActivityContextPersistence.retrospectiveIntervals(document: document, events: events, hr: hr, steps: steps,
+                                                          rr: rr, from: from, to: to, finality: finality)
+    }
 
     private var isEvaluatingStand = false
     private var lastStandReason: StandReminderEngine.Reason?
 
     private var materializeTask: Task<Void, Never>?
     private var materializeAgain = false
-    /// What this process last saw of each day (never persisted: a relaunch looks again).
+    /// What this process last saw of each day. Not persisted itself; the input fingerprint a day was derived
+    /// from is, in its ledger row, so a relaunch still sees late input.
     private var checks: [Int: ActivityContextMaterialization.Check] = [:]
     /// When a day last failed to be written, so one that keeps failing is not retried on every pass.
     private var failures: [Int: Int] = [:]
@@ -56,13 +68,15 @@ final class ActivityContextCoordinator {
          isWorn: @escaping () -> Bool,
          remind: @escaping (_ loops: UInt8, _ windowMinutes: Int) -> Void,
          log: @escaping (String) -> Void,
-         timeZone: @escaping () -> TimeZone = { .current }) {
+         timeZone: @escaping () -> TimeZone = { .current },
+         smooth: @escaping Smoother = ActivityContextCoordinator.defaultSmoother) {
         self.repo = repo
         self.horizonDays = horizonDays
         self.isWorn = isWorn
         self.remind = remind
         self.log = log
         self.timeZone = timeZone
+        self.smooth = smooth
     }
 
     // MARK: - Stand reminder
@@ -156,25 +170,59 @@ final class ActivityContextCoordinator {
 
         var owners: [Int: Repository.ActivityContextOwner] = [:]
         var fingerprints: [Int: String] = [:]
+        var tails: [Int: [ActivityTransitionEvent]] = [:]
+        var configTags: [Int: String] = [:]
         var candidates: [ActivityContextMaterialization.Candidate] = []
+        var unanswered: Set<Int> = []
         for day in days {
-            guard let owner = await repo.activityContextOwner(store: store, ids: ids, from: day.start, to: day.end) else { continue }
-            owners[day.start] = owner
-            // A07: the cheap store-level day-stream fingerprint (count/max-ts per stream) rides on the
-            // candidate so `needsWork` re-examines a day whose streams changed under an unchanged ledger
-            // — a late backfill to an old day with no new HR must not stay invisible until the horizon
-            // rolls over it. (Equal-count *value* corrections are caught by the track's content
-            // fingerprint once the day is re-examined; the last-seen route here is in-session — the
-            // ledger column that would persist it across launches is the documented follow-up.)
-            // Only a day this process has already looked at can compare against a fingerprint (no stored one is
-            // passed in), so the query is skipped for the others — about 118 of 120 on a pass.
-            if checks[day.start] != nil {
-                let fingerprint = (try? await store.dayStreamFingerprint(deviceId: owner.deviceId, from: day.start, to: day.end)) ?? ""
-                if !fingerprint.isEmpty { fingerprints[day.start] = fingerprint }
+            let probed: Repository.ActivityContextOwner?
+            do {
+                probed = try await repo.activityContextOwner(store: store, ids: ids, from: day.start, to: day.end)
+            } catch {
+                unanswered.insert(day.start)
+                log("Activity context: could not read \(day.key)'s heart rate: \(error)")
+                continue
             }
+            guard let owner = probed else { continue }
+            owners[day.start] = owner
+            let configTag = repo.activityContextLedgerConfigTag(dayStart: day.start)
+            configTags[day.start] = configTag
+            // The witness of everything the decode reads (every raw id's streams, sleep, workouts, the server's
+            // windows, the config): `needsWork` compares it with the one the day's ledger recorded when it was
+            // derived — persisted, so a late backfill to an old day is seen after a relaunch too — and with what
+            // this process last saw. Equal-count *value* corrections are caught by the track's content
+            // fingerprint once the day is re-examined.
+            // The previous day's last events are input too: the day's first rows settle on them. Witnessed by their
+            // content ("" with none), so the day is derived again once the day before it is stored or its last
+            // minutes change, and not otherwise.
+            let tail = await previousDayTail(day, ids: ids, store: store)
+            tails[day.start] = tail
+            if let fingerprint = await repo.activityContextInputFingerprint(store: store, ids: ids, day: day,
+                                                                             ownerId: owner.deviceId, configTag: configTag) {
+                fingerprints[day.start] = fingerprint + ActivityContextPersistence.tailFingerprint(tail)
+            }
+            // Rule 7 is on: `materialize` writes retrospective rows for every final day it derives, so a final
+            // day without this smoother's rows is derived once more (and, once it has them, never re-planned).
+            // A final day smoothed to nothing records the version too ("smoothed, empty"), so it is not re-planned.
             candidates.append(.init(day: day, ledger: ledgers[owner.deviceId]?[day.start],
                                     newestHeartRateTs: owner.newestHeartRateTs, lastCheck: checks[day.start],
-                                    inputFingerprint: fingerprints[day.start]))
+                                    inputFingerprint: fingerprints[day.start], configTag: configTag,
+                                    retrospectiveVersion: ActivityContextRetrospective.version))
+        }
+
+        // A day that still has stored context but no heart rate under any id (samples moved out, a device's data
+        // deleted) is forgotten under every id, so nothing describes seconds that have no data behind them. Only a
+        // pass whose every probe was answered clears anything: a failed read is not "no heart rate".
+        let ledgerDays = Set(ledgers.values.flatMap(\.keys))
+        for day in ActivityContextMaterialization.orphanedDays(days, ledgerDays: ledgerDays, owned: Set(owners.keys),
+                                                               unanswered: unanswered) {
+            do {
+                try await store.clearActivityContext(deviceIds: ids, from: day.start, to: day.end)
+                checks[day.start] = nil
+                log("Activity context: cleared \(day.key), which no longer has heart rate")
+            } catch {
+                log("Activity context: could not clear \(day.key): \(error)")
+            }
         }
 
         let planned = ActivityContextMaterialization.plan(candidates, now: nowSec)
@@ -186,7 +234,9 @@ final class ActivityContextCoordinator {
         for day in due {
             guard let owner = owners[day.start] else { continue }
             await materialize(day, owner: owner, ledger: ledgers[owner.deviceId]?[day.start],
-                              inputFingerprint: fingerprints[day.start], ids: ids, store: store)
+                              inputFingerprint: fingerprints[day.start], previousEvents: tails[day.start] ?? [],
+                              configTag: configTags[day.start] ?? repo.activityContextLedgerConfigTag(dayStart: day.start),
+                              ids: ids, store: store)
         }
         let oldDays = planned.filter { !ActivityContextMaterialization.isRecent($0, now: nowSec) }.count
         return oldDays >= ActivityContextMaterialization.Config().maxBacklogPerPass
@@ -200,58 +250,139 @@ final class ActivityContextCoordinator {
         return now - last < Self.openDayRederiveFloorS
     }
 
-    private func materialize(_ day: Day, owner: Repository.ActivityContextOwner, ledger: ActivityContextDayRow?,
-                             inputFingerprint: String?, ids: [String], store: WhoopStore) async {
-        // The planner fingerprints only days this process already looked at; a day derived for the first time
-        // records its fingerprint here, so a later backfill into it is still noticed (rule 5).
-        var fingerprint = inputFingerprint
-        if fingerprint == nil {
-            let read = (try? await store.dayStreamFingerprint(deviceId: owner.deviceId, from: day.start, to: day.end)) ?? ""
-            fingerprint = read.isEmpty ? nil : read
+    /// The previous day's events in the `hrvEventLookbackS` before `day`, as stored with that day under any of `ids`.
+    /// Empty when that day is not stored yet (or the read failed): the day's first rows and windows then see no
+    /// event before the day, as before.
+    private func previousDayTail(_ day: Day, ids: [String], store: WhoopStore) async -> [ActivityTransitionEvent] {
+        var rows: [ActivityContextTransitionRow] = []
+        for id in ids {
+            rows += (try? await store.activityContextTransitions(
+                deviceId: id, from: day.start - ActivityContextPersistence.hrvEventLookbackS, to: day.start)) ?? []
         }
-        checks[day.start] = .init(at: Int(Date().timeIntervalSince1970), newestHeartRateTs: owner.newestHeartRateTs,
-                                  inputFingerprint: fingerprint)
+        return ActivityContextPersistence.events(rows)
+    }
+
+    private func materialize(_ day: Day, owner: Repository.ActivityContextOwner, ledger: ActivityContextDayRow?,
+                             inputFingerprint: String?, previousEvents: [ActivityTransitionEvent],
+                             configTag: String, ids: [String], store: WhoopStore) async {
+        let startedAt = Int(Date().timeIntervalSince1970)
+        checks[day.start] = .init(at: startedAt, newestHeartRateTs: owner.newestHeartRateTs,
+                                  inputFingerprint: inputFingerprint)
         guard let loaded = await loadDay(day) else {
             failures[day.start] = Int(Date().timeIntervalSince1970)
             return
         }
-        // Decoded to the same horizon by the same rules as what is already saved: nothing to write.
-        if ActivityContextMaterialization.covers(ledger, document: loaded.document) { return }
+        // Decoded to the same horizon by the same rules and config, from the same input, as what is already saved:
+        // nothing to write but whether the day is now final. (`covers` compares the decode's timestamp to the
+        // second; when the input witness moved, the rows are written again rather than trusting that.) A day that
+        // is final but lacks this smoother's retrospective rows falls through to the full write, which adds them.
+        if let ledger, ledger.inputFingerprint == inputFingerprint,
+           ActivityContextMaterialization.covers(ledger, document: loaded.document, configTag: configTag) {
+            let finality = ActivityContextPersistence.finality(
+                sleepKnownOutsideSessions: loaded.document.sleepKnownOutsideSessions, dayEnd: day.end, at: startedAt)
+            let settled = ledger.isFinal ? ActivityContextDayRow.final : finality
+            let needsRetrospective = settled == ActivityContextDayRow.final
+                && ledger.retrospectiveVersion != ActivityContextRetrospective.version
+            if !needsRetrospective {
+                if ledger.finality != settled {
+                    _ = try? await store.updateActivityContextDayStatus(deviceId: owner.deviceId, dayStart: ledger.dayStart,
+                                                                        inputFingerprint: inputFingerprint, finality: settled)
+                }
+                return
+            }
+        }
 
         let streams = loaded.streams
         let beats = await repo.rrIntervals(from: streams.start, to: streams.end, limit: 250_000)
         let document = loaded.document, hr = streams.hr, steps = streams.stepCounter, gravity = streams.gravity
-        let (built, hrvWindows) = await Task.detached(priority: .utility) {
-            let intervals = ActivityContextIntervalBuilder.build(document: document, hr: hr, steps: steps, rr: beats)
+        // The previous day's last minutes, as stored with that day, so the day's first rows and HRV windows see a
+        // change of position or the end of a walk or a workout just before midnight: its events (read when the
+        // pass planned the day, and witnessed in its input fingerprint) as settling anchors and for the windows'
+        // recovery lookback, and its intervals for the windows' time-since-locomotion / exercise gates. Empty when
+        // that day is not stored yet.
+        var previousRows: [[ActivityContextInterval]] = []
+        for id in ids {
+            let rows = (try? await store.activityContextIntervals(
+                deviceId: id, from: day.start - ActivityContextPersistence.hrvIntervalLookbackS, to: day.start)) ?? []
+            previousRows.append(rows.map(ActivityContextInterval.init(row:)))
+        }
+        let previousIntervals = ActivityContextPersistence.merged(previousRows)
+        // The wearer's answers on these seconds ("not wearing", "it was a walk"), laid over the windows' lookup the
+        // same way `storedActivityContext` lays them over what it reads, so a stretch the wearer corrected never
+        // vouches for an HRV window. The saved intervals stay the decoder's own output.
+        let feedback = StretchFeedbackStore.shared.verdicts(
+            overlapping: day.start - ActivityContextPersistence.hrvIntervalLookbackS, to: day.end)
+        // Retrospective smoothing (D8-10) reads later seconds of the day, so only a day already final when it is
+        // written gets it; the same rule `dayRow` stamps the ledger's finality with.
+        let finality = ActivityContextPersistence.finality(
+            sleepKnownOutsideSessions: document.sleepKnownOutsideSessions, dayEnd: day.end, at: startedAt)
+        let smooth = self.smooth
+        let (built, hrvWindows, smoothed) = await Task.detached(priority: .utility) {
+            let events = ActivityContextPersistence.hrvEvents(day: document.events, previous: previousEvents,
+                                                              dayStart: document.dayStart)
+            let intervals = ActivityContextIntervalBuilder.build(runs: document.runs, events: events,
+                                                                 hr: hr, steps: steps, rr: beats)
             // Fed by exactly the same live beat-to-beat R-R and the strap's always-on 1 Hz motion stream the
             // interval build above uses (no fabricated/placeholder data): see `HRVWindow.swift`'s header for
             // why this is a SEPARATE, canonical-duration population from `intervals`'s own per-interval RMSSD.
             // `imuWindows` is left empty: the strap does not stream raw 100 Hz IMU continuously during normal
             // wear (only during an opt-in Raw Data collector session), so `motionRmsG` falls back to the 1 Hz
             // stream and `gyroRmsDps` stays honestly nil here rather than inventing a reading.
-            let lookup = ActivityContextLookup(intervals: intervals)
+            let lookup = ActivityContextLookup(intervals: ActivityContextCorrections.applying(
+                feedback, to: ActivityContextPersistence.hrvIntervals(
+                    day: intervals, previous: previousIntervals, dayStart: document.dayStart)))
             // The phone's day document carries runs, not per-epoch wear signal (that is server-only, in the
             // C10 epochs), so every window resolves wearSignal nil here. These windows only feed the
             // diagnostic line today; no score or baseline reads them yet.
             let windows = HRVWindowBuilder.build(kind: .canonical5m, dayStart: document.dayStart, dayEnd: document.dayEnd,
                                                  rr: beats, gravity: gravity, activity: lookup,
-                                                 transitionEvents: document.events,
+                                                 transitionEvents: events,
                                                  epochWearSignal: [])
-            return (intervals, windows)
+            // Historical readers only (`reading: .historical`). Never the lookup above, never a causal consumer.
+            let smoothed = smooth(document, events, hr, steps, beats, day.start, day.end, finality)
+            return (intervals, windows, smoothed)
         }.value
         log(HRVWindowSummary.diagLine(hrvWindows, kind: .canonical5m, day: day.key))
         let intervals = ActivityContextPersistence.clipped(built, from: day.start, to: day.end)
+        let retrospective = smoothed   // empty unless the day is final
         let row = ActivityContextPersistence.dayRow(day: day.key, document: document, intervalCount: intervals.count,
-                                                    computedAt: document.generatedAt, dayEnd: day.end)
+                                                    computedAt: document.generatedAt, dayEnd: day.end,
+                                                    configTag: configTag, inputFingerprint: inputFingerprint,
+                                                    writtenAt: startedAt,
+                                                    // On a final day the smoother's result is recorded even when it is
+                                                    // empty ("smoothed, nothing to store"); the store keeps no version
+                                                    // for a day that is not final.
+                                                    retrospectiveVersion: finality == ActivityContextDayRow.final
+                                                        ? ActivityContextRetrospective.version : nil)
+        // The decoder's typed events (a 10 s stand the interval builder folds into sitting still leaves one),
+        // written with the intervals they belong to.
+        let transitions = ActivityContextPersistence.transitionRows(document.events, from: day.start, to: day.end,
+                                                                     decoderVersion: document.versions.decoder)
+        let smoothedRows = row.isFinal ? retrospective.map(\.storeRow) : []
         do {
-            try await store.replaceActivityContext(deviceId: owner.deviceId, day: row,
-                                                   intervals: intervals.map(\.storeRow))
-            // One owner per day: another id that held this day's context (the active strap changed) must not
-            // keep describing the same seconds.
-            for id in ids where id != owner.deviceId {
-                try? await store.clearActivityContext(deviceId: id, from: day.start, to: day.end)
+            // One owner per day, in one write: another id that held this day's context (the active strap
+            // changed) stops describing the same seconds in the same transaction that the owner's rows land in,
+            // or neither happens and the day is retried.
+            do {
+                try await store.replaceActivityContext(deviceId: owner.deviceId, day: row,
+                                                       intervals: intervals.map(\.storeRow), transitions: transitions,
+                                                       clearingOtherIds: ids, retrospective: smoothedRows)
+            } catch let error where !smoothedRows.isEmpty {
+                // The causal rows are what every live consumer needs; a smoother output the store refuses must not
+                // cost the day those. Write them alone (the ledger then names no smoother) and say so.
+                log("Activity context: retrospective rows for \(day.key) refused (\(error)); saving causal rows only")
+                var causalOnly = row
+                causalOnly.retrospectiveVersion = nil
+                try await store.replaceActivityContext(deviceId: owner.deviceId, day: causalOnly,
+                                                       intervals: intervals.map(\.storeRow), transitions: transitions,
+                                                       clearingOtherIds: ids)
             }
             failures[day.start] = nil
+            // A refused smoother write leaves the version nil: that day is tried again at most once per launch (rule 7
+            // stops once this process has looked at it after it settled).
+            if !smoothedRows.isEmpty {
+                log("Activity context: \(smoothedRows.count) retrospective intervals (\(ActivityContextRetrospective.version)) for \(day.key)")
+            }
             log("Activity context: saved \(intervals.count) intervals for \(day.key)")
         } catch {
             failures[day.start] = Int(Date().timeIntervalSince1970)
@@ -267,7 +398,8 @@ final class ActivityContextCoordinator {
     }
 
     private func loadDay(_ day: Day) async -> LoadedDay? {
-        guard let streams = await repo.dayStreams(dayStart: Date(timeIntervalSince1970: TimeInterval(day.start))),
+        guard let streams = await repo.dayStreams(dayStart: Date(timeIntervalSince1970: TimeInterval(day.start)),
+                                                  dayEnd: Date(timeIntervalSince1970: TimeInterval(day.end))),
               let document = await repo.activityContext(from: streams, lane: .background) else { return nil }
         return LoadedDay(streams: streams, document: document)
     }

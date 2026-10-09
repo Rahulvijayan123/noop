@@ -119,3 +119,130 @@ final class PCEngineTests: XCTestCase {
         XCTAssertNotEqual(a, p.fingerprint)
     }
 }
+
+/// The canonical context record end to end: posture stratum, decoder transition events, source confidence and
+/// provenance, wear-signal quality, causal visibility and the stored form (D3-06/07/10/11, D5-07, D5-13, D6-15).
+final class PCEngineContextRecordTests: XCTestCase {
+    typealias PC = PhysiologyContext
+    typealias F = PCSignalFixtures
+    typealias B = PhysiologyContext.Eligibility
+
+    static let from = F.dayStart + 8 * 3600
+    static let to = F.dayStart + 12 * 3600
+    static let eventTs = F.t0 + 60
+
+    static func epochs(confidence: Double = 0.9, looseFrom: Int? = nil) -> [PC.ActivityEpochInput] {
+        stride(from: from, to: to, by: 30).map { t in
+            let loose = looseFrom.map { t >= $0 && t < $0 + 300 } ?? false
+            return PC.ActivityEpochInput(
+                epoch: ActivityEpoch(startTs: t, endTs: t + 30, motion: .stationary, posture: .unknown,
+                                     exercise: .false, sleepState: .awake, exertion: .restingCandidate,
+                                     wear: .onWrist, wearSignal: loose ? .onWristLoose : .onWristGood,
+                                     confidence: confidence, observedS: 30, validS: 30),
+                revision: 7, availableAt: t + 60, modelVersion: "hart-wisdm-v0", preprocessingVersion: "1.0.0")
+        }
+    }
+
+    static func input(confidence: Double = 0.9, looseFrom: Int? = nil, events: [PC.TransitionEventInput]? = nil,
+                      mode: PC.ProcessingMode = .retrospective, cutoff: Int? = nil) -> PC.DayInput {
+        let hr = stride(from: from, to: to, by: 1).map { PC.HeartRateObservation(ts: $0, bpm: 62, availableAt: $0 + 30) }
+        // Forearm flat (lying on a sofa), very still.
+        let motion = stride(from: from, to: to, by: 1).map {
+            PC.MotionObservation(ts: $0, dynAccelG: 0.004, x: 0.1, y: 0.2, z: 0.97, availableAt: $0 + 30)
+        }
+        var input = F.input(heartRate: hr, motion: motion, mode: mode, cutoff: cutoff)
+        input.activityEpochs = epochs(confidence: confidence, looseFrom: looseFrom)
+        input.activityIntervals = [PC.ActivityIntervalInput(
+            interval: .init(from, to), activityClass: "sitting", confidence: 0.8, revision: 11,
+            availableAt: from + 60, inBed: false, decoderVersion: "hsmm-1.7", algorithmVersion: "streams-activity-1")]
+        input.activityTransitions = events ?? [
+            PC.TransitionEventInput(ts: eventTs, kind: "sit_to_stand_like", probability: 0.8, revision: 11,
+                                    availableAt: eventTs + 120, decoderVersion: "hsmm-1.7",
+                                    algorithmVersion: "streams-activity-1"),
+        ]
+        return input
+    }
+
+    static func hrWindow(_ doc: PC.DayDocument, at start: Int) -> PC.MeasurementEnvelope? {
+        doc.envelopes.first { $0.metric == .heartRate && $0.support.start == start }
+    }
+
+    func testEnvelopeCarriesPostureTransitionsConfidenceAndProvenance() throws {
+        let doc = PC.Engine.buildDay(Self.input(), history: .empty)
+        let w = try XCTUnwrap(Self.hrWindow(doc, at: F.t0))
+        XCTAssertEqual(w.posture?.stratum, .recumbentLikely)
+        XCTAssertEqual(w.posture?.basis, [PC.PostureEvidence.basisForearmGravity])
+        XCTAssertEqual(w.activity.source, .hartEpochs)
+        XCTAssertEqual(w.activity.transitionEvents?.postural, 1)
+        XCTAssertEqual(w.activity.meanConfidence, 0.9)
+        XCTAssertEqual(w.activity.provenance, ["hart-wisdm-v0@1.0.0"])
+        XCTAssertEqual(w.decoderActivity?.provenance, ["streams-activity-1/hsmm-1.7"])
+        XCTAssertEqual(w.wearSignal?.poorS, 0)
+        let v = try XCTUnwrap(w.verdict(.stableAwakeRest))
+        XCTAssertEqual(v.state, .ineligible)
+        XCTAssertTrue(v.reasons.contains(B.recentPosturalTransition), "\(v.reasons)")
+        XCTAssertTrue(v.targetDependentGates.contains(B.gateDecoderTransitionEvents))
+        // The next window is past the 120-s settling time: the event is history, not a gate.
+        let next = try XCTUnwrap(Self.hrWindow(doc, at: F.t0 + 300))
+        XCTAssertEqual(next.preceding.secondsSinceLastPosturalTransition, 240)
+        XCTAssertEqual(next.preceding.lastPosturalTransitionKind, "sit_to_stand_like")
+        XCTAssertEqual(next.preceding.transitionEvents?.postural, 1)
+        XCTAssertEqual(next.activity.transitionEvents?.postural, 0, "observed and quiet")
+        XCTAssertFalse(next.verdict(.stableAwakeRest)!.reasons.contains(B.recentPosturalTransition))
+        // Lossless stored form with the new records.
+        let (summary, tables) = PC.StoredDocument.split(doc)
+        XCTAssertEqual(PC.StoredDocument.join(summary: summary, tables: tables), doc)
+        let decoded = try PC.decoder().decode(PC.DayDocument.self, from: try PC.encoder().encode(doc))
+        XCTAssertEqual(decoded, doc)
+    }
+
+    func testLowConfidenceAndPoorWearSignalAreUnknownNotEligible() throws {
+        let low = PC.Engine.buildDay(Self.input(confidence: 0.3, events: []), history: .empty)
+        let lv = try XCTUnwrap(Self.hrWindow(low, at: F.t0 + 1800)?.verdict(.stableAwakeRest))
+        XCTAssertTrue(lv.reasons.contains(B.lowActivityConfidence), "\(lv.reasons)")
+        let loose = PC.Engine.buildDay(Self.input(looseFrom: F.t0 + 1800, events: []), history: .empty)
+        let w = try XCTUnwrap(Self.hrWindow(loose, at: F.t0 + 1800))
+        XCTAssertEqual(w.wearSignal?.poorS, 300)
+        XCTAssertTrue(w.verdict(.stableAwakeRest)!.reasons.contains(B.wearSignalPoor))
+        XCTAssertFalse(Self.hrWindow(loose, at: F.t0 + 2400)!.verdict(.stableAwakeRest)!.reasons.contains(B.wearSignalPoor))
+    }
+
+    func testCausalDocumentNeverSeesAnEventPublishedAfterItsCutoff() throws {
+        // A sit-to-stand at 10:04 inside the settling time of the [10:05, 10:10) window, published at 10:15. A
+        // causal job at 10:11:40 decides that window without it; one whose cutoff is after the publication (or a
+        // retrospective rebuild) sees it.
+        let eventTs = F.t0 + 240
+        func event(publishedAt: Int) -> [PC.TransitionEventInput] {
+            [PC.TransitionEventInput(ts: eventTs, kind: "sit_to_stand_like", probability: 0.8, revision: 11,
+                                     availableAt: publishedAt, decoderVersion: "hsmm-1.7",
+                                     algorithmVersion: "streams-activity-1")]
+        }
+        let start = F.t0 + 300
+        let cutoff = F.t0 + 700
+        let causal = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 900), mode: .causalLive,
+                                                   cutoff: cutoff), history: .empty)
+        let w = try XCTUnwrap(Self.hrWindow(causal, at: start), "the window is decided before the cutoff")
+        XCTAssertEqual(w.preceding.transitionEvents?.postural ?? 0, 0)
+        XCTAssertNil(w.preceding.secondsSinceLastPosturalTransition)
+        XCTAssertNil(w.preceding.lastPosturalTransitionKind)
+        XCTAssertFalse(try XCTUnwrap(w.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+
+        // Published before the cutoff: the same causal job sees it and gates the window.
+        let seen = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 650), mode: .causalLive,
+                                                 cutoff: cutoff), history: .empty)
+        let s = try XCTUnwrap(Self.hrWindow(seen, at: start))
+        XCTAssertEqual(s.preceding.secondsSinceLastPosturalTransition, 60)
+        XCTAssertTrue(try XCTUnwrap(s.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+
+        // A retrospective rebuild sees it whenever it was published.
+        let retro = PC.Engine.buildDay(Self.input(events: event(publishedAt: F.t0 + 900)), history: .empty)
+        let r = try XCTUnwrap(Self.hrWindow(retro, at: start))
+        XCTAssertEqual(r.preceding.secondsSinceLastPosturalTransition, 60)
+        XCTAssertEqual(r.preceding.lastPosturalTransitionKind, "sit_to_stand_like")
+        XCTAssertEqual(try XCTUnwrap(r.verdict(.stableAwakeRest)).state, .ineligible)
+        XCTAssertTrue(try XCTUnwrap(r.verdict(.stableAwakeRest)).reasons.contains(B.recentPosturalTransition))
+        // An added event changes the input fingerprint.
+        let none = PC.Engine.buildDay(Self.input(events: []), history: .empty)
+        XCTAssertNotEqual(none.header.inputFingerprint, retro.header.inputFingerprint)
+    }
+}

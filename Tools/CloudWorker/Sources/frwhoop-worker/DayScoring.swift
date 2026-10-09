@@ -473,17 +473,85 @@ struct DayScorer {
     /// to be, not a resting baseline: wrist R-R is much noisier awake than asleep (posture, motion, talking),
     /// so it must not feed Charge or the nightly baseline, and `cleanBeats` is there so a reader can weigh it.
     static func hrvSlots(rr: [RRInterval], from: Int, to: Int) -> [[Any]] {
+        hrvSlotReadings(rr: rr, from: from, to: to).map(\.point)
+    }
+
+    /// One published intraday HRV slot, with what its context flags need beyond the point itself.
+    struct HrvSlotReading: Equatable {
+        var slotStart: Int
+        /// RMSSD rounded to 0.1 ms, as published.
+        var rmssd: Double
+        var cleanBeats: Int
+        /// Mean clean NN interval (ms); nil only if the analyzer could not give one.
+        var meanNN: Double?
+
+        /// The published `[slotStartUnix, rmssdMs, cleanBeats]` point.
+        var point: [Any] { [slotStart, rmssd, cleanBeats] }
+    }
+
+    /// The slots `hrvSlots` publishes, as readings. Same gates, same order.
+    static func hrvSlotReadings(rr: [RRInterval], from: Int, to: Int) -> [HrvSlotReading] {
         var bySlot: [Int: [RRInterval]] = [:]
         for beat in rr where beat.ts >= from && beat.ts < to {
             bySlot[beat.ts / hrvSlotSeconds, default: []].append(beat)
         }
-        return bySlot.keys.sorted().compactMap { slot -> [Any]? in
+        return bySlot.keys.sorted().compactMap { slot -> HrvSlotReading? in
             let beats = bySlot[slot] ?? []
             let ms = beats.map { Double($0.rrMs) }
             guard HRVAnalyzer.rrCoverage(tsSec: beats.map(\.ts), rrMs: ms) <= HRVAnalyzer.coveragePlausibleCeiling else { return nil }
             let r = HRVAnalyzer.analyze(rawRR: ms, maxRejectedFraction: HRVAnalyzer.defaultSpotMaxRejectedFraction)
             guard let rmssd = r.rmssd, r.nClean >= hrvSlotMinCleanBeats else { return nil }
-            return [slot * hrvSlotSeconds, (rmssd * 10).rounded() / 10, r.nClean]
+            return HrvSlotReading(slotStart: slot * hrvSlotSeconds, rmssd: (rmssd * 10).rounded() / 10,
+                                  cleanBeats: r.nClean, meanNN: r.meanNN)
+        }
+    }
+
+    // MARK: - Intraday HRV slot context (audit D6-14)
+    //
+    // A published slot is a valid measurement, so it is never dropped here. What changes is how much a reader
+    // should lean on it: a slot taken mostly while walking, one whose activity context mostly abstained, or one
+    // built from a few minutes of clean beats is flagged `weak` with the reasons, and the app draws it
+    // de-emphasised and leaves it out of the line and the "latest" read-out.
+
+    /// Moving (walking + running + other movement) share of the slot at or above which the slot is flagged
+    /// `movement`. A quarter of the slot is about four minutes of motion-perturbed beats pooled into the RMSSD.
+    static let hrvSlotMovingShareLimit = 0.25
+    /// Unknown (abstained / uncovered) share of the slot at or above which it is flagged `unknown_context`;
+    /// the same 0.5 the app's activity line uses before it says "Activity unavailable".
+    static let hrvSlotUnknownShareLimit = 0.5
+    /// Clean-beat time (clean beats x mean NN) as a share of the slot below which it is flagged `sparse_beats`:
+    /// one third of 15 minutes is the 5-minute window the canonical HRV series is defined on.
+    static let hrvSlotMinCleanCoverage = 1.0 / 3.0
+
+    /// One context entry per reading, same order: `{slot_s, weak, reasons, moving_share, unknown_share,
+    /// clean_coverage, post_activity}`. Shares come from the shared duration-weighted join
+    /// (`ActivityContextJoin.hrvSlotContexts`, the same fold as `contexts.hrv_slots`).
+    ///
+    /// Context that is not published yet is not context known to be unclear (review R10): a slot no published epoch
+    /// overlaps, or one that runs past the newest published epoch with most of it uncovered, reads
+    /// `context_pending`, which does NOT make the slot weak. `unknown_context` (weak) is kept for a slot the
+    /// activity lane did describe and mostly abstained on. `movement` and `sparse_beats` apply either way.
+    static func hrvSlotContext(readings: [HrvSlotReading], epochs: [ActivityEpoch]) -> [[String: Any]] {
+        let contexts = ActivityContextJoin.hrvSlotContexts(slots: readings.map(\.slotStart), epochs: epochs,
+                                                           slotSeconds: hrvSlotSeconds)
+        let publishedThrough = epochs.map(\.endTs).max()
+        return zip(readings, contexts).map { reading, ctx in
+            let slotEnd = reading.slotStart + hrvSlotSeconds
+            let moving = ["walking", "running", "other_movement"].reduce(0.0) { $0 + (ctx.shares[$1] ?? 0) }
+            let coverage = reading.meanNN.map { Double(reading.cleanBeats) * $0 / (Double(hrvSlotSeconds) * 1000) } ?? 0
+            let described = epochs.contains { $0.startTs < slotEnd && $0.endTs > reading.slotStart }
+            let pastHorizon = (publishedThrough ?? Int.min) < slotEnd
+            let mostlyUnknown = ctx.unknownShare >= hrvSlotUnknownShareLimit
+            let pending = !described || (pastHorizon && mostlyUnknown)
+            var reasons: [String] = []
+            if moving >= hrvSlotMovingShareLimit { reasons.append("movement") }
+            if pending { reasons.append("context_pending") } else if mostlyUnknown { reasons.append("unknown_context") }
+            if coverage < hrvSlotMinCleanCoverage { reasons.append("sparse_beats") }
+            let weak = reasons.contains { $0 != "context_pending" }
+            func r3(_ v: Double) -> Double { (v * 1000).rounded() / 1000 }
+            return ["slot_s": reading.slotStart, "weak": weak, "reasons": reasons,
+                    "moving_share": r3(moving), "unknown_share": r3(ctx.unknownShare),
+                    "clean_coverage": r3(min(coverage, 1)), "post_activity": ctx.postActivity] as [String: Any]
         }
     }
 
@@ -1302,7 +1370,8 @@ struct DayScorer {
                                                       sourceKind: deviceRow?.sourceKind)
 
         let profile = try loadProfile(userId: claim.userId)
-        let baselines = try loadBaselines(userId: claim.userId, deviceId: claim.deviceId, before: claim.day)
+        let (baselines, baselinesHeld) = Self.scoringBaselines(
+            try loadBaselines(userId: claim.userId, deviceId: claim.deviceId, before: claim.day))
 
         let computedAt = isoNow()
         let now = Int(Date().timeIntervalSince1970)
@@ -1414,12 +1483,18 @@ struct DayScorer {
 
         let status = Self.classifyStatus(hrCount: hr.count, rrCount: rr.count, respCount: resp.count,
                                          gravityCount: gravity.count, detectedSessionCount: result.sleepSessions.count)
-        let daily = legacyDaily(from: result, claim: claim, computedAt: computedAt)
+        var daily = legacyDaily(from: result, claim: claim, computedAt: computedAt)
         var snapshotDaily = self.snapshotDaily(from: result, claim: claim, computedAt: computedAt)
+        Self.recordHeldBaselines(baselinesHeld, in: &daily)
+        Self.recordHeldBaselines(baselinesHeld, in: &snapshotDaily)
         // Free-form snapshot jsonb only: the legacy daily row has no slot for it.
-        let slots = Self.hrvSlots(rr: rr, from: dayStart, to: dayEnd)
+        let slotReadings = Self.hrvSlotReadings(rr: rr, from: dayStart, to: dayEnd)
+        let slots = slotReadings.map(\.point)
         if !slots.isEmpty {
-            snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots] as [String: Any]
+            // `context` is additive (one entry per point, same order); readers that predate it ignore it.
+            snapshotDaily["hrv_series"] = ["slot_s": Self.hrvSlotSeconds, "points": slots,
+                                           "context": Self.hrvSlotContext(readings: slotReadings,
+                                                                          epochs: publishedActivity.epochs)] as [String: Any]
         }
         snapshotDaily.merge(Self.spo2EstimateKeys(sessions: result.sleepSessions, readings: spo2Estimates)) { _, new in new }
         // Optional activity context (C10): attach the day's latest published
@@ -1715,52 +1790,102 @@ struct DayScorer {
         return out
     }
 
-    /// What the activity lane published for one day: the latest result revision's epochs and the model
-    /// provenance its `activity_context` document records. Read once per scoring pass and shared by the
-    /// energy model (which reads the epochs as context, never recomputes them) and the document attach.
+    /// What the activity lane published for one day: the current lineage's epochs of every UTC day the local
+    /// day overlaps, and the model provenance its `activity_context` document records. Read once per scoring
+    /// pass and shared by the energy model (which reads the epochs as context, never recomputes them) and the
+    /// document attach.
     struct PublishedActivityEpochs {
         var epochs: [ActivityEpoch] = []
         var modelVersion = ""
         var preprocessingVersion = ""
         var ontologyVersion = "v1"
         var maxEnd: Int
+        /// The publishes the epochs came from, one per UTC day, oldest day first: the document's provenance.
+        var lineages: [Lineage] = []
+
+        /// One UTC day's current publish, as far as the scoring window saw it.
+        struct Lineage: Equatable {
+            var day: String
+            var fingerprint: String
+            var resultRevision: Int64
+            /// Epochs of this publish inside the scoring window.
+            var epochs: Int
+            var modelVersion: String = ""
+        }
     }
 
-    /// The day's latest published activity epochs, or none when the lane has not run, the tables are
-    /// unreadable (the read runs under a savepoint, so a failure cannot abort the scoring transaction) or the
-    /// day has no epochs. Never throws: activity context is optional input to scoring.
+    /// The scoring window's published activity epochs: for every UTC day the LOCAL window overlaps, the
+    /// epochs of that day's newest publish (the highest `result_revision` of the day, the same rule as the
+    /// `activity_context_epochs_current` view), clipped to the window. Publishes are per UTC day and each takes
+    /// its own revision, so a local day west or east of UTC needs two of them; keeping one revision for the
+    /// whole window dropped most of the day (audit D5-01 / D3V-01). An older lineage of a day never fills
+    /// seconds its newest publish left out: that publish is the day's whole current answer.
+    ///
+    /// Exactly one epoch per start second is returned (the energy model sums overlapping epochs). None when the
+    /// lane has not run, the tables are unreadable (the read runs under a savepoint, so a failure cannot abort
+    /// the scoring transaction) or the window has no epochs. Never throws: activity context is optional input.
     static func readPublishedActivityEpochs(db: PostgresClient, userId: String, deviceId: String,
                                             day: String, dayStart: Int, dayEnd: Int) -> PublishedActivityEpochs {
         let rows: [[String: String]]
         do {
-            rows = try db.isolatingFailures { try db.query("""
-                with latest as (
-                  select result_revision from public.activity_context_epochs
-                   where user_id = $1::uuid and device_id = $2::uuid
-                     and start_ts >= $3::bigint and start_ts < $4::bigint
-                   order by result_revision desc
-                   limit 1
-                )
-                select start_ts::text, end_ts::text, motion_label, posture,
-                       exercise_session, sleep_state, exertion_context, wear_state, wear_signal,
-                       confidence::text, observed_s::text, valid_s::text,
-                       model_version, preprocessing_version, ontology_version,
-                       fingerprint, result_revision::text
-                from public.activity_context_epochs
-                where user_id = $1::uuid and device_id = $2::uuid
-                  and start_ts >= $3::bigint and start_ts < $4::bigint
-                  and result_revision = (select result_revision from latest)
-                order by start_ts
-                """, [userId, deviceId, String(dayStart), String(dayEnd)]) }
+            rows = try db.isolatingFailures { try db.query(publishedEpochsSQL,
+                                                           [userId, deviceId, String(dayStart), String(dayEnd)]) }
         } catch {
             FileHandle.standardError.write(
                 "day \(day): activity attach skipped (epoch read failed): \(error)\n".data(using: .utf8)!)
             return PublishedActivityEpochs(maxEnd: dayStart)
         }
+        return publishedEpochs(fromRows: rows, dayStart: dayStart)
+    }
 
+    /// The current publish of each UTC day overlapping `[$3, $4)`, then that publish's epochs in the window.
+    /// The per-day maximum is an index lookup (`activity_context_epochs_day_revision`) where that index exists.
+    static let publishedEpochsSQL = """
+        with days as (
+          select g::date as day
+            from generate_series((to_timestamp($3::bigint) at time zone 'UTC')::date,
+                                 (to_timestamp($4::bigint - 1) at time zone 'UTC')::date,
+                                 interval '1 day') as g
+        ), cur as (
+          select d.day,
+                 (select max(x.result_revision) from public.activity_context_epochs x
+                   where x.user_id = $1::uuid and x.device_id = $2::uuid and x.day = d.day) as result_revision
+            from days d
+        )
+        select e.day::text as day, e.start_ts::text, e.end_ts::text, e.motion_label, e.posture,
+               e.exercise_session, e.sleep_state, e.exertion_context, e.wear_state, e.wear_signal,
+               e.confidence::text, e.observed_s::text, e.valid_s::text,
+               e.model_version, e.preprocessing_version, e.ontology_version,
+               e.fingerprint, e.result_revision::text
+          from cur
+          join public.activity_context_epochs e
+            on e.user_id = $1::uuid and e.device_id = $2::uuid
+           and e.day = cur.day and e.result_revision = cur.result_revision
+         where e.start_ts >= $3::bigint and e.start_ts < $4::bigint
+         order by e.start_ts, e.result_revision desc
+        """
+
+    /// Fold the selected rows (ordered by start, newest revision first) into the scoring input: one epoch per
+    /// start second, and the lineages that supplied them. Pure, so the selection rule is unit-tested.
+    static func publishedEpochs(fromRows rows: [[String: String]], dayStart: Int) -> PublishedActivityEpochs {
         var out = PublishedActivityEpochs(maxEnd: dayStart)
+        var seen = Set<Int>()
+        var lineageIndex: [String: Int] = [:]
         for r in rows {
             guard let s = Int(r["start_ts"] ?? ""), let e = Int(r["end_ts"] ?? "") else { continue }
+            // Defensive: one publish never repeats a start, and UTC days never overlap, so this only matters
+            // if the table ever holds something the publish RPC would not write.
+            guard seen.insert(s).inserted else { continue }
+            let lineageKey = "\(r["day"] ?? "")|\(r["fingerprint"] ?? "")|\(r["result_revision"] ?? "")"
+            if let i = lineageIndex[lineageKey] {
+                out.lineages[i].epochs += 1
+            } else {
+                lineageIndex[lineageKey] = out.lineages.count
+                out.lineages.append(PublishedActivityEpochs.Lineage(
+                    day: r["day"] ?? "", fingerprint: r["fingerprint"] ?? "",
+                    resultRevision: Int64(r["result_revision"] ?? "") ?? 0, epochs: 1,
+                    modelVersion: r["model_version"] ?? ""))
+            }
             if let mv = r["model_version"], !mv.isEmpty { out.modelVersion = mv }
             if let pv = r["preprocessing_version"], !pv.isEmpty { out.preprocessingVersion = pv }
             if let ov = r["ontology_version"], !ov.isEmpty { out.ontologyVersion = ov }
@@ -1812,21 +1937,27 @@ struct DayScorer {
         let ontologyVersion = published.ontologyVersion
         let maxEnd = published.maxEnd
 
-        // The epochs above come from the raw-IMU job. A stream-day job for the same day shares the table and
-        // counts its own revisions, so it must not be picked here.
-        let inputRevision: Int64
+        // Provenance comes from the epochs themselves: the UTC days they were published for, and for each the
+        // raw-IMU job's completed input revision (the publish that wrote a day's current lineage completes that
+        // revision in the same transaction). Keyed by the epochs' UTC days, never by the local claim day, which
+        // names a different job for every wearer off UTC (audit D6-V01). A stream-day job for the same day
+        // shares the table and counts its own revisions, so it must not be picked here.
+        var jobRevisions: [String: Int64] = [:]
         do {
+            let days = "{" + published.lineages.map(\.day).joined(separator: ",") + "}"
             let jobRows = try db.isolatingFailures { try db.query("""
-                select input_revision::text as rev from public.activity_context_jobs
-                 where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+                select day::text as day, max(completed_revision)::text as rev from public.activity_context_jobs
+                 where user_id = $1::uuid and device_id = $2::uuid and day = any($3::date[])
                    and algorithm_version <> $4
-                 order by input_revision desc
-                 limit 1
-                """, [userId, deviceId, day, ActivityContextDays.streamsAlgorithmVersion]) }
-            inputRevision = Int64(jobRows.first?["rev"] ?? "") ?? 0
+                 group by day
+                """, [userId, deviceId, days, ActivityContextDays.streamsAlgorithmVersion]) }
+            for r in jobRows {
+                if let d = r["day"], let rev = Int64(r["rev"] ?? "") { jobRevisions[d] = rev }
+            }
         } catch {
-            inputRevision = 0
+            jobRevisions = [:]
         }
+        let inputRevision = published.lineages.compactMap { jobRevisions[$0.day] }.max() ?? 0
 
         // The night being scored, staged: its sleep epochs. `public.sessions` was read here once; the
         // current scoring lane no longer writes nights to it, so a caller without the night gets none.
@@ -1845,7 +1976,22 @@ struct DayScorer {
                 "day \(day): activity attach skipped (document build failed)\n".data(using: .utf8)!)
             return
         }
-        daily["activity_context"] = doc
+        var stamped = doc
+        stamped["lineages"] = lineagesJSON(published.lineages, jobRevisions: jobRevisions)
+        daily["activity_context"] = stamped
+    }
+
+    /// The document's `lineages` (additive; older readers ignore the key): one entry per UTC day publish the
+    /// epochs came from, so a reader can tell exactly which job output describes which part of the local day.
+    static func lineagesJSON(_ lineages: [PublishedActivityEpochs.Lineage],
+                             jobRevisions: [String: Int64]) -> [[String: Any]] {
+        lineages.map { l in
+            var item: [String: Any] = ["day": l.day, "fingerprint": l.fingerprint,
+                                       "result_revision": l.resultRevision, "epochs": l.epochs,
+                                       "model_version": l.modelVersion]
+            if let rev = jobRevisions[l.day] { item["input_revision"] = rev }
+            return item
+        }
     }
 
     private func confidenceJSON(from result: AnalyticsEngine.DayResult) -> [String: Any] {
@@ -2136,6 +2282,12 @@ struct DayScorer {
     ///
     /// History window: 120 days back (enough to reach the 14 valid nights a
     /// `.trusted` status needs), ascending so the fold runs oldest → newest.
+    /// Every calendar day of the window is one step of the fold: a day with no
+    /// row is a nil night, so skip-and-hold counts it and the fold's `.stale`
+    /// gate (more than `staleDays` nights since the last update) can trip after a
+    /// real absence. Folding only the days that have rows made a 37-day gap look
+    /// like consecutive nights, and the first night back was scored against a
+    /// "trusted" baseline (audit D4-03 / D4-12).
     /// `dayKeys` are passed so the epoch-aware fold drops nights dated before a
     /// recalibration epoch; the worker persists no epoch (no UserDefaults), so
     /// today that variant degrades to the plain fold — the honest default.
@@ -2148,12 +2300,35 @@ struct DayScorer {
               and day >= $2::date - 120 and day < $2::date
             order by day asc
             """, [userId, day])
-        let dayKeys = rows.map { $0["d"] ?? "" }
+        return try Self.foldBaselines(rows: rows, before: day)
+    }
+
+    /// Days of nightly history the server baselines fold.
+    static let baselineHistoryDays = 120
+
+    /// The calendar days `[day - 120, day)`, oldest first ("yyyy-MM-dd", UTC calendar arithmetic on the
+    /// date itself), or nil for a malformed day.
+    static func baselineDayKeys(before day: String, days: Int = baselineHistoryDays) -> [String]? {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        guard let end = f.date(from: day), f.string(from: end) == day else { return nil }
+        return (1...days).reversed().map { f.string(from: end.addingTimeInterval(-Double($0) * 86_400)) }
+    }
+
+    /// Fold `server_daily_scores` rows (`d`, `hrv`, `rhr`, `resp`, `st`) into the profile baselines, one fold
+    /// step per calendar day before `day` (absent day = nil night). Pure, so the gap handling is unit-tested.
+    static func foldBaselines(rows: [[String: String]], before day: String) throws -> AnalyticsEngine.ProfileBaselines {
+        var byDay: [String: [String: String]] = [:]
+        for r in rows { if let d = r["d"] { byDay[d] = r } }
+        // A malformed claim day cannot be padded; fold the rows as they came (the old behaviour).
+        let dayKeys = baselineDayKeys(before: day) ?? rows.map { $0["d"] ?? "" }
         func fold(_ key: String, _ col: String) throws -> BaselineState {
             guard let cfg = Baselines.metricCfg[key] else {
                 throw ScoringError(description: "Baselines.metricCfg missing key \(key)")
             }
-            let values = rows.map { Double($0[col] ?? "") }
+            let values = dayKeys.map { byDay[$0].flatMap { Double($0[col] ?? "") } }
             return Baselines.foldHistory(values, dayKeys: dayKeys, cfg: cfg)
         }
         return AnalyticsEngine.ProfileBaselines(
@@ -2162,6 +2337,38 @@ struct DayScorer {
             resp: try fold("resp", "resp"),
             skinTemp: try fold("skin_temp", "st")
         )
+    }
+
+    /// The baselines the day scores with, and the metrics among them that were held stale. The calendar fold
+    /// marks a baseline whose last contributing night is more than `Baselines.staleDays` nights back `.stale`
+    /// (audit D4-12), and `.stale` is not `usable`, so the first day back from a long absence would publish no
+    /// recovery at all while the phone (whose fold never sees the gap) scores it. Instead the held centre is
+    /// the fallback: a stale baseline with enough nights scores as `.provisional`, so the recovery is there
+    /// but its charge confidence is `.building`, never `.solid`, and `recordHeldBaselines` names every held
+    /// metric with its nights since update. The next scored night refreshes the baseline as usual.
+    static func scoringBaselines(_ folded: AnalyticsEngine.ProfileBaselines)
+        -> (baselines: AnalyticsEngine.ProfileBaselines, held: [String: Int]) {
+        var held: [String: Int] = [:]
+        func hold(_ state: BaselineState?, _ key: String) -> BaselineState? {
+            guard let state, state.status == .stale else { return state }
+            held[key] = state.nightsSinceUpdate
+            return BaselineState(baseline: state.baseline, spread: state.spread, nValid: state.nValid,
+                                 nightsSinceUpdate: state.nightsSinceUpdate, status: .provisional)
+        }
+        let baselines = AnalyticsEngine.ProfileBaselines(
+            hrv: hold(folded.hrv, "hrv"), restingHR: hold(folded.restingHR, "resting_hr"),
+            resp: hold(folded.resp, "resp"), skinTemp: hold(folded.skinTemp, "skin_temp"))
+        return (baselines, held)
+    }
+
+    /// Additive provenance on a daily object: `baseline_fallback` = "held_stale" and
+    /// `baseline_nights_since_update` per held metric, only when a stale baseline was held.
+    static func recordHeldBaselines(_ held: [String: Int], in daily: inout [String: Any]) {
+        guard !held.isEmpty else { return }
+        var provenance = daily["provenance"] as? [String: Any] ?? [:]
+        provenance["baseline_fallback"] = "held_stale"
+        provenance["baseline_nights_since_update"] = held
+        daily["provenance"] = provenance
     }
 
     // MARK: - Time helpers

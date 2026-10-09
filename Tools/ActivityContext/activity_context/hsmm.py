@@ -32,6 +32,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Sequence, Tuple
 
+#: The Swift decoder version this port reproduces. The Swift decoder has since moved on (see
+#: ActivityContextVersions.decoder); results from this port describe THIS version only, and decoder changes are
+#: validated through the Swift replay harness (Tests/StrandAnalyticsTests/ActivityReplayHarness.swift), not here.
+PORTED_DECODER_VERSION = "hsmm-1.6"
+
 # ---------------------------------------------------------------------------
 # Body modes (raw order = index; matches BodyMode in ActivityContextModel.swift)
 # ---------------------------------------------------------------------------

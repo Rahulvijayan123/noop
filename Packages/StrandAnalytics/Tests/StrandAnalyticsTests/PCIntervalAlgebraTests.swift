@@ -196,3 +196,67 @@ struct SplitMix {
     }
     mutating func unit() -> Double { Double(next() >> 11) / Double(1 << 53) }
 }
+
+/// Label changes across short gaps, and the source's own confidence and provenance on the composition (D3-06, D3-10).
+final class PCIntervalAlgebraContextTests: XCTestCase {
+    typealias PC = PhysiologyContext
+
+    private func track(_ records: [PC.LabelRecord]) -> PC.ResolvedTrack {
+        PC.IntervalAlgebra.resolve(records, source: .hartEpochs, heartRateDependent: false)
+    }
+
+    func testLabelChangeAcrossAShortUnknownOrUncoveredGapIsCounted() {
+        // stationary [0,100), abstained [100,103), walking [103,200): one change of activity, not zero.
+        let abstained = track([PC.LabelRecord(interval: .init(0, 100), label: "stationary", tieBreak: "a"),
+                               PC.LabelRecord(interval: .init(100, 103), label: nil, unknownFraction: 1, tieBreak: "b"),
+                               PC.LabelRecord(interval: .init(103, 200), label: "walking", tieBreak: "c")])
+        XCTAssertEqual(PC.IntervalAlgebra.composition(over: .init(0, 200), track: abstained).transitions, 1)
+        // The same change across a 3-s hole with no record at all.
+        let hole = track([PC.LabelRecord(interval: .init(0, 100), label: "stationary", tieBreak: "a"),
+                          PC.LabelRecord(interval: .init(103, 200), label: "walking", tieBreak: "c")])
+        XCTAssertEqual(PC.IntervalAlgebra.composition(over: .init(0, 200), track: hole).transitions, 1)
+        let history = PC.IntervalAlgebra.precedingHistory(before: 200, track: hole, lookbackS: 200)
+        XCTAssertEqual(history.transitions, 1)
+        // A change across a 60-s hole was not observed: not counted.
+        let longHole = track([PC.LabelRecord(interval: .init(0, 100), label: "stationary", tieBreak: "a"),
+                              PC.LabelRecord(interval: .init(160, 200), label: "walking", tieBreak: "c")])
+        XCTAssertEqual(PC.IntervalAlgebra.composition(over: .init(0, 200), track: longHole).transitions, 0)
+        // Same label on both sides of a gap is no change.
+        let same = track([PC.LabelRecord(interval: .init(0, 100), label: "stationary", tieBreak: "a"),
+                          PC.LabelRecord(interval: .init(103, 200), label: "stationary", tieBreak: "c")])
+        XCTAssertEqual(PC.IntervalAlgebra.composition(over: .init(0, 200), track: same).transitions, 0)
+    }
+
+    func testCompositionCarriesLabelledSecondsWeightedConfidenceAndProvenance() {
+        let t = track([
+            PC.LabelRecord(interval: .init(0, 60), label: "stationary", tieBreak: "a", confidence: 0.9,
+                           provenance: "hart-wisdm-v0@1.0.0"),
+            PC.LabelRecord(interval: .init(60, 100), label: "stationary", tieBreak: "b", confidence: 0.3,
+                           provenance: "hart-wisdm-v1@1.0.0"),
+            // Abstained seconds carry no confidence and do not dilute it.
+            PC.LabelRecord(interval: .init(100, 120), label: nil, unknownFraction: 1, tieBreak: "c"),
+        ])
+        let c = PC.IntervalAlgebra.composition(over: .init(0, 120), track: t)
+        XCTAssertEqual(c.meanConfidence ?? -1, (0.9 * 60 + 0.3 * 40) / 100, accuracy: 1e-4)
+        XCTAssertEqual(c.lowConfidenceS ?? -1, 40, accuracy: 1e-9)
+        XCTAssertEqual(c.provenance, ["hart-wisdm-v0@1.0.0", "hart-wisdm-v1@1.0.0"])
+        // A source without confidence (strap motion thresholds) reports none.
+        let strap = PC.IntervalAlgebra.resolve([PC.LabelRecord(interval: .init(0, 120), label: "still", tieBreak: "s")],
+                                               source: .strapMotion, heartRateDependent: false)
+        let s = PC.IntervalAlgebra.composition(over: .init(0, 120), track: strap)
+        XCTAssertNil(s.meanConfidence)
+        XCTAssertNil(s.lowConfidenceS)
+        XCTAssertNil(s.provenance)
+    }
+
+    func testEpochRecordsCarryConfidenceAndModelProvenance() {
+        let e = PC.ActivityEpochInput(
+            epoch: ActivityEpoch(startTs: 0, endTs: 30, motion: .stationary, posture: .unknown, exercise: .unknown,
+                                 sleepState: .unknown, exertion: .unknown, wear: .onWrist, confidence: 0.42,
+                                 observedS: 30, validS: 30),
+            revision: 3, modelVersion: "hart-wisdm-v0", preprocessingVersion: "1.0.0")
+        let r = PC.IntervalAlgebra.records(fromEpochs: [e])
+        XCTAssertEqual(r.first?.confidence, 0.42)
+        XCTAssertEqual(r.first?.provenance, "hart-wisdm-v0@1.0.0")
+    }
+}

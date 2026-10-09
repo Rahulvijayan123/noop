@@ -63,10 +63,13 @@ final class ActivityPersonalProfileTests: XCTestCase {
 
     // MARK: Fit and adoption
 
-    func testTwoRunsAreEnoughToAdopt() {
+    /// Two runs are enough to validate (leave-one-out over two runs). This protocol labels no lying, so its
+    /// stationary adaptations are refused (personal-profile-3, `validatesEveryStationaryPosture`); the decision is
+    /// a validated refusal, not a request for more runs.
+    func testTwoRunsAreEnoughToValidate() {
         let result = ActivityPersonalProfileFitter.fit(runs: Self.runs(Wearer(), count: 2), config: ActivityDecoderConfig(),
                                                        now: 0)
-        XCTAssertEqual(result.status, .adopted)
+        XCTAssertNotEqual(result.status, .needsMoreRuns)
         XCTAssertEqual(result.validation?.runs, 2)
     }
 
@@ -122,27 +125,34 @@ final class ActivityPersonalProfileTests: XCTestCase {
         XCTAssertNil(result.profile)
     }
 
-    func testAPersonalProfileFixesTheWearersStandingOnHeldOutRuns() throws {
+    /// The wearer's own profile fixes their busy standing on held-out runs, and passes every per-class guard on
+    /// the classes it saw. It is still refused: the protocol labels no lying, and narrowing a stationary mode moves
+    /// where lying seconds land without any guard able to see it (personal-profile-3; on the calibration simulator
+    /// such a profile doubled the unseen day's wrong claims, the lie-down read as sitting).
+    func testAPersonalProfileFixesTheWearersStandingOnHeldOutRunsButNeedsLyingValidatedToBeAdopted() throws {
         let result = ActivityPersonalProfileFitter.fit(runs: Self.runs(Wearer(), count: 3),
                                                        config: ActivityDecoderConfig(), now: 1_770_000_000)
         let v = try XCTUnwrap(result.validation)
         let upright = try XCTUnwrap(v.classes["upright"])
-        XCTAssertEqual(result.status, .adopted, "validation: \(v)")
         XCTAssertGreaterThanOrEqual(v.gain, 0.03)
         XCTAssertGreaterThan(upright.personalRecall, upright.baselineRecall + 0.2,
                              "the defaults read busy standing as sitting; the wearer's own profile should not")
         XCTAssertLessThanOrEqual(v.worstRecallDrop, 0.05)
-        let profile = try XCTUnwrap(result.profile)
-        XCTAssertEqual(profile.sessionIds, ["session-0", "session-1", "session-2"])
-        XCTAssertNotNil(profile.modes["upright"])
-        XCTAssertEqual(profile.validation, v)
-        if case .adopted(let p) = result.outcome { XCTAssertEqual(p, profile) } else { XCTFail("outcome") }
+        XCTAssertTrue(ActivityPersonalProfileFitter.guardsHold(v), "validation: \(v)")
+        XCTAssertNil(v.classes["bedRest"], "no lying labelled")
+        XCTAssertFalse(ActivityPersonalProfileFitter.validatesEveryStationaryPosture(v, adapting: ["upright"]))
+        XCTAssertEqual(result.status, .notBetter, "validation: \(v)")
+        XCTAssertNil(result.profile)
     }
 
-    func testTheAdoptedProfileChangesWhatTheDecoderSays() throws {
+    func testAProfileChangesWhatTheDecoderSays() throws {
+        // The adaptation itself (as the fitter would build it from these runs), applied directly: the decoder reads
+        // the wearer's busy stand as standing. Adoption is the fitter's separate decision (above).
         let runs = Self.runs(Wearer(), count: 3)
-        let profile = try XCTUnwrap(ActivityPersonalProfileFitter.fit(runs: runs, config: ActivityDecoderConfig(),
-                                                                      now: 0).profile)
+        let samples = runs.flatMap { ActivityPersonalProfileFitter.replay($0, config: ActivityDecoderConfig()).samples }
+        let modes = ActivityPersonalProfileFitter.fitModes(samples)
+        XCTAssertNotNil(modes["upright"])
+        let profile = ActivityPersonalProfile(fittedAt: 0, sessionIds: runs.map(\.sessionId), modes: modes)
         var personal = ActivityDecoderConfig()
         personal.personalProfile = profile
         let fresh = Self.run(Wearer(), session: "fresh", seed: 99, start: 1_761_000_000)
@@ -223,13 +233,30 @@ final class ActivityPersonalProfileTests: XCTestCase {
     }
 
     func testHeartRateShiftIsClamped() throws {
+        // 400 labelled seconds at hrRel 0.9: a walking level shifts by at most 0.15.
+        var f = heldFeatures(ux: 0.5, sign: nil)
+        f.hrRel = 0.9
+        let walk = try XCTUnwrap(ActivityPersonalProfileFitter.fitMode(.walk, Array(repeating: f, count: 400)))
+        let hr = try XCTUnwrap(walk.hrRel)
+        XCTAssertEqual(hr, ActivityContextModel.profiles[BodyMode.walk.rawValue].hrRel + 0.15, accuracy: 1e-4)
+    }
+
+    func testNoStationaryPostureAdaptsAHeartRateLevel() throws {
+        // D9-02: a standing rate 118 bpm above the sitting one (the old fitter moved upright's level by +0.15)
+        // adapts no stationary heart-rate level; heart rate is not posture evidence.
         let replay = ActivityPersonalProfileFitter.replay(
             Self.run({ var w = Wearer(); w.standHR = 180; w.labelSeconds = 400; return w }(),
                      session: "s", seed: 5, start: 1_760_000_000),
             config: ActivityDecoderConfig())
-        let upright = try XCTUnwrap(ActivityPersonalProfileFitter.fitModes(replay.samples)["upright"])
-        let hr = try XCTUnwrap(upright.hrRel)
-        XCTAssertEqual(hr, ActivityContextModel.profiles[BodyMode.upright.rawValue].hrRel + 0.15, accuracy: 1e-4)
+        let modes = ActivityPersonalProfileFitter.fitModes(replay.samples)
+        let upright = try XCTUnwrap(modes["upright"])
+        XCTAssertNil(upright.hrRel)
+        XCTAssertNil(modes["seated"]?.hrRel)
+        var f = heldFeatures(ux: 0.5, sign: nil)
+        f.hrRel = 0.9
+        for mode in [BodyMode.bedRest, .seated, .upright] {
+            XCTAssertNil(ActivityPersonalProfileFitter.fitMode(mode, Array(repeating: f, count: 400))?.hrRel, "\(mode)")
+        }
     }
 
     // MARK: Decoder plumbing
@@ -250,6 +277,7 @@ final class ActivityPersonalProfileTests: XCTestCase {
                                                         hrRel: 0.2)
         let profile = ActivityPersonalProfile(fittedAt: 1, sessionIds: ["b", "a"], modes: ["upright": adjustment])
         XCTAssertEqual(profile.sessionIds, ["a", "b"])
+        XCTAssertEqual(profile.version, "personal-profile-3", "bumped with the per-class wrong-claim guard: an older profile is refit")
         var config = ActivityDecoderConfig()
         config.personalProfile = profile
         XCTAssertEqual(config.cacheTag, ActivityDecoderConfig().cacheTag + "-pp\(profile.tag)")
@@ -267,7 +295,9 @@ final class ActivityPersonalProfileTests: XCTestCase {
         let table = ActivityContextModel.profiles(for: profile)
         let upright = table[BodyMode.upright.rawValue]
         XCTAssertEqual(upright.move, 0.2...0.5)
-        XCTAssertEqual(upright.hrRel, 0.2)
+        // A stored per-posture heart-rate level (an older fitter's) is kept in the profile but never applied (D9-02).
+        XCTAssertEqual(profile.modes["upright"]?.hrRel, 0.2)
+        XCTAssertEqual(upright.hrRel, ActivityContextModel.stationaryHrRel)
         XCTAssertEqual(upright.orientPath, ActivityContextModel.profiles[BodyMode.upright.rawValue].orientPath)
         XCTAssertEqual(table[BodyMode.seated.rawValue].move, ActivityContextModel.profiles[BodyMode.seated.rawValue].move)
     }
@@ -285,5 +315,112 @@ final class ActivityPersonalProfileTests: XCTestCase {
         XCTAssertNil(ActivityPersonalProfileFitter.staticMode(of: label(.guided, transition: "sit_to_stand")))
         let truth = ActivityPersonalProfileFitter.truthBySecond([label(.guided)])
         XCTAssertEqual(truth.keys.sorted(), Array(3..<9), "settle and guard edges are dropped")
+    }
+
+    // MARK: Personal held-forearm orientation (channel 3c) and what validation scores
+
+    private func heldFeatures(ux: Double, sign: Double?) -> ActivityFeatures {
+        var f = ActivityFeatures(ts: 0, m4: 0.05, m10: 0.05, m30: 0.05, mMed30: 0.05, mBurst10: 0.06, cv30: 0.5,
+                                 gaitPresence: 0, cadenceSpm: nil, runShare6: nil, rhythm: nil, orientPath10: 0.2,
+                                 net5: 1, net30: 1, shiftNet: nil, hr: nil, hrRel: nil, hrSlope: nil,
+                                 wear: .onWrist, sleep: .awake, loggedWorkout: false, workoutKind: .other,
+                                 encoder: nil, encoderAgeS: 0,
+                                 evidence: ActivityEvidenceSummary(imu: false, encoder: false, dynAccel: true,
+                                                                   gravity: true, steps: true, heartRate: false,
+                                                                   sleep: true, coverage: 1),
+                                 windowFill: 10)
+        f.heldUx = ux
+        f.forearmSign = sign
+        return f
+    }
+
+    func testOrientationSharesAreFitPerFrameAndShrunkTowardThePopulation() throws {
+        let fitter = ActivityPersonalProfileFitter.self
+        let flatSigned = [ActivityFeatures](repeating: heldFeatures(ux: 0.0, sign: 1), count: 300)
+        let shares = try XCTUnwrap(fitter.orientationShares(.bedRest, flatSigned, signed: true))
+        XCTAssertEqual(shares.reduce(0, +), 1, accuracy: 1e-3)
+        // w = 300 / 420: about 0.29 · 0.42 + 0.71 · 1 of the mass is flat.
+        XCTAssertGreaterThan(shares[1], ActivityContextModel.orientationRows.bed[1] + 0.3)
+        XCTAssertTrue(shares.allSatisfy { $0 >= 0.005 }, "no category becomes impossible: \(shares)")
+        XCTAssertNil(fitter.orientationShares(.bedRest, flatSigned, signed: false), "no uncalibrated seconds")
+        XCTAssertNil(fitter.orientationShares(.walk, flatSigned, signed: true), "stationary modes only")
+        XCTAssertNil(fitter.orientationShares(.bedRest, Array(flatSigned.prefix(59)), signed: true))
+
+        let flatUnsigned = [ActivityFeatures](repeating: heldFeatures(ux: 0.0, sign: nil), count: 300)
+        let unsigned = try XCTUnwrap(fitter.orientationShares(.bedRest, flatUnsigned, signed: false))
+        XCTAssertEqual(unsigned[0], 0, "|x| cannot see a raised hand")
+
+        // fitMode carries them on stationary modes, never on walking ones.
+        XCTAssertNotNil(fitter.fitMode(.bedRest, flatSigned)?.orientation)
+        XCTAssertNil(fitter.fitMode(.walk, flatSigned)?.orientation)
+    }
+
+    func testAWearersOwnOrientationRowsReplaceThePopulationRowsOnlyWhenFitted() throws {
+        // This wearer lies with the forearm flat (owner's production data: 69 % flat in bed) and sits with it
+        // inclined (3 % flat by day).
+        let profile = ActivityPersonalProfile(fittedAt: 0, sessionIds: [], modes: [
+            "bedRest": ActivityPersonalModeAdjustment(seconds: 600, orientation: [0.09, 0.69, 0.17, 0.05]),
+            "seated": ActivityPersonalModeAdjustment(seconds: 600, orientation: [0.006, 0.03, 0.70, 0.264]),
+        ])
+        let table = ActivityContextModel.profiles(for: profile)
+        XCTAssertEqual(try XCTUnwrap(table[BodyMode.bedRest.rawValue].orientation)[1], 0.69, accuracy: 1e-9)
+        XCTAssertNil(table[BodyMode.upright.rawValue].orientation, "unfitted modes keep the population row")
+        XCTAssertNil(table[BodyMode.bedRest.rawValue].orientationUnsigned)
+        // Population default: no profile, no rows.
+        XCTAssertTrue(ActivityContextModel.profiles(for: nil).allSatisfy { $0.orientation == nil && $0.orientationUnsigned == nil })
+
+        func evidence(_ ux: Double, _ t: [ModeProfile]) -> ActivityContextModel.PostureEvidence {
+            ActivityContextModel.score(heldFeatures(ux: ux, sign: 1), temperature: 1, table: t).postureEvidence
+        }
+        let population = ActivityContextModel.profiles
+        // A flat forearm is much stronger recumbent evidence for this wearer than for the population (LR ~23 vs 1.4) ...
+        XCTAssertGreaterThan(evidence(0.0, table).recumbentOrientation, evidence(0.0, population).recumbentOrientation + 0.08)
+        // ... and an inclined one argues against lying more strongly.
+        XCTAssertLessThan(evidence(0.5, table).recumbentOrientation, evidence(0.5, population).recumbentOrientation - 0.03)
+        // With the sign uncalibrated, the (unfitted) unsigned rows are the population's: identical evidence.
+        XCTAssertEqual(ActivityContextModel.score(heldFeatures(ux: 0.0, sign: nil), temperature: 1, table: table).postureEvidence,
+                       ActivityContextModel.score(heldFeatures(ux: 0.0, sign: nil), temperature: 1).postureEvidence)
+        // A malformed stored row is ignored.
+        let bad = ActivityPersonalProfile(fittedAt: 0, sessionIds: [], modes: [
+            "bedRest": ActivityPersonalModeAdjustment(seconds: 600, orientation: [0.5, 0.5]),
+            "seated": ActivityPersonalModeAdjustment(seconds: 600, orientation: [0, 0, 0, 0]),
+        ])
+        XCTAssertTrue(ActivityContextModel.profiles(for: bad).allSatisfy { $0.orientation == nil })
+    }
+
+    func testAnOlderProfileWithoutOrientationDecodesAndKeepsItsTag() throws {
+        let json = #"{"seconds":120,"move":{"lo":0.2,"hi":0.5}}"#
+        let adj = try JSONDecoder().decode(ActivityPersonalModeAdjustment.self, from: Data(json.utf8))
+        XCTAssertNil(adj.orientation)
+        XCTAssertNil(adj.orientationUnsigned)
+        let encoded = String(decoding: try JSONEncoder().encode(adj), as: UTF8.self)
+        XCTAssertFalse(encoded.contains("orientation"), "absent rows are not written, so stored tags do not change")
+    }
+
+    func testValidationScoresThePublishedClassNotTheBodyModeArgmax() throws {
+        // Quiet sitting with no posture evidence: the decoder publishes "stationary" (posture unresolved), which
+        // claims neither posture. The body-mode argmax used to call those seconds standing.
+        var sim = ActivitySim(start: 1_760_000_000, seed: 5)
+        sim.forearm(0.55)
+        sim.still(300)
+        let a = sim.ts
+        sim.still(300)
+        let label = ActivityGroundTruthLabel(labelKey: "guided:s:\(a)", source: .guided, sessionId: "s",
+                                             protocolVersion: "calibration-v2", startTs: a, endTs: sim.ts,
+                                             posture: PostureClass.seatedLikely.rawValue)
+        let run = ActivityCalibrationRun(sessionId: "s", observations: sim.observations, labels: [label])
+        let samples = ActivityPersonalProfileFitter.replay(run, config: ActivityDecoderConfig()).samples
+        XCTAssertGreaterThan(samples.count, 200)
+        XCTAssertEqual(samples.filter { $0.predicted == .upright }.count, 0, "a hedged second is not a standing claim")
+        var d = ActivityContextDecoder(config: ActivityDecoderConfig())
+        let published = d.run(sim.observations).filter { $0.ts >= a + 3 && $0.ts < sim.ts - 1 }
+        XCTAssertTrue(published.allSatisfy { ActivityClassifier.classify(state: $0).activityClass == .stationary })
+        XCTAssertTrue(samples.allSatisfy { $0.predicted == .unknown })
+        XCTAssertEqual(ActivityPersonalProfileFitter.publishedMode(
+            ActivityClassification(activityClass: .stationary, confidence: 0.9)), .unknown)
+        XCTAssertEqual(ActivityPersonalProfileFitter.publishedMode(
+            ActivityClassification(activityClass: .fidgeting, confidence: 0.6, posture: .uprightStationary)), .upright)
+        XCTAssertEqual(ActivityPersonalProfileFitter.publishedMode(
+            ActivityClassification(activityClass: .sittingDesk, confidence: 0.6)), .seated)
     }
 }

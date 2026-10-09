@@ -544,9 +544,13 @@ enum ActivityGaitWindowsDays {
     ///
     /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
     /// nil): HART plus the gait-quality channel exactly, with the config and release the policy built from the row.
+    /// `config` and `lookback` are the published document's (`ContextDayBuild.config` / `.lookback`: the wearer's
+    /// reference as of the day and the warm-up half hour), so the comparison differs from it only by the expert.
     static func candidate(mode: ElderNetSettings.Mode, gait: GaitQualityTrackInput, input: ActivityContextTrackInput?,
                           generatedAt: Int, expectedModelVersion: String?, expectedWeightsDigest: String?,
-                          gaitPrior: Double?, selection: ActivityExpertSelection? = nil) -> Candidate {
+                          gaitPrior: Double?, selection: ActivityExpertSelection? = nil,
+                          config base: ActivityDecoderConfig = ActivityDecoderConfig(),
+                          lookback: ActivityContextTrackInput? = nil) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedModelVersion, let expectedWeightsDigest else { return .withheld("model_not_pinned") }
         guard let gaitPrior else { return .withheld("gait_prior_not_set") }
@@ -561,8 +565,9 @@ enum ActivityGaitWindowsDays {
         guard selection.use(of: .gaitQuality) != .none else {
             return .withheld(selection.decision(for: .gaitQuality)?.reason ?? "gait_quality_not_admitted")
         }
-        let d = selection.decode(input, base: ActivityDecoderConfig(), channels: [.gaitQuality])
-        let built = ActivityContextDays.dayDocumentAndGaitReport(input: d.input, generatedAt: generatedAt, config: d.config)
+        let d = selection.decode(input, base: base, channels: [.gaitQuality])
+        let built = ActivityContextDays.dayDocumentAndGaitReport(input: d.input, generatedAt: generatedAt, config: d.config,
+                                                                 lookback: lookback)
         // A comparison must name the evidence that shaped it; a decode the evidence never reached is withheld.
         guard built.document.versions.gaitQuality != nil else {
             return .withheld(built.report?.refusal ?? "gait_quality_not_accepted")

@@ -119,6 +119,9 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
     /// Per-key native EMA so morning and evening do not share one mixed vector.
     public var sessionNativeByKey: [String: [Double]]
     public var sessionNativeCountByKey: [String: [Int]]
+    /// Per-key, per-channel streaming median of the day's eligible ticks. This, not the EMA above,
+    /// is the day value written to the phase usual. Missing in older carries (EMA fallback that day).
+    public var sessionMedianByKey: [String: [WatchdogP2Median]] = [:]
     public var lastWorkoutEndUnix: Int
     public var phaseUsual: WatchdogPhaseUsualStore
     public var bandQ: [Double]
@@ -345,6 +348,8 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionKeyTicks = try c.decodeIfPresent([String: Int].self, forKey: .sessionKeyTicks) ?? [:]
         sessionNativeByKey = try c.decodeIfPresent([String: [Double]].self, forKey: .sessionNativeByKey) ?? [:]
         sessionNativeCountByKey = try c.decodeIfPresent([String: [Int]].self, forKey: .sessionNativeCountByKey) ?? [:]
+        sessionMedianByKey = try c.decodeIfPresent([String: [WatchdogP2Median]].self,
+                                                   forKey: .sessionMedianByKey) ?? [:]
         lastWorkoutEndUnix = try c.decodeIfPresent(Int.self, forKey: .lastWorkoutEndUnix) ?? 0
         phaseUsual = try c.decodeIfPresent(WatchdogPhaseUsualStore.self, forKey: .phaseUsual) ?? .empty
         phaseUsual.dropResidualScaleCenters()
@@ -395,6 +400,7 @@ public struct WatchdogCarry: Equatable, Sendable, Codable {
         sessionKeyTicks = [:]
         sessionNativeByKey = [:]
         sessionNativeCountByKey = [:]
+        sessionMedianByKey = [:]
         sessionLastUnix = 0
     }
 
@@ -497,6 +503,9 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     public var physiologyOff: Bool
     /// v2: every candidate this tick with its five-check verdict (alert / hold / suppress). Nil on legacy rows.
     public var verdicts: [WatchdogVerdict]? = nil
+    /// Where the live awake-rest anchor came from (phase usual key, still fallback, posture).
+    /// Nil on unavailable / safety-only ticks and in results persisted by older builds.
+    public var usualProvenance: WatchdogUsualProvenance? = nil
 }
 
 public enum Watchdog {
@@ -555,18 +564,21 @@ public enum Watchdog {
             let phase = WatchdogPhaseUsualStore.phase(nowUnix: nowUnix, sleepBit: sleepNow)
             let fam = WatchdogPhaseUsualStore.family(label: .normalStillAwake, cls: evidenced)
             let blendFam: WatchdogActivityFamily = openTail.stillNow ? .still : fam
-            let livePrompt = carry.phaseUsual.blendPrompt(prompt, key: WatchdogPhaseKey(phase: phase, family: blendFam))
+            let (livePrompt, usualProvenance) = carry.phaseUsual.blendPromptWithProvenance(
+                prompt, key: WatchdogPhaseKey(phase: phase, family: blendFam), liveClass: evidenced)
             var modelWin = win
             modelWin.maskStaleChannels()
             // Expected = the person's own established Layer 1 reference for each minute's context (no model).
             let residual = WatchdogExpectation.residual(window: modelWin, evaluations: evaluations,
                                                         carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix,
                                                         tail: openTail)
-            return combine(window: modelWin, display: win, residual: residual, prompt: livePrompt,
-                           evaluations: evaluations,
-                           dayLog: dayLog, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: &carry,
-                           sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast,
-                           liveAlerts: liveAlerts, modelCandidates: modelCandidates)
+            var scored = combine(window: modelWin, display: win, residual: residual, prompt: livePrompt,
+                                 evaluations: evaluations,
+                                 dayLog: dayLog, nowUnix: nowUnix, interval: liveIntervalMinutes, carry: &carry,
+                                 sleepSessionOpen: sleepSessionOpen, skipForecast: skipForecast,
+                                 liveAlerts: liveAlerts, modelCandidates: modelCandidates)
+            scored.usualProvenance = usualProvenance
+            return scored
         }
     }
 
@@ -924,9 +936,13 @@ public enum Watchdog {
                                        usualTrust: layer1UsualTrust(evaluations, matching: [.sleepRHR]),
                                        persistTicks: persistTicks, hot: hot.contains("RHR"),
                                        hat: lastRHR?.hat)
-        let trustHRV = predictionTrust(energy: eHRV, usual: prompt.hrvAwake ?? prompt.hrv, coverage: trustCoverage,
-                                       usualTrust: layer1UsualTrust(evaluations, matching: prompt.hrvAwake != nil
-                                                                 ? [.awakeRestHRVLn] : [.sleepHRVLn]),
+        // The phase-correct HRV usual (D4-08): the overnight copy on a sleeping tick, the awake-rest copy (or the
+        // flagged sleep-scaled fallback) on an awake one — the same centre UniTS reconstructs against.
+        let hrvPrompt = prompt.phased(window)
+        let hrvUsualFromSleep = hrvPrompt.sleepPhase ? prompt.hrv != nil : prompt.hrvAwake == nil
+        let trustHRV = predictionTrust(energy: eHRV, usual: hrvPrompt.hrvCentre, coverage: trustCoverage,
+                                       usualTrust: layer1UsualTrust(evaluations, matching: hrvUsualFromSleep
+                                                                 ? [.sleepHRVLn] : [.awakeRestHRVLn]),
                                        persistTicks: persistTicks, hot: hot.contains("HRV"),
                                        hat: lastHRV?.hat)
         let tempC = sparseCoverage(window.temp, startUnix: window.startUnix, nowUnix: nowUnix,
@@ -1016,11 +1032,17 @@ public enum Watchdog {
             }
             let sessionKey = WatchdogPhaseKey(phase: sessionPhase, family: .still)
             carry.sessionLastUnix = nowUnix
+            // Awake still usual: quiet-still evidence only. Occupancy `stand` and no-evidence
+            // `unknown` ticks would mix another regime into the still key (D4-06, D6-02).
+            let keyedRegime = WatchdogPhaseUsualStore.trainsStillUsual(phase: sessionPhase, cls: cls)
             var keyed = carry.sessionNativeByKey[sessionKey.id] ?? Array(repeating: 0, count: 6)
             var keyedCount = carry.sessionNativeCountByKey[sessionKey.id] ?? Array(repeating: 0, count: 6)
+            var keyedMedian = carry.sessionMedianByKey[sessionKey.id]
+                ?? Array(repeating: WatchdogP2Median.empty, count: 6)
             if keyed.count < 6 { keyed = Array(repeating: 0, count: 6) }
             if keyedCount.count < 6 { keyedCount = Array(repeating: 0, count: 6) }
-            for k in 0..<6 {
+            if keyedMedian.count < 6 { keyedMedian = Array(repeating: WatchdogP2Median.empty, count: 6) }
+            for k in 0..<6 where keyedRegime {
                 guard let obs = nativeObs[k], obs.isFinite else { continue }
                 let minute = WatchdogQuality.lastFiniteMinuteUnix(series[k], startUnix: window.startUnix) ?? 0
                 guard minute > priorMinute[k] else { continue }
@@ -1030,15 +1052,21 @@ public enum Watchdog {
                     keyed[k] = (1 - a) * keyed[k] + a * obs
                 }
                 keyedCount[k] += 1
+                keyedMedian[k].add(obs)
             }
-            carry.sessionNativeByKey[sessionKey.id] = keyed
-            carry.sessionNativeCountByKey[sessionKey.id] = keyedCount
+            if keyedRegime {
+                carry.sessionNativeByKey[sessionKey.id] = keyed
+                carry.sessionNativeCountByKey[sessionKey.id] = keyedCount
+                carry.sessionMedianByKey[sessionKey.id] = keyedMedian
+            }
             let advanced = (0..<6).contains { $0 < carry.lastNativeMinute.count
                 && $0 < priorMinute.count && carry.lastNativeMinute[$0] > priorMinute[$0] }
             if advanced {
                 carry.sessionN += 1
                 carry.sessionNativeN += 1
-                carry.sessionKeyTicks[sessionKey.id, default: 0] += 1
+                if keyedRegime {
+                    carry.sessionKeyTicks[sessionKey.id, default: 0] += 1
+                }
             }
             carry.sessionUnix = nowUnix
         }
@@ -1101,7 +1129,7 @@ public enum Watchdog {
             .init(name: "RHR", observed: lastRHR?.obs ?? freshLast(window.rhr, channel: 1), usual: prompt.rhr,
                   reconstructed: lastRHR?.hat, energy: eRHR, unit: "bpm", trustPct: trustRHR,
                   rangeHalf: adapted.rangeHalf(for: .rhr)),
-            .init(name: "HRV", observed: lastHRV?.obs ?? freshLast(window.hrv, channel: 2), usual: prompt.hrvAwake ?? prompt.hrv,
+            .init(name: "HRV", observed: lastHRV?.obs ?? freshLast(window.hrv, channel: 2), usual: hrvPrompt.hrvCentre,
                   reconstructed: lastHRV?.hat, energy: eHRV, unit: "ms", trustPct: trustHRV,
                   rangeHalf: adapted.rangeHalf(for: .hrv)),
             .init(name: "Temp", observed: lastTemp?.obs ?? last(shown.temp), usual: prompt.temp,
@@ -1147,9 +1175,18 @@ public enum Watchdog {
         if carry.lastCivilDay.isEmpty { carry.lastCivilDay = civil }
         if civil != carry.lastCivilDay {
             for key in WatchdogPhaseUsualStore.qualifyingStillKeys(ticks: carry.sessionKeyTicks) {
-                let native = carry.sessionNativeByKey[key.id] ?? carry.sessionNative
+                let ema = carry.sessionNativeByKey[key.id] ?? carry.sessionNative
                 let counts = carry.sessionNativeCountByKey[key.id] ?? carry.sessionNativeCount
                 let present = (0..<6).map { $0 < counts.count && counts[$0] >= 8 }
+                // The day value is the median of the day's eligible ticks. A carry from before the
+                // sketch existed has fewer sketched ticks than counted ones; that day keeps its EMA.
+                let medians = carry.sessionMedianByKey[key.id] ?? []
+                let native = (0..<6).map { k -> Double in
+                    let fallback = k < ema.count ? ema[k] : 0
+                    guard k < medians.count, k < counts.count, medians[k].count >= counts[k],
+                          let m = medians[k].median else { return fallback }
+                    return m
+                }
                 if present[0] || present[3] {
                     carry.phaseUsual.writeDay(key: key, dayMedian: native,
                                               present: present, civilDay: carry.lastCivilDay)
