@@ -5,6 +5,9 @@ the owner's phone). **Nothing here has been pushed, merged into `main`, deployed
 production database, edge function, VPS, unit file or environment was touched; every database run used a local
 scratch Postgres. Deploying is the next stage's job (section 13).
 
+> Deployed to production on 2026-10-09; what was deployed, the evidence and the open blockers are in
+> `PRODUCTION_VALIDATION.md`.
+
 ## 0. Summary
 
 - All seven branches are merged, conflicts resolved semantically, and the pipeline is wired end to end:
