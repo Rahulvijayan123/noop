@@ -464,6 +464,16 @@ struct MetricDetailView: View {
     // MARK: Body
 
     var body: some View {
+        // The one routing point for the key-metric screen. The page below, and its `.task` loads, are not built at
+        // all for those metrics.
+        if let keyMetric = KeyMetricCatalog.entry(for: metric) {
+            KeyMetricDetailView(metric: metric, entry: keyMetric)
+        } else {
+            page
+        }
+    }
+
+    private var page: some View {
         let f = frame()
         let p = f.presentation
         let loadingNow = !isLoaded
