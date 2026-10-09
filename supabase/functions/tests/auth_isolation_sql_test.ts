@@ -214,6 +214,8 @@ const SERVICE_ONLY_FUNCTIONS = [
   // Measurement context per minute (20261009130100_measurement_context_minutes.sql): the scores route's read, the
   // builder, its pg_cron tick and the operator backfill (internal schema, never exposed through PostgREST).
   "measurement_context_minutes_read_v1",
+  // The phone's per-minute optical evidence (20261009130200_measurement_context_quality_minutes.sql).
+  "measurement_context_quality_upsert_v1",
   "build_measurement_context_minutes",
   "build_measurement_context_minutes_v1",
   "backfill_measurement_context_minutes",
