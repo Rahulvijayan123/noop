@@ -178,6 +178,17 @@ def test_strength_and_session_properties():
     assert not unsure.is_strong
 
 
+def test_manual_event_labels_are_weak_and_not_evaluation_ready_without_imu_coverage():
+    # Projected from the app's event log (supabase 20261008100000): weak, never promoted to guided, and
+    # with no sample-level IMU coverage known, so the default evaluation leaves them out.
+    rec = L._label_from_wire(wire_label("manual_event:e1", "manual_event", None, 100, 700, "walking",
+                                        quality={"basis": "manual_event", "imu_coverage": "unknown",
+                                                 "expected_seconds": 0}))
+    assert rec.source == "manual_event"
+    assert rec.strength == "weak" and not rec.is_strong
+    assert not rec.evaluation_ready
+
+
 def test_evaluation_ready_gaps_never_valid():
     recs = golden_records()
     good = [r for r in recs if r.source == "guided"][0]

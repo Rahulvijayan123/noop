@@ -165,6 +165,7 @@ extension HealthEvent {
 /// The Events tab: the latest event the body reacted to, then the newest days of the timeline.
 struct EventsView: View {
     var events: [HealthEvent] = HealthEvent.current
+    var manualEventCenter: ManualEventCenter = .shared
     @ObservedObject private var filterState = EventFilterState.shared
 
     /// The most recent event that carries a physiology trace.
@@ -174,6 +175,7 @@ struct EventsView: View {
 
     var body: some View {
         ScreenScaffold(title: "Events", trailing: { HeaderSettingsButton() }) {
+            ManualEventLoggingSection(center: manualEventCenter)
             if let featured, let physiology = featured.physiology, !physiology.metrics.isEmpty {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     SectionHeader("Latest reaction")
@@ -184,8 +186,9 @@ struct EventsView: View {
                 }
             }
             if events.isEmpty {
-                // Nothing feeds this tab yet: say so once, with no filter to operate on an empty list.
-                ComingSoon(what: "No events yet.")
+                // Nothing feeds this tab yet: say so once, with no filter to operate on an empty list. Named
+                // "detected" because the event log above can already hold events the person logged.
+                ComingSoon(what: "No detected events yet.")
             } else {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     SectionHeader("Timeline")

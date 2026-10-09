@@ -348,6 +348,7 @@ final class AppModel: ObservableObject {
         let runJobs = claimCloudJobs(for: CloudPushRuntime.shared.runningScope)
         if runJobs {
             Task { await profileSync.reconcile() }
+            Task { await ManualEventCenter.shared.syncNow() }
             Task { await settingsSync.reconcile() }
             Task { await syncPlacement() }   // wear-placement changes saved while offline
             StretchFeedbackCenter.shared.flush()   // verdicts saved while offline
@@ -431,6 +432,7 @@ final class AppModel: ObservableObject {
 
     /// The cloud path is up for `identity`'s account: bring the screens and the one-time jobs along.
     func cloudAccountReady(_ identity: CloudPushIdentity) async {
+        ManualEventCenter.shared.bindAccount()
         let newAccount = hostedAccountScope != identity.scope
         if newAccount {
             hostedWrittenRevision = [:]
@@ -449,6 +451,7 @@ final class AppModel: ObservableObject {
             return
         }
         Task { await profileSync.reconcile() }
+        Task { await ManualEventCenter.shared.syncNow() }
         Task { await settingsSync.reconcile() }
         Task { await syncPlacement() }   // wear-placement changes saved before the account was ready
         StretchFeedbackCenter.shared.flush()   // verdicts saved before the account was ready
@@ -465,6 +468,7 @@ final class AppModel: ObservableObject {
     /// The account's cloud path was stopped (sign-out, a switch of account, or a block). Nothing it read
     /// may stay on screen or keep running for whoever uses the phone next.
     func cloudAccountEnded() async {
+        ManualEventCenter.shared.bindAccount()
         hostedRefreshTask?.cancel()
         hostedRefreshTask = nil
         historySeedTask?.cancel()
