@@ -57,6 +57,12 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// only after beating the defaults on held-out runs (`ActivityPersonalProfileFitter`). nil (the default)
     /// scores with the population profiles exactly as before.
     public var personalProfile: ActivityPersonalProfile? = nil
+    /// The wearer's verified sit / stand head (`ActivitySitStand.swift`). Set it ONLY while
+    /// `ActivitySitStandGate.evaluate` says `.enabled`. nil (the default) is OFF: states, snapshots and `cacheTag`
+    /// are exactly what they were before the head existed. When set, each still, awake, on-wrist, non-moving
+    /// second's still-segment log-odds feed the learned posture memory (bounded per second, with its usual cap
+    /// and decay), and sitting / standing claims it agrees with read "Likely sitting" / "Likely standing".
+    public var sitStandHead: ActivitySitStandModel? = nil
 
     public init() {}
 }
@@ -147,6 +153,26 @@ struct DecoderTracking: Codable, Equatable {
     /// snapshot without them still decodes (and re-calibrates on the next walk).
     var forearmSignVotes: Double?
     var forearmSignWeight: Double?
+    /// The personal sit / stand head's causal still-segment state. Only ever set while
+    /// `ActivityDecoderConfig.sitStandHead` is, so a snapshot without a head encodes exactly the keys it always did.
+    var sitStand: SitStandTrack?
+}
+
+/// Causal form of `ActivitySitStandSmoothing` inside the decoder: the trailing (not centred) 10-s mean of the
+/// dynamic acceleration splits segments, and a still second's evidence is the running mean of the segment's
+/// log-odds so far.
+struct SitStandTrack: Codable, Equatable {
+    /// `ActivitySitStandModel.tag` of the head that built this state (a snapshot never continues across heads).
+    var stamp: String
+    var lastTs: Int?
+    /// Trailing dynamic-acceleration window: seconds and values (g).
+    var dynTs: [Int] = []
+    var dynG: [Double] = []
+    /// The open still segment's summed log-odds and still-second count (0 = no open segment with a claim).
+    var sum: Double = 0
+    var count: Int = 0
+
+    mutating func closeSegment() { sum = 0; count = 0 }
 }
 
 // MARK: - Layout of the Erlang-expanded state space
@@ -234,6 +260,8 @@ public struct ActivityContextDecoder: Sendable {
     public private(set) var gaitQualityReport: GaitQualityTrackReport?
     /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy.
     private let observationProfiles: [ModeProfile]
+    /// The personal sit / stand head when `config.sitStandHead` is set and usable; nil keeps every path as it was.
+    private let sitStandHead: ActivitySitStandModel?
     /// When set, `ingest` keeps the scored second's features and body posterior in `lastScored` (the
     /// personal-profile fitter reads them; ordinary decodes never pay for the copy).
     var recordsScoredSeconds = false
@@ -269,6 +297,12 @@ public struct ActivityContextDecoder: Sendable {
         let gait = PreparedGaitQuality.prepare(config.gaitQuality)
         self.gaitQuality = gait.prepared
         self.gaitQualityRefusal = gait.refusal
+        if let head = config.sitStandHead, head.isUsable {
+            self.sitStandHead = head
+            self.tracking.sitStand = SitStandTrack(stamp: head.tag)
+        } else {
+            self.sitStandHead = nil
+        }
         if config.gaitQuality != nil {
             self.gaitQualityReport = GaitQualityTrackReport(stamp: gait.prepared?.stamp, refusal: gait.refusal)
         }
@@ -300,6 +334,11 @@ public struct ActivityContextDecoder: Sendable {
         // The same for ElderNet: a belief shaped by another model / config (or by none) is never continued.
         if v.gaitQuality != gaitQuality?.stamp {
             restoreOutcome = .discarded("gait_quality_mismatch")
+            return
+        }
+        // The same for the personal sit / stand head: its stamp lives in the tracking state (nil without one).
+        if s.tracking.sitStand?.stamp != sitStandHead?.tag {
+            restoreOutcome = .discarded("sit_stand_mismatch")
             return
         }
         guard s.body.count == bodyLayout.total, s.arm.count == ArmState.count,
@@ -357,6 +396,7 @@ public struct ActivityContextDecoder: Sendable {
         if obs.inBed { tracking.lastInBedTs = obs.ts }
 
         if obs.wear == .offWrist {
+            if sitStandHead != nil { tracking.sitStand?.closeSegment(); tracking.sitStand?.lastTs = obs.ts }
             if tracking.offWristSinceTs == nil {
                 tracking.offWristSinceTs = obs.ts
                 resetBelief()
@@ -394,7 +434,8 @@ public struct ActivityContextDecoder: Sendable {
         let score = ActivityContextModel.score(f, temperature: config.evidenceTemperature, motionHeads: motionHeads,
                                                gaitQuality: gaitQuality, table: observationProfiles)
         applyBody(score)
-        boundPosture(score, f, sleep: obs.sleep, inBed: obs.inBed)
+        let sitStandEvidence = sitStandHead.map { sitStandStep(obs, head: $0) } ?? 0
+        boundPosture(score, f, sleep: obs.sleep, inBed: obs.inBed, learnedExtra: sitStandEvidence)
         applyArm(f, motionHeads: score.arm)
         smoothArmForDisplay()
         if motionHeads != nil, motionHeadsReport != nil {
@@ -479,7 +520,64 @@ public struct ActivityContextDecoder: Sendable {
         tracking.gaitStretch = nil
         tracking.postureEvidence = nil
         tracking.noPulseStillS = nil
+        tracking.sitStand?.closeSegment()
     }
+
+    // MARK: Personal sit / stand head
+
+    /// Most the head adds to the learned posture memory in one second (log-odds). The memory decays with a 180 s
+    /// time constant and is capped at ln 3 either way (`PostureEvidence.caps[learnedIndex]`), so a segment the head
+    /// reads at ≥ 2.5 log-odds reaches the 2:1 agreement bar in about 15 s and the cap in about 30 s; a weaker read
+    /// takes proportionally longer.
+    static let sitStandMaxPerSecond = 0.05
+    /// Per-second gain on the segment's mean log-odds before the bound.
+    static let sitStandGain = 0.02
+    /// A gap in the observations longer than this closes the open segment (s).
+    static let sitStandMaxGapS = 10
+    /// Moving / vehicle / exercise posterior mass at or above which a second is never posture evidence.
+    static let sitStandMaxMovingMass = 0.5
+
+    /// One second of the personal head: update the causal still-segment state and return its bounded contribution
+    /// to the learned posture memory (> 0 toward seated), or 0 when the second is not still sitting / standing
+    /// evidence (stepping, moving, vehicle, a change of position, a logged workout, asleep, in bed, no gravity, no
+    /// dynamic acceleration, not still).
+    private mutating func sitStandStep(_ obs: ActivityObservation, head: ActivitySitStandModel) -> Double {
+        var s = tracking.sitStand ?? SitStandTrack(stamp: head.tag)
+        defer { tracking.sitStand = s }
+        let ts = obs.ts
+        if let last = s.lastTs, ts - last > Self.sitStandMaxGapS { s.closeSegment(); s.dynTs = []; s.dynG = [] }
+        s.lastTs = ts
+        // Locomotion and changes of position close the segment: the strap's step counter / walk class, or the
+        // belief on the moving modes (walking, vehicle, exercise …) or on the transition modes. This strap's
+        // dynamic acceleration reads ordinary walking under the 0.2 g segment bar, so it cannot do it alone.
+        let post = bodyPosterior()
+        var moving = 0.0, transition = 0.0
+        for m in 0..<BodyMode.count {
+            let mode = BodyMode(rawValue: m)!
+            if mode.isTransition { transition += post[m] }
+            else if !(mode.isStationary || mode == .unknown) { moving += post[m] }
+        }
+        let stepping = (obs.stepTicks ?? 0) > 0 || (obs.strapClass ?? 0) >= 1
+        let excluded = obs.sleep == .asleep || obs.inBed || obs.loggedWorkout || stepping
+            || moving >= Self.sitStandMaxMovingMass || transition >= Self.posturalEventFloor
+        if !excluded, let d = obs.dynAccelG, d.isFinite { s.dynTs.append(ts); s.dynG.append(d) }
+        let window = ActivitySitStandSmoothing.segmentWindowS
+        while let first = s.dynTs.first, ts - first >= window { s.dynTs.removeFirst(); s.dynG.removeFirst() }
+        if excluded { s.closeSegment(); s.dynTs = []; s.dynG = []; return 0 }
+        let mean = s.dynG.isEmpty ? .infinity : s.dynG.reduce(0, +) / Double(s.dynG.count)
+        guard mean <= ActivitySitStandSmoothing.segmentActiveDynG else { s.closeSegment(); return 0 }
+        guard let d = obs.dynAccelG, d.isFinite, d < ActivitySitStandSmoothing.stillDynG,
+              let g = obs.gravity, g.count >= 3 else { return 0 }
+        let n = (g[0] * g[0] + g[1] * g[1] + g[2] * g[2]).squareRoot()
+        guard n.isFinite, n > 1e-6 else { return 0 }
+        s.sum += head.logOdds(gravity: g[0], y: g[1], z: g[2])
+        s.count += 1
+        let segmentMean = s.sum / Double(s.count)
+        return min(Self.sitStandMaxPerSecond, max(-Self.sitStandMaxPerSecond, Self.sitStandGain * segmentMean))
+    }
+
+    /// Whether the personal head currently backs a posture claim: an open still segment it has read.
+    private var sitStandBacking: Bool { sitStandHead != nil && (tracking.sitStand?.count ?? 0) > 0 }
 
     // MARK: Posture honesty (hsmm-1.8)
 
@@ -576,10 +674,13 @@ public struct ActivityContextDecoder: Sendable {
     /// every moving / stationary claim, is untouched; with no posture evidence the heads stay hedged and the
     /// published class is `stationary`.
     private mutating func boundPosture(_ score: ActivityContextModel.Score, _ f: ActivityFeatures,
-                                       sleep: SleepEvidence, inBed: Bool) {
+                                       sleep: SleepEvidence, inBed: Bool, learnedExtra: Double = 0) {
         var memory = tracking.postureEvidence ?? [Double](repeating: 0, count: Evidence.caps.count)
         let caps = postureEvidenceCaps
-        let fresh = score.postureEvidence.values
+        var fresh = score.postureEvidence.values
+        // The personal sit / stand head (only when set; 0 otherwise, and then nothing is added so the arithmetic
+        // stays bit-identical to a decoder without one).
+        if learnedExtra != 0 { fresh[Evidence.learnedIndex] += learnedExtra }
         // Moving about makes what was known about the posture before obsolete: the memory fades fast while the
         // body is in a moving mode (about 3 s at full belief), so a walk resets it.
         let post = bodyPosterior()
@@ -1102,6 +1203,7 @@ public struct ActivityContextDecoder: Sendable {
         }
 
         evidence.learnedPosture = learnedPostureLean
+        if sitStandBacking { evidence.personalSitStand = true }
 
         let post = bodyPosterior()
         var posture: [PostureClass: Double] = [:]
@@ -1146,7 +1248,7 @@ public struct ActivityContextDecoder: Sendable {
                                          arm: HeadProbabilities(armShown).normalized(),
                                          sleep: sleepState, inBed: tracking.lastInBed,
                                          confidence: confidence)
-        let label = applyHysteresis(raw: raw, ts: ts)
+        let label = applyHysteresis(raw: sitStandWording(raw, learned: evidence.learnedPosture), ts: ts)
 
         // The event field shows only fresh events. hsmm-1.8: a postural event is held back for its first
         // `posturalEventSettleS` seconds (its direction may still resolve), and then shown even if a later event
@@ -1200,6 +1302,18 @@ public struct ActivityContextDecoder: Sendable {
             history: history, evidence: evidence, versions: versions,
             gait: gaitQuality == nil ? nil : tracking.gaitStretch.map(\.summary),
             gaitReading: gaitReading)
+    }
+
+    /// With the personal sit / stand head backing the claim (an open still segment it has read) and the learned
+    /// posture memory agreeing with the posture a sitting / standing label names, the label says what it is: a
+    /// verified personal "likely", never a plain "Standing". Unchanged without a head.
+    private func sitStandWording(_ raw: String, learned: PostureClass?) -> String {
+        guard sitStandBacking, let learned, raw != "In a vehicle" else { return raw }
+        switch ActivityDisplay.group(raw) {
+        case "seated" where learned == .seatedLikely: return ActivityDisplay.likelySitting
+        case "upright" where learned == .uprightStationary: return ActivityDisplay.likelyStanding
+        default: return raw
+        }
     }
 
     /// Display hysteresis. A change of *kind* (moving ↔ stationary ↔ lying …) must hold for the group's

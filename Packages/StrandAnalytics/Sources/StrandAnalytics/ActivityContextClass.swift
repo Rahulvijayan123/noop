@@ -330,10 +330,11 @@ public enum ActivityClassifier {
         case "Asleep": return .sleeping
         case "Resting in bed", "Lying down": return .lyingDown
         case "Desk sitting": return .sittingDesk
-        case "Sitting quietly", "Sitting, repetitive hand activity", "Sitting, gesturing", "Sitting (likely)":
+        case "Sitting quietly", "Sitting, repetitive hand activity", "Sitting, gesturing", "Sitting (likely)",
+             ActivityDisplay.likelySitting:
             return .sitting
         case "Standing quietly", "Standing, gesturing", "Standing, repetitive hand activity",
-             "Standing, hands busy", "Standing (likely)":
+             "Standing, hands busy", "Standing (likely)", ActivityDisplay.likelyStanding:
             return .standing
         case "Sitting, restless", "Standing, restless": return .fidgeting
         case "Still, sitting or standing", "Hands busy, sitting or standing", "Stationary":

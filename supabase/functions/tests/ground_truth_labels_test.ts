@@ -10,6 +10,7 @@ import { noopDeviceId } from '../_shared/keys.ts';
 import {
   GROUND_TRUTH_LABELS_MAX_JSON_FIELD_BYTES,
   GROUND_TRUTH_LABELS_MAX_RAW_REFS_BYTES,
+  GROUND_TRUTH_CONFIRMATION_MAX_SPAN_SECONDS,
   GROUND_TRUTH_SEMANTIC_TAGS,
   GROUND_TRUTH_SOURCES,
   parseGroundTruthLabelsEnvelope,
@@ -268,11 +269,11 @@ Deno.test('ground truth validator: boundary values are accepted', () => {
 Deno.test('ground truth validator: every vocabulary value is accepted and everything else is not', () => {
   // Source.
   for (const source of GROUND_TRUTH_SOURCES) {
-    const accepted = validateGroundTruthLabelItem(item({ source }));
+    const accepted = validateGroundTruthLabelItem(item({ source, ...(source === 'confirmation' ? { end_ts: T0 + 60 } : {}) }));
     assert(accepted.ok, source);
     assertEquals(accepted.item.source, source);
   }
-  assertEquals(GROUND_TRUTH_SOURCES.length, 3);
+  assertEquals(GROUND_TRUTH_SOURCES.length, 4);
   // Posture.
   for (const posture of ['recumbent', 'seated_likely', 'upright_stationary', 'postural_transition', 'unknown']) {
     assertEquals(reasonOf({ posture }), null, posture);
@@ -300,6 +301,42 @@ Deno.test('ground truth validator: every vocabulary value is accepted and everyt
   }
   assertEquals(GROUND_TRUTH_SEMANTIC_TAGS.length, 8);
   assertEquals(reasonOf({ semantic_tag: 'running' }), 'invalid_semantic_tag');
+});
+
+Deno.test('ground truth validator: a confirmation answer is a short posture-only label', () => {
+  const confirmation = (over: Record<string, unknown> = {}) => ({
+    label_key: `confirmation:prompt:${T0}`,
+    source: 'confirmation',
+    start_ts: T0,
+    end_ts: T0 + 60,
+    posture: 'seated_likely',
+    locomotion: null,
+    arm_behavior: null,
+    semantic_tag: null,
+    session_id: null,
+    label_confidence: 1,
+    ...over,
+  });
+  // sitting, standing, neither (posture unknown with user_unsure false).
+  for (const posture of ['seated_likely', 'upright_stationary', 'unknown']) {
+    const result = validateGroundTruthLabelItem(item(confirmation({ posture })));
+    assert(result.ok, posture);
+    assertEquals(result.item.source, 'confirmation');
+    assertEquals(result.item.posture, posture);
+    assertEquals(result.item.session_id, null);
+    assertEquals(result.item.transition_kind, null);
+  }
+  assertEquals(reasonOf(confirmation({ end_ts: T0 + GROUND_TRUTH_CONFIRMATION_MAX_SPAN_SECONDS })), null);
+  assertEquals(reasonOf(confirmation({ end_ts: T0 + GROUND_TRUTH_CONFIRMATION_MAX_SPAN_SECONDS + 1 })), 'invalid_confirmation_span');
+  assertEquals(reasonOf(confirmation({ end_ts: T0 + 900 })), 'invalid_confirmation_span');
+  assertEquals(reasonOf(confirmation({ posture: null })), 'invalid_confirmation_posture');
+  assertEquals(reasonOf(confirmation({ posture: undefined })), 'invalid_confirmation_posture');
+  assertEquals(reasonOf(confirmation({ posture: 'recumbent' })), 'invalid_confirmation_posture');
+  assertEquals(reasonOf(confirmation({ posture: 'postural_transition' })), 'invalid_confirmation_posture');
+  assertEquals(reasonOf(confirmation({ transition_kind: 'sit_to_stand' })), 'invalid_confirmation_transition');
+  assertEquals(reasonOf(confirmation({ transition_ts: T0 + 30 })), 'invalid_confirmation_transition');
+  // Other sources keep their rules: a long, transition-bearing guided item is still fine.
+  assertEquals(reasonOf({ transition_kind: 'sit_to_stand', transition_ts: T0 + 450, posture: null }), null);
 });
 
 Deno.test('ground truth validator: note and labels are counted in code points like the database', () => {

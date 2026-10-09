@@ -49,7 +49,7 @@ extension ActivityDecoderConfig {
     /// drops the Inertia suffix when that input's windows are not from the config's bundle (or it has none).
     ///
     /// ElderNet adds its own suffix (`-eg<weights12><cfgtag>`) only while its evidence is active, after Inertia's,
-    /// and an adopted personal profile its own (`-pp<tag>`) last.
+    /// an adopted personal profile its own (`-pp<tag>`), and a personal sit / stand head its own (`-ss<version><tag>`) last.
     public var cacheTag: String {
         var tag = "r\(Int(restingHeartRate.rounded()))m\(Int(maxHeartRate.rounded()))"
         if let heads = motionHeads, heads.evidenceRefusal == nil {
@@ -60,6 +60,10 @@ extension ActivityDecoderConfig {
         }
         if let personal = personalProfile, !personal.modes.isEmpty {
             tag += "-pp\(personal.tag)"
+        }
+        // The personal sit / stand head (`-ss<version><weights hash>`), only while one is set and usable.
+        if let head = sitStandHead, head.isUsable {
+            tag += "-ss\(head.modelVersion.filter { $0.isLetter || $0.isNumber })\(head.tag)"
         }
         return tag
     }
