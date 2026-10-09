@@ -106,7 +106,7 @@ private struct NoopButtonBackground: View {
                     LiquidGlassBackdrop(level: glass)
                         .clipShape(shape)
                     shape.fill(fill).opacity(glass.tintedBodyOpacity)
-                    LiquidGlassHighlights(shape: shape, level: glass)
+                    LiquidGlassHighlights(shape: shape, level: glass, restrained: true)
                 } else {
                     shape.fill(fill)
                 }
