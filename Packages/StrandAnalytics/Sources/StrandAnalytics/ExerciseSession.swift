@@ -1,7 +1,7 @@
 import Foundation
 import WhoopStore
 
-// ExerciseSession.swift — rule `exercise-session-1` (docs/context-watchdog/EXERCISE_SESSION.md).
+// ExerciseSession.swift — rule `exercise-session-2` (docs/context-watchdog/EXERCISE_SESSION.md).
 //
 // A strap sees resistance training as mostly still: between sets and during leg work it barely moves while heart rate
 // is 100–150 bpm. A session is a period opened by movement that keeps its still minutes, followed by a recovery phase.
@@ -9,13 +9,24 @@ import WhoopStore
 // a sitting or resting one. Heart rate only qualifies a period that movement opened, so a still, high heart rate never
 // opens a session and resting tachycardia keeps being judged against rest.
 //
-// Pinned to contracts/reference/exercise-session-1.json (ExerciseSessionTests). The server minute builder implements
+// Since -2 a session is `confirmed` once its period holds `minConfirmStrong` strong minutes, or when it starts at most
+// `inheritMinutes` after the last evidence minute of a confirmed session (a workout split by a long rest). Only a
+// confirmed session gets a recovery phase and trains the exercise references. An unconfirmed one, once it has ended,
+// is phase `active`: movement (never rest, never an exercise reference) with no recovery after it. Live opening is
+// unchanged: an open period is `session` from the moment conditions 1–3 hold, confirmed or not.
+//
+// Pinned to contracts/reference/exercise-session-2.json (ExerciseSessionTests). The server minute builder implements
 // the same rule.
 
 public enum ExerciseSessionPhase: String, Equatable, Sendable, Codable {
     case none
+    /// Inside a session: an open one (confirmed or not yet), or a confirmed one that has ended.
     case session
+    /// After a confirmed session's last evidence minute, until heart rate returns or the cap.
     case recovery
+    /// An ended, unconfirmed session's minutes (rule exercise-session-2): movement, never rest and never an exercise
+    /// reference; no recovery follows it.
+    case active
 }
 
 /// One minute of HR-free movement evidence plus its heart rate (the load check only).
@@ -34,7 +45,8 @@ public struct ExerciseSessionSpan: Equatable, Sendable, Codable {
     /// First and last evidence minute (minute starts, unix seconds).
     public var startUnix: Int
     public var endUnix: Int
-    /// Start of the first minute no longer in recovery; nil while the session is still open.
+    /// Start of the first minute no longer in recovery (the minute after `endUnix` for an unconfirmed session); nil
+    /// while the session is still open.
     public var recoveryEndUnix: Int?
     /// Median HR 45–10 minutes before the start (bpm).
     public var preReference: Double
@@ -45,11 +57,40 @@ public struct ExerciseSessionSpan: Equatable, Sendable, Codable {
     public var hrPeak: Double?
     /// Σ max(0, HR − rest) over the session's minutes, bpm·min.
     public var load: Double
+    /// Rule exercise-session-2: `minConfirmStrong` strong minutes so far, or inherited from a confirmed session that
+    /// ended at most `inheritMinutes` before this one started. Only a confirmed session has a recovery and trains the
+    /// exercise references.
+    public var confirmed: Bool = true
+    /// Start of the minute that confirmed it (the session start when inherited); nil when unconfirmed.
+    public var confirmedAtUnix: Int? = nil
     public var durationMinutes: Int { (endUnix - startUnix) / 60 + 1 }
 }
 
+extension ExerciseSessionSpan {
+    private enum CodingKeys: String, CodingKey {
+        case startUnix, endUnix, recoveryEndUnix, preReference, open, hrP50, hrP90, hrPeak, load, confirmed,
+             confirmedAtUnix
+    }
+
+    /// Lenient: a span encoded before exercise-session-2 had a recovery like every -1 session (confirmed).
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        startUnix = try c.decode(Int.self, forKey: .startUnix)
+        endUnix = try c.decode(Int.self, forKey: .endUnix)
+        recoveryEndUnix = try c.decodeIfPresent(Int.self, forKey: .recoveryEndUnix)
+        preReference = try c.decode(Double.self, forKey: .preReference)
+        open = try c.decode(Bool.self, forKey: .open)
+        hrP50 = try c.decodeIfPresent(Double.self, forKey: .hrP50)
+        hrP90 = try c.decodeIfPresent(Double.self, forKey: .hrP90)
+        hrPeak = try c.decodeIfPresent(Double.self, forKey: .hrPeak)
+        load = try c.decode(Double.self, forKey: .load)
+        confirmed = try c.decodeIfPresent(Bool.self, forKey: .confirmed) ?? true
+        confirmedAtUnix = try c.decodeIfPresent(Int.self, forKey: .confirmedAtUnix)
+    }
+}
+
 public enum ExerciseSessionRule {
-    public static let rule = "exercise-session-1"
+    public static let rule = "exercise-session-2"
     public static let mergeGapMinutes = 10
     /// A weak evidence minute counts only within this many minutes of a strong one.
     public static let anchorMinutes = 20
@@ -63,6 +104,11 @@ public enum ExerciseSessionRule {
     public static let returnRunMinutes = 5
     public static let recoveryCapMinutes = 30...120
     public static let preWindowMinutes = (from: 45, to: 10)
+    /// A session is confirmed at its `minConfirmStrong`-th strong minute (owner audit 2026-10-09: the weakest of 9 gym
+    /// sessions had 19; non-gym "sessions" had far fewer).
+    public static let minConfirmStrong = 15
+    /// …or when it starts at most this many minutes after the last evidence minute of a confirmed session.
+    public static let inheritMinutes = 30
     /// The resting rule (> 120 bpm for 10 still minutes) applies to recovery minutes from this long after the
     /// session's last evidence minute.
     public static let recoveryRestingRuleAfterSeconds = 15 * 60
@@ -144,6 +190,26 @@ public enum ExerciseSessionRule {
         return out
     }
 
+    /// The earliest second from which `new` gives any minute different interval evidence than `old` (a re-decode
+    /// rewrote the stored decoder intervals): the first interval, in start order, whose bounds or evidence fields
+    /// (class, locomotion, arm behaviour, intensity, sleep and wear state) differ. nil when nothing differs.
+    public static func earliestEvidenceChange(old: [ActivityContextIntervalRow],
+                                              new: [ActivityContextIntervalRow]) -> Int? {
+        let a = old.sorted { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
+        let b = new.sorted { ($0.startTs, $0.endTs) < ($1.startTs, $1.endTs) }
+        func same(_ x: ActivityContextIntervalRow, _ y: ActivityContextIntervalRow) -> Bool {
+            x.startTs == y.startTs && x.endTs == y.endTs && x.activityClass == y.activityClass
+                && x.locomotion == y.locomotion && x.armBehavior == y.armBehavior && x.intensity == y.intensity
+                && x.sleepState == y.sleepState && x.wearState == y.wearState
+        }
+        for i in 0..<max(a.count, b.count) {
+            guard i < a.count else { return b[i].startTs }
+            guard i < b.count else { return a[i].startTs }
+            if !same(a[i], b[i]) { return min(a[i].startTs, b[i].startTs) }
+        }
+        return nil
+    }
+
     // MARK: Rule
 
     /// Sessions over a contiguous, minute-aligned run of minutes (gaps in the input are filled as no evidence, no
@@ -189,13 +255,20 @@ public enum ExerciseSessionRule {
         var out: [ExerciseSessionSpan] = []
         var busy = Set<Int>()
         var previousPre: Double?
+        var lastConfirmedEnd: Int?
         for (k, s) in found.enumerated() {
             let lo = max(0, s.a - preWindowMinutes.from), hi = max(0, s.a - preWindowMinutes.to)
             let preVals = (lo..<hi).compactMap { busy.contains($0) ? nil : grid[$0].hr }
             let pre = median(preVals) ?? previousPre ?? rest
             previousPre = pre
+            let confirmedAt = confirmation(a: s.a, b: s.b, grid: grid, lastConfirmedEnd: lastConfirmedEnd)
+            if confirmedAt != nil { lastConfirmedEnd = s.b }
             var recoveryEnd: Int?
-            if !s.open {
+            if !s.open, confirmedAt == nil {
+                // Unconfirmed (stored as `active`): no recovery. Its minutes stay out of later pre-references.
+                recoveryEnd = t0 + (s.b + 1) * 60
+                busy.formUnion(s.a...s.b)
+            } else if !s.open {
                 let duration = s.b - s.a + 1
                 let cap = min(max(duration, recoveryCapMinutes.lowerBound), recoveryCapMinutes.upperBound)
                 var limit = min(n, s.b + 1 + cap)
@@ -225,25 +298,39 @@ public enum ExerciseSessionRule {
                 startUnix: t0 + s.a * 60, endUnix: t0 + s.b * 60, recoveryEndUnix: recoveryEnd,
                 preReference: pre, open: s.open,
                 hrP50: quantile(hrs, 0.5), hrP90: quantile(hrs, 0.9), hrPeak: hrs.last,
-                load: hrs.reduce(0) { $0 + max(0, $1 - rest) }))
+                load: hrs.reduce(0) { $0 + max(0, $1 - rest) },
+                confirmed: confirmedAt != nil, confirmedAtUnix: confirmedAt.map { t0 + $0 * 60 }))
         }
         return out
     }
 
-    /// The phase of each minute in `[fromUnix, toUnix)`: inside a session (open sessions run to `toUnix`), in its
-    /// recovery, or neither.
+    /// Grid index that confirms the session `[a, b]`, or nil: `a` when it starts at most `inheritMinutes` after the
+    /// last evidence minute of the previous confirmed session (inheritance chains forward only), else the
+    /// `minConfirmStrong`-th strong minute of the period.
+    static func confirmation(a: Int, b: Int, grid: [ExerciseSessionMinute], lastConfirmedEnd: Int?) -> Int? {
+        if let last = lastConfirmedEnd, a - last <= inheritMinutes { return a }
+        var count = 0
+        for i in a...b where grid[i].strong {
+            count += 1
+            if count == minConfirmStrong { return i }
+        }
+        return nil
+    }
+
+    /// The phase of each minute in `[fromUnix, toUnix)`: inside a session (open sessions run to `toUnix`, confirmed
+    /// or not), in a confirmed session's recovery, inside an ended unconfirmed session (`active`), or none.
     public static func phases(_ spans: [ExerciseSessionSpan], fromUnix: Int, toUnix: Int) -> [ExerciseSessionPhase] {
         stride(from: fromUnix, to: toUnix, by: 60).map { m in
             for s in spans {
                 let sessionEnd = s.open ? Int.max : s.endUnix
-                if m >= s.startUnix && m <= sessionEnd { return .session }
-                if !s.open, m > s.endUnix, m < (s.recoveryEndUnix ?? Int.max) { return .recovery }
+                if m >= s.startUnix && m <= sessionEnd { return s.open || s.confirmed ? .session : .active }
+                if !s.open, s.confirmed, m > s.endUnix, m < (s.recoveryEndUnix ?? Int.max) { return .recovery }
             }
             return .none
         }
     }
 
-    /// The session (open, or whose recovery covers `unix`) a minute belongs to.
+    /// The session (open, or whose recovery covers `unix`; an unconfirmed one only up to its end) a minute belongs to.
     public static func span(at unix: Int, in spans: [ExerciseSessionSpan]) -> ExerciseSessionSpan? {
         spans.last { s in
             unix >= s.startUnix && (s.open || unix < (s.recoveryEndUnix ?? Int.max))
@@ -308,11 +395,12 @@ public struct ExerciseRoutine: Equatable, Sendable, Codable {
     public static let minSessionsPerCluster = 3
     public static let clusterBandMinutes = 90
 
-    /// Builds the routine from completed sessions. `calendar` carries the person's time zone. `historyStartUnix` is
+    /// Builds the routine from completed, confirmed sessions (rule exercise-session-2: an unconfirmed period never
+    /// trains a routine or the in-session ceiling). `calendar` carries the person's time zone. `historyStartUnix` is
     /// when the evidence history begins (days before it are not misses); nil = the first session's day.
     public static func build(_ spans: [ExerciseSessionSpan], nowUnix: Int, historyStartUnix: Int? = nil,
                              calendar: Calendar = .current) -> ExerciseRoutine {
-        let done = spans.filter { !$0.open }
+        let done = spans.filter { !$0.open && $0.confirmed }
         func local(_ unix: Int) -> (minute: Int, weekend: Bool, day: Int) {
             let d = Date(timeIntervalSince1970: TimeInterval(unix))
             let c = calendar.dateComponents([.hour, .minute, .weekday], from: d)

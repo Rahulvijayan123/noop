@@ -194,6 +194,42 @@ final class ActivityContextAppTests: XCTestCase {
         XCTAssertTrue(other.isEmpty, "today has no data and gets no rows")
     }
 
+    /// The live Watchdog's exercise evidence re-reads stored intervals from where a write changed them (rule
+    /// exercise-session-2 wiring: re-decodes land minutes late, past its trailing re-read).
+    @MainActor
+    func testASavedDayReportsFromWhereItsIntervalsChanged() async throws {
+        let (repo, store, id) = try await fixture()
+        let day = localDays[1]
+        var wrist = Wrist(start: day.start + 8 * 3_600)
+        wrist.desk(1_800)
+        _ = try await store.insert(wrist.streams, deviceId: id)
+
+        final class Reports { var from: [Int?] = [] }
+        let reports = Reports()
+        let sut = ActivityContextCoordinator(repo: repo, horizonDays: 3, isWorn: { true }, remind: { _, _ in },
+                                             log: { _ in }, intervalsRewritten: { reports.from.append($0) })
+        await sut.drainMaterialization(pauseNs: 0)
+        let firstRows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+        let firstStart = try XCTUnwrap(firstRows.first?.startTs)
+        XCTAssertFalse(reports.from.isEmpty, "a first save is reported")
+        XCTAssertEqual(reports.from.first ?? nil, firstStart, "a first save changes everything from its first interval")
+
+        // An up-to-date day is not rewritten, so nothing is reported.
+        let count = reports.from.count
+        await sut.drainMaterialization(pauseNs: 0)
+        XCTAssertEqual(reports.from.count, count)
+
+        // Later heart rate: reported from no later than where the new data starts.
+        var more = Wrist(start: wrist.ts)
+        more.desk(1_800)
+        _ = try await store.insert(more.streams, deviceId: id)
+        await sut.drainMaterialization(pauseNs: 0)
+        XCTAssertGreaterThan(reports.from.count, count)
+        let changed = try XCTUnwrap(reports.from.last ?? nil)
+        XCTAssertLessThanOrEqual(changed, more.hr[0].ts)
+        XCTAssertGreaterThanOrEqual(changed, firstStart)
+    }
+
     @MainActor
     func testADayWithNoHeartRateIsNeitherDecodedNorGivenALedgerRow() async throws {
         let (repo, store, id) = try await fixture()

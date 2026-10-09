@@ -27,6 +27,9 @@ final class ActivityContextCoordinator {
     private let timeZone: () -> TimeZone
     private let horizonDays: Int
     private let smooth: Smoother
+    /// Told after a write from which second the stored causal intervals changed (nil = not known where), so the live
+    /// Watchdog's exercise evidence re-reads them (`WatchdogExerciseEvidence.intervalsRewritten`).
+    private let intervalsRewritten: (_ fromUnix: Int?) -> Void
 
     /// The retrospective smoother (D8-10): `ActivityContextPersistence.retrospectiveIntervals` in production;
     /// injectable so a test can drive a final day whose smoothing yields nothing.
@@ -69,7 +72,8 @@ final class ActivityContextCoordinator {
          remind: @escaping (_ loops: UInt8, _ windowMinutes: Int) -> Void,
          log: @escaping (String) -> Void,
          timeZone: @escaping () -> TimeZone = { .current },
-         smooth: @escaping Smoother = ActivityContextCoordinator.defaultSmoother) {
+         smooth: @escaping Smoother = ActivityContextCoordinator.defaultSmoother,
+         intervalsRewritten: @escaping (_ fromUnix: Int?) -> Void = { _ in }) {
         self.repo = repo
         self.horizonDays = horizonDays
         self.isWorn = isWorn
@@ -77,6 +81,7 @@ final class ActivityContextCoordinator {
         self.log = log
         self.timeZone = timeZone
         self.smooth = smooth
+        self.intervalsRewritten = intervalsRewritten
     }
 
     // MARK: - Stand reminder
@@ -219,6 +224,7 @@ final class ActivityContextCoordinator {
             do {
                 try await store.clearActivityContext(deviceIds: ids, from: day.start, to: day.end)
                 checks[day.start] = nil
+                intervalsRewritten(day.start)
                 log("Activity context: cleared \(day.key), which no longer has heart rate")
             } catch {
                 log("Activity context: could not clear \(day.key): \(error)")
@@ -359,13 +365,25 @@ final class ActivityContextCoordinator {
         let transitions = ActivityContextPersistence.transitionRows(document.events, from: day.start, to: day.end,
                                                                      decoderVersion: document.versions.decoder)
         let smoothedRows = row.isFinal ? retrospective.map(\.storeRow) : []
+        // What the live consumers read today (causal rows, any id), to tell the Watchdog's exercise evidence from where
+        // this write changes it. nil when a read failed: then it is told "not known where".
+        var storedBefore: [ActivityContextIntervalRow]? = []
+        for id in ids {
+            do {
+                let rows = try await store.activityContextIntervals(deviceId: id, from: day.start, to: day.end)
+                storedBefore?.append(contentsOf: rows)
+            } catch {
+                storedBefore = nil
+            }
+        }
+        let writtenRows = intervals.map(\.storeRow)
         do {
             // One owner per day, in one write: another id that held this day's context (the active strap
             // changed) stops describing the same seconds in the same transaction that the owner's rows land in,
             // or neither happens and the day is retried.
             do {
                 try await store.replaceActivityContext(deviceId: owner.deviceId, day: row,
-                                                       intervals: intervals.map(\.storeRow), transitions: transitions,
+                                                       intervals: writtenRows, transitions: transitions,
                                                        clearingOtherIds: ids, retrospective: smoothedRows)
             } catch let error where !smoothedRows.isEmpty {
                 // The causal rows are what every live consumer needs; a smoother output the store refuses must not
@@ -374,10 +392,17 @@ final class ActivityContextCoordinator {
                 var causalOnly = row
                 causalOnly.retrospectiveVersion = nil
                 try await store.replaceActivityContext(deviceId: owner.deviceId, day: causalOnly,
-                                                       intervals: intervals.map(\.storeRow), transitions: transitions,
+                                                       intervals: writtenRows, transitions: transitions,
                                                        clearingOtherIds: ids)
             }
             failures[day.start] = nil
+            if let before = storedBefore {
+                if let changed = ExerciseSessionRule.earliestEvidenceChange(old: before, new: writtenRows) {
+                    intervalsRewritten(changed)
+                }
+            } else {
+                intervalsRewritten(nil)
+            }
             // A refused smoother write leaves the version nil: that day is tried again at most once per launch (rule 7
             // stops once this process has looked at it after it settled).
             if !smoothedRows.isEmpty {

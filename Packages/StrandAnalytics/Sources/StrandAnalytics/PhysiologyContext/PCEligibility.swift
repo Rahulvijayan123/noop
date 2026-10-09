@@ -69,7 +69,9 @@ extension PhysiologyContext {
             PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 1200, exclusionS: 3600),
             PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 3600, exclusionS: 5400),
         ]
-        /// pc-eligibility-5 — exercise sessions (rule `exercise-session-1`, docs/context-watchdog/EXERCISE_SESSION.md).
+        /// pc-eligibility-5 — exercise sessions (rule `exercise-session-1`'s merge gap and recovery cap, unchanged in
+        /// `exercise-session-2`, docs/context-watchdog/EXERCISE_SESSION.md; -2's confirmation step is not applied here:
+        /// every bout session spanning `sessionMinDurationS` excludes, as before).
         /// A gym or circuit workout reaches the strap as stepping / walking fragments between still sets, or as one
         /// long `mixed_locomotion` bout, and the kind cannot tell an easy stroll from it: bouts carry no intensity.
         /// On 2026-10-07 a 66-minute mixed_locomotion bout (HR median 130, peak 142) got only the 600 s floor, and
@@ -276,7 +278,7 @@ extension PhysiologyContext {
 
         /// pc-eligibility-5: recent bouts at most 10 minutes apart are one exercise session, and a session of 30
         /// minutes or more excludes stable awake rest for its duration clamped to 30-120 minutes (rule
-        /// `exercise-session-1`'s recovery cap; `EligibilityConfig.sessionMergeGapS`).
+        /// `exercise-session-1`'s recovery cap, unchanged in -2; `EligibilityConfig.sessionMergeGapS`).
         /// pc-eligibility-4: a decoder transition event counts over its onset-to-detection span `[onsetTs, ts]`
         /// (INT-C), not at its detection second only, so the postural-settling gate can move. Documents decided
         /// under an earlier version are told apart by `PolicyVersions.eligibility` and the policy fingerprint.

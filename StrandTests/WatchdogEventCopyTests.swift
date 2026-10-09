@@ -15,6 +15,27 @@ final class WatchdogEventCopyTests: XCTestCase {
                                  headline: headline, contributing: contributing, signals: signals)
     }
 
+    /// Rule exercise-session-2: an ended, unconfirmed session ("active") is movement, never described as an exercise
+    /// session or a recovery.
+    func testExerciseLineNamesOnlySessionsAndRecovery() throws {
+        func snapshot(_ phase: String) throws -> WatchdogExerciseSnapshot {
+            let json = """
+            {"rule":"exercise-session-2","phase":"\(phase)","restReference":66,"restBasis":"awake_rest_reference",
+             "ceilingBpm":199,"ceilingBasis":"age_formula_plus_5","sessionReference":"established",
+             "recoveryReference":"learning","confirmed":\(phase == "none" ? "null" : "false")}
+            """
+            return try JSONDecoder().decode(WatchdogExerciseSnapshot.self, from: Data(json.utf8))
+        }
+        XCTAssertEqual(WatchdogEventCopy.exerciseLine(try snapshot("session")),
+                       "Exercise session. Compared with your own workouts.")
+        XCTAssertEqual(WatchdogEventCopy.exerciseComparison(try snapshot("recovery")),
+                       "Still learning your own recovery after workouts; only safety limits apply")
+        XCTAssertNil(WatchdogEventCopy.exerciseLine(try snapshot("active")))
+        XCTAssertNil(WatchdogEventCopy.exerciseComparison(try snapshot("active")))
+        XCTAssertNil(WatchdogEventCopy.exerciseLine(try snapshot("none")))
+        XCTAssertNil(WatchdogEventCopy.exerciseLine(nil))
+    }
+
     func testSeverityTitles() {
         XCTAssertEqual(WatchdogEventCopy.severityTitle("severe"), "Strong alert")
         XCTAssertEqual(WatchdogEventCopy.severityTitle("active"), "Alert")

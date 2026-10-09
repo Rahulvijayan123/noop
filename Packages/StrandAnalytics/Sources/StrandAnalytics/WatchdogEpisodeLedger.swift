@@ -20,7 +20,7 @@ public struct WatchdogEpisodeLedgerRow: Equatable, Sendable, Codable {
     /// Minutes (not ticks) the Watchdog could not judge.
     public var unavailableMinutes: Int
     public var lastUnavailableMinute: Int?
-    /// Exercise context at the peak tick (rule exercise-session-1): lineage for the clinician export and the server.
+    /// Exercise context at the peak tick (rule exercise-session-2): lineage for the clinician export and the server.
     public var exercise: WatchdogExerciseSnapshot?
     /// The tick with the highest fused energy in this episode, and what `evaluate` saw then.
     /// Optional so rows written before these fields decode unchanged.

@@ -2,8 +2,8 @@ import XCTest
 import WhoopStore
 @testable import StrandAnalytics
 
-/// Rule `exercise-session-1`: the Swift implementation must reproduce the shared parity fixture exactly
-/// (contracts/reference/exercise-session-1.json, written by contracts/reference/exercise_session_1.py).
+/// Rule `exercise-session-2`: the Swift implementation must reproduce the shared parity fixture exactly
+/// (contracts/reference/exercise-session-2.json, written by contracts/reference/exercise_session_2.py).
 final class ExerciseSessionTests: XCTestCase {
 
     private struct Fixture: Decodable {
@@ -13,6 +13,8 @@ final class ExerciseSessionTests: XCTestCase {
                 var end: Int
                 var recovery_end: Int
                 var pre_reference: Double
+                var confirmed: Bool
+                var confirmed_at: Int?
             }
             var name: String
             var t0: Int
@@ -30,7 +32,7 @@ final class ExerciseSessionTests: XCTestCase {
         let url = URL(fileURLWithPath: #filePath)
             .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
             .deletingLastPathComponent().deletingLastPathComponent()
-            .appendingPathComponent("contracts/reference/exercise-session-1.json")
+            .appendingPathComponent("contracts/reference/exercise-session-2.json")
         return try JSONDecoder().decode(Fixture.self, from: Data(contentsOf: url))
     }
 
@@ -50,9 +52,80 @@ final class ExerciseSessionTests: XCTestCase {
                 XCTAssertEqual(g.endUnix, e.end, c.name)
                 XCTAssertEqual(g.recoveryEndUnix, e.recovery_end, c.name)
                 XCTAssertEqual(g.preReference, e.pre_reference, accuracy: 1e-6, c.name)
+                XCTAssertEqual(g.confirmed, e.confirmed, c.name)
+                XCTAssertEqual(g.confirmedAtUnix, e.confirmed_at, c.name)
                 XCTAssertFalse(g.open, c.name)
             }
         }
+        // The fixture exercises every -2 path: unconfirmed, confirmed at the 15th strong minute, inherited, expired.
+        XCTAssertTrue(fx.cases.contains { $0.sessions.contains { !$0.confirmed } })
+        XCTAssertTrue(fx.cases.contains { c in c.sessions.contains { $0.confirmed && $0.confirmed_at == $0.start } })
+    }
+
+    private func minutes(_ c: Fixture.Case) -> [ExerciseSessionMinute] {
+        c.hr.indices.map { i in
+            ExerciseSessionMinute(minuteUnix: c.t0 + i * 60, hr: c.hr[i], strong: c.strong[i] == 1, weak: c.weak[i] == 1)
+        }
+    }
+
+    /// An unconfirmed session (4 strong minutes over 25) is `active` once it has ended: no recovery follows it.
+    func testUnconfirmedSessionIsActiveWithNoRecovery() throws {
+        let fx = try fixture()
+        let c = try XCTUnwrap(fx.cases.first { $0.name == "late_night_low_movement_4_strong" })
+        let spans = ExerciseSessionRule.sessions(minutes: minutes(c), restReference: c.rest_reference)
+        XCTAssertEqual(spans.count, 1)
+        XCTAssertFalse(spans[0].confirmed)
+        XCTAssertNil(spans[0].confirmedAtUnix)
+        let phases = ExerciseSessionRule.phases(spans, fromUnix: c.t0, toUnix: c.t0 + c.hr.count * 60)
+        XCTAssertEqual(phases[39], .none)
+        XCTAssertTrue(phases[40...64].allSatisfy { $0 == .active })
+        XCTAssertTrue(phases[65...].allSatisfy { $0 == .none }, "no recovery after an unconfirmed session")
+        XCTAssertFalse(phases.contains(.session))
+        XCTAssertFalse(phases.contains(.recovery))
+    }
+
+    /// Live opening is unchanged: the same period is `session` while it is open (confirmed or not), and `active` once
+    /// it has closed unconfirmed.
+    func testOpenSessionIsSessionUntilItEndsUnconfirmed() throws {
+        let fx = try fixture()
+        let c = try XCTUnwrap(fx.cases.first { $0.name == "late_night_low_movement_4_strong" })
+        let all = minutes(c)
+        // Minute 60: the period's last strong minute is 56, so it is still open.
+        let liveNow = c.t0 + 60 * 60
+        let live = ExerciseSessionRule.sessions(minutes: Array(all.prefix(60)), restReference: c.rest_reference,
+                                                nowUnix: liveNow)
+        XCTAssertEqual(live.count, 1)
+        XCTAssertTrue(live[0].open)
+        XCTAssertFalse(live[0].confirmed)
+        XCTAssertEqual(ExerciseSessionRule.phases(live, fromUnix: c.t0 + 40 * 60, toUnix: liveNow),
+                       Array(repeating: .session, count: 20))
+        // Minute 76: the last evidence minute (64) is more than 10 minutes old: closed, unconfirmed.
+        let laterNow = c.t0 + 76 * 60
+        let closed = ExerciseSessionRule.sessions(minutes: Array(all.prefix(76)), restReference: c.rest_reference,
+                                                  nowUnix: laterNow)
+        XCTAssertEqual(closed.count, 1)
+        XCTAssertFalse(closed[0].open)
+        XCTAssertEqual(closed[0].recoveryEndUnix, c.t0 + 65 * 60)
+        let phases = ExerciseSessionRule.phases(closed, fromUnix: c.t0 + 40 * 60, toUnix: laterNow)
+        XCTAssertTrue(phases.prefix(25).allSatisfy { $0 == .active })
+        XCTAssertTrue(phases.dropFirst(25).allSatisfy { $0 == .none })
+    }
+
+    /// An open session is confirmed live at its 15th strong minute.
+    func testOpenSessionConfirmsAtTheFifteenthStrongMinute() {
+        let t0 = 1_790_000_040 - 1_790_000_040 % 60
+        var all: [ExerciseSessionMinute] = (0..<80).map {
+            ExerciseSessionMinute(minuteUnix: t0 + $0 * 60, hr: 72, strong: false, weak: false)
+        }
+        for i in 30..<80 { all[i] = ExerciseSessionMinute(minuteUnix: t0 + i * 60, hr: 125, strong: i % 2 == 0, weak: i % 2 == 1) }
+        // Strong minutes 30, 32, …: the 15th is minute 58.
+        let before = ExerciseSessionRule.sessions(minutes: Array(all.prefix(58)), restReference: 72, nowUnix: t0 + 58 * 60)
+        XCTAssertEqual(before.count, 1)
+        XCTAssertTrue(before[0].open)
+        XCTAssertFalse(before[0].confirmed)
+        let at = ExerciseSessionRule.sessions(minutes: Array(all.prefix(59)), restReference: 72, nowUnix: t0 + 59 * 60)
+        XCTAssertTrue(at[0].confirmed)
+        XCTAssertEqual(at[0].confirmedAtUnix, t0 + 58 * 60)
     }
 
     func testOpenSessionCountsBeforeTwelveMinutesAndHasNoRecoveryEnd() {
@@ -80,10 +153,8 @@ final class ExerciseSessionTests: XCTestCase {
     func testRecoveryPhasesFollowTheSession() throws {
         let fx = try fixture()
         let c = try XCTUnwrap(fx.cases.first { $0.name == "gym_sets_with_leg_work" })
-        let minutes = c.hr.indices.map { i in
-            ExerciseSessionMinute(minuteUnix: c.t0 + i * 60, hr: c.hr[i], strong: c.strong[i] == 1, weak: c.weak[i] == 1)
-        }
-        let spans = ExerciseSessionRule.sessions(minutes: minutes, restReference: c.rest_reference)
+        let spans = ExerciseSessionRule.sessions(minutes: minutes(c), restReference: c.rest_reference)
+        XCTAssertTrue(spans[0].confirmed)
         let phases = ExerciseSessionRule.phases(spans, fromUnix: c.t0, toUnix: c.t0 + c.hr.count * 60)
         XCTAssertEqual(phases[49], .none)
         XCTAssertEqual(phases[50], .session)
@@ -131,5 +202,50 @@ final class ExerciseSessionTests: XCTestCase {
         XCTAssertTrue(c.active)
         XCTAssertNotNil(routine.match(startUnix: spans[0].startUnix + 7 * 86_400, calendar: cal))
         XCTAssertTrue(ExerciseRoutine.build([], nowUnix: now, calendar: cal).clusters.isEmpty)
+        // Rule exercise-session-2: unconfirmed sessions never form a routine (nor the in-session ceiling).
+        let unconfirmed = spans.map { s -> ExerciseSessionSpan in
+            var u = s; u.confirmed = false; u.confirmedAtUnix = nil; return u
+        }
+        let none = ExerciseRoutine.build(unconfirmed, nowUnix: now, calendar: cal)
+        XCTAssertTrue(none.clusters.isEmpty)
+        XCTAssertEqual(none.sessionCount, 0)
+        XCTAssertEqual(ExerciseRoutine.build(spans + unconfirmed, nowUnix: now, calendar: cal).sessionCount, 4)
+    }
+
+    /// A span stored before -2 (no `confirmed`) decodes as confirmed: every -1 session had a recovery.
+    func testSpanDecodesLeniently() throws {
+        let old = #"{"startUnix":60,"endUnix":600,"recoveryEndUnix":900,"preReference":70,"open":false,"load":10}"#
+        let span = try JSONDecoder().decode(ExerciseSessionSpan.self, from: Data(old.utf8))
+        XCTAssertTrue(span.confirmed)
+        XCTAssertNil(span.confirmedAtUnix)
+        var now = span
+        now.confirmed = false
+        let round = try JSONDecoder().decode(ExerciseSessionSpan.self, from: JSONEncoder().encode(now))
+        XCTAssertEqual(round, now)
+    }
+
+    /// The earliest second a re-decode changed the interval evidence of (the live evidence cache re-reads from it).
+    func testEarliestEvidenceChange() {
+        func row(_ s: Int, _ e: Int, _ cls: String, intensity: Double = 0.05) -> ActivityContextIntervalRow {
+            ActivityContextIntervalRow(startTs: s, endTs: e, activityClass: cls, confidence: 0.8, evidenceQuality: 0.8,
+                                       sleepState: "awake", wearState: "on_wrist", intensity: intensity)
+        }
+        let old = [row(0, 600, "sitting"), row(600, 1200, "sitting"), row(1200, 1800, "sitting")]
+        XCTAssertNil(ExerciseSessionRule.earliestEvidenceChange(old: old, new: old))
+        // A confidence change alone does not change evidence.
+        var tweak = old
+        tweak[1].confidence = 0.5
+        XCTAssertNil(ExerciseSessionRule.earliestEvidenceChange(old: old, new: tweak))
+        // A class rewrite in the middle.
+        var rewritten = old
+        rewritten[1].activityClass = "vigorous_activity"
+        XCTAssertEqual(ExerciseSessionRule.earliestEvidenceChange(old: old, new: rewritten), 600)
+        // New rows appended after the old ones.
+        XCTAssertEqual(ExerciseSessionRule.earliestEvidenceChange(old: old, new: old + [row(1800, 2400, "walking")]), 1800)
+        // A boundary moved.
+        let moved = [row(0, 600, "sitting"), row(600, 1000, "sitting"), row(1000, 1800, "light_activity")]
+        XCTAssertEqual(ExerciseSessionRule.earliestEvidenceChange(old: old, new: moved), 600)
+        // Nothing stored before.
+        XCTAssertEqual(ExerciseSessionRule.earliestEvidenceChange(old: [], new: old), 0)
     }
 }

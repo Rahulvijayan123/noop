@@ -506,7 +506,7 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
     /// Where the live awake-rest anchor came from (phase usual key, still fallback, posture).
     /// Nil on unavailable / safety-only ticks and in results persisted by older builds.
     public var usualProvenance: WatchdogUsualProvenance? = nil
-    /// Exercise-session context of the newest minute (rule exercise-session-1). Nil when no evidence history was
+    /// Exercise-session context of the newest minute (rule exercise-session-2). Nil when no evidence history was
     /// available and in results persisted by older builds.
     public var exercise: WatchdogExerciseSnapshot? = nil
 }
@@ -515,7 +515,7 @@ public struct WatchdogResult: Equatable, Sendable, Codable {
 /// the server record.
 public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
     public var rule: String
-    /// "session" | "recovery" | "none"
+    /// "session" | "recovery" | "active" | "none" (`ExerciseSessionPhase`; "active" = an ended, unconfirmed session).
     public var phase: String
     public var sessionStartUnix: Int?
     /// Start of the session's last movement minute (nil while the session is open).
@@ -529,6 +529,9 @@ public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
     public var recoveryReference: String
     /// "weekday 21:50 (4 sessions)" when the session matches an active routine; display only.
     public var routine: String?
+    /// Whether the session the minute belongs to is confirmed (rule exercise-session-2); nil when there is no session
+    /// (phase "none") and in rows written before -2 (decoded leniently: absent reads as nil).
+    public var confirmed: Bool? = nil
 
     public static func make(_ ex: WatchdogExerciseContext, evaluations: [LBEvaluation],
                             nowUnix: Int) -> WatchdogExerciseSnapshot {
@@ -546,7 +549,7 @@ public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
             restReference: ex.restReference, restBasis: ex.restBasis,
             ceilingBpm: ex.hrCeiling, ceilingBasis: ex.hrCeilingBasis,
             sessionReference: state(.exerciseSessionHR), recoveryReference: state(.exerciseRecoveryHR),
-            routine: routine)
+            routine: routine, confirmed: phase == .none ? nil : span?.confirmed)
     }
 }
 
@@ -1032,7 +1035,8 @@ public enum Watchdog {
             carry.quietAbsTemp = 0; carry.quietAbsResp = 0; carry.quietAbsSpO2 = 0
             carry.quietN = 0
         }
-        // An exercise session or its recovery (rule exercise-session-1) is never learned as a usual band.
+        // An exercise session, its recovery or an unconfirmed session's movement (`active`, rule exercise-session-2)
+        // is never learned as a usual band.
         let inExercise = (window.exercise?.phases.last).map { $0 != .none } ?? false
         let recovering = inExercise || (carry.lastWorkoutEndUnix > 0
             && nowUnix - carry.lastWorkoutEndUnix < WatchdogEventLabeler.postWorkoutSeconds)

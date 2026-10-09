@@ -1,6 +1,6 @@
 import Foundation
 
-/// The exercise-session context of one Watchdog window (rule exercise-session-1): the phase of each window minute,
+/// The exercise-session context of one Watchdog window (rule exercise-session-2): the phase of each window minute,
 /// the sessions in the evidence history behind it, and the in-session safety ceiling. Built by the app from up to
 /// 4 hours of per-minute evidence (`WatchdogService`), or by tests from a tape. It selects which reference a minute
 /// is compared with; it never mutes a check and never widens a safety bound.

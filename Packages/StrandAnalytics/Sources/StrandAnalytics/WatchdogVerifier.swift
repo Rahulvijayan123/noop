@@ -170,9 +170,9 @@ public enum WatchdogMinuteContextKind: String, Equatable, Sendable, Codable {
     case awakeStill = "awake_still"
     case walking
     case active
-    /// Inside an exercise session (rule exercise-session-1): still minutes between sets and during leg work included.
+    /// Inside an exercise session (rule exercise-session-2): still minutes between sets and during leg work included.
     case exerciseSession = "exercise_session"
-    /// After a session's last movement, until heart rate returns or the cap.
+    /// After a confirmed session's last movement, until heart rate returns or the cap.
     case recovery
     case unknown
 
@@ -239,6 +239,10 @@ public enum WatchdogContextResolver {
                 kind = .exerciseSession
             } else if exercise == .recovery && !plainWalking && motion != .moving {
                 kind = .recovery
+            } else if exercise == .active && !plainWalking {
+                // An ended, unconfirmed session (rule exercise-session-2): movement, its still minutes included. Never
+                // a rest, exercise or recovery comparison; the normal settle after a bout follows it.
+                kind = .active
             } else if WatchdogEventGeometry.isExercise(cls) && cls != .walk || motion == .artifact || vigorousLocomotion {
                 kind = cls == .artifact || motion == .artifact ? .unknown : .active
             } else if plainWalking {

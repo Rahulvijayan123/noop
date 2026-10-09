@@ -144,5 +144,50 @@ final class WatchdogEpisodeServerBodyTests: XCTestCase {
         XCTAssertEqual((ep["annotation"] as? [String: Any])?["episodeId"] as? String, "wd-1")
         XCTAssertNotEqual(WatchdogEpisodeLedger.fingerprint(row, annotation: nil),
                           WatchdogEpisodeLedger.fingerprint(row, annotation: note))
+        // No `confirmed` known (a row from before exercise-session-2): the key is absent, not invented.
+        XCTAssertNil((ep["exercise"] as? [String: Any])?["confirmed"])
+    }
+
+    /// Rule exercise-session-2: the snapshot carries `confirmed` and the phase `active` to the server, and ledger rows
+    /// written before -2 (no `confirmed`) still decode.
+    func testExerciseConfirmedAndActivePhaseReachTheBody() throws {
+        var row = WatchdogEpisodeLedgerRow(episodeId: "wd-2", deviceId: "my-whoop", openedUnix: 100, lastUnix: 400,
+                                           maxSeverity: "candidate", safety: false, personalOff: true,
+                                           notifyDelivery: "", liveAlerts: true)
+        row.exercise = WatchdogExerciseSnapshot(rule: ExerciseSessionRule.rule, phase: ExerciseSessionPhase.active.rawValue,
+                                                sessionStartUnix: 50, sessionLastMovementUnix: 300, restReference: 66,
+                                                restBasis: "awake_rest_reference", ceilingBpm: 199,
+                                                ceilingBasis: "age_formula_plus_5", sessionReference: "learning",
+                                                recoveryReference: "learning", routine: nil, confirmed: false)
+        let body = WatchdogEpisodeLedger.serverBody(rows: [row], annotations: [], serverDeviceId: "dev",
+                                                    localDeviceId: "my-whoop",
+                                                    versions: ["exercise_rule": ExerciseSessionRule.rule], nowUnix: 600)
+        XCTAssertNoThrow(try JSONSerialization.data(withJSONObject: body))
+        let ep = try XCTUnwrap((body["episodes"] as? [[String: Any]])?.first)
+        let exercise = try XCTUnwrap(ep["exercise"] as? [String: Any])
+        XCTAssertEqual(exercise["confirmed"] as? Bool, false)
+        XCTAssertEqual(exercise["phase"] as? String, "active")
+        XCTAssertEqual(exercise["rule"] as? String, "exercise-session-2")
+        var confirmed = row
+        confirmed.exercise?.confirmed = true
+        confirmed.exercise?.phase = "session"
+        let body2 = WatchdogEpisodeLedger.serverBody(rows: [confirmed], annotations: [], serverDeviceId: "dev",
+                                                     localDeviceId: "my-whoop", versions: [:], nowUnix: 600)
+        let ep2 = try XCTUnwrap((body2["episodes"] as? [[String: Any]])?.first)
+        XCTAssertEqual((ep2["exercise"] as? [String: Any])?["confirmed"] as? Bool, true)
+        XCTAssertNotEqual(WatchdogEpisodeLedger.fingerprint(row, annotation: nil),
+                          WatchdogEpisodeLedger.fingerprint(confirmed, annotation: nil))
+
+        // A ledger row persisted before -2: its snapshot has no `confirmed` and decodes with nil.
+        let legacy = """
+        {"episodeId":"wd-old","deviceId":"my-whoop","openedUnix":100,"lastUnix":400,"maxSeverity":"severe",
+         "safety":false,"personalOff":true,"notifyDelivery":"","liveAlerts":true,"offMinutes":[],"unavailableMinutes":0,
+         "exercise":{"rule":"exercise-session-1","phase":"recovery","sessionStartUnix":50,"sessionLastMovementUnix":300,
+         "restReference":66,"restBasis":"awake_rest_reference","ceilingBpm":199,"ceilingBasis":"age_formula_plus_5",
+         "sessionReference":"learning","recoveryReference":"learning"}}
+        """
+        let decoded = try JSONDecoder().decode(WatchdogEpisodeLedgerRow.self, from: Data(legacy.utf8))
+        XCTAssertEqual(decoded.exercise?.phase, "recovery")
+        XCTAssertNil(decoded.exercise?.confirmed)
     }
 }

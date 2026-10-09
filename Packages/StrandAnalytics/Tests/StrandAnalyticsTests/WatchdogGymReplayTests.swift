@@ -4,7 +4,7 @@ import WhoopProtocol
 @testable import StrandAnalytics
 
 /// Replays the owner's real gym evenings (phone export, read-only; same layout as WatchdogV2RealDataReplayTests) through
-/// the Watchdog every minute, with and without the exercise-session context (rule exercise-session-1), in two reference
+/// the Watchdog every minute, with and without the exercise-session context (rule exercise-session-2), in two reference
 /// states: the references the real history supports today ("learning"), and references established from the owner's
 /// own data (the state a few weeks on, when personal deviations can fire). Skipped unless NARA_REPLAY_DIR is set.
 /// No real data is committed.
@@ -154,6 +154,10 @@ final class WatchdogGymReplayTests: XCTestCase {
         var heldMinutes = 0
         var verdicts: [String: Int] = [:]
         var kinds: [String: Int] = [:]
+        /// Minutes judged inside a session at some tick (`exercise_session`).
+        var sessionMinutes: Set<Int> = []
+        /// Of those, minutes a later tick compared with a resting reference (awake still / asleep).
+        var sessionMinutesLaterRest: Set<Int> = []
     }
 
     static func replay(_ e: Export, from: Int, to: Int, refs: [LBEvaluation], exercise: Bool,
@@ -220,13 +224,19 @@ final class WatchdogGymReplayTests: XCTestCase {
                     if now == to - to % 60 || now + 60 > to {
                         let f = DateFormatter(); f.timeZone = TimeZone(identifier: "America/Los_Angeles"); f.dateFormat = "HH:mm"
                         func t(_ u: Int) -> String { f.string(from: Date(timeIntervalSince1970: TimeInterval(u))) }
-                        out.spans = (w.exercise?.spans ?? []).map { "\(t($0.startUnix))-\(t($0.endUnix)) rec→\($0.recoveryEndUnix.map(t) ?? "open") p50=\(Int($0.hrP50 ?? 0)) rest=\(Int(w.exercise?.restReference ?? 0))/\(w.exercise?.restBasis ?? "")" }
+                        out.spans = (w.exercise?.spans ?? []).map { "\(t($0.startUnix))-\(t($0.endUnix)) rec→\($0.recoveryEndUnix.map(t) ?? "open") p50=\(Int($0.hrP50 ?? 0)) rest=\(Int(w.exercise?.restReference ?? 0))/\(w.exercise?.restBasis ?? "") confirmed=\($0.confirmedAtUnix.map(t) ?? "no")" }
                     }
                 }
                 // EXERCISE-END
                 let qa = WatchdogSignalQuality.assess(window: w)
                 let ctx = WatchdogContextResolver.resolve(window: w, quality: qa, carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix)
                 if let k = ctx.last?.kind.rawValue { out.kinds[k, default: 0] += 1 }
+                for c in ctx {
+                    if c.kind == .exerciseSession { out.sessionMinutes.insert(c.minuteUnix) }
+                    else if c.kind.restReferenced, out.sessionMinutes.contains(c.minuteUnix) {
+                        out.sessionMinutesLaterRest.insert(c.minuteUnix)
+                    }
+                }
                 window = .success(w)
             }
             let r = Watchdog.evaluate(window: window, prompt: prompt, evaluations: refs, nowUnix: now,
@@ -295,7 +305,7 @@ final class WatchdogGymReplayTests: XCTestCase {
         let learning = Self.learningReferences(e, asOf: "2026-10-08", calendar: cal)
         let established = Self.establishedReferences(asOf: "2026-10-08")
         var lines: [String] = ["GYM-REPLAY (minute ticks, 20:30–01:30 PDT)"]
-        var totals: [String: (notif: Int, severe: Int)] = [:]
+        var totals: [String: (notif: Int, severe: Int, laterRest: Int)] = [:]
         let modes: [(String, [LBEvaluation], Bool)] = [
             ("learning/no-session", learning, false),
             ("established/no-session", established, false),
@@ -307,15 +317,21 @@ final class WatchdogGymReplayTests: XCTestCase {
         for (name, refs, ex) in modes {
             for (day, a, b) in evenings {
                 let r = Self.replay(e, from: a, to: b, refs: refs, exercise: ex)
-                totals[name, default: (0, 0)].notif += r.notifications.count
-                totals[name, default: (0, 0)].severe += r.severeMinutes
-                lines.append(String(format: "%-24@ %@  notif=%d severe_min=%d held_min=%d kinds=%@ verdicts=%@",
+                totals[name, default: (0, 0, 0)].notif += r.notifications.count
+                totals[name, default: (0, 0, 0)].severe += r.severeMinutes
+                totals[name, default: (0, 0, 0)].laterRest += r.sessionMinutesLaterRest.count
+                lines.append(String(format: "%-24@ %@  notif=%d severe_min=%d held_min=%d session_min=%d later_rest=%d kinds=%@ verdicts=%@",
                                     name as NSString, day as NSString, r.notifications.count, r.severeMinutes,
-                                    r.heldMinutes,
+                                    r.heldMinutes, r.sessionMinutes.count, r.sessionMinutesLaterRest.count,
                                     r.kinds.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",") as NSString,
                                     r.verdicts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") as NSString))
                 for n in r.notifications.prefix(4) { lines.append("    notify \(n)") }
                 if ex { lines.append("    sessions(4h before 01:30): " + r.spans.joined(separator: "; ")) }
+                if !r.sessionMinutesLaterRest.isEmpty {
+                    let f = DateFormatter(); f.timeZone = cal.timeZone; f.dateFormat = "HH:mm"
+                    lines.append("    later_rest minutes: " + r.sessionMinutesLaterRest.sorted()
+                        .map { f.string(from: Date(timeIntervalSince1970: TimeInterval($0))) }.joined(separator: ","))
+                }
             }
         }
         print(lines.joined(separator: "\n"))
@@ -324,6 +340,7 @@ final class WatchdogGymReplayTests: XCTestCase {
         // nothing may notify, even once every personal reference is established.
         XCTAssertEqual(totals["established/session"]?.notif, 0)
         XCTAssertEqual(totals["learning/session"]?.notif, 0)
+        print("later_rest totals: established=\(totals["established/session"]?.laterRest ?? -1) learning=\(totals["learning/session"]?.laterRest ?? -1)")
         // EXERCISE-END
     }
 }

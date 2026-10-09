@@ -207,10 +207,10 @@ public struct LBDayTape: Equatable, Sendable, Codable {
             if i < minuteQuality.count, minuteQuality[i].onBody == .off || minuteQuality[i].signal == .poor {
                 return .unknown
             }
-            // Exercise sessions (still minutes between sets included) are effort; their recovery is never rest
-            // (rule exercise-session-1).
+            // Exercise sessions (still minutes between sets included) and ended unconfirmed sessions are effort; a
+            // confirmed session's recovery is never rest (rule exercise-session-2).
             switch window.exercise?.phase(at: i) ?? .none {
-            case .session: return .effort
+            case .session, .active: return .effort
             case .recovery: return .recovering
             case .none: break
             }

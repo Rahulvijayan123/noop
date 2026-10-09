@@ -22,6 +22,10 @@ final class WatchdogV2ScenarioTests: XCTestCase {
         case liftRest
         /// Seated, with an isolated arm movement (≈0.07 g) every fourth minute.
         case seatedFidget
+        /// Seated, moving the arm a little all minute (≈0.065 g: weak movement evidence, no steps).
+        case weakMove
+        /// A brisk arm movement without steps (≈0.16 g: strong movement evidence).
+        case armMove
     }
 
     struct Segment {
@@ -138,6 +142,8 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                 let fidget = (minute - seg.fromMin) % 4 == 3
                 dyn = fidget ? 0.07 + 0.01 * abs(r.n()) : 0.004 + 0.002 * abs(r.n())
                 occ = fidget ? 0.2 : 0.04
+            case .weakMove: dyn = 0.062 + 0.004 * abs(r.n()); occ = 0.15
+            case .armMove: dyn = 0.16 + 0.03 * abs(r.n()); occ = 0.3
             }
             tape.imu.append(WatchdogIMUSample(ts: t, x: 0, y: 0, z: 1, dynAccel: dyn))
             tape.motion.append(WatchdogScalarSample(ts: t, value: occ))
@@ -200,7 +206,7 @@ final class WatchdogV2ScenarioTests: XCTestCase {
         var decisions: [String]
     }
 
-    /// Per-minute evidence for rule exercise-session-1 from the tape (no decoder intervals in the synthetic tape).
+    /// Per-minute evidence for rule exercise-session-2 from the tape (no decoder intervals in the synthetic tape).
     static func evidenceMinutes(_ tape: Tape) -> [Int: ExerciseSessionMinute] {
         var dyn: [Int: (Double, Int)] = [:], hr: [Int: (Double, Int)] = [:], walk: [Int: Int] = [:], steps: [Int: Int] = [:]
         for g in tape.imu { if let d = g.dynAccel { let m = g.ts - g.ts % 60; dyn[m, default: (0, 0)].0 += d; dyn[m, default: (0, 0)].1 += 1 } }
@@ -220,8 +226,10 @@ final class WatchdogV2ScenarioTests: XCTestCase {
         return out
     }
 
+    /// `inspect` sees every tick's window (with its exercise context), the carry it was judged with, and the result.
     static func run(_ sc: Scenario, models: [WatchdogModelCandidate]? = nil,
-                    refs: [LBEvaluation], exercise: Bool = true) -> [TickOut] {
+                    refs: [LBEvaluation], exercise: Bool = true,
+                    inspect: ((Int, WatchdogWindow, WatchdogCarry, WatchdogResult) -> Void)? = nil) -> [TickOut] {
         let tape = generate(sc)
         let evidence = exercise ? evidenceMinutes(tape) : [:]
         let prompt = UniTSPrompt.from(evaluations: refs)
@@ -271,6 +279,7 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                                       previous: carry, sleepSessionOpen: sleepOpen,
                                       sleepIntervals: tape.sleep.filter { $0.startUnix < now },
                                       modelCandidates: models ?? sc.models)
+            if let inspect, case .success(let w) = window { inspect(minute, w, carry, r) }
             carry = r.carry
             if r.shouldNotify { carry.notifyDelivery = "sent"; carry.notifiedSevereEpisodeId = carry.episodeId ?? "" }
             out.append(TickOut(minute: minute, severity: r.severity, notify: r.shouldNotify,
@@ -409,7 +418,26 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                                 seg(150, 220, .seated, 70)],
                      truth: [Truth(fromMin: 80, toMin: 150, label: "resting HR 132 with isolated arm movement", expectAlert: true)],
                      seed: 26),
+            // Rule exercise-session-2: 25 minutes of low movement (4 strong minutes, weak ones between) at 100 bpm ends
+            // unconfirmed: no recovery follows it, and a genuinely high still heart rate after it is judged once the
+            // 10-minute settle has passed.
+            Scenario(name: "unconfirmed_low_movement_then_tachy", minutes: 220,
+                     segments: [seg(0, 60, .seated, 70)] + lowMovement(60, 85, hr: 100, strongAt: [2, 10, 16, 24])
+                        + [seg(85, 160, .seated, 132, rmssd: 10), seg(160, 220, .seated, 70)],
+                     truth: [Truth(fromMin: 85, toMin: 160, label: "resting HR 132 after an unconfirmed period",
+                                   expectAlert: true)],
+                     seed: 27),
         ]
+    }
+
+    /// Low movement from `a` to `b`: weak arm movement on even minutes, still on odd ones, a strong arm movement at the
+    /// `strongAt` offsets; heart rate `hr` throughout.
+    static func lowMovement(_ a: Int, _ b: Int, hr: Double, strongAt: Set<Int>) -> [Segment] {
+        (a..<b).map { m in
+            let k = m - a
+            let state: State = strongAt.contains(k) ? .armMove : (k % 2 == 0 ? .weakMove : .seated)
+            return Segment(fromMin: m, toMin: m + 1, state: state, hr: hr, rmssd: 20)
+        }
     }
 
     func testScenarioTable() throws {
@@ -435,6 +463,73 @@ final class WatchdogV2ScenarioTests: XCTestCase {
             XCTAssertEqual(m.detected, m.expected, "\(name) missed alert")
         }
         XCTAssertLessThanOrEqual(summary["safety_tachy_132_rest"]?.delays.first ?? 99, 12)
+    }
+
+    /// Rule exercise-session-2, live: a low-movement period at 100 bpm is a session while it is open (never compared
+    /// with rest), ends unconfirmed with no recovery phase, its minutes stay movement, the 10-minute settle after a bout
+    /// follows it, and then a still heart rate of 96 is compared with awake rest again (not muted).
+    func testUnconfirmedPeriodHasNoRecoveryAndStillHeartRateIsJudgedAfterTheSettle() throws {
+        let sc = Scenario(name: "unconfirmed_low_movement_then_high_still", minutes: 200,
+                          segments: [Segment(fromMin: 0, toMin: 60, state: .seated, hr: 70)]
+                            + Self.lowMovement(60, 85, hr: 100, strongAt: [2, 10, 16, 24])
+                            + [Segment(fromMin: 85, toMin: 200, state: .seated, hr: 96, rmssd: 22)],
+                          seed: 28)
+        let refs = Self.references()
+        var phaseAt: [Int: [Int: ExerciseSessionPhase]] = [:]          // tick → window minute → phase
+        var kindAt: [Int: [Int: WatchdogMinuteContext]] = [:]          // tick → window minute → context
+        var snapshots: [Int: WatchdogExerciseSnapshot] = [:]
+        var judgedAgainstRest: [Int] = []
+        _ = Self.run(sc, refs: refs) { minute, w, carry, r in
+            guard let ex = w.exercise else { return }
+            let q = WatchdogSignalQuality.assess(window: w)
+            let ctx = WatchdogContextResolver.resolve(window: w, quality: q, carryLastWorkoutEndUnix: carry.lastWorkoutEndUnix)
+            for i in 0..<w.hr.count {
+                let m = (w.startUnix - Self.t0) / 60 + i
+                phaseAt[minute, default: [:]][m] = ex.phase(at: i)
+                kindAt[minute, default: [:]][m] = ctx[i]
+            }
+            snapshots[minute] = r.exercise
+            let rest = (r.verdicts ?? []).contains { v in
+                v.candidate.kind == .personalDeviation && v.candidate.reference == LBSeries.awakeRestHR.rawValue
+                    && v.checks.contains { $0.check == .activity && $0.outcome == .pass }
+            }
+            if rest { judgedAgainstRest.append(minute) }
+        }
+        // While open (minute 80): a session, not yet confirmed; never compared with rest.
+        XCTAssertEqual(phaseAt[80]?[79], .session)
+        XCTAssertEqual(snapshots[80]?.phase, "session")
+        XCTAssertEqual(snapshots[80]?.confirmed, false)
+        for m in 70..<80 {
+            // Plain walking keeps the walking reference inside a session (the classifier reads some arm movements so).
+            let kind = try XCTUnwrap(kindAt[80]?[m]?.kind)
+            XCTAssertTrue(kind == .exerciseSession || kind == .walking, "minute \(m) while open is \(kind)")
+        }
+        // Ended (minute 100): its minutes are `active`, nothing after it is recovery.
+        for m in 70..<85 {
+            XCTAssertEqual(phaseAt[100]?[m], .active, "minute \(m)")
+            let kind = try XCTUnwrap(kindAt[100]?[m]?.kind)
+            XCTAssertTrue(kind == .active || kind == .walking, "minute \(m) of an ended unconfirmed period is \(kind)")
+        }
+        for m in 85..<100 { XCTAssertEqual(phaseAt[100]?[m], ExerciseSessionPhase.none, "minute \(m)") }
+        for (_, minutes) in kindAt {
+            XCTAssertFalse(minutes.values.contains { $0.kind == .recovery }, "no recovery after an unconfirmed period")
+        }
+        for (tick, phases) in phaseAt where tick >= 96 {
+            XCTAssertFalse(phases.values.contains(.recovery), "tick \(tick)")
+            XCTAssertFalse(phases.values.contains(.session), "tick \(tick)")
+        }
+        XCTAssertEqual(snapshots[100]?.phase, "none")
+        XCTAssertNil(snapshots[100]?.confirmed)
+        // The 10-minute settle after the bout, then steady state.
+        for m in 85..<95 {
+            let c = try XCTUnwrap(kindAt[100]?[m])
+            if c.kind.restReferenced { XCTAssertTrue(c.settlingAfterBout, "minute \(m) settles") }
+        }
+        for m in 95..<100 { XCTAssertEqual(kindAt[100]?[m]?.settlingAfterBout, false, "minute \(m)") }
+        // A still 96 bpm after the settle is compared with awake rest (judged, not muted).
+        let first = try XCTUnwrap(judgedAgainstRest.first, "the still heart rate after the period was never judged")
+        XCTAssertGreaterThanOrEqual(first, 95)
+        XCTAssertLessThanOrEqual(first, 120)
     }
 
     // MARK: Export for the server-model harness

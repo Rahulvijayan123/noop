@@ -33,7 +33,7 @@ final class LongitudinalBaselineContextTests: XCTestCase {
                                    hrSamples: end - start, hrMean: hr)
     }
 
-    /// Rule exercise-session-1: a gym session (brisk sets, still rests at 120 bpm) and its recovery feed the exercise
+    /// Rule exercise-session-2: a confirmed gym session (brisk sets, still rests at 120 bpm) and its recovery feed the exercise
     /// series and never the awake-rest strata (audit 2026-10-09: recovery tails leaked into awake rest).
     func testExerciseSessionAndRecoveryNeverReachRest() throws {
         var cal = Calendar(identifier: .gregorian)
@@ -57,12 +57,50 @@ final class LongitudinalBaselineContextTests: XCTestCase {
         rows.append(sitting(t, t + 3600, hr: 66))
         let sessions = LongitudinalBaseline.ContextMaterializer.exerciseSessions(rows: rows)
         XCTAssertEqual(sessions.count, 1)
+        XCTAssertTrue(try XCTUnwrap(sessions.first).confirmed)
         let obs = LongitudinalBaseline.ContextMaterializer.observations(rows: rows, calendar: cal)
         let rest = try XCTUnwrap(obs[.awakeRestHR]?.first?.value)
         XCTAssertEqual(rest, 66, accuracy: 0.5, "session / recovery heart rate leaked into awake rest")
         let session = try XCTUnwrap(obs[.exerciseSessionHR]?.first?.value)
         XCTAssertGreaterThan(session, 115)
         XCTAssertNotNil(obs[.exerciseRecoveryHR]?.first?.value)
+    }
+
+    /// Rule exercise-session-2: an unconfirmed session (4 strong minutes over 25, still minutes at 100 bpm between)
+    /// trains neither exercise series, its minutes never reach the rest strata, and the 10 minutes after it are not
+    /// steady state (no recovery follows it, but the live Watchdog's settle after a bout does).
+    func testUnconfirmedSessionTrainsNothingAndNeverReachesRest() throws {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "UTC")!
+        let t0 = 1_780_000_000 - 1_780_000_000 % 86_400 + 10 * 3600
+        var rows: [ActivityContextIntervalRow] = []
+        for k in 0..<60 { rows.append(sitting(t0 + k * 60, t0 + (k + 1) * 60, hr: 66)) }
+        let a = t0 + 3600
+        for k in 0..<25 {
+            let s = a + k * 60
+            if [2, 10, 16, 24].contains(k) {
+                rows.append(row("light_activity", s, s + 60, hr: 104, intensity: 0.55))      // strong
+            } else if k % 2 == 0 {
+                rows.append(row("light_activity", s, s + 60, hr: 100, intensity: 0.42))      // weak
+            } else {
+                rows.append(row("stationary", s, s + 60, hr: 100, posture: "seated_likely"))  // still, not rest
+            }
+        }
+        let after = a + 25 * 60
+        // Ten settling minutes at 80, then an hour seated at 66.
+        for k in 0..<10 { rows.append(sitting(after + k * 60, after + (k + 1) * 60, hr: 80)) }
+        for k in 10..<70 { rows.append(sitting(after + k * 60, after + (k + 1) * 60, hr: 66)) }
+
+        let sessions = LongitudinalBaseline.ContextMaterializer.exerciseSessions(rows: rows)
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertFalse(try XCTUnwrap(sessions.first).confirmed)
+        let obs = LongitudinalBaseline.ContextMaterializer.observations(rows: rows, calendar: cal)
+        XCTAssertNil(obs[.exerciseSessionHR]?.first?.value, "an unconfirmed session trained the session reference")
+        XCTAssertNil(obs[.exerciseRecoveryHR]?.first?.value, "an unconfirmed session has no recovery")
+        for series in [LBSeries.awakeRestHR, .awakeSeatedHR] {
+            let value = try XCTUnwrap(obs[series]?.first?.value, "\(series)")
+            XCTAssertEqual(value, 66, accuracy: 1e-9, "\(series): the period or its settle leaked into rest")
+        }
     }
 
     /// A still interval whose posture the decoder left unknown does not break a seated bout (they alternated every

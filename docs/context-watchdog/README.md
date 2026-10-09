@@ -6,7 +6,7 @@ deployed. The audits behind it are in `_build-scratch/ctxwd/{A..F}-*/REPORT.md` 
 they quote production values).
 
 Contents: 1 what was wrong · 2 what changed · 3 how it was verified · 4 deploy order · 5 limits and owner decisions.
-Contracts: [EXERCISE_SESSION.md](EXERCISE_SESSION.md) (rule `exercise-session-1`), [MEASUREMENT_CONTEXT.md](MEASUREMENT_CONTEXT.md)
+Contracts: [EXERCISE_SESSION.md](EXERCISE_SESSION.md) (rule `exercise-session-2`), [MEASUREMENT_CONTEXT.md](MEASUREMENT_CONTEXT.md)
 (per-minute record), [WATCHDOG_EPISODES.md](WATCHDOG_EPISODES.md) (alarm lineage), `contracts/reason-codes.json` (one
 reason vocabulary, `data-reason-1`).
 
@@ -49,10 +49,15 @@ edited; retired memories reached metric insights; forgetting the automatic "Ask 
 
 ## 2. What changed
 
-**Exercise context (phone Watchdog, Layer 1, server).** Rule `exercise-session-1`: a session is opened by movement
+**Exercise context (phone Watchdog, Layer 1, server).** Rule `exercise-session-2`: a session is opened by movement
 (steps, dynamic acceleration, decoder walking/vigorous/exercise-arm intervals — never heart rate, never time of day),
 qualified by load (≥ 8 min at rest + 25 bpm), keeps its still minutes (sets, leg work), and is followed by a recovery
-that ends when HR returns or at a load-scaled cap. Weak movement counts only within 20 min of strong movement.
+that ends when HR returns or at a load-scaled cap. Weak movement counts only within 20 min of strong movement. A
+session is confirmed at 15 strong minutes, or when it starts ≤ 30 min after a confirmed one; one that ends
+unconfirmed is stored as `active` (movement: no recovery, no exercise-reference training, never rest). Live opening
+does not wait for confirmation. HART `other_movement` is not evidence (as common outside the gym as in it). The
+pretrained activity models are annotation only: they see the cardio part of a gym session, not the lifting, and
+arrive too late to open a session (EXERCISE_SESSION.md, "Activity models").
 One rule, four implementations pinned to one fixture (`contracts/reference/`): Swift (`ExerciseSession.swift`),
 the anomaly service (Python), the measurement-context builder (SQL), and the reference (Python).
 
@@ -65,7 +70,7 @@ the anomaly service (Python), the measurement-context builder (SQL), and the ref
   A recurring routine (weekday/weekend × start time) is recorded for interpretation and display only.
 - Quality: bpm and beat timing are graded separately; record-index continuity names "strap not recording" (off-body)
   apart from "records lost in transfer"; skin temperature settles 20 min after WRIST_ON.
-- Layer 1: sessions and recovery never reach rest strata; posture bouts fixed (`lb-context-2`); the day tape files
+- Layer 1: sessions and recovery never reach rest strata; posture bouts fixed; unconfirmed (`active`) periods never train exercise references and get the 10-minute settle (`lb-context-3`); the day tape files
   off-body / poor-signal minutes as unknown.
 - Ledger: `safety` means a verified safety alert; delivery is recorded only for the episode notified; unavailable
   time counted per minute; the exercise snapshot is kept with each episode.

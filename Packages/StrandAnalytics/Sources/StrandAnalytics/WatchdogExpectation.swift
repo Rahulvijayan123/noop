@@ -11,7 +11,7 @@ import Foundation
 /// * Temperature / respiration: the sleep references while asleep. Awake values have no reference (room, clothing,
 ///   talking dominate), so nothing is drawn.
 /// * SpO₂: sleep mean while asleep, awake-rest mean while awake still.
-/// * Exercise session / recovery (rule exercise-session-1): the person's own session and recovery HR references.
+/// * Exercise session / recovery (rule exercise-session-2): the person's own session and recovery HR references.
 /// * No expectation (nil) while moving, while settling for a resting reference (2 min after an isolated movement
 ///   minute, 10 min after a movement bout or walking), for 2 minutes after a posture / sleep transition, in unknown
 ///   context, or when the matching reference is not yet established ("learning"). A person's baseline has to be learned before it can be drawn; until then the

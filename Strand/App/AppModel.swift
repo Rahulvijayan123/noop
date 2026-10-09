@@ -88,7 +88,9 @@ final class AppModel: ObservableObject {
             self?.buzz(loops: loops)
             AppModel.postInactivity(minutes: windowMinutes)
         },
-        log: { [weak self] line in self?.live.append(log: line) })
+        log: { [weak self] line in self?.live.append(log: line) },
+        // A re-decode (HART windows land 5–80 minutes late) reaches the live exercise evidence from where it changed.
+        intervalsRewritten: { [weak self] from in self?.watchdog.activityIntervalsRewritten(from: from) })
     /// Behaviour settings: double-tap action, wear automation, zone coaching, smart alarm, illness watch.
     let behavior = BehaviorStore()
     /// On-device WHOOP-style recovery/strain/sleep computation from raw strap streams.

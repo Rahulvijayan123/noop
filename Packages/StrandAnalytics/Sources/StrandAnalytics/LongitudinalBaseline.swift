@@ -59,12 +59,12 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     /// Mean HR across asleep minutes (all stages) with a within-night scale: the reference for LIVE minutes
     /// while asleep. `sleepRHR` (the nightly resting value) is a different quantity and is never used for that.
     case sleepHR = "sleep_hr"
-    /// HR during this person's exercise sessions (rule exercise-session-1, docs/context-watchdog/EXERCISE_SESSION.md):
-    /// one value per session day with the within-session scale. The live reference for session minutes; never a rest
-    /// series.
+    /// HR during this person's confirmed exercise sessions (rule exercise-session-2,
+    /// docs/context-watchdog/EXERCISE_SESSION.md): one value per session day with the within-session scale. The live
+    /// reference for session minutes; never a rest series.
     case exerciseSessionHR = "exercise_session_hr"
-    /// HR in the recovery after an exercise session (last movement until return or the cap). The live reference for
-    /// recovery minutes.
+    /// HR in the recovery after a confirmed exercise session (last movement until return or the cap). The live
+    /// reference for recovery minutes.
     case exerciseRecoveryHR = "exercise_recovery_hr"
 
     /// Body position of a posture stratum (nil for every other series).

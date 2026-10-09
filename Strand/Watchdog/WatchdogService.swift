@@ -45,6 +45,12 @@ final class WatchdogService {
     /// Live ring retention: the window plus a margin for a tick that runs late.
     private static let ringSeconds = WatchdogConfig.contextSeconds + 5 * 60
 
+    /// A re-decode rewrote the stored activity-context intervals from `unix` on (nil = not known where): the exercise
+    /// evidence re-reads those minutes on the next tick (HART-fused intervals land 5–80 minutes late).
+    func activityIntervalsRewritten(from unix: Int?) {
+        exerciseEvidence.intervalsRewritten(from: unix)
+    }
+
     func start(on model: AppModel) {
         self.model = model
         bindLive(model)
@@ -124,7 +130,7 @@ final class WatchdogService {
             window = .failure(.empty)
         }
         if Task.isCancelled { return false }
-        // Exercise-session context (rule exercise-session-1) from 4 h of movement evidence: a session that began
+        // Exercise-session context (rule exercise-session-2) from 4 h of movement evidence: a session that began
         // before this window, or before a relaunch, is still known. Selects references; never mutes a check.
         if inject == nil, case .success(var built) = window, let store = await model.repo.storeHandle() {
             let ids = model.repo.rawPhysiologyReadIds(store: store)

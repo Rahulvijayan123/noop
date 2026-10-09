@@ -130,9 +130,10 @@ enum WatchdogEventCopy {
         }
     }
 
-    /// What an exercise-session reading was compared with (rule exercise-session-1). Nil outside a session.
+    /// What an exercise-session reading was compared with (rule exercise-session-2). Nil outside a session or its
+    /// recovery: an ended, unconfirmed session ("active") is movement, never described as a session or a recovery.
     static func exerciseComparison(_ e: WatchdogExerciseSnapshot?) -> String? {
-        guard let e, e.phase != "none" else { return nil }
+        guard let e, e.phase == "session" || e.phase == "recovery" else { return nil }
         let session = e.phase == "session"
         let reference = session ? e.sessionReference : e.recoveryReference
         let what = session ? "your own workouts" : "your own recovery after workouts"
@@ -142,7 +143,7 @@ enum WatchdogEventCopy {
 
     /// One plain sentence for the live card while a session or its recovery is in view.
     static func exerciseLine(_ e: WatchdogExerciseSnapshot?) -> String? {
-        guard let e, e.phase != "none", let comparison = exerciseComparison(e) else { return nil }
+        guard let e, let comparison = exerciseComparison(e) else { return nil }
         let head = e.phase == "session" ? "Exercise session" : "Recovering from exercise"
         var line = "\(head). \(comparison)."
         if let routine = e.routine { line += " Matches your usual \(routine.split(separator: " ").first ?? "") session." }

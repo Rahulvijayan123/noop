@@ -22,9 +22,12 @@ import WhoopStore
 //   • HR per stratum-day: sample-weighted mean of interval means. HRV: pooled √(Σd²/Σn) of the stored successive-
 //     difference components (never an average of RMSSDs); rows older than v49 fall back to n = rrBeats − 1.
 //   • Within-day scale: weighted MAD of the interval values (≥ 3 intervals) for live short-window comparisons.
-//   • Exercise sessions and their recovery (rule exercise-session-1, docs/context-watchdog/EXERCISE_SESSION.md) never
-//     count as rest or steady walking: their intervals feed the exercise-session and recovery series instead
-//     (audit 2026-10-09: recovery tails had leaked 17 min at 84.5 bpm into a day's awake-rest value).
+//   • Exercise sessions and their recovery (rule exercise-session-2, docs/context-watchdog/EXERCISE_SESSION.md) never
+//     count as rest or steady walking: a confirmed session's intervals feed the exercise-session and recovery series
+//     instead (audit 2026-10-09: recovery tails had leaked 17 min at 84.5 bpm into a day's awake-rest value). An
+//     unconfirmed session (`active`) has no recovery and trains no series: its intervals are excluded like a session's,
+//     and still intervals within `settleAfterActivePeriodS` of its end are not steady state (the live Watchdog's
+//     settle after a movement bout).
 //   • A still bout is broken by a change between two known postures, movement, sleep, a gap or off-wrist, not by a
 //     still interval whose posture the decoder left unknown (those alternated every 1–2 minutes and kept every posture
 //     stratum empty).
@@ -39,7 +42,7 @@ public enum LBPosture: String, Equatable, Sendable, Codable, CaseIterable {
 extension LongitudinalBaseline {
 
     public enum ContextMaterializer {
-        public static let version = "lb-context-2"
+        public static let version = "lb-context-3"
         public static let minClassConfidence = 0.6
         public static let minEvidenceQuality = 0.5
         public static let maxStillIntensity = 0.40
@@ -47,6 +50,8 @@ extension LongitudinalBaseline {
         public static let settleAfterTransitionS = 120
         public static let settleAfterWalkingS = 600
         public static let settleAfterVigorousS = 1800
+        /// After an unconfirmed session (`active`, rule exercise-session-2): the live resolver's settle after a bout.
+        public static let settleAfterActivePeriodS = 600
         /// Steady walking: the first 180 s of a walking bout are the HR on-transient.
         public static let walkingOnTransientS = 180
         public static let minHRVPairs = 120
@@ -141,7 +146,7 @@ extension LongitudinalBaseline {
             }
         }
 
-        /// Exercise sessions found in the interval rows (rule exercise-session-1). `restReference` is the established
+        /// Exercise sessions found in the interval rows (rule exercise-session-2). `restReference` is the established
         /// awake-rest HR centre when the caller has one; otherwise the sample-weighted median HR of the rows' still,
         /// awake intervals; otherwise 70 bpm.
         public static func exerciseSessions(rows: [ActivityContextIntervalRow],
@@ -162,13 +167,14 @@ extension LongitudinalBaseline {
                                         calendar: Calendar = .current) -> [LBSeries: [LBDailyObservation]] {
             let sorted = rows.sorted { $0.startTs < $1.startTs }
             let sessions = exerciseSessions(rows: sorted, restReference: restReference)
-            /// The session phase an interval mostly falls in (by its midpoint).
+            /// The session phase an interval mostly falls in (by its midpoint): only a confirmed session is `session`
+            /// and has a recovery; an unconfirmed one is `active` (rule exercise-session-2).
             func phase(_ r: ActivityContextIntervalRow) -> ExerciseSessionPhase {
                 let mid = (r.startTs + r.endTs) / 2
                 let minute = mid - ((mid % 60) + 60) % 60
                 for s in sessions {
-                    if minute >= s.startUnix && minute <= s.endUnix { return .session }
-                    if minute > s.endUnix && minute < (s.recoveryEndUnix ?? Int.max) { return .recovery }
+                    if minute >= s.startUnix && minute <= s.endUnix { return s.confirmed ? .session : .active }
+                    if s.confirmed, minute > s.endUnix && minute < (s.recoveryEndUnix ?? Int.max) { return .recovery }
                 }
                 return .none
             }
@@ -179,6 +185,7 @@ extension LongitudinalBaseline {
             var boutStart = Self.never
             var lastWalkingEnd = Self.never
             var lastVigorousEnd = Self.never
+            var lastActivePeriodEnd = Self.never
             var prevStillPosture: LBPosture?? = nil   // .none = previous interval was not awake-still
             // The last known posture of the current still bout (nil = none known yet in this bout).
             var boutPosture: LBPosture? = nil
@@ -229,6 +236,12 @@ extension LongitudinalBaseline {
                     prevStillPosture = nil
                     walkingBoutStart = nil
                     continue
+                case .active:
+                    // Movement, never rest; not a confirmed session, so no exercise series either.
+                    lastActivePeriodEnd = r.endTs
+                    prevStillPosture = nil
+                    walkingBoutStart = nil
+                    continue
                 case .none:
                     break
                 }
@@ -265,6 +278,7 @@ extension LongitudinalBaseline {
                 let settled = r.startTs - boutStart >= settleAfterTransitionS
                     && r.startTs - lastWalkingEnd >= settleAfterWalkingS
                     && r.startTs - lastVigorousEnd >= settleAfterVigorousS
+                    && r.startTs - lastActivePeriodEnd >= settleAfterActivePeriodS
                 guard settled else { continue }
 
                 acc[.awakeRestHR, default: [:]][day, default: Acc()].add(r, hr: true, hrv: false)

@@ -129,7 +129,7 @@ public struct WatchdogWindow: Equatable, Sendable {
     /// Respiration came from beat intervals (no respiration waveform): it is the beat stream, not independent
     /// evidence, and never a safety input.
     public var respFromBeats: Bool = true
-    /// Exercise-session phase of each minute (rule exercise-session-1, `WatchdogExerciseContext`). nil = not built (no
+    /// Exercise-session phase of each minute (rule exercise-session-2, `WatchdogExerciseContext`). nil = not built (no
     /// evidence history): minutes resolve from this window alone.
     public var exercise: WatchdogExerciseContext? = nil
 

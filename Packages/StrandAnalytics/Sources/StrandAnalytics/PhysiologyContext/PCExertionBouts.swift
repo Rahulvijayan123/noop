@@ -704,10 +704,10 @@ extension PhysiologyContext {
         }
 
         /// Exercise sessions among a measurement's recent bouts: the merge step of rule `exercise-session-1`
-        /// (docs/context-watchdog/EXERCISE_SESSION.md), on bouts instead of evidence minutes. In start order, a bout
-        /// whose start is at most `mergeGapS` after the current session's end joins it (overlapping bouts always
-        /// do). Heart-rate free, like the bouts: the rule's heart-rate load check is not applied (see
-        /// `EligibilityConfig.sessionMergeGapS`). Oldest session first.
+        /// (unchanged in -2; docs/context-watchdog/EXERCISE_SESSION.md), on bouts instead of evidence minutes. In start
+        /// order, a bout whose start is at most `mergeGapS` after the current session's end joins it (overlapping bouts
+        /// always do). Heart-rate free, like the bouts: the rule's heart-rate load check and -2's confirmation are not
+        /// applied (see `EligibilityConfig.sessionMergeGapS`). Oldest session first.
         public static func sessions(_ refs: [BoutRef], mergeGapS: Int) -> [BoutSession] {
             let sorted = refs.sorted {
                 ($0.endedAt - max(0, $0.durationS), $0.endedAt, $0.boutId)

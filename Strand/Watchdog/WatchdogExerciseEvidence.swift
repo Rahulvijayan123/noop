@@ -3,23 +3,36 @@ import WhoopProtocol
 import WhoopStore
 import StrandAnalytics
 
-/// Per-minute movement evidence for the exercise-session rule (exercise-session-1), kept for the last 4 hours so a
+/// Per-minute movement evidence for the exercise-session rule (exercise-session-2), kept for the last 4 hours so a
 /// session that began before the 30-minute Watchdog window — or before an app relaunch — is still known. Heart rate is
 /// carried for the rule's load check only; evidence never comes from heart rate or the time of day.
 ///
 /// Refreshed incrementally each tick: the trailing 15 minutes are re-read (late offloads and decoder intervals), the
-/// rest is kept. Main-actor state; the store reads run in `load`, which takes values only.
+/// rest is kept, except from where a re-decode rewrote the stored decoder intervals (`intervalsRewritten`): HART-fused
+/// intervals land 5–80 minutes late, past the trailing re-read. Main-actor state; the store reads run in `load`, which
+/// takes values only.
 @MainActor
 final class WatchdogExerciseEvidence {
     private(set) var minutes: [Int: ExerciseSessionMinute] = [:]
     private var key = ""
     private var loadedThrough = 0
+    /// Earliest second a re-decode rewrote since the last refresh started (nil = none pending).
+    private(set) var rewrittenFrom: Int?
     static let refreshTailSeconds = 15 * 60
 
     func reset() {
         minutes = [:]
         key = ""
         loadedThrough = 0
+        rewrittenFrom = nil
+    }
+
+    /// The stored decoder intervals were rewritten from `unix` on (`ActivityContextCoordinator` after a re-decode):
+    /// the next refresh re-reads every cached minute from there. nil = not known where: it re-reads the whole history.
+    /// Kept until a refresh starts, so a rewrite that lands during one is re-read by the next.
+    func intervalsRewritten(from unix: Int?) {
+        let from = unix ?? 0
+        rewrittenFrom = min(rewrittenFrom ?? from, from)
     }
 
     /// The evidence for `[now − 4 h, now)`, refreshed from the store.
@@ -27,11 +40,18 @@ final class WatchdogExerciseEvidence {
                  intervals: (Int, Int) async -> [ActivityContextIntervalRow]) async -> [ExerciseSessionMinute] {
         if key != self.key { reset(); self.key = key }
         let horizon = now - WatchdogExerciseContext.historySeconds
-        let from = max(horizon - horizon % 60, loadedThrough - Self.refreshTailSeconds)
+        let oldest = horizon - ((horizon % 60) + 60) % 60
+        var from = max(oldest, loadedThrough - Self.refreshTailSeconds)
+        if let rewritten = rewrittenFrom {
+            from = max(oldest, min(from, rewritten - ((rewritten % 60) + 60) % 60))
+            rewrittenFrom = nil
+        }
         let to = now - now % 60
         if to > from {
             let rows = await intervals(from, to)
             let fresh = await Self.load(store: store, readIds: readIds, from: from, to: to, intervals: rows)
+            // The re-read range is replaced, not merged: a minute whose evidence went away does not keep it.
+            minutes = minutes.filter { $0.key < from }
             for m in fresh { minutes[m.minuteUnix] = m }
             loadedThrough = to
         }

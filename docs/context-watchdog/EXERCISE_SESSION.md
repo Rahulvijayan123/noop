@@ -1,9 +1,10 @@
-# Exercise session and recovery (rule `exercise-session-1`)
+# Exercise session and recovery (rule `exercise-session-2`)
 
-One rule, implemented twice: on the phone in `Packages/StrandAnalytics/Sources/StrandAnalytics/ExerciseSession.swift`
-(the Watchdog and the Layer 1 context strata) and on the server in the measurement-context minute builder
-(`supabase/migrations/2026100913xxxx_measurement_context_minutes.sql`). Both are pinned by the shared fixture
-`contracts/reference/exercise-session-1.json`.
+One rule, implemented three times: on the phone in `Packages/StrandAnalytics/Sources/StrandAnalytics/ExerciseSession.swift`
+(the Watchdog and the Layer 1 context strata), on the server in the measurement-context minute builder
+(`supabase/migrations/20261009130100_measurement_context_minutes.sql`, `internal.exercise_session_spans_v2`), and in
+the anomaly service (`Tools/AnomalyService/src/frwhoop_anomaly/exercise_session.py`). All three are pinned by the
+shared fixture `contracts/reference/exercise-session-2.json`, written by `contracts/reference/exercise_session_2.py`.
 
 ## Why
 
@@ -20,10 +21,16 @@ Inputs are per-minute and HR-free except the load check.
 **Evidence minutes** (never heart rate, never time of day):
 
 - *strong*: walking or running step ticks covering at least half of the minute's step samples; or mean dynamic
-  acceleration ≥ 0.10 g; or an exercise activity class for the minute (walk, run, cycle-like, resistance); or a decoder
-  interval covering the minute with locomotion `walking`/`brisk_walking`/`running`, class
-  `brisk_walking`/`running`/`cycling`/`vigorous_activity`, or arm behaviour `exercise_motion`;
-- *weak*: mean dynamic acceleration ≥ 0.05 g, or decoder class `light_activity`.
+  acceleration ≥ 0.10 g; or (phone) a decoder interval covering the minute with locomotion
+  `walking`/`brisk_walking`/`running`, class `brisk_walking`/`running`/`cycling`/`vigorous_activity`, or arm behaviour
+  `exercise_motion`; or (server, which has no decoder intervals) a current-lineage activity epoch labelled walking,
+  running or active with confidence ≥ 0.6, or one inside a workout the person logged;
+- *weak*: mean dynamic acceleration ≥ 0.05 g, or (phone) decoder class `light_activity`.
+
+The Watchdog's own activity class is not evidence: it is weighted by heart rate, and evidence never is. HART
+`other_movement` epochs are not evidence either: on the owner's data they cover 27 % of gym minutes and 29 % of other
+awake minutes, so they carry no information about exercise (rule -1 counted them as weak on the server, which
+stretched one non-gym period from 37 to 71 minutes).
 
 A minute asleep or off the wrist is never evidence (whatever its motion). A weak minute counts only within 20 minutes
 of a strong minute, so a fidgety afternoon never forms or stretches a period on its own.
@@ -50,6 +57,24 @@ against rest.
 **Live sessions** (the phone): a period counts as a session as soon as 1–3 hold, even while shorter than 12 minutes
 (4 is checked once it ends). A session stays open while the newest evidence minute is at most 10 minutes old.
 
+**Confirmation** (new in -2): a session is *confirmed* once its period holds at least 15 strong minutes, or when it
+starts at most 30 minutes after the last evidence minute of the previous confirmed session (a workout split by a long
+rest inherits confirmation; inheritance only runs forward). Confirmation never changes live opening: an open session
+is compared with the exercise reference from the moment 1–3 hold, confirmed or not, so no gym minute goes back to a
+rest comparison. It decides what the session leaves behind:
+
+- a *confirmed* session gets its recovery phase and trains the personal exercise references and the routine;
+- a session that ends *unconfirmed* is stored as phase `active`: no recovery phase (the usual 10-minute settle after a
+  bout of movement applies, then the normal references), no exercise-reference or routine training, and its minutes
+  still never enter a rest reference.
+
+Why 15: on the owner's 9.5 days (9 gym sessions, `_build-scratch/ctxwd/G-models/`), every gym session held 19–100
+strong minutes, while the non-gym periods that rule -1 called sessions held 3–27. Confirming at 15 with the 30-minute
+carry-over keeps 9 of 9 gym sessions and 98.9 % of gym minutes inside a session, and cuts non-gym sessions from 6 to 1
+(rest reference 70) or 15 to 4 (nightly resting HR + 10). Confirmation comes 1 minute later than opening at the
+median, 20 at most. The margin is thin (19 against 15, 20 and 27), and a real workout with fewer than 15 strong
+minutes is stored as `active`; the threshold is a new rule id when it changes.
+
 **Recovery**: starts at the session's last evidence minute. It ends at the first of
 
 - heart rate within the pre-session reference + 10 bpm for 5 consecutive minutes (the pre-session reference is the
@@ -66,12 +91,35 @@ Minutes in recovery that are again evidence minutes extend the session instead (
 | --- | --- | --- |
 | session | `exercise_session_hr` (personal; "learning" until established) | in-session ceiling: HR above min(own session p99 + 10, 208 − 0.7·age, or 200 bpm when age is unknown) for ≥ 5 min |
 | recovery | `exercise_recovery_hr` (personal; "learning" until established) | resting rule (> 120 bpm for 10 still minutes) applies from 15 minutes after the session's last evidence minute |
+| active (ended unconfirmed) | unchanged (posture / walking references after the 10-minute bout settle) | unchanged |
 | neither | unchanged (posture / walking / sleep references) | unchanged |
 
-Session and recovery minutes never enter rest references (awake rest, posture strata, the anomaly service's rest
+Session, recovery and active minutes never enter rest references (awake rest, posture strata, the anomaly service's rest
 bucket). A recurring routine (time of day × weekday/weekend) is recorded for interpretation and display only; it
 never opens a session, never widens a safety bound, and never turns an alert into "usual".
 
+## Activity models
+
+The pretrained activity models were checked against the owner's gym sessions (audit 2026-10-09,
+`_build-scratch/ctxwd/G-models/`). They see the cardio part of a gym session and not the lifting:
+
+- HART calls 13.6 % of gym windows walking against 0.1 % elsewhere, but the strap's own motion and step classes
+  already mark those minutes, live. HART abstains on 52 % of gym windows (it is trained on wrists; the strap is on the
+  upper arm), and its epochs arrive a median 7 minutes after the data, up to 80.
+- ActiNet's arm `exercise_motion` (candidate tier) fires on 22 % of covered gym minutes against 2.7 % elsewhere, with
+  about 45 % coverage because raw motion is recorded 60 s in every 180 s.
+- None of them sees the still lifting minutes (no motion, no steps, median HR 91): each flags 0–13 % of them.
+
+Adding model evidence to rule -1 would have gained at most 1.5 points of gym coverage, never opened a session earlier,
+and let one non-gym period back in. So models are not evidence here: they never open, confirm, extend or mute a
+session. The phone's decoder already fuses HART when it arrives, and the Watchdog re-reads the evidence of re-decoded
+minutes. A model trained on gym exercises themselves (resistance training on an arm IMU) is ported separately in
+shadow mode and is not evidence either until it is validated on the owner's sessions.
+
 ## Versioning
 
-The rule id `exercise-session-1` is stored with every derived row. Any change to a threshold is a new id.
+The rule id `exercise-session-2` is stored with every derived row. Any change to a threshold is a new id.
+
+Changes from `exercise-session-1` (which was never deployed): the confirmation step and the `active` phase; HART
+`other_movement` removed from the server's weak evidence; the Watchdog activity class removed from this document's
+evidence list (the code never used it).
