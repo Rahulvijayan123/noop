@@ -97,11 +97,6 @@ struct LiquidTodayView: View {
     // SwiftUI re-mount, and the two Today surfaces agree on the selection.
     @AppStorage(TodayView.selectedDayOffsetKey) private var selectedDayOffset = 0
     @State private var showDayPicker = false
-    /// The pop-up for the card the user tapped, and the page its "Open details" button pushes after the
-    /// pop-up has gone (a push from under a presented sheet would be dropped).
-    @State private var explainer: CardExplainer?
-    @State private var pendingRoute: TabRoute?
-    @State private var showsPendingRoute = false
     /// Where the heart-rate CHART sits, so a sideways drag on it scrubs instead of changing the day.
     @State private var heartRateCardFrame: CGRect = .null
     private static let daySwipeSpace = "liquidTodayDaySwipeSpace"
@@ -375,17 +370,6 @@ struct LiquidTodayView: View {
         .sheet(item: $guideSection) { section in
             NavigationStack { ScoringGuideView(initialSection: section, onClose: { guideSection = nil }) }
         }
-        .sheet(item: $explainer, onDismiss: {
-            if pendingRoute != nil { showsPendingRoute = true }
-        }) { card in
-            CardExplainerSheet(
-                explainer: card,
-                onOpenDetails: { route in pendingRoute = route; explainer = nil },
-                onClose: { explainer = nil })
-        }
-        .navigationDestination(isPresented: $showsPendingRoute) {
-            if let route = pendingRoute { route.screen }
-        }
         .sheet(item: $customizationDestination) { destination in
             TodayCustomizationSheet(
                 initialDestination: destination,
@@ -469,21 +453,16 @@ struct LiquidTodayView: View {
     private var heroCard: some View {
         NoopCard {
             HStack(alignment: .top, spacing: NoopMetrics.space2) {
-                BaselineHeroCell(isLoading: isLoading, onExplain: { explainer = $0 })
+                BaselineHeroCell(isLoading: isLoading)
                 if selectedDayOffset == 0 {
-                    WatchdogHeroCell(isLoading: isLoading, onExplain: { explainer = $0 })
+                    WatchdogHeroCell(isLoading: isLoading)
                 }
-                let restValue = restScore.map { String(Int($0.rounded())) } ?? Self.noValueDash
-                let restState = HeroRings.recoveryStatus(score: restScore)
                 HeroRingCell(label: String(localized: "Rest"),
                              fraction: restScore.map { $0 / 100 },
-                             value: restValue,
+                             value: restScore.map { String(Int($0.rounded())) } ?? Self.noValueDash,
                              color: StrandPalette.restColor,
-                             state: restState,
-                             explainer: .rest(value: restValue, state: restState,
-                                              tint: StrandPalette.restColor,
-                                              route: .metric(HeroRingMetric.rest)),
-                             onExplain: { explainer = $0 },
+                             state: HeroRings.recoveryStatus(score: restScore),
+                             route: .metric(HeroRingMetric.rest),
                              isLoading: isLoading)
                     // The metrics guide stays one long-press away.
                     .contextMenu {
@@ -642,15 +621,10 @@ struct LiquidTodayView: View {
                               state: m.state, trend: trend, reservesTrendSlot: keyMetricsDetailed,
                               isEstimate: m.isEstimate, isLoading: isLoading)
         if let detail = m.detail {
-            // A tap explains the tile; the pop-up's "Open details" pushes the page this link used to.
-            Button {
-                let reading = m.value.map { v in m.unit.map { "\(v) \($0)" } ?? v }
-                explainer = .keyMetric(m.metric, value: reading, state: m.state,
-                                       tint: m.metric.customizationTint, icon: m.metric.customizationIcon,
-                                       route: .metricSourced(key: detail.key, source: detail.source))
-            } label: { tile }
+            // A VALUE link (not a closure), so a re-tap of the Today tab pops back to the root (#135/#198).
+            // The detail page's About section carries the explanation.
+            NavigationLink(value: TabRoute.metricSourced(key: detail.key, source: detail.source)) { tile }
                 .buttonStyle(LiquidPressStyle())
-                .accessibilityHint(Text("Explains this card"))
                 .contextMenu {
                     Button { customizationDestination = .keyMetrics } label: {
                         Label("Edit Key Metrics", systemImage: "slider.horizontal.3")
@@ -705,11 +679,7 @@ struct LiquidTodayView: View {
                            isToday: selectedDayOffset == 0,
                            window: heartRateWindow,
                            isLoading: isLoading,
-                           frameSpace: Self.daySwipeSpace,
-                           onExplain: {
-                               explainer = .heartRate(value: displayDay?.restingHr.map { "\($0) bpm resting" },
-                                                      route: .heartRateDay)
-                           })
+                           frameSpace: Self.daySwipeSpace)
     }
 
     /// The chart's x window: the selected logical day, midnight to midnight, widened to the loaded samples
@@ -1257,13 +1227,11 @@ private struct HeroRingCell: View {
     let value: String
     let color: Color
     let state: String?
-    /// The pop-up a tap opens (its "Open details" button goes to the page this cell used to push).
-    let explainer: CardExplainer
-    let onExplain: (CardExplainer) -> Void
+    let route: TabRoute
     let isLoading: Bool
 
     var body: some View {
-        Button { onExplain(explainer) } label: {
+        NavigationLink(value: route) {
             VStack(spacing: NoopMetrics.space2) {
                 ScoreRing(fraction: fraction, value: value, color: color,
                           diameter: Self.ringDiameter, isLoading: isLoading)
@@ -1293,7 +1261,7 @@ private struct HeroRingCell: View {
         .accessibilityValue(Text(isLoading ? String(localized: "Loading")
                                  : [ScoreRing.displayValue(fraction: fraction, value: value), state]
                                     .compactMap { $0 }.joined(separator: ", ")))
-        .accessibilityHint(Text("Explains this card"))
+        .accessibilityHint(Text("Opens the trend and readings"))
         .accessibilityAddTraits(.isButton)
     }
 }
@@ -1302,7 +1270,6 @@ private struct HeroRingCell: View {
 /// Isolated so Today only re-renders this cell when the usuals move.
 private struct BaselineHeroCell: View {
     let isLoading: Bool
-    let onExplain: (CardExplainer) -> Void
     @EnvironmentObject private var store: BaselineStore
 
     var body: some View {
@@ -1312,15 +1279,12 @@ private struct BaselineHeroCell: View {
             guard let check, counted > 0 else { return StrandPalette.textTertiary }
             return check.offCount == 0 ? StrandPalette.statusPositive : StrandPalette.statusWarning
         }()
-        let value = check.map { "\($0.inRangeCount)/\(counted)" } ?? LiquidTodayView.noValueDash
-        let state = Self.stateWord(check)
         HeroRingCell(label: String(localized: "Baseline"),
                      fraction: counted > 0 ? check.map { Double($0.inRangeCount) / Double(counted) } : nil,
-                     value: value,
+                     value: check.map { "\($0.inRangeCount)/\(counted)" } ?? LiquidTodayView.noValueDash,
                      color: tint,
-                     state: state,
-                     explainer: .baseline(value: value, state: state, tint: tint, route: .baselineCharts),
-                     onExplain: onExplain,
+                     state: Self.stateWord(check),
+                     route: .baselineCharts,
                      isLoading: isLoading)
     }
 
@@ -1341,22 +1305,17 @@ private struct BaselineHeroCell: View {
 /// Live Watchdog: the ring fills with how far the last half-hour is from the usual, full at the severe cut.
 private struct WatchdogHeroCell: View {
     let isLoading: Bool
-    let onExplain: (CardExplainer) -> Void
     @EnvironmentObject private var store: BaselineStore
 
     var body: some View {
         let state = HeroRings.watchdogState(store.watchdogResult)
         let distance = HeroRings.watchdogDistance(store.watchdogResult)
-        let value = LiquidTodayView.intValue(distance) ?? LiquidTodayView.noValueDash
-        let tint = WatchdogTone.color(state)
         HeroRingCell(label: String(localized: "Watchdog"),
                      fraction: distance.map { $0 / 100 },
-                     value: value,
-                     color: tint,
+                     value: LiquidTodayView.intValue(distance) ?? LiquidTodayView.noValueDash,
+                     color: WatchdogTone.color(state),
                      state: HeroRings.watchdogLabel(state),
-                     explainer: .watchdog(value: value, state: HeroRings.watchdogLabel(state), tint: tint,
-                                          route: .watchdog),
-                     onExplain: onExplain,
+                     route: .watchdog,
                      isLoading: isLoading)
     }
 }
@@ -1394,7 +1353,6 @@ private struct TodayHeartRateCard: View {
     let window: ClosedRange<Date>
     let isLoading: Bool
     let frameSpace: String
-    let onExplain: () -> Void
 
     @State private var selection: Date?
 
@@ -1414,11 +1372,11 @@ private struct TodayHeartRateCard: View {
     var body: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.cardInnerSpacing) {
-                Button(action: onExplain) {
-                    TodayCardTitleRow(title: String(localized: "Heart rate"), showsChevron: false) { readout }
+                NavigationLink(value: TabRoute.heartRateDay) {
+                    TodayCardTitleRow(title: String(localized: "Heart rate")) { readout }
                 }
                 .buttonStyle(.plain)
-                .accessibilityHint(Text("Explains this card"))
+                .accessibilityHint(Text("Opens your day: the full-day heart rate graph with an activity timeline"))
 
                 IntradayChart(samples: samples, bucketSeconds: 300, color: StrandPalette.metricRose,
                               references: resting.map { [ChartReference(Double($0), label: String(localized: "Resting"))] } ?? [],
@@ -1436,9 +1394,9 @@ private struct TodayHeartRateCard: View {
                         }
                     }
 
-                Button(action: onExplain) { stats }
+                NavigationLink(value: TabRoute.heartRateDay) { stats }
                     .buttonStyle(.plain)
-                    .accessibilityHint(Text("Explains this card"))
+                    .accessibilityHint(Text("Opens your day: the full-day heart rate graph with an activity timeline"))
             }
         }
         // A new day (or the first load) starts unselected.

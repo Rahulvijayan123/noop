@@ -15,16 +15,16 @@ object CoachSuggestions {
      *  Swift `fallback` list. */
     val fallback: List<String> = listOf(
         "How's my recovery trending this week?",
-        "What should today's training look like?",
+        "How should I pace my day today?",
         "Analyse my sleep",
-        "Why am I run down?",
+        "Why am I feeling run down?",
     )
 
     /** A stable generic prompt always appended as the last chip so there is a consistent entry point
      *  even when the contextual chips already cover the user's situation. */
     private const val stableGeneric = "Analyse my sleep"
 
-    // Charge band cutoffs (mirror the autoregulation bands in the coach system prompt).
+    // Charge band cutoffs (mirror the pacing bands in the coach system prompt).
     private const val CHARGE_RED_CUTOFF = 34.0
     private const val CHARGE_GREEN_CUTOFF = 67.0
     /** HRV "trending down": today's HRV below 85% of the trailing-30-day baseline (excluding today). */
@@ -59,9 +59,9 @@ object CoachSuggestions {
         // 1. Charge band → one readiness prescription chip.
         if (charge != null) {
             chips += when {
-                charge < CHARGE_RED_CUTOFF -> "Active recovery only today — what should I do?"
-                charge < CHARGE_GREEN_CUTOFF -> "Quality over volume today — plan my session"
-                else -> "Green light — how hard can I push today?"
+                charge < CHARGE_RED_CUTOFF -> "Low energy today — how should I pace myself?"
+                charge < CHARGE_GREEN_CUTOFF -> "A steady day — how should I pace it?"
+                else -> "I'm feeling good today — how can I make the most of it?"
             }
         }
 
@@ -80,7 +80,7 @@ object CoachSuggestions {
 
         // 4. Already a high-strain day.
         if (strain != null && strain >= StrainScorer.effortValueFromWhoopStrain(HIGH_STRAIN)) {
-            chips += "Have I done enough today, or push more?"
+            chips += "Have I done enough today, or should I rest?"
         }
 
         // Signals present but none of the band conditions fired → generic fallback (avoids a lone

@@ -33,36 +33,31 @@ final class HomeCleanupUITests: XCTestCase {
         attach("today-greeting")
     }
 
-    func testTappingACardOpensItsExplanation() {
-        launch(["--demo-seed", "--demo-tab", "0"])
-        let baseline = app.buttons["Baseline"]
-        XCTAssertTrue(baseline.waitForExistence(timeout: 20))
-        baseline.tap()
-
-        let done = app.buttons["cardExplainer.done"]
-        XCTAssertTrue(done.waitForExistence(timeout: 10), "the pop-up did not open")
-        XCTAssertTrue(app.staticTexts["What it is"].exists)
-        XCTAssertTrue(app.staticTexts["How Nara measures it"].exists)
-        attach("card-explainer-baseline")
-
-        // Its detail page is one button away, and opens after the pop-up closes.
-        let open = app.buttons["cardExplainer.openDetails"]
-        XCTAssertTrue(open.exists)
-        open.tap()
-        XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 10))
-        XCTAssertFalse(done.exists)
-    }
-
-    func testAMetricTileExplainsItselfWithStudies() {
+    func testTappingAMetricOpensItsDetailPageWithAnAboutSection() {
         launch(["--demo-seed", "--demo-tab", "0"])
         let hrv = app.buttons.matching(NSPredicate(format: "label BEGINSWITH 'HRV'")).firstMatch
         XCTAssertTrue(hrv.waitForExistence(timeout: 20))
         hrv.tap()
-        XCTAssertTrue(app.buttons["cardExplainer.done"].waitForExistence(timeout: 10))
-        XCTAssertTrue(app.staticTexts["Studies"].exists)
-        attach("card-explainer-hrv")
-        app.buttons["cardExplainer.done"].tap()
-        XCTAssertFalse(app.buttons["cardExplainer.done"].waitForExistence(timeout: 2))
+        // The detail page, not a pop-up: it has a back button and an About section.
+        XCTAssertTrue(app.navigationBars.buttons.firstMatch.waitForExistence(timeout: 10))
+        let about = app.buttons["About"]
+        var swipes = 0
+        while !about.isHittable && swipes < 14 { app.swipeUp(); swipes += 1 }
+        XCTAssertTrue(about.exists, "the detail page has no About section")
+        app.swipeUp()
+        attach("metric-detail-about")
+    }
+
+    func testTheHeartRateCardOpensYourDay() {
+        launch(["--demo-seed", "--demo-tab", "0"])
+        let card = app.buttons.matching(NSPredicate(format: "label CONTAINS 'Heart rate'")).firstMatch
+        var swipes = 0
+        while !card.exists && swipes < 12 { app.swipeUp(); swipes += 1 }
+        XCTAssertTrue(card.waitForExistence(timeout: 20))
+        card.tap()
+        XCTAssertTrue(app.staticTexts["Your health and activity at a glance."].waitForExistence(timeout: 10),
+                      "the heart rate card should open the day view")
+        attach("heart-rate-day")
     }
 
     func testBrowseHasOnlyTheKeptRows() {

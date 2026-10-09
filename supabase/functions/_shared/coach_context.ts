@@ -220,7 +220,7 @@ interface Chunk { text: string; sections: Section[] }
 interface Note { threadId: string; text: string }
 
 const MAP_SYSTEM = (
-  'You read excerpts from a user\'s earlier chats with Sana, a health and fitness assistant, and pull out what bears on a question. '
+  'You read excerpts from a user\'s earlier chats with Sana, a wellbeing assistant for people living with a rare disease, and pull out what bears on a question. '
   + 'Reply with JSON only: {"relevant": true or false, "notes": ["..."]}. '
   + 'Rules: at most 5 notes, each at most 220 characters, each starting with the date (YYYY-MM-DD) of the message or chat it comes from, '
   + 'then the chat\'s ref in brackets, like "2026-08-01 [t2] User planned a 16-week marathon block". '

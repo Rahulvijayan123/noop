@@ -39,7 +39,7 @@ final class CoachSuggestionsTests: XCTestCase {
     func testLowChargeActiveRecoveryChip() {
         let today = metric(day: 10, recovery: 20)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertEqual(chips.first, "Active recovery only today — what should I do?")
+        XCTAssertEqual(chips.first, "Low energy today — how should I pace myself?")
         XCTAssertEqual(chips.last, "Analyse my sleep")
         XCTAssertTrue(chips.count >= 2 && chips.count <= 4)
     }
@@ -47,25 +47,25 @@ final class CoachSuggestionsTests: XCTestCase {
     func testMidChargeQualityOverVolumeChip() {
         let today = metric(day: 10, recovery: 50)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertEqual(chips.first, "Quality over volume today — plan my session")
+        XCTAssertEqual(chips.first, "A steady day — how should I pace it?")
     }
 
     func testHighChargeGreenLightChip() {
         let today = metric(day: 10, recovery: 90)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertEqual(chips.first, "Green light — how hard can I push today?")
+        XCTAssertEqual(chips.first, "I'm feeling good today — how can I make the most of it?")
     }
 
     func testChargeBoundary34IsMidBand() {
         let today = metric(day: 10, recovery: 34)
         XCTAssertEqual(CoachSuggestions.suggestions(for: today, recent: []).first,
-                       "Quality over volume today — plan my session")
+                       "A steady day — how should I pace it?")
     }
 
     func testChargeBoundary67IsGreenBand() {
         let today = metric(day: 10, recovery: 67)
         XCTAssertEqual(CoachSuggestions.suggestions(for: today, recent: []).first,
-                       "Green light — how hard can I push today?")
+                       "I'm feeling good today — how can I make the most of it?")
     }
 
     // MARK: - HRV trending down
@@ -114,13 +114,13 @@ final class CoachSuggestionsTests: XCTestCase {
     func testHighStrainAddsLoadedChip() {
         let today = metric(day: 10, recovery: 70, strain: 70)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertTrue(chips.contains("Have I done enough today, or push more?"))
+        XCTAssertTrue(chips.contains("Have I done enough today, or should I rest?"))
     }
 
     func testStrainBelowMappedWhoop14DoesNotAddLoadedChip() {
         let today = metric(day: 10, recovery: 70, strain: 60)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertFalse(chips.contains("Have I done enough today, or push more?"))
+        XCTAssertFalse(chips.contains("Have I done enough today, or should I rest?"))
     }
 
     func testMappedWhoop14IsTheHighStrainBoundary() {
@@ -131,8 +131,8 @@ final class CoachSuggestionsTests: XCTestCase {
         let belowBoundary = CoachSuggestions.suggestions(
             for: metric(day: 10, recovery: 70, strain: boundary.nextDown), recent: []
         )
-        XCTAssertTrue(atBoundary.contains("Have I done enough today, or push more?"))
-        XCTAssertFalse(belowBoundary.contains("Have I done enough today, or push more?"))
+        XCTAssertTrue(atBoundary.contains("Have I done enough today, or should I rest?"))
+        XCTAssertFalse(belowBoundary.contains("Have I done enough today, or should I rest?"))
     }
 
     // MARK: - Cap + stable generic
@@ -145,14 +145,14 @@ final class CoachSuggestionsTests: XCTestCase {
         XCTAssertEqual(chips.count, 4)
         // The stable generic is appended last; with the cap at 4, it is the 4th element (the 5th
         // candidate, the strain chip, is dropped). Charge is first.
-        XCTAssertEqual(chips.first, "Active recovery only today — what should I do?")
+        XCTAssertEqual(chips.first, "Low energy today — how should I pace myself?")
         XCTAssertEqual(chips.last, "Analyse my sleep")
     }
 
     func testChargeOnlyYieldsChargeAndGeneric() {
         let today = metric(day: 10, recovery: 90)
         let chips = CoachSuggestions.suggestions(for: today, recent: [])
-        XCTAssertEqual(chips, ["Green light — how hard can I push today?", "Analyse my sleep"])
+        XCTAssertEqual(chips, ["I'm feeling good today — how can I make the most of it?", "Analyse my sleep"])
     }
 
     // MARK: - Byte-identity of the fallback list
@@ -160,9 +160,9 @@ final class CoachSuggestionsTests: XCTestCase {
     func testFallbackListIsCanonical() {
         XCTAssertEqual(fallback, [
             "How's my recovery trending this week?",
-            "What should today's training look like?",
+            "How should I pace my day today?",
             "Analyse my sleep",
-            "Why am I run down?",
+            "Why am I feeling run down?",
         ])
     }
 }

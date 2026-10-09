@@ -126,23 +126,31 @@ struct MetricInsightCard: View {
     /// The screen metric's period, for the lines shown while there is no explanation to read one from. A shown
     /// explanation speaks of its own period (`MetricInsight.period`).
     var period: MetricInsightPeriod = .night
+    /// Drawn bare, without its own card, for a host that already is one (the detail page's About section).
+    var embedded = false
 
     /// The period the card speaks of.
     private var shownPeriod: MetricInsightPeriod { state?.insight?.period ?? period }
 
     var body: some View {
-        NoopCard(tint: tint) {
-            VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-                header
-                if let insight = state?.insight {
-                    if let message = statusLine { status(message) }
-                    explanation(insight)
-                    notes(insight)
-                } else if let message = statusLine {
-                    status(message)
-                } else {
-                    placeholder
-                }
+        if embedded {
+            content
+        } else {
+            NoopCard(tint: tint) { content }
+        }
+    }
+
+    private var content: some View {
+        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+            header
+            if let insight = state?.insight {
+                if let message = statusLine { status(message) }
+                explanation(insight)
+                notes(insight)
+            } else if let message = statusLine {
+                status(message)
+            } else {
+                placeholder
             }
         }
     }

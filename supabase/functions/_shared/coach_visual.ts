@@ -712,7 +712,7 @@ export async function routeVisual(deps: VisualDeps, question: string, answer: st
   const questions = {
     visual: {
       type: 'choice',
-      instructions: 'Which visual, if any, would make this answer to a fitness and health question clearer or more useful? Choose none unless the answer states concrete figures, comparisons, sequences, or lists worth visualizing, or the user asked for a chart, graph, or table.',
+      instructions: 'Which visual, if any, would make this answer to a health and wellbeing question clearer or more useful? Choose none unless the answer states concrete figures, comparisons, sequences, or lists worth visualizing, or the user asked for a chart, graph, or table.',
       criteria: VISUAL_KINDS,
     },
     chart: {
@@ -756,7 +756,7 @@ const cardShapes = `- facts: facts=[{label, value, detail?, tone?}] (2-6 items)
 - list: items=[{title, detail?, tag?}] (2-8 items, in order)
 - alerts: alerts=[{tone: "warning"|"negative"|"info"|"positive", title, detail?}] (1-4)`;
 
-const DESIGNER_INSTRUCTIONS = `You turn a finished fitness-coach answer into one compact, accurate visual by calling exactly one tool: visualize_data, visualize_timeline, or present_cards.
+const DESIGNER_INSTRUCTIONS = `You turn a finished wellbeing-assistant answer into one compact, accurate visual by calling exactly one tool: visualize_data, visualize_timeline, or present_cards.
 
 Rules:
 - Use only figures, labels, and dates stated in the answer or in the DATA block (the user's own logged numbers). Never invent, estimate, smooth, or extrapolate. Never add derived values (differences, averages, totals) unless the answer or DATA states them.
@@ -951,7 +951,7 @@ export function auditRequired(viz: any): boolean {
   return false;
 }
 
-const AUDITOR_INSTRUCTIONS = `You are a strict fact-checker for charts and cards in a fitness coaching app. You receive SOURCE (the user's question, the coach's answer, and the user's logged data) and VISUAL (the JSON that will be drawn).
+const AUDITOR_INSTRUCTIONS = `You are a strict fact-checker for charts and cards in a health and wellbeing app. You receive SOURCE (the user's question, the coach's answer, and the user's logged data) and VISUAL (the JSON that will be drawn).
 
 Check every plotted value, label, date, unit, and claim in VISUAL against SOURCE:
 - Every number must be stated in SOURCE (rounding to the shown precision is fine).

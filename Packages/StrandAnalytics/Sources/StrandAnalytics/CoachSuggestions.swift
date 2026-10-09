@@ -15,16 +15,16 @@ public enum CoachSuggestions {
     /// Android `FALLBACK` list.
     public static let fallback: [String] = [
         "How's my recovery trending this week?",
-        "What should today's training look like?",
+        "How should I pace my day today?",
         "Analyse my sleep",
-        "Why am I run down?",
+        "Why am I feeling run down?",
     ]
 
     /// A stable generic prompt always appended as the last chip so there is a consistent entry point
     /// even when the contextual chips already cover the user's situation.
     private static let stableGeneric = "Analyse my sleep"
 
-    /// Charge band cutoffs (mirrors the autoregulation bands in `AICoachEngine.defaultSystemPrompt`).
+    /// Charge band cutoffs (mirrors the pacing bands in `AICoachEngine.defaultSystemPrompt`).
     private static let chargeRedCutoff: Double = 34
     private static let chargeGreenCutoff: Double = 67
     /// HRV "trending down" threshold: today's HRV below 85% of the trailing-30-day baseline (excluding
@@ -60,11 +60,11 @@ public enum CoachSuggestions {
         // 1. Charge band → one readiness prescription chip.
         if let c = charge {
             if c < chargeRedCutoff {
-                chips.append("Active recovery only today — what should I do?")
+                chips.append("Low energy today — how should I pace myself?")
             } else if c < chargeGreenCutoff {
-                chips.append("Quality over volume today — plan my session")
+                chips.append("A steady day — how should I pace it?")
             } else {
-                chips.append("Green light — how hard can I push today?")
+                chips.append("I'm feeling good today — how can I make the most of it?")
             }
         }
 
@@ -83,7 +83,7 @@ public enum CoachSuggestions {
 
         // 4. Already a high-strain day.
         if let st = strain, st >= StrainScorer.effortValue(fromWhoopStrain: highStrain) {
-            chips.append("Have I done enough today, or push more?")
+            chips.append("Have I done enough today, or should I rest?")
         }
 
         // Signals present but none of the band conditions fired → generic fallback (avoids a lone

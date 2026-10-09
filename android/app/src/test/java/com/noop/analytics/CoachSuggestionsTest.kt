@@ -47,7 +47,7 @@ class CoachSuggestionsTest {
     @Test fun lowChargeActiveRecoveryChip() {
         val today = metric(day = 10, recovery = 20.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertEquals("Active recovery only today — what should I do?", chips.first())
+        assertEquals("Low energy today — how should I pace myself?", chips.first())
         assertEquals("Analyse my sleep", chips.last())
         assertTrue(chips.size in 2..4)
     }
@@ -55,19 +55,19 @@ class CoachSuggestionsTest {
     @Test fun midChargeQualityOverVolumeChip() {
         val today = metric(day = 10, recovery = 50.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertEquals("Quality over volume today — plan my session", chips.first())
+        assertEquals("A steady day — how should I pace it?", chips.first())
     }
 
     @Test fun highChargeGreenLightChip() {
         val today = metric(day = 10, recovery = 90.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertEquals("Green light — how hard can I push today?", chips.first())
+        assertEquals("I'm feeling good today — how can I make the most of it?", chips.first())
     }
 
     @Test fun chargeBoundary34IsMidBand() {
         val today = metric(day = 10, recovery = 34.0)
         assertEquals(
-            "Quality over volume today — plan my session",
+            "A steady day — how should I pace it?",
             CoachSuggestions.suggestions(today, emptyList()).first(),
         )
     }
@@ -75,7 +75,7 @@ class CoachSuggestionsTest {
     @Test fun chargeBoundary67IsGreenBand() {
         val today = metric(day = 10, recovery = 67.0)
         assertEquals(
-            "Green light — how hard can I push today?",
+            "I'm feeling good today — how can I make the most of it?",
             CoachSuggestions.suggestions(today, emptyList()).first(),
         )
     }
@@ -125,13 +125,13 @@ class CoachSuggestionsTest {
     @Test fun highStrainAddsLoadedChip() {
         val today = metric(day = 10, recovery = 70.0, strain = 70.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertTrue(chips.contains("Have I done enough today, or push more?"))
+        assertTrue(chips.contains("Have I done enough today, or should I rest?"))
     }
 
     @Test fun strainBelowMappedWhoop14DoesNotAddLoadedChip() {
         val today = metric(day = 10, recovery = 70.0, strain = 60.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertFalse(chips.contains("Have I done enough today, or push more?"))
+        assertFalse(chips.contains("Have I done enough today, or should I rest?"))
     }
 
     @Test fun mappedWhoop14IsTheHighStrainBoundary() {
@@ -144,8 +144,8 @@ class CoachSuggestionsTest {
             metric(day = 10, recovery = 70.0, strain = Math.nextDown(boundary)),
             emptyList(),
         )
-        assertTrue(atBoundary.contains("Have I done enough today, or push more?"))
-        assertFalse(belowBoundary.contains("Have I done enough today, or push more?"))
+        assertTrue(atBoundary.contains("Have I done enough today, or should I rest?"))
+        assertFalse(belowBoundary.contains("Have I done enough today, or should I rest?"))
     }
 
     // MARK: - Cap + stable generic
@@ -158,14 +158,14 @@ class CoachSuggestionsTest {
         assertEquals(4, chips.size)
         // The stable generic is appended last; with the cap at 4, it is the 4th element (the 5th
         // candidate, the strain chip, is dropped). Charge is first.
-        assertEquals("Active recovery only today — what should I do?", chips.first())
+        assertEquals("Low energy today — how should I pace myself?", chips.first())
         assertEquals("Analyse my sleep", chips.last())
     }
 
     @Test fun chargeOnlyYieldsChargeAndGeneric() {
         val today = metric(day = 10, recovery = 90.0)
         val chips = CoachSuggestions.suggestions(today, emptyList())
-        assertEquals(listOf("Green light — how hard can I push today?", "Analyse my sleep"), chips)
+        assertEquals(listOf("I'm feeling good today — how can I make the most of it?", "Analyse my sleep"), chips)
     }
 
     // MARK: - Byte-identity of the fallback list
@@ -174,9 +174,9 @@ class CoachSuggestionsTest {
         assertEquals(
             listOf(
                 "How's my recovery trending this week?",
-                "What should today's training look like?",
+                "How should I pace my day today?",
                 "Analyse my sleep",
-                "Why am I run down?",
+                "Why am I feeling run down?",
             ),
             fallback,
         )

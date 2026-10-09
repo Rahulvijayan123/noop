@@ -197,7 +197,8 @@ enum CoachStarterSuggestions {
         var continues = 0
         for item in items {
             let text = CoachModelText.collapsed(item.text)
-            guard !text.isEmpty, text.count <= 80, CoachModelText.isSafe(text, userAge: userAge) else { continue }
+            guard !text.isEmpty, text.count <= 80, !CoachModelText.isTrainingTalk(text),
+                  CoachModelText.isSafe(text, userAge: userAge) else { continue }
             let key = CoachModelText.normalized(text)
             guard !key.isEmpty, seen.insert(key).inserted else { continue }
             var kind = item.kind
@@ -239,6 +240,13 @@ enum CoachModelText {
     /// Passes the input screen and comes out of the output screen unchanged.
     static func isSafe(_ text: String, userAge: Int?) -> Bool {
         !CoachSafety.screenInput(text, userAge: userAge).blocked && CoachSafety.screenOutput(text, userAge: userAge).clean
+    }
+
+    /// Sana is a wellbeing companion for people living with a rare disease, not a training coach: a starter about
+    /// lifting, programmes, sessions or pushing harder is dropped, whoever wrote it.
+    static func isTrainingTalk(_ text: String) -> Bool {
+        text.range(of: #"\b(strength|lift(?:ing|s)?|gym|hypertrophy|overload|deload|reps?|sets?|one[- ]rep max|1rm|pr|personal (?:best|record)|training (?:plan|programme|program|session|load|block)|workout (?:plan|programme|program)|plan my session|push (?:harder|more|myself)|how hard (?:can|should) i push)\b"#,
+                   options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     static func collapsed(_ text: String) -> String {

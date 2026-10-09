@@ -22,7 +22,7 @@ const REGENERABLE = new Set(['none', 'fallback', 'legacy']);
 // ------------------------------------------------------------------------------------------------
 
 const titleSystem = (language: string) =>
-  `You name chats for Sana, a health and fitness assistant. Reply with JSON only: {"title": "..."}. `
+  `You name chats for Sana, a wellbeing assistant for people living with a rare disease. Reply with JSON only: {"title": "..."}. `
   + `The title is 2 to 6 words in Title Case, in ${language}, naming the specific subject of the user's first question `
   + '(the metric, plan, goal or problem). No quotes, emoji or trailing punctuation; never start with "Chat about", '
   + '"Question about" or anything like it.';
@@ -80,7 +80,7 @@ export async function titleRoute(req: Request, userId: string, rawId: string, d:
 
 function followUpsSystem(language: string, minor: boolean, wantTitle: boolean): string {
   return [
-    'You suggest what the user might ask Sana, a health and fitness assistant, right after its answer. '
+    'You suggest what the user might ask Sana, a wellbeing assistant for people living with a rare disease, right after its answer. '
       + `Reply with JSON only: {"follow_ups": ["...", "...", "..."]${wantTitle ? ', "title": "..."' : ''}}.`,
     `follow_ups: exactly 3 questions in ${language}, written as the user would type them (first person), each 8 to 80 characters `
       + '(aim for under 70; a longer one is discarded).',
@@ -268,7 +268,7 @@ export function validStarters(raw: unknown, refs: Refs, avoid: string[]): Starte
 
 function suggestionsSystem(language: string): string {
   return [
-    'You write 4 conversation starters for the empty chat screen of Sana, a health and fitness assistant. '
+    'You write 4 conversation starters for the empty chat screen of Sana, a wellbeing assistant for people living with a rare disease. '
       + 'Reply with JSON only: {"suggestions": [{"text": "...", "kind": "continue|state|goal|explore", "thread": "t1"}]}.',
     `Exactly 4 items in ${language}, each at most 64 characters, in the first person as something the user would tap to ask `
       + '("How did my sleep…", "Help me plan…").',
@@ -276,7 +276,8 @@ function suggestionsSystem(language: string): string {
       + 'prefer chats with something left open). kind "state" is about the current state, and when the state has flags at least '
       + 'one item is about a flag. kind "goal" is about a remembered goal, injury or routine. kind "explore" is something new and useful.',
     'Make them specific to this user and different from each other and from the recent questions. '
-      + 'No diagnosis, medication or dosage questions.',
+      + 'No diagnosis, medication or dosage questions. Sana is not a fitness or strength coach: nothing about workouts, lifting, '
+      + 'training plans or pushing harder. Prefer sleep, energy and pacing, symptoms and patterns, and preparing for appointments.',
   ].join('\n');
 }
 
@@ -426,7 +427,7 @@ function curatorPrompt(o: {
     o.wantMemory ? '"memory_ops": [...]' : '',
   ].filter(Boolean).join(', ');
   const rules = [
-    "You maintain the running summary and the long-term memory of a user's chat with Sana, a health and fitness assistant.",
+    "You maintain the running summary and the long-term memory of a user's chat with Sana, a wellbeing assistant for people living with a rare disease.",
     `Reply with JSON only: {${keys}}. The date in brackets is when each message was sent.`,
   ];
   if (o.wantSummary) {
@@ -786,7 +787,7 @@ export async function runMaintain(d: CoachDeps, userId: string, threadId: string
 // 9. Consolidation: merges and retires duplicates across every active memory.
 
 const consolidationSystem = () => [
-  "You tidy a user's long-term memory for Sana, a health and fitness assistant. You get every saved memory, labelled m1, m2, ...",
+  "You tidy a user's long-term memory for Sana, a wellbeing assistant for people living with a rare disease. You get every saved memory, labelled m1, m2, ...",
   'Reply with JSON only: {"ops": [...]} with at most 12 of {"op":"merge","refs":["m1","m4"],"content":"...","topic":"...","importance":1-5} '
     + 'and {"op":"retire","ref":"m7","reason":"superseded|duplicate"}.',
   'merge two or more memories that state the same fact or one fact in pieces; content is the combined fact in the third person '

@@ -100,6 +100,9 @@ struct MetricDetailView: View {
     @State private var companionsLoadedFor: String?
     @State private var showAllReadings = false
     @State private var showScoringGuide = false
+    /// The server's written explanation of a key metric (`docs/METRIC_INSIGHTS.md`), shown in About. Optional by
+    /// design: the page and its chart draw without it, and it hides in local-only mode.
+    @ObservedObject private var insights = MetricInsightStore.shared
     /// Derived per-range values, rebuilt only when their inputs change (never per scrub tick).
     @State private var memo = MetricDetailMemo()
 
@@ -484,6 +487,11 @@ struct MetricDetailView: View {
             if repositoryReady, !Task.isCancelled { loadedWithRepository = true }
         }
         .task(id: companionTaskID) { await loadCompanions() }
+        // The explanation is asked for on appear, again for the other side of the HRV switch, and for the next
+        // account after one ends; leaving the page cancels the request and its polling.
+        .task(id: "\(insightSide?.rawValue ?? "-")|\(insights.epoch)") {
+            if let side = insightSide { await insights.refresh(side) }
+        }
         // Range changes the window, hence the correlation inputs — recompute the cached scan rather than
         // letting the correlation card run it inside body.
         .onChangeCompat(of: range) { _ in
@@ -720,6 +728,14 @@ struct MetricDetailView: View {
 
     // MARK: About
 
+    /// The server metric that explains this page: the key metrics only (`KeyMetricCatalog`), and for HRV the side the
+    /// switch shows.
+    private var insightSide: MetricInsightMetric? {
+        guard let entry = KeyMetricCatalog.entry(for: metric) else { return nil }
+        if entry.metrics.contains(.hrvSdnn), showsSDNN { return .hrvSdnn }
+        return entry.metrics.first
+    }
+
     private func aboutCard(_ p: MetricPresentation) -> some View {
         var paragraphs = p.about(title: metric.title, catalogDescription: metric.description)
         if let skinTempNote { paragraphs.insert(skinTempNote, at: min(1, paragraphs.count)) }
@@ -727,7 +743,14 @@ struct MetricDetailView: View {
             paragraphs.insert(IntradaySeriesSection.note(for: intraday), at: max(0, paragraphs.count - 1))
         }
         let shown = paragraphs
-        return AboutDisclosure("About") {
+        let side = insightSide
+        let insightState = side.flatMap { insights.state(for: $0) }
+        let showsInsight = side != nil && insightState?.phase != .hidden
+        return AboutDisclosure("About", initiallyExpanded: showsInsight) {
+            if let side, showsInsight {
+                MetricInsightCard(state: insightState, tint: nil, latestMeasuredDay: series.last?.day,
+                                  period: side.period, embedded: true)
+            }
             AboutParagraphs(shown)
             if p.scoringSection != nil {
                 NoopButton("How it is scored", kind: .tertiary) { showScoringGuide = true }
