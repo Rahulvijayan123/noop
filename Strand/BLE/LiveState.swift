@@ -574,6 +574,11 @@ public final class LiveState: ObservableObject {
     /// Chunks acked during the current offload session — an honest progress signal (total pending is
     /// unknowable from the protocol, so a count, never a percent).
     @Published public var syncChunksThisSession: Int = 0
+    /// Cloud mode: a catch-up offload (a backlog of strap history, such as the night on the morning's first
+    /// sync) has finished on the phone, but its rows are still uploading or the server has not rescored the day
+    /// yet. Set and cleared by `AppModel.watchCloudCatchUp`. The Sleep tab reads it as "calculating", so a night
+    /// that is minutes from appearing is never called undetected.
+    @Published public var cloudCatchUpPending = false
 
     /// Undecodable HISTORICAL_DATA record frames seen this offload session whose raw bytes WERE
     /// preserved to the on-device archive (#77 / #91). Drives the honest "saved on this Mac" sync

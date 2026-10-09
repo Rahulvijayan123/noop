@@ -977,11 +977,13 @@ private struct SleepFreshnessNote: View {
         let calculationQueued = live.lastSyncedAt.map {
             (0..<5).contains(now.timeIntervalSince1970 - $0)
         } ?? false
+        // Cloud mode: the strap has handed the night over, but it is still uploading or the server has not
+        // rescored the day yet. That is minutes, not a verdict, so it reads as calculating too.
         let status = resolveSleepFreshness(
             hasCurrentNight: current,
             morningReady: calendar.component(.hour, from: now) >= 6,
             syncing: live.backfilling,
-            calculating: intelligence.computing || calculationQueued,
+            calculating: intelligence.computing || calculationQueued || live.cloudCatchUpPending,
             syncedSinceDayStart: (live.lastSyncedAt ?? 0) >= start.timeIntervalSince1970,
             syncFailed: live.lastSyncError != nil
         )

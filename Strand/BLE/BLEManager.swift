@@ -3064,6 +3064,8 @@ public final class BLEManager: NSObject, ObservableObject {
            let dynLine = bf.sessionDynAccel.logLine(threshold: dynAccelStillThresholdG) {
             log(dynLine)
         }
+        // Where the offload's time went: the strap and radio versus the phone's per-chunk commit.
+        if let timing = backfiller?.sessionTiming.line() { log(timing) }
         // Connection test mode: the offload OUTCOME the readout's lastOffloadResult id binds. Gated
         // zero-cost (the .connection bool is read before any string is built). Diagnostic only - it reads
         // the same per-session tallies the existing summary above does, changing no offload behaviour. A

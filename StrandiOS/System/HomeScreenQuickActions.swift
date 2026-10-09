@@ -60,6 +60,8 @@ final class HomeScreenQuickActionAppDelegate: NSObject, UIApplicationDelegate {
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
         HomeScreenQuickAction.install(in: application)
+        // Running again, for whatever reason it stopped: a "Nara stopped syncing" notice no longer applies.
+        SyncStoppedNotifier.withdraw()
         // Cloud capture must be running before the earliest restored notifications can arrive: a
         // Bluetooth state-restoration relaunch reaches this method without creating a scene, so the
         // runtime is started here rather than only from the foreground path. Idempotent, and a no-op
@@ -158,6 +160,8 @@ final class HomeScreenQuickActionSceneDelegate: NSObject, UIWindowSceneDelegate,
     /// cheap no-op.
     func sceneDidDisconnect(_ scene: UIScene) {
         Task { @MainActor in await Self.flushStandardHR(.termination) }
+        // Swiped away, iOS will not relaunch the app for the strap; say so while the night can still be saved.
+        SyncStoppedNotifier.sceneDidDisconnect()
     }
 
     /// Reaches the live Collector through `AppModel.shared`, the seam App Intents already use. It is
