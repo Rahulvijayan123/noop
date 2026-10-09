@@ -4,8 +4,9 @@ Every `poll_seconds`: enqueue owners whose server scoring completed (throttled p
 up to `max_jobs_per_cycle` jobs. A job: refresh the minute cache (re-read only the last 3 h), mark exercise sessions
 and their recovery over the cached minutes (rule exercise-session-1), score complete 30-minute windows since the
 watermark with every loaded model, calibrate each model's window scores on the user's own history, form candidates
-(local day in the person's own time zone) and publish them (fenced). A heartbeat thread writes `anomaly_service_heartbeats` every 30 s;
-systemd gets READY=1 and WATCHDOG=1 (Type=notify, WatchdogSec) so a hung loop is restarted.
+(local day in the person's own time zone) and publish them (fenced). A heartbeat thread writes
+`anomaly_service_heartbeats` every 30 s; systemd gets READY=1 and WATCHDOG=1 (Type=notify, WatchdogSec) so a hung
+loop is restarted.
 """
 
 from __future__ import annotations
@@ -326,11 +327,12 @@ class Service:
   def _grow_references(self, st: UserState, combined: dict, score_to: int) -> None:
     """Quarantined reference growth (no silent drift into "normal"). A scored window joins its model's calibration
     reference only when (a) it is ≥ REF_QUARANTINE_SECONDS old, (b) it was not flagged, (c) no window of ANY
-    model was flagged within REF_QUARANTINE_SECONDS of it, and (d) it is still usable under the context known NOW:
-    a window scored while an exercise session was not yet recognisable (its first minutes, before the period met
-    the rule) is re-gated against today's session and recovery marks, so gym minutes never become "rest". So the
-    slowly-building onset of an event that is flagged later (a fever ramp) never becomes "normal". Under the null
-    flags are ~1e-3 per window, so (c) removes almost nothing. Each window is considered once (refmeta "last")."""
+    model was flagged within REF_QUARANTINE_SECONDS of it, and (d) it is still usable under the context known now.
+    By (c) the slowly-building onset of an event that is flagged later (a fever ramp) never becomes "normal"; under
+    the null flags are ~1e-3 per window, so (c) removes almost nothing. By (d) a window scored while an exercise
+    session was not yet recognisable (its first minutes, before the period met the rule) is re-gated against the
+    session and recovery marks known 6 h later, so gym minutes never become "rest". Each window is considered once
+    (refmeta "last")."""
     Q = REF_QUARANTINE_SECONDS
     flagged = np.array(sorted({r.window.start for rs in combined.values() for r in rs if r.flagged}), dtype=np.int64)
     for model, rs in combined.items():
