@@ -211,6 +211,17 @@ const SERVICE_ONLY_FUNCTIONS = [
   // Account sync health (20261009110000_account_sync_health.sql): any account's upload recency, for the coach
   // status route and operators.
   "account_sync_health_v1",
+  // Measurement context per minute (20261009130100_measurement_context_minutes.sql): the scores route's read, the
+  // builder, its pg_cron tick and the operator backfill (internal schema, never exposed through PostgREST).
+  "measurement_context_minutes_read_v1",
+  "build_measurement_context_minutes",
+  "build_measurement_context_minutes_v1",
+  "backfill_measurement_context_minutes",
+  "measurement_context_tick_v1",
+  "measurement_context_discover_v1",
+  "measurement_context_process_v1",
+  "measurement_context_quality_v1",
+  "exercise_session_spans_v1",
 ];
 
 Deno.test({
@@ -289,7 +300,7 @@ Deno.test({
           select coalesce(jsonb_agg(has_function_privilege('anon', p.oid, 'EXECUTE')
             or has_function_privilege('authenticated', p.oid, 'EXECUTE')), '[]')
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'public' and p.proname = '${name}'`);
+          where n.nspname in ('public', 'internal') and p.proname = '${name}'`);
         assert.ok(reachable.length > 0, `${name} no longer exists; update the reviewed list`);
         assert.ok(reachable.every((value) => value === false), `${name} is executable by a client`);
       }
