@@ -118,7 +118,8 @@
       "unverified_optical_dc": {"code": "no_verified_input", "certainty": "confirmed"},
       "no_verified_input": {"code": "no_verified_input", "certainty": "confirmed"},
       "model_unavailable": {"code": "model_unavailable", "certainty": "confirmed"},
-      "adapter_broken": {"code": "model_unavailable", "certainty": "confirmed"}
+      "adapter_broken": {"code": "model_unavailable", "certainty": "confirmed"},
+      "artifact_unavailable": {"code": "no_verified_input", "certainty": "unknown"}
     },
     "layer1": {
       "low_coverage": {"code": "insufficient_coverage", "certainty": "measured"},

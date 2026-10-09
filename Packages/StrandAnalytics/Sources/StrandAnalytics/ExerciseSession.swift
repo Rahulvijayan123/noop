@@ -51,6 +51,8 @@ public struct ExerciseSessionSpan: Equatable, Sendable, Codable {
 public enum ExerciseSessionRule {
     public static let rule = "exercise-session-1"
     public static let mergeGapMinutes = 10
+    /// A weak evidence minute counts only within this many minutes of a strong one.
+    public static let anchorMinutes = 20
     public static let spanMinutes = 10
     public static let minEvidenceInSpan = 3
     public static let minStrong = 2
@@ -93,6 +95,10 @@ public enum ExerciseSessionRule {
     /// the minute's midpoint. Heart rate is carried for the load check only.
     public static func minute(minuteUnix: Int, hr: Double?, dynMean: Double?, walkRunTicks: Int, stepTicks: Int,
                               interval: ActivityContextIntervalRow?) -> ExerciseSessionMinute {
+        // Asleep or off the wrist is never evidence, whatever the motion.
+        if let iv = interval, iv.sleepState == "asleep" || iv.wearState == "off_wrist" {
+            return ExerciseSessionMinute(minuteUnix: minuteUnix, hr: hr, strong: false, weak: false)
+        }
         let fromInterval: (strong: Bool, weak: Bool) = interval.map(evidence(of:)) ?? (false, false)
         let steps = stepTicks > 0 && Double(walkRunTicks) >= 0.5 * Double(stepTicks)
         let strong = steps || (dynMean.map { $0 >= strongDynG } ?? false) || fromInterval.strong
@@ -149,8 +155,18 @@ public enum ExerciseSessionRule {
         guard !grid.isEmpty else { return [] }
         let n = grid.count
         let t0 = grid[0].minuteUnix
+        // Counted evidence: strong minutes, and weak minutes within `anchorMinutes` of a strong one.
+        let strongIdx = (0..<n).filter { grid[$0].strong }
+        var counted = [Bool](repeating: false, count: n)
+        var j = 0
+        for i in 0..<n {
+            if grid[i].strong { counted[i] = true; continue }
+            guard grid[i].weak else { continue }
+            while j < strongIdx.count && strongIdx[j] < i - anchorMinutes { j += 1 }
+            counted[i] = j < strongIdx.count && strongIdx[j] <= i + anchorMinutes
+        }
         var periods: [(Int, Int)] = []
-        for i in 0..<n where grid[i].evidence {
+        for i in 0..<n where counted[i] {
             if let last = periods.last, i - last.1 <= mergeGapMinutes {
                 periods[periods.count - 1].1 = i
             } else {
@@ -161,7 +177,7 @@ public enum ExerciseSessionRule {
         var found: [(a: Int, b: Int, open: Bool)] = []
         for (a, b) in periods {
             let dense = (a...b).contains { s in
-                (s..<min(s + spanMinutes, b + 1)).filter { grid[$0].evidence }.count >= minEvidenceInSpan
+                (s..<min(s + spanMinutes, b + 1)).filter { counted[$0] }.count >= minEvidenceInSpan
             }
             let strong = (a...b).filter { grid[$0].strong }.count
             let load = (a...b).filter { (grid[$0].hr ?? 0) >= rest + loadDeltaBpm }.count

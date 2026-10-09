@@ -25,8 +25,15 @@ Inputs are per-minute and HR-free except the load check.
   `brisk_walking`/`running`/`cycling`/`vigorous_activity`, or arm behaviour `exercise_motion`;
 - *weak*: mean dynamic acceleration ≥ 0.05 g, or decoder class `light_activity`.
 
-**Active period**: evidence minutes (strong or weak) merged while the gap between consecutive evidence minutes is at
-most 10 minutes. The period spans first to last evidence minute, still minutes inside included.
+A minute asleep or off the wrist is never evidence (whatever its motion). A weak minute counts only within 20 minutes
+of a strong minute, so a fidgety afternoon never forms or stretches a period on its own.
+
+From stored decoder intervals (Layer 1, history), the decoder's log-scaled intensity stands in for dynamic
+acceleration: ≥ 0.48 (≈ 100 mg) strong, ≥ 0.40 (≈ 49 mg) weak; a minute is strong (weak) when strong (any evidence)
+intervals cover ≥ 20 s of it.
+
+**Active period**: counted evidence minutes (strong, or anchored weak) merged while the gap between consecutive
+evidence minutes is at most 10 minutes. The period spans first to last evidence minute, still minutes inside included.
 
 **Exercise session**: an active period that has
 

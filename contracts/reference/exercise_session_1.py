@@ -15,6 +15,7 @@ import statistics
 
 RULE = "exercise-session-1"
 MERGE_GAP_MIN = 10
+ANCHOR_MIN = 20
 SPAN_MIN = 10
 MIN_EVIDENCE_IN_SPAN = 3
 MIN_STRONG = 2
@@ -25,6 +26,23 @@ RETURN_DELTA_BPM = 10
 RETURN_RUN_MIN = 5
 RECOVERY_CAP = (30, 120)
 PRE_WINDOW = (45, 10)
+
+
+def anchored(strong, weak):
+    """Evidence minutes that count: strong minutes, and weak minutes within ANCHOR_MIN minutes of a strong one.
+    Weak movement far from any strong minute (a fidgety afternoon) never forms or stretches a period."""
+    n = len(strong)
+    strong_idx = [i for i in range(n) if strong[i]]
+    out = [False] * n
+    j = 0
+    for i in range(n):
+        if strong[i]:
+            out[i] = True
+        elif weak[i]:
+            while j < len(strong_idx) and strong_idx[j] < i - ANCHOR_MIN:
+                j += 1
+            out[i] = j < len(strong_idx) and strong_idx[j] <= i + ANCHOR_MIN
+    return out
 
 
 def periods(evidence):
@@ -40,7 +58,7 @@ def periods(evidence):
 
 
 def qualifies(a, b, hr, strong, weak, rest):
-    ev = [strong[i] or weak[i] for i in range(len(hr))]
+    ev = anchored(strong, weak)
     dense = any(sum(ev[j] for j in range(s, min(s + SPAN_MIN, b + 1))) >= MIN_EVIDENCE_IN_SPAN
                 for s in range(a, b + 1))
     n_strong = sum(strong[i] for i in range(a, b + 1))
@@ -60,7 +78,7 @@ def pre_reference(a, hr, rest, busy, fallback):
 
 def sessions(t0, hr, strong, weak, rest):
     n = len(hr)
-    ev = [bool(strong[i] or weak[i]) for i in range(n)]
+    ev = anchored(strong, weak)
     found = [(a, b) for a, b in periods(ev) if qualifies(a, b, hr, strong, weak, rest)]
     out = []
     busy = set()
@@ -157,6 +175,16 @@ def cases():
         for i in range(95, 200):
             hr[i] = 76
 
+    def fidgety_day_with_short_walk(hr, strong, weak):
+        # Four hours of fidgeting (weak every other minute) at 96 bpm, a 6-minute walk at 115 in the middle.
+        for i in range(0, 300):
+            hr[i] = 72 if i < 30 or i >= 270 else 96
+            weak[i] = 1 if 30 <= i < 270 and i % 2 == 0 else 0
+        for i in range(147, 153):
+            strong[i] = 1
+            weak[i] = 0
+            hr[i] = 115
+
     def no_return(hr, strong, weak):
         for i in range(0, 60):
             hr[i] = 70
@@ -174,6 +202,7 @@ def cases():
         _case("easy_walk_no_load", 120, 72, easy_walk),
         _case("two_bouts_gap_15_min", 200, 72, two_bouts),
         _case("no_return_recovery_capped", 260, 70, no_return),
+        _case("fidgety_day_with_short_walk", 300, 70, fidgety_day_with_short_walk),
     ]
 
 
