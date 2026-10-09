@@ -823,7 +823,7 @@ Deno.test('coach suggestions: forgetting one memory drops the cached starters th
   const revision = state().memory_revision;
   await h.json(`memories/${pref.id}`, { method: 'DELETE' });
   assertEquals([state().suggestions, state().suggestions_fingerprint, state().suggestions_at], [[], null, null]);
-  assertEquals(state().memory_revision, revision, 'the revision rule is unchanged');
+  assertEquals(state().memory_revision, revision + 1, 'every change the user makes moves the revision, so other phones drop their cached context');
   assertEquals((await h.json('suggestions', { method: 'POST', body })).body.source, 'model');
   assert(!h.model.of('suggestions')[1].user.includes('lactose'));
   // Forgetting an id that is not there leaves the cache alone.
@@ -981,4 +981,106 @@ Deno.test('coach maintain: two memories that look alike get a targeted consolida
   ];
   assertEquals(duplicatePairs(rows, () => false), []);
   assertEquals(duplicatePairs(rows, (m) => m.id === 'b').map((m) => m.id).sort(), ['a', 'b']);
+});
+
+// ------------------------------------------------------------------------------------------------
+// Memories in the user's own words (edited or added in the memory sheet)
+// ------------------------------------------------------------------------------------------------
+
+Deno.test('coach maintain: a memory in the user\'s own words is confirmed but never reworded, merged or retired; an edit\'s old wording is not learned again', async () => {
+  let shown: ModelCall | undefined;
+  const h = await harness({
+    curator: (c: ModelCall) => {
+      shown = c;
+      const swim = refOf(c, 'swims on Thursdays');
+      const goal = refOf(c, 'marathon goal');
+      return {
+        memory_ops: [
+          { op: 'add', topic: 'routine', importance: 3, content: 'User swims on Tuesdays' },
+          { op: 'add', topic: 'goal', importance: 4, content: "User's marathon goal is 3:30" },
+          { op: 'update', ref: goal, content: "User's marathon goal is 3:30" },
+          { op: 'retire', ref: swim, reason: 'User said Tuesdays' },
+          { op: 'merge', refs: [swim, refOf(c, 'lake swims')], content: 'User swims on Thursdays at the lake' },
+          { op: 'add', topic: 'routine', importance: 3, content: 'User swims on Thursdays at the lake' },
+          { op: 'update', ref: goal, importance: 5 },
+        ],
+      };
+    },
+  });
+  clockAt(h, 0);
+  // The user changed Tuesdays to Thursdays in the memory sheet, and wrote the goal themselves.
+  const swim = (await h.json('memories', { method: 'POST', body: { content: 'User swims on Tuesdays', topic: 'routine' } })).body.memory;
+  assertEquals((await h.json(`memories/${swim.id}`, { method: 'PATCH', body: { content: 'User swims on Thursdays', version: 1 } })).status, 200);
+  const goal = h.db.memory(USER, "User's marathon goal is 3:45", { topic: 'goal', importance: 3, source: 'user' });
+  const lake = h.db.memory(USER, 'User enjoys lake swims in summer', { topic: 'routine', source: 'curator' });
+  // A chat that still says the old day (an older message the curator reads again, say) and a new goal time.
+  const t = seed(h, [['user', 'I swim on Tuesdays and on Thursdays at the lake. My marathon goal is 3:30 now, and lake swims are my favourite.']]);
+  clockAt(h, 1);
+
+  const res = (await maintain(h, t.id)).body;
+  assertEquals(res.memoryOps, 2, 'the confirm and the importance change; every rewording was dropped');
+  assert(shown && refOf(shown, 'swims on Thursdays') && !shown.user.includes('Tuesdays\n'), 'the prompt shows the edited text');
+  const byId = (id: string) => h.db.rows('coach_memory_items').find((m) => m.id === id);
+  assertEquals([byId(swim.id).content, byId(swim.id).source, byId(swim.id).confirmations, byId(swim.id).retired_at],
+    ['User swims on Thursdays', 'user', 2, null], 'a restatement that says more confirms the user\'s row');
+  assertEquals([byId(goal.id).content, byId(goal.id).importance, byId(goal.id).source], ["User's marathon goal is 3:45", 5, 'user'],
+    'only its importance moved');
+  assertEquals([byId(lake.id).retired_at, byId(lake.id).content], [null, 'User enjoys lake swims in summer'], 'never merged into the user\'s row');
+  assert(!h.db.activeMemories().some((m) => /Tuesdays/.test(m.content)), 'the old wording is not learned again');
+  assertEquals(h.db.activeMemories().length, 3);
+  assert(!applied(h).some((o: any) => o.op === 'retire' || o.op === 'merge'));
+});
+
+Deno.test('coach curator and consolidation: ops on a row in the user\'s own words (the rule in isolation)', () => {
+  const pool = [
+    { id: 'u', content: 'User runs 5 days a week at 6am', topic: 'routine', importance: 3, version: 2, source: 'user', created_at: '2026-01-01T00:00:00Z' },
+    { id: 'c', content: 'User runs 5 days a week at 6am before work', topic: 'routine', importance: 3, version: 1, source: 'curator', created_at: '2026-02-01T00:00:00Z' },
+    { id: 'k', content: 'User has a tight left hamstring', topic: 'injury', importance: 4, version: 1, source: 'tool', source_thread_id: 'T', created_at: '2026-03-01T00:00:00Z' },
+  ];
+  const refs = new Refs('m');
+  pool.forEach((p) => refs.ref(p.id));
+  const text = 'I run 5 days a week at 6am before work, now 6 days. My left hamstring is tight.';
+  const guard = { userTokens: tokenSet(text), userText: text, tombstones: [] };
+  const ops = resolveCuratorOps([
+    { op: 'update', ref: 'm1', content: 'User runs 6 days a week at 6am' },
+    { op: 'merge', refs: ['m1', 'm2'], content: 'User runs 5 days a week at 6am before work' },
+    { op: 'retire', ref: 'm1', reason: 'now 6 days' },
+    { op: 'add', topic: 'routine', importance: 3, content: 'User runs 6 days a week at 6am' },
+    { op: 'update', ref: 'm1', importance: 4 },
+  ], refs, structuredClone(pool), guard, 'T');
+  assertEquals(ops, [{ op: 'update', id: 'u', importance: 4, expect_version: 2 }]);
+  // An update of another row never folds the user's row into a merge.
+  const fold = resolveCuratorOps([{ op: 'update', ref: 'm2', content: 'User runs 5 days a week at 6am before work, now on trails' }],
+    refs, structuredClone(pool).map((p) => (p.id === 'u' ? { ...p, source_thread_id: 'T' } : p)), guard, 'T');
+  assertEquals(fold.map((o) => [o.op, o.id]), [['update', 'c']]);
+  // Consolidation: no merge or retire of the user's row; it may still be what covers a retired duplicate.
+  const consolidation = resolveConsolidationOps([
+    { op: 'merge', refs: ['m1', 'm2'], content: 'User runs 5 days a week at 6am before work' },
+    { op: 'retire', ref: 'm1', reason: 'duplicate' },
+    { op: 'retire', ref: 'm2', reason: 'duplicate' },
+  ], refs, pool);
+  assertEquals(consolidation.map((o) => [o.op, o.id]), [['retire', 'c']]);
+});
+
+Deno.test('coach maintain: consolidation leaves a row in the user\'s own words alone and retires the copy it covers', async () => {
+  const h = await harness({
+    curator: { memory_ops: [] },
+    consolidation: (c: ModelCall) => ({
+      ops: [
+        { op: 'merge', refs: [refOf(c, 'oat milk$'), refOf(c, 'oat milk in coffee')], content: 'User likes oat milk in coffee' },
+        { op: 'retire', ref: refOf(c, 'oat milk$'), reason: 'duplicate' },
+        { op: 'retire', ref: refOf(c, 'oat milk in coffee'), reason: 'duplicate' },
+      ],
+    }),
+  });
+  clockAt(h, 0);
+  const mine = h.db.memory(USER, 'User likes oat milk', { topic: 'preference', source: 'user', created_at: '2026-01-01T00:00:00Z' });
+  const copy = h.db.memory(USER, 'User likes oat milk in coffee', { topic: 'preference', source: 'curator' });
+  for (let i = 0; i < 40; i++) h.db.memory(USER, distinct(i), { importance: 1 });
+  const t = seed(h, [['user', 'Thanks for the plan'], ['assistant', 'Any time.']], { summary: 'An earlier summary.', summary_through: at(-1), curated_through: at(-1) });
+  clockAt(h, 2);
+  assertEquals((await maintain(h, t.id)).body.consolidated, true);
+  const byId = (id: string) => h.db.rows('coach_memory_items').find((m) => m.id === id);
+  assertEquals([byId(mine.id).content, byId(mine.id).retired_at, byId(mine.id).version], ['User likes oat milk', null, 1]);
+  assertEquals(byId(copy.id).retired_reason, 'duplicate');
 });
