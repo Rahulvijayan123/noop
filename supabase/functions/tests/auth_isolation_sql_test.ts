@@ -231,6 +231,10 @@ const SERVICE_ONLY_FUNCTIONS = [
   "placement_resolved_read_v1",
   // The anomaly windows behind GET scores/anomaly-candidates (20261009150200_anomaly_windows_read.sql).
   "anomaly_windows_read_v1",
+  // RecGym exercise windows, shadow (20261009160000_activity_exercise_windows.sql): the worker's fenced publish
+  // and its retention.
+  "publish_activity_exercise_windows",
+  "prune_activity_exercise_windows",
 ];
 
 Deno.test({

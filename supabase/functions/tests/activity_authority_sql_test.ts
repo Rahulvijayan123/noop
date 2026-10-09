@@ -10,6 +10,7 @@ import { readActivityWindows, readGaitWindows } from '../_shared/serverScores.ts
 const CONTRACTS = [
   'activity_context_contract.sql',
   'activity_encoder_windows_contract.sql',
+  'activity_exercise_windows_contract.sql',
   'activity_gait_windows_contract.sql',
   'activity_motion_heads_contract.sql',
   'activity_release_authority_contract.sql',
@@ -40,6 +41,12 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
       await psqlFile(db.base, new URL('../../migrations/20261008100600_activity_release_authority.sql', import.meta.url));
       const notices = await psqlFile(db.base, new URL('activity_release_authority_contract.sql', import.meta.url));
       assert.match(notices, /PASS 4 privileges/);
+    });
+
+    await t.step('the exercise windows migration is idempotent and every part of its contract passes', async () => {
+      await psqlFile(db.base, new URL('../../migrations/20261009160000_activity_exercise_windows.sql', import.meta.url));
+      const notices = await psqlFile(db.base, new URL('activity_exercise_windows_contract.sql', import.meta.url));
+      for (const n of [1, 2, 3, 4, 5, 6, 7]) assert.match(notices, new RegExp(`PASS ${n} `));
     });
 
     await t.step('routes read the release columns written by the real publish functions', async () => {
