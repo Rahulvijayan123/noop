@@ -3,10 +3,21 @@ import hashlib
 import json
 import warnings
 from pathlib import Path
+from functools import lru_cache
 import numpy as np
 from sklearn.decomposition import PCA
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import StandardScaler
+
+
+@lru_cache(maxsize=1)
+def frozen_encoder(name,configuration):
+    from .frozen import FrozenEncoder
+    cfg=json.loads(configuration)
+    encoder=FrozenEncoder(name,source=cfg.get('source'),checkpoint=cfg['checkpoint'])
+    digest=hashlib.sha256(json.dumps(encoder.provenance,sort_keys=True).encode()).hexdigest()
+    if digest != cfg.get('provenance_sha256'): raise ValueError(f"{name}: checkpoint provenance does not match configured digest")
+    return encoder,digest
 
 
 def statistics(raw):
@@ -30,12 +41,9 @@ def fixed_features(name, raw, config=None, cache=None):
             out.append([[v for channel in step for v in pycatch22.catch22_all(channel,catch24=True)['values']] for step in window])
         return np.asarray(out,dtype=np.float32)
     if name in ('normwear','normwear2'):
-        from .frozen import FrozenEncoder
         cfg=(config or {}).get(name)
         if not cfg: raise ValueError(f"{name}: pinned local checkpoint is not configured")
-        encoder=FrozenEncoder(name,source=cfg.get('source'),checkpoint=cfg['checkpoint'])
-        digest=hashlib.sha256(json.dumps(encoder.provenance,sort_keys=True).encode()).hexdigest()
-        if digest != cfg.get('provenance_sha256'): raise ValueError(f"{name}: checkpoint provenance does not match configured digest")
+        encoder,digest=frozen_encoder(name,json.dumps(cfg,sort_keys=True))
         out=[]
         for window in raw:
             steps=[]
@@ -54,7 +62,8 @@ def fixed_features(name, raw, config=None, cache=None):
 
 
 class Encoder:
-    def __init__(self,name,config=None,cache=None): self.name=name; self.config=config; self.cache=cache
+    def __init__(self,name,config=None,cache=None):
+        self.name=name; self.config=config; self.cache=(config or {}).get('_shared_cache',cache)
     def fit(self,raw,y):
         self.learned=None
         if self.name=='minirocket':

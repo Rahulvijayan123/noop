@@ -49,26 +49,47 @@ create table public.event_detection_inputs (
   day date not null, revision bigint not null default 1, updated_at timestamptz not null default now(),
   primary key(user_id,device_id,day)
 );
+create table public.event_detection_input_changes (
+  user_id uuid not null references auth.users(id) on delete cascade, device_id uuid not null,
+  day date not null, revision bigint not null, first_ts double precision not null, last_ts double precision not null,
+  primary key(user_id,device_id,day,revision)
+);
 -- One invalidation per device/day per SQL insert, not one job per sensor sample.
 create function public.event_sensor_input_changed() returns trigger language plpgsql
-security definer set search_path=public,pg_temp as $$ begin
-  insert into event_detection_inputs(user_id,device_id,day)
-    select distinct user_id,device_id,(to_timestamp(ts) at time zone 'UTC')::date from inserted_samples
-    where exists(select 1 from event_detector_settings s where s.user_id=inserted_samples.user_id and s.enabled)
-  on conflict(user_id,device_id,day) do update set revision=event_detection_inputs.revision+1,updated_at=now();
+security definer set search_path=public,pg_temp as $$ declare item record; rev bigint; begin
+  for item in select x.user_id,x.device_id,d.input_day,min(x.ts) lo,max(x.ts) hi
+    from inserted_samples x cross join lateral (
+      select (to_timestamp(x.ts) at time zone 'UTC')::date as input_day
+      union select (to_timestamp(x.ts+32) at time zone 'UTC')::date
+    ) d where exists(select 1 from event_detector_settings s where s.user_id=x.user_id and s.enabled)
+      and exists(select 1 from auth.users u where u.id=x.user_id)
+    group by 1,2,3 loop
+    insert into event_detection_inputs(user_id,device_id,day) values(item.user_id,item.device_id,item.input_day)
+      on conflict(user_id,device_id,day) do update set revision=event_detection_inputs.revision+1,updated_at=now()
+      returning revision into rev;
+    insert into event_detection_input_changes values(item.user_id,item.device_id,item.input_day,rev,item.lo,item.hi);
+  end loop;
   return null;
 end $$;
 create trigger event_hr_arrival after insert on public.noop_hr_samples
   referencing new table as inserted_samples for each statement execute function public.event_sensor_input_changed();
 create trigger event_temperature_arrival after insert on public.noop_skin_temp_samples
   referencing new table as inserted_samples for each statement execute function public.event_sensor_input_changed();
+create trigger event_hr_update after update on public.noop_hr_samples
+  referencing new table as inserted_samples for each statement execute function public.event_sensor_input_changed();
+create trigger event_hr_remove after delete on public.noop_hr_samples
+  referencing old table as inserted_samples for each statement execute function public.event_sensor_input_changed();
+create trigger event_temperature_update after update on public.noop_skin_temp_samples
+  referencing new table as inserted_samples for each statement execute function public.event_sensor_input_changed();
+create trigger event_temperature_remove after delete on public.noop_skin_temp_samples
+  referencing old table as inserted_samples for each statement execute function public.event_sensor_input_changed();
 revoke all on function public.event_sensor_input_changed() from public,anon,authenticated;
 create table public.event_detections (
   user_id uuid not null, id uuid not null, type_id uuid not null, device_id uuid not null,
   start_at double precision not null, end_at double precision not null,
   model_id uuid not null, status text not null default 'pending'
-    check(status in ('pending','confirmed','rejected','unsure','archived')),
-  manual_event_id uuid, historical boolean not null default false,
+    check(status in ('pending','confirmed','rejected','unsure','archived','superseded')),
+  manual_event_id uuid, owns_manual_event boolean not null default false, historical boolean not null default false,
   updated_at timestamptz not null default now(),
   primary key(user_id,id), check(start_at >= 0 and end_at >= start_at),
   foreign key(user_id,type_id) references public.event_detector_settings on delete cascade
@@ -79,10 +100,23 @@ create table public.event_detection_reviews (
   id uuid not null, body jsonb not null, created_at timestamptz not null default now(),
   primary key(user_id,id)
 );
+create table public.event_detection_revisions (
+  seq bigint generated always as identity primary key,
+  user_id uuid not null references auth.users(id) on delete cascade,
+  detection_id uuid not null, body jsonb not null, created_at timestamptz not null default now()
+);
+create function public.retain_detection_revision() returns trigger language plpgsql
+security definer set search_path=public,pg_temp as $$ begin
+  insert into event_detection_revisions(user_id,detection_id,body) values(new.user_id,new.id,to_jsonb(new));
+  return new;
+end $$;
+create trigger event_detection_revision after insert or update on public.event_detections
+  for each row execute function public.retain_detection_revision();
+revoke all on function public.retain_detection_revision() from public,anon,authenticated;
 -- Clients cannot access model bytes, job credentials or state. The API is owner-scoped.
 do $$ declare t text; begin
   foreach t in array array['event_detector_settings','event_detector_jobs','event_detector_models',
-    'event_detector_runs','event_detection_state','event_detections','event_detection_reviews','event_detection_inputs'] loop
+    'event_detector_runs','event_detection_state','event_detections','event_detection_reviews','event_detection_inputs','event_detection_input_changes','event_detection_revisions'] loop
     execute format('alter table public.%I enable row level security',t);
     execute format('revoke all on public.%I from public,anon,authenticated,service_role',t);
     execute format('grant select,insert,update,delete on public.%I to service_role',t);
@@ -90,10 +124,11 @@ do $$ declare t text; begin
 end $$;
 -- Reviews are append-only to the service. Whole-account deletion still cascades.
 revoke update,delete on public.event_detection_reviews from service_role;
+revoke insert,update,delete on public.event_detection_revisions from service_role;
 
 create function public.event_detection_command(p_user uuid,p_source uuid,p_body jsonb)
 returns jsonb language plpgsql security definer set search_path = public,pg_temp as $$
-declare typ uuid; r public.event_detections; label jsonb; event_entry jsonb; eid uuid;
+declare typ uuid; r public.event_detections; label jsonb; event_entry jsonb; eid uuid; created boolean := false; stamp bigint;
   old jsonb; outcome text; request_id uuid := (p_body->>'requestId')::uuid;
 begin
   if not exists(select 1 from noop_app_installations where user_id=p_user and source_id=p_source and revoked_at is null)
@@ -131,7 +166,7 @@ begin
     if outcome not in ('confirmed','rejected','unsure','archived') then raise exception 'invalid_outcome'; end if;
     if outcome='confirmed' then
       -- A retry, another phone, or a matching manual log must not create another occurrence.
-      eid := r.manual_event_id;
+      eid := case when r.owns_manual_event then r.id else r.manual_event_id end;
       if eid is null then
         select entity_id into eid from manual_events_current where user_id=p_user
           and entry->>'kind'='event' and (entry->>'typeId')::uuid=typ
@@ -141,18 +176,34 @@ begin
           order by seq desc limit 1;
       end if;
       if eid is null then eid := r.id; end if;
+      created := r.owns_manual_event or not exists(select 1 from manual_events_current where user_id=p_user and entity_id=eid);
       event_entry := jsonb_build_object('id',eid,'kind','event','typeId',typ,'label',label->>'label',
         'symbol',label->>'symbol','favorite',false,'startUnixSeconds',(p_body->>'start')::double precision,
         'endUnixSeconds',(p_body->>'end')::double precision,'deviceId',r.device_id,
         'timeZoneIdentifier','UTC','archived',false);
       -- Preserve a matching log. Only an explicit review of this detection's prior log edits it.
-      if r.manual_event_id is not null or not exists(select 1 from manual_events_current where user_id=p_user and entity_id=eid) then
+      if created then
+        select greatest(floor(extract(epoch from clock_timestamp())*1000)::bigint,coalesce(max(updated_at_ms),0)+1)
+          into stamp from manual_event_revisions where user_id=p_user and entity_id=eid;
         perform append_manual_event_revisions(p_user,p_source,jsonb_build_array(jsonb_build_object(
-          'revision_id',request_id,'updated_at_ms',floor(extract(epoch from clock_timestamp())*1000),'entry',event_entry)));
+          'revision_id',request_id,'updated_at_ms',stamp,'entry',event_entry)));
+      end if;
+    elsif r.owns_manual_event then
+      select c.entry into event_entry from manual_events_current c where c.user_id=p_user and c.entity_id=r.id;
+      if event_entry is not null then
+        event_entry := event_entry || jsonb_build_object('archived',true,'archivedAt',extract(epoch from now()));
+        select greatest(floor(extract(epoch from clock_timestamp())*1000)::bigint,coalesce(max(updated_at_ms),0)+1)
+          into stamp from manual_event_revisions where user_id=p_user and entity_id=r.id;
+        perform append_manual_event_revisions(p_user,p_source,jsonb_build_array(jsonb_build_object(
+          'revision_id',request_id,'updated_at_ms',stamp,'entry',event_entry)));
       end if;
     end if;
-    update event_detections set status=outcome,manual_event_id=coalesce(eid,manual_event_id),updated_at=now()
+    update event_detections set status=outcome,manual_event_id=case when outcome='confirmed' then eid else null end,
+      owns_manual_event=r.owns_manual_event or created,updated_at=now()
       where user_id=p_user and id=r.id;
+  elsif p_body->>'action'='withdraw' then
+    if not exists(select 1 from event_detection_reviews where user_id=p_user and id=(p_body->>'reviewId')::uuid
+      and (body->>'typeId')::uuid=typ and body->>'action'='negative') then raise exception 'unknown_review'; end if;
   elsif p_body->>'action' <> 'negative' then raise exception 'invalid_action'; end if;
   insert into event_detection_reviews(user_id,id,body) values(p_user,request_id,p_body);
   return jsonb_build_object('saved',request_id);

@@ -19,6 +19,8 @@ struct EventDetectorSetting: Codable, Identifiable {
         var recall: Double?
         var delaySeconds: Double?
         var events: Int?
+        var coverage: Double?
+        var reviewedHours: Double?
     }
     enum CodingKeys: String, CodingKey {
         case typeId = "type_id", enabled, revision, state, activeModelId = "active_model_id"
@@ -62,7 +64,12 @@ struct EventDetectionCommand: Codable, Identifiable {
     var start: Double?
     var end: Double?
     var deviceId: UUID?
+    var reviewId: UUID?
     var id: UUID { requestId }
+}
+
+struct NegativeEventReview: Codable, Identifiable {
+    var id: UUID; var typeId: UUID; var start: Double; var end: Double
 }
 
 /// Durable owner-bound writes. A server acknowledgement, not an optimistic toggle, confirms cloud state.
@@ -73,6 +80,7 @@ final class EventDetectionCenter: ObservableObject {
     @Published private(set) var settings: [EventDetectorSetting] = []
     @Published private(set) var detections: [DetectedEvent] = []
     @Published private(set) var pending: [EventDetectionCommand] = []
+    @Published private(set) var negativeReviews: [NegativeEventReview] = []
     @Published private(set) var physiology: [String: EventPhysiology] = [:]
     @Published private(set) var message: String?
     @Published private(set) var error: String?
@@ -96,6 +104,7 @@ final class EventDetectionCenter: ObservableObject {
     }
     private struct Cache: Codable {
         var settings: [EventDetectorSetting]; var detections: [DetectedEvent]; var pending: [EventDetectionCommand]
+        var negativeReviews: [NegativeEventReview]?
     }
     private func cacheURL(_ owner: String) -> URL? {
         guard let uuid = UUID(uuidString: owner) else { return nil }
@@ -105,10 +114,11 @@ final class EventDetectionCenter: ObservableObject {
         let next = identity()?.ownerId
         guard next != owner else { return }
         generation = UUID(); syncing = false; owner = next
-        settings = []; detections = []; pending = []; physiology = [:]; message = nil; error = nil
+        settings = []; detections = []; pending = []; negativeReviews = []; physiology = [:]; message = nil; error = nil
         if let next, let url = cacheURL(next), let data = try? Data(contentsOf: url),
            let cache = try? JSONDecoder().decode(Cache.self, from: data) {
             settings = cache.settings; detections = cache.detections; pending = cache.pending
+            negativeReviews = cache.negativeReviews ?? []
             message = "Saved results. Refreshing cloud status."
         }
     }
@@ -118,7 +128,7 @@ final class EventDetectionCenter: ObservableObject {
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: directory.path)
         #endif
-        try JSONEncoder().encode(Cache(settings: settings, detections: detections, pending: pending)).write(to: url, options: .atomic)
+        try JSONEncoder().encode(Cache(settings: settings, detections: detections, pending: pending, negativeReviews: negativeReviews)).write(to: url, options: .atomic)
     }
     @discardableResult
     func enqueue(_ command: EventDetectionCommand, expectedOwner: String?) -> Bool {
@@ -141,6 +151,7 @@ final class EventDetectionCenter: ObservableObject {
     private struct Identity: Decodable { var userId: String; var sourceId: String }
     private struct Page: Decodable {
         var identity: Identity; var settings: [EventDetectorSetting]; var detections: [DetectedEvent]; var next: String?
+        var negativeReviews: [NegativeEventReview]?
     }
     private struct Ack: Decodable { var identity: Identity; var saved: UUID }
     private enum Failure: Error { case unavailable, invalid }
@@ -185,6 +196,7 @@ final class EventDetectionCenter: ObservableObject {
                       page.identity.sourceId.lowercased() == identity.sourceId,
                       page.next == nil || page.next != before else { throw Failure.invalid }
                 all.append(contentsOf: page.detections); fetched = page.settings; before = page.next
+                negativeReviews = page.negativeReviews ?? []
                 guard all.count <= 20000 else { throw Failure.invalid }
             } while before != nil
             settings = fetched; detections = all; try persist(); message = nil

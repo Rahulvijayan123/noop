@@ -703,6 +703,8 @@ enum DemoScreens {
         case "insights": return AnyView(InsightsView())
         case "explore":  return AnyView(MetricExplorerView())
         case "eventslog": return AnyView(ManualEventDemoView())
+        case "eventsdetect": return AnyView(PersonalEventDetectionDemo())
+        case "eventsphysiology": return AnyView(PersonalEventDetectionDemo(showDetail: true))
         case "eventeditor": return AnyView(ManualEventDemoView(showEditor: true))
         case "eventtype": return AnyView(ManualEventDemoView(showCustomType: true))
         case "eventdetail": return AnyView(ManualEventDemoView(showDetail: true))

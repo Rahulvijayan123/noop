@@ -63,8 +63,8 @@ class Detector:
             return self
         common=dict(random_state=42)
         if head in ('ridge','lasso','elastic_net'):
-            self.model=LogisticRegression(C=.2,penalty={'ridge':'l2','lasso':'l1','elastic_net':'elasticnet'}[head],
-                solver='saga' if head=='elastic_net' else 'liblinear',l1_ratio=.5 if head=='elastic_net' else None,
+            self.model=LogisticRegression(C=.2,solver='saga' if head=='elastic_net' else 'liblinear',
+                l1_ratio={'ridge':0,'lasso':1,'elastic_net':.5}[head],
                 class_weight='balanced',max_iter=1500,**common)
         elif head=='random_forest': self.model=RandomForestClassifier(n_estimators=100,max_depth=8,min_samples_leaf=3,class_weight='balanced',n_jobs=1,**common)
         elif head=='extra_trees': self.model=ExtraTreesClassifier(n_estimators=150,max_depth=10,min_samples_leaf=3,class_weight='balanced',n_jobs=1,**common)

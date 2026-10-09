@@ -87,7 +87,7 @@ struct EventDetectionSection: View {
                     }.buttonStyle(.plain)
                 }
             }
-            let retained = detection.detections.filter { ["rejected", "archived", "unsure"].contains($0.status) }
+            let retained = detection.detections.filter { ["rejected", "archived", "unsure", "superseded"].contains($0.status) }
             if !retained.isEmpty {
                 DisclosureGroup("Reviewed and archived detections (\(retained.count))") {
                     ForEach(retained) { item in
@@ -130,6 +130,8 @@ struct DetectorDetailSheet: View {
                         if let value = model.detail.falseAlertsPerDay { LabeledContent("False alerts", value: String(format: "%.1f/day", value)) }
                         if let value = model.detail.recall { LabeledContent("Reviewed events detected", value: String(format: "%.0f%%", value * 100)) }
                         if let value = model.detail.events { LabeledContent("Evaluation events", value: String(value)) }
+                        if let value = model.detail.coverage { LabeledContent("Usable reviewed data", value: String(format: "%.0f%%", value * 100)) }
+                        if let value = model.detail.reviewedHours { LabeledContent("Observed review time", value: String(format: "%.1f hours", value)) }
                         if let value = model.detail.delaySeconds { LabeledContent("Typical delay", value: String(format: "%.0f sec", value)) }
                     }
                     Text("Models are compared each week when new reviewed data is available. Estimated savings include the time used to confirm and dismiss alerts.")
@@ -144,6 +146,20 @@ struct DetectorDetailSheet: View {
                             start: start.timeIntervalSince1970, end: end.timeIntervalSince1970, deviceId: device), expectedOwner: owner)
                     }.disabled(end <= start || end.timeIntervalSince(start) > 86400 || PersonalEventPresentation.canonicalDevice == nil || saved)
                     if PersonalEventPresentation.canonicalDevice == nil { Text("Connect a cloud-linked wearable to review sensor intervals.") }
+                }
+                let reviews = detection.negativeReviews.filter { $0.typeId == type.id }
+                if !reviews.isEmpty {
+                    Section("Reviewed negative intervals") {
+                        ForEach(reviews) { review in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Text(Date(timeIntervalSince1970: review.start).formatted(date: .abbreviated, time: .shortened))
+                                Button("Withdraw this review") {
+                                    detection.enqueue(EventDetectionCommand(action: "withdraw", typeId: type.id, reviewId: review.id), expectedOwner: owner)
+                                }.disabled(detection.pending.contains { $0.reviewId == review.id })
+                            }
+                        }
+                        Text("Withdrawn reviews stay in the retained history and stop supplying negative training labels.")
+                    }
                 }
             }.navigationTitle(type.label)
                 .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }

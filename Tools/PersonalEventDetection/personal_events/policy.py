@@ -21,6 +21,7 @@ class Policy:
     max_delay: float = 120
     min_events: int = 3
     min_negative_hours: float = 1
+    min_coverage: float = .8
 
     def __post_init__(self):
         if not 0 <= self.exit < self.enter <= 1 or min(self.persistence, self.smoothing, self.cadence) < 1:
@@ -95,6 +96,10 @@ def evaluate(times, scores, positives, negatives, policy, *, owner="eval", type_
         return total
     negative_seconds = exposure(negatives)
     seconds = exposure(negatives + [(e["start"],e["end"]) for e in positives])
+    intervals=sorted(negatives+[(e['start'],e['end']) for e in positives])
+    expected=0; last=-math.inf
+    for a,b in intervals: expected+=max(0,b-max(a,last)); last=max(last,b)
+    coverage=seconds/expected if expected else 0
     days = seconds/86400
     recall = len(covered)/len(positives) if positives else 0
     false_day = false/days if days else 0
@@ -102,7 +107,8 @@ def evaluate(times, scores, positives, negatives, policy, *, owner="eval", type_
     delay = sum(delays)/len(delays) if delays else None
     eligible = (len(positives)>=policy.min_events and negative_seconds>=policy.min_negative_hours*3600
                 and recall>=policy.min_recall and false_day<=policy.max_false_per_day
+                and coverage>=policy.min_coverage
                 and delay is not None and max(delays)<=policy.max_delay and saved>0)
     return dict(eligible=eligible, timeSavedSecondsPerDay=saved, falseAlertsPerDay=false_day,
                 recall=recall, delaySeconds=delay, events=len(positives), coveredEvents=len(covered),
-                reviewedHours=seconds/3600, negativeHours=negative_seconds/3600, policy=asdict(policy))
+                reviewedHours=seconds/3600, negativeHours=negative_seconds/3600, coverage=coverage, policy=asdict(policy))

@@ -79,6 +79,9 @@ class EngineTests(unittest.TestCase):
             self.assertIsNotNone(model)
             with self.assertRaisesRegex(ValueError,'independent'):
                 train(times,raw,labels,positive,negative,snapshot='test',cache=cache,specs=specs,previous_test_end=times.max())
+            with self.assertRaisesRegex(ValueError,'training labels were reviewed'):
+                train(times,raw,labels,positive,negative,snapshot='test',cache=cache,specs=specs,
+                    availability=np.full(len(times),times.max()+1))
 
 
 if __name__=='__main__': unittest.main()

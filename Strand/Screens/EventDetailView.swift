@@ -65,7 +65,12 @@ struct EventDetailView: View {
             AboutDisclosure(paragraphs: aboutParagraphs)
             }
         }
-        .task(id: event.id) { await detection.loadPhysiology(for: event) }
+        .task(id: event.id) {
+            while !Task.isCancelled {
+                await detection.loadPhysiology(for: latest)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
         .sheet(item: $review) { item in
             DetectionReviewSheet(item: item, owner: event.ownerId, manual: manual, detection: detection)
         }

@@ -16,7 +16,7 @@ This PR replaces PR #3 and includes its logger, custom icons, favorites, duratio
 6. Review CPU, RAM, disk and database load on the actual VPS. Use the two `.service.example` templates as starting limits. Keep the training service at low priority so it cannot consume all ingestion/scoring capacity. Prepare a private `/var/lib/nara-events` directory. Install the services only after these checks; no existing deploy script enables them.
 7. Run fixture or test-account jobs first. Verify train → save → reload → infer → review, switch-off during an in-flight job, late uploads, repeated jobs, and model replacement. Measure actual upload-to-display delay. Then enable `NARA_EVENT_DETECTION_ENABLED=1` for the reviewed rollout.
 8. Keep a prior model version for rollback. To roll back a label, stop/fence its inference job and atomically set its `active_model_id` to an earlier artifact for the **same owner and type**. Never copy a model between accounts. The app can disable the label while this is done.
-9. Confirm the whole-account deletion path removes the new database rows through `auth.users` cascades and removes the owner's private cache directory. Event-level archive remains retained; it is separate from deleting an entire account.
+9. Confirm the whole-account deletion path removes the new database rows through `auth.users` cascades and removes the owner's private cache directory through the worker's hourly cleanup. Event-level archive remains retained; it is separate from deleting an entire account.
 
 ## App behavior
 
@@ -31,7 +31,7 @@ This PR replaces PR #3 and includes its logger, custom icons, favorites, duratio
 
 Weekly jobs select a personal detector by estimated user time saved, subject to event recall, false-alert, delay and resource gates. Each candidate is tested under the same causal alert policy for a label. Reports retain selection, later evaluation, costs, skips and dependencies. Current models remain active unless a new candidate passes the later-data comparison. No model is activated when there is insufficient evidence.
 
-Jobs have leases, retries and settings-revision fences. Sensor upload statements invalidate affected device-days. Replays use durable detected-episode IDs and retain review state, including through a model swap. A delayed upload is historical; this code sends no stale live notifications.
+Jobs have leases, retries and settings-revision fences. Sensor upload and correction statements invalidate affected device-days. Ordinary uploads advance stored cursors; late data uses bounded replay. Publication checks the current input revision. Replays use durable detected-episode IDs and retain review state, including through a model swap. A delayed upload is historical; this code sends no stale live notifications.
 
 Source-bound training currently uses the research suite's heart-rate and raw-temperature inputs. Movement is available in the UI from the separate existing activity lane. A future movement-trained personal candidate can be added explicitly to the versioned registry; it must not silently replace one of the research suite's input definitions.
 

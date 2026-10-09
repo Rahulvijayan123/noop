@@ -39,6 +39,8 @@ class Database:
     @contextmanager
     def fenced(self,job):
         with self.conn.transaction():
+            self.execute("select pg_advisory_xact_lock(hashtextextended('event-detection:'||%s::text,0))",(job['user_id'],))
+            self.execute("select pg_advisory_xact_lock(hashtextextended('manual-events:'||%s::text,0))",(job['user_id'],))
             setting=self.row("select * from event_detector_settings where user_id=%s and type_id=%s for update",(job['user_id'],job['type_id']))
             claim=self.row("select * from event_detector_jobs where user_id=%s and type_id=%s and kind=%s for update",(job['user_id'],job['type_id'],job['kind']))
             if (not setting or not setting['enabled'] or setting['revision']!=job['setting']['revision'] or not claim
@@ -74,28 +76,43 @@ class Database:
         devices={d for d in devices if valid_uuid(d)}
         if not devices: raise ValueError('Log completed events with a cloud-linked wearable first.')
         device=max(sorted(devices),key=lambda d:sum(e['entry'].get('deviceId')==d for e in entries))
-        positive=[dict(id=e['entry']['id'],start=e['entry']['startUnixSeconds'],end=e['entry']['endUnixSeconds'])
+        positive=[dict(id=e['entry']['id'],start=e['entry']['startUnixSeconds'],end=e['entry']['endUnixSeconds'],available=e['received_at'].timestamp())
                   for e in entries if e['entry'].get('deviceId')==device]
         detections={str(r['id']):r for r in self.rows('select * from event_detections where user_id=%s',(owner,))}
         latest={}
+        withdrawn={r['body'].get('reviewId','').lower() for r in reviews if r['body'].get('action')=='withdraw'}
         for r in reviews:
-            b=r['body']; latest[b.get('detectionId',str(r['id']))]=b
+            if str(r['id']).lower() in withdrawn: continue
+            b=dict(r['body'],available=r['created_at'].timestamp()); latest[b.get('detectionId',str(r['id'])).lower()]=b
         negative=[]
+        negative_availability=[]
         for b in latest.values():
             if b.get('typeId','').lower()!=str(typ): continue
-            if b.get('action')=='negative' and b.get('deviceId','').lower()==device.lower(): negative.append((b['start'],b['end']))
+            if b.get('action')=='negative' and b.get('deviceId','').lower()==device.lower():
+                negative.append((b['start'],b['end'])); negative_availability.append((b['start'],b['end'],b['available']))
             if b.get('outcome')=='rejected':
-                d=detections.get(b.get('detectionId'))
-                if d and str(d['device_id'])==device.lower() and d['status']=='rejected': negative.append((b['start'],b['end']))
+                d=detections.get(b.get('detectionId','').lower())
+                if d and str(d['device_id'])==device.lower() and d['status']=='rejected':
+                    negative.append((b['start'],b['end'])); negative_availability.append((b['start'],b['end'],b['available']))
         if not positive or not negative: raise ValueError('Add confirmed events and reviewed negative time for this wearable.')
+        if any(max(e['start'],a)<min(e['end'],b) for e in positive for a,b in negative):
+            raise ValueError('A negative review overlaps a confirmed event. Withdraw or correct the conflicting review.')
         lo=min([e['start'] for e in positive]+[a for a,b in negative]); hi=max([e['end'] for e in positive]+[b for a,b in negative])
         cutoff=max(lo,hi-90*86400)
         positive=[e for e in positive if e['start']>=cutoff]; negative=[(max(a,cutoff),b) for a,b in negative if b>cutoff]
         times,raw=self.sensor_windows(owner,device,cutoff,hi)
         labels=label_windows(times,positive,negative)
+        availability=np.full(len(times),np.inf)
+        for e in positive:
+            mask=(times-32>=e['start'])&(times<=e['end'])&(labels==1)
+            availability[mask]=np.minimum(availability[mask],e['available'])
+        for a,b,available in negative_availability:
+            mask=(times-32>=a)&(times<=b)&(labels==0)
+            availability[mask]=np.minimum(availability[mask],available)
         revisions=[(str(e['revision_id']),str(e['received_at'])) for e in entries]+[(str(r['id']),str(r['created_at'])) for r in reviews]
         snapshot=snapshot_id(owner,typ,device,times,raw,labels,revisions)
         return dict(times=times,raw=raw,labels=labels,positives=positive,negatives=negative,
+                    availability=availability,
                     snapshot=snapshot,device=device,labelRevisions=revisions,
                     manualRevisions=sorted(str(e['revision_id']) for e in entries),
                     reviewRevisions=sorted(str(r['id']) for r in reviews))

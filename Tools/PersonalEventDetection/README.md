@@ -22,6 +22,7 @@ NARA_EVENT_CACHE=/var/lib/nara-events
 NARA_EVENT_ENCODERS=/etc/frwhoop/event-encoders.json
 OMP_NUM_THREADS=1
 OPENBLAS_NUM_THREADS=1
+NUMBA_CACHE_DIR=/var/lib/nara-events/numba
 ```
 
 Run each lane in a separate supervised process:
@@ -39,14 +40,14 @@ nara-event-worker --lane infer
 - A model selects one wearable source based on completed, source-bound examples. It does not pool different owners or straps.
 - Windows use 32 seconds of uploaded heart rate and raw strap temperature, with two 16-second steps and an 8-second stride. Raw temperature is explicitly in strap units. No conversion into degrees is claimed.
 - Unknown intervals are not negative examples. Users add negative intervals in detector details or reject a detection. Archived manual labels are excluded. Confirmed detections produce retained manual revisions; possible detections do not train the model.
-- Training/selection/test are split by UTC day with purges around boundaries and whole crossing episodes removed. At least five reviewed days are required. Every evaluation gate also requires three complete events and one hour of observed reviewed negative exposure. These configurable research defaults are not clinical validation.
+- Training/selection/test are split by UTC day with purges around boundaries and whole crossing episodes removed. Training excludes labels that were not yet available before the selection period. At least five reviewed days are required. Every evaluation gate also requires three complete events and one hour of observed reviewed negative exposure. These configurable research defaults are not clinical validation.
 - All 25 input combinations and 18 heads are registered. Every cell receives an evaluated, skipped, or failed record. Each candidate runs in a separate process with a three-minute limit. Runs have a three-hour budget and resume completed cells from a cache. Frozen features and fitted training encoders are reused for the same data and version.
 - A common policy scores candidates in event units. User time saved is `(20 - 2) × unique detected events - 10 × false alerts`, normalized by observed reviewed days. These action-time assumptions are estimates. Scores are not presented as calibrated confidence.
 - Promotion needs useful later held-out results and improvement over the existing model. Previously used protected test time is excluded from later promotion tests. No winner means no automatic detector. Models are not replaced merely because a week passed.
 - Artifacts and model reports are private database rows; only server code can read executable model artifacts. Model loading is only from these trusted server-generated rows, never an upload endpoint.
 - Training is bounded to 90 days and one million rows per sensor. Jobs that need a larger budget stop with a reason, rather than silently sample or drop records.
-- New upload inserts invalidate device-days. Inference replays each changed day causally and retains episode IDs across repeated runs, late uploads and model changes. Existing reviewed episodes retain their review. Historical detections are labelled; there is no push-notification sender in this feature.
-- UI switches increment a settings revision. Both job claims and result commits check it. Archiving a type stops its jobs. Account deletion cascades database rows, including artifacts; cache cleanup is described in the handoff.
+- New upload inserts invalidate device-days. Inference scores new windows from persisted state for ordinary uploads; late or corrected data uses a bounded day replay. Input revisions are checked again at commit. Episode IDs survive repeated runs, late uploads and model changes. Existing reviewed episodes retain their review. Historical detections are labelled; there is no push-notification sender in this feature.
+- UI switches increment a settings revision. Both job claims and result commits check it. Archiving a type stops its jobs. Account deletion cascades database rows, including artifacts; private owner caches are removed by the worker within an hour of account deletion.
 
 ## Local validation
 

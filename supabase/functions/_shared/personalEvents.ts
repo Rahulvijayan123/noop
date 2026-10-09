@@ -8,6 +8,7 @@ export function validateDetectionCommand(body: any): boolean {
   if (!body || typeof body !== 'object' || Array.isArray(body) || !isUuid(body.requestId) || !isUuid(body.typeId)) return false;
   const common = ['action', 'requestId', 'typeId'];
   if (body.action === 'setting') return keys(body, [...common, 'enabled']) && typeof body.enabled === 'boolean';
+  if (body.action === 'withdraw') return keys(body, [...common, 'reviewId']) && isUuid(body.reviewId);
   if (!instant(body.start) || !instant(body.end) || body.end <= body.start || body.end - body.start > 86400) return false;
   if (body.action === 'negative') return keys(body, [...common, 'start', 'end', 'deviceId']) && isUuid(body.deviceId);
   return body.action === 'review' && keys(body, [...common, 'detectionId', 'outcome', 'start', 'end'])
@@ -32,10 +33,14 @@ export async function personalEvents(rest: SupabaseRest, user: {id: string; sour
   const [time, id] = before?.split(':') ?? [];
   if (before && (!instant(Number(time)) || before.split(':').length !== 2)) throw fail();
   const cursor = before ? `&or=(start_at.lt.${Number(time)},and(start_at.eq.${Number(time)},id.lt.${id}))` : '';
-  const [settings, rows] = await Promise.all([
+  const [settings, rows, reviews] = await Promise.all([
     rest.select('event_detector_settings', `user_id=eq.${user.id}&select=type_id,enabled,revision,state,active_model_id,last_training_at,last_input_at,detail&order=type_id.asc&limit=1000`),
     rest.select('event_detections', `user_id=eq.${user.id}${cursor}&select=id,type_id,device_id,start_at,end_at,model_id,status,manual_event_id,historical&order=start_at.desc,id.desc&limit=201`),
+    rest.select('event_detection_reviews', `user_id=eq.${user.id}&body->>action=in.(negative,withdraw)&select=id,body&order=created_at.desc&limit=1000`),
   ]);
   const detections = rows.slice(0, 200), last = detections.at(-1);
-  return { settings, detections, next: rows.length > 200 ? `${last.start_at}:${last.id}` : null };
+  const withdrawn = new Set(reviews.filter(r => r.body.action === 'withdraw').map(r => r.body.reviewId.toLowerCase()));
+  const negativeReviews = reviews.filter(r => r.body.action === 'negative' && !withdrawn.has(r.id.toLowerCase()))
+    .map(r => ({ id: r.id, typeId: r.body.typeId, start: r.body.start, end: r.body.end }));
+  return { settings, detections, negativeReviews, next: rows.length > 200 ? `${last.start_at}:${last.id}` : null };
 }

@@ -49,10 +49,14 @@ def fit_one(root,spec):
 
 def train(times,raw,labels,positives,negatives,*,snapshot,cache,config=None,policy=None,
           current=None,progress=lambda _:None,max_seconds=10800,specs=None,previous_test_end=0,
-          isolate=True,candidate_seconds=180):
+          isolate=True,candidate_seconds=180,availability=None):
     policy=policy or Policy(); parts=chronological_split(times,labels,positives)
     train_ids,validation,test=parts
     if not len(validation) or not len(test): raise ValueError('Need later reviewed evaluation windows')
+    if availability is not None:
+        train_ids=train_ids[availability[train_ids]<times[validation].min()-32]
+        if len(set(labels[train_ids]))<2:
+            raise ValueError('Waiting for later evaluation days after the training labels were reviewed.')
     # An earlier protected test set cannot become the next weekly promotion scoreboard.
     test=test[times[test]>previous_test_end+32]
     if not len(test): raise ValueError('Waiting for new independent evaluation data')
@@ -83,12 +87,13 @@ def train(times,raw,labels,positives,negatives,*,snapshot,cache,config=None,poli
             best,best_score=model_path,value
     report=dict(registry=REGISTRY_VERSION,featureVersion=VERSION,snapshot=snapshot,candidates=results,
                 policy=asdict(policy),trainEnd=float(times[train_ids].max()),testEnd=float(times[test].max()),
+                labelAvailabilityCutoff=float(times[validation].min()-32),
                 promotion=False,reason='No eligible model improves on manual logging.')
+    incumbent=score(current,test) if current else None
+    report['incumbent']=incumbent
     if best is None: return None,report
     model=unpack(best.read_bytes()); heldout=score(model,test)
     report.update(candidate=model.spec['id'],evaluation=heldout)
-    incumbent=score(current,test) if current else None
-    report['incumbent']=incumbent
     # Require both useful held-out performance and a meaningful margin over the incumbent.
     baseline=max(0,incumbent['timeSavedSecondsPerDay']) if incumbent else 0
     if heldout['eligible'] and heldout['timeSavedSecondsPerDay']>baseline+max(5,abs(baseline)*.1):

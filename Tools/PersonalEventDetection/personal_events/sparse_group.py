@@ -60,4 +60,3 @@ class SparseGroupLogistic:
     def predict_proba(self, X):
         p = expit(X @ self.coef_ + self.intercept_)
         return np.column_stack([1 - p, p])
-

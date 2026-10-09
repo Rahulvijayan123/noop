@@ -185,7 +185,7 @@ extension HealthEvent {
 struct EventsView: View {
     var extraEvents: [HealthEvent] = HealthEvent.current
     @ObservedObject var manualEventCenter: ManualEventCenter = .shared
-    @ObservedObject private var detection = EventDetectionCenter.shared
+    @ObservedObject var detection: EventDetectionCenter = .shared
     @ObservedObject private var filterState = EventFilterState.shared
 
     /// Logged events with their strap context, possible events awaiting review, and any DEBUG samples.
