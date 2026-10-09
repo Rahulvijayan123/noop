@@ -13,8 +13,8 @@ struct EventDetailView: View {
     let event: HealthEvent
     var history: [HealthEvent] = []
 
+    @ObservedObject var detection: EventDetectionCenter = .shared
     @ObservedObject var manual: ManualEventCenter = .shared
-    @ObservedObject private var detection = EventDetectionCenter.shared
     @State private var metricIndex = EventDetailView.initialMetricIndex
     @State private var selected: Date?
     @State private var showingContext = false
