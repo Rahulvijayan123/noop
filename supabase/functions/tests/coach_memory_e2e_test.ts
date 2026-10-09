@@ -21,7 +21,8 @@ import {
 //     save_memory row the curator restates folded into one memory; a targeted consolidation of a look-alike pair
 //     and its 30-minute lease; a first-answer title that comes back pending;
 //     deletes racing saves; an old app build's thread-less rows, its refusals marked blocked by their text; the
-//     COACH_THREADS_DISABLED rollback switch; the meta merge;
+//     COACH_THREADS_DISABLED rollback switch; the meta merge; an edit from the memory sheet (PATCH) that every read
+//     returns as one row, that a curator pass never undoes, and whose forgotten text an automatic save never restores;
 //  7. a second account that reaches none of it on any route; and with the utility budget spent, every pass
 //     falls back deterministically without a model call.
 
@@ -829,6 +830,73 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       assert.deepEqual((await a.del(`threads/${threadId}`)).body, { deleted: true });
     });
 
+    await t.step('an edit from the memory sheet reaches the store and every read; the curator and automatic saves never bring the old text back', async () => {
+      const swims = (rows: any[]) => rows.filter((m: any) => /\bswims\b/.test(m.content)).map((m: any) => [m.id, m.content, m.version]);
+      const revisionNow = async () => Number(await one(`select memory_revision from coach_user_state where user_id='${USER_A}'`));
+      // Saved (by Sana's save_memory, here), then corrected by the user in the memory sheet.
+      const saved = await a.post('memories', { content: 'User swims on Tuesdays', topic: 'routine', importance: 3 });
+      assert.equal(saved.status, 200, saved.text);
+      assert.deepEqual([saved.body.kept, saved.body.memory.version, saved.body.memory.source], [true, 1, 'tool']);
+      const id = saved.body.memory.id;
+      const revision = await revisionNow();
+      const edited = await a.patch(`memories/${id}`, { content: 'User swims on Thursdays', version: 1 });
+      assert.equal(edited.status, 200, edited.text);
+      assert.deepEqual([edited.body.memory.id, edited.body.memory.content, edited.body.memory.version, edited.body.memory.source],
+        [id, 'User swims on Thursdays', 2, 'user']);
+
+      // The store: the same row, rewritten; no second row (active or retired); the old wording only as tokens.
+      assert.equal(await one(`select count(*) from coach_memory_items where user_id='${USER_A}' and content ~ '\\mswims\\M'`), '1');
+      assert.equal(await one(`select content || '|' || source || '|' || version from coach_memory_items where id='${id}'`),
+        'User swims on Thursdays|user|2');
+      assert.equal(await one(`select count(*) from coach_memory_events where memory_id='${id}'
+        and coalesce(before::text, '') || coalesce(after::text, '') like '%Tuesdays%'`), '0');
+      assert.equal(await one(`select tokens::text from coach_memory_events where memory_id='${id}' and reason='user_edit'`), '{swim,tuesday}');
+      assert.equal(await revisionNow(), revision + 1);
+
+      // Every read: the list (each shape the phone asks for), the ranked RPC, the manifest RPC and the turn's manifest.
+      for (const path of ['memories', 'memories?limit=200', 'memories?q=swim', 'memories?topic=routine']) {
+        assert.deepEqual(swims((await a.get(path)).body.memories), [[id, 'User swims on Thursdays', 2]], path);
+      }
+      const ranked = await db.rest.rpc('coach_memories_ranked_v1', { p_user: USER_A, p_query: 'When do I swim?', p_limit: 8, p_pin_safety: true });
+      assert.deepEqual(swims(ranked.memories), [[id, 'User swims on Thursdays', 2]]);
+      const manifest = await db.rest.rpc('coach_context_manifest_v1', { p_user: USER_A, p_thread: null, p_query: 'When do I swim?' });
+      assert.deepEqual(swims(manifest.memories), [[id, 'User swims on Thursdays', 2]]);
+      assert.equal(Number(manifest.memory_revision), revision + 1);
+      const context = (await a.post('context', { question: 'When do I swim?' })).body;
+      assert.deepEqual(swims(context.memories), [[id, 'User swims on Thursdays', 2]], 'what the phone puts in the prompt');
+      assert.equal(context.memories.find((m: any) => m.id === id).source, 'user');
+      assert.equal(context.memoryRevision, revision + 1, 'other phones see the revision move and drop their cached context');
+      // A sheet that read the row before the edit gets 409 and the row as it is; nothing is written.
+      const stale = await a.patch(`memories/${id}`, { content: 'User swims on Fridays', version: 1 });
+      assert.deepEqual([stale.status, stale.body.error, stale.body.memory.content, stale.body.memory.version],
+        [409, 'version_conflict', 'User swims on Thursdays', 2]);
+
+      // A chat that still says the old day: the curator proposes the old wording, and the edit tombstone drops it.
+      const TS = uuid();
+      await turn(a, TS, 'I swim on Tuesdays before work. Is that a good recovery day?', Date.now() + 5 * MINUTE,
+        { threadTitle: 'I swim on Tuesdays before work' });
+      const maintained = await a.post(`threads/${TS}/maintain`, {});
+      assert.equal(maintained.status, 200, maintained.text);
+      assert.deepEqual([maintained.body.status, maintained.body.memoryOps], ['done', 0]);
+      const curator = upstream.of('curator').at(-1)!;
+      assert.match(curator.user, /^m\d+ \[routine, importance 3\] User swims on Thursdays$/m, 'the curator reads the edited text');
+      assert.match(JSON.stringify(scriptedJson('curator', curator.system, curator.user)), /User swims on Tuesdays/, 'and proposed the old one');
+      assert.deepEqual(swims((await a.get('memories?limit=200')).body.memories), [[id, 'User swims on Thursdays', 2]],
+        'the curator pass did not resurrect the old text, nor reword the user\'s row');
+
+      // Forget it: an automatic save of the same text (or the edit's old wording) is skipped; an explicit one is not.
+      assert.deepEqual((await a.del(`memories/${id}`)).body, { deleted: true });
+      for (const content of ['User swims on Thursdays', 'User swims on Tuesdays']) {
+        const auto = await a.post('memories', { content, topic: 'routine', importance: 3, threadId: TS, auto: true });
+        assert.deepEqual([auto.status, auto.body], [200, { skipped: 'forgotten' }], content);
+      }
+      assert.deepEqual(swims((await a.get('memories?limit=200')).body.memories), []);
+      assert.equal(await one(`select count(*) from coach_memory_items where user_id='${USER_A}' and content ~ '\\mswims\\M'`), '0');
+      const explicit = await a.post('memories', { content: 'User swims on Thursdays', topic: 'routine' });
+      assert.equal(explicit.body.kept, true, 'the user (or Sana, asked to) can still save it on purpose');
+      assert.deepEqual((await a.del(`memories/${explicit.body.memory.id}`)).body, { deleted: true });
+    });
+
     await t.step('a second account reaches none of it on any route', async () => {
       const B = b();
       const marker = uuid();
@@ -848,6 +916,7 @@ Deno.test('coach memory e2e: threads, memory and the context library over real H
       assert.deepEqual((await B.get('memories')).body.memories, []);
       assert.deepEqual((await B.get('memories?q=asthma')).body.memories, []);
       assert.deepEqual((await B.del(`memories/${aMemories[0].id}`)).body, { deleted: true });
+      assert.equal((await B.patch(`memories/${aMemories[0].id}`, { content: 'Mine now', version: aMemories[0].version })).status, 404);
       assert.deepEqual((await B.get('folders')).body.folders, []);
       const bFolder = uuid();
       assert.equal((await B.post('folders', { id: bFolder, name: 'B' })).status, 200);

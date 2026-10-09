@@ -134,6 +134,8 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
       // retention prune and coach_search_v1's light pool read the owner's messages newest/oldest first through it.
       await sql(`create index if not exists coach_messages_user_idx on public.coach_messages (user_id, created_at desc);`);
       await apply('20261007160000_coach_threads_memory.sql');
+      // Edits from the memory sheet: the user's own wording, edit tombstones, the revision on every user change.
+      await apply('20261009120000_coach_memory_user_edits.sql');
     }
     await sql(`insert into auth.users(id) values ('${USER_A}'),('${USER_B}');`);
     const jwtSecret = 'disposable-edge-test-only-' + crypto.randomUUID();

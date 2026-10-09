@@ -672,7 +672,7 @@ export class FakeCoachDb {
     for (const m of active) topics[m.topic] = (topics[m.topic] ?? 0) + 1;
     const shape = (m: any, pinned: boolean) => ({
       id: m.id, content: m.content, topic: m.topic, importance: m.importance, created_at: m.created_at, updated_at: m.updated_at,
-      source: m.source, confirmations: m.confirmations, pinned,
+      source: m.source, confirmations: m.confirmations, pinned, version: m.version,
     });
     return { memories: [...pins.map((m) => shape(m, true)), ...ranked.map((m) => shape(m, false))], total: active.length, topics };
   }
@@ -754,6 +754,9 @@ export class FakeCoachDb {
     const state = this.state(user);
     const results: any[] = [];
     let bump = false;
+    // A pass may confirm a row in the user's own words or move its importance; nothing else (reason user_edited).
+    const machine = actor === 'curator' || actor === 'consolidator';
+    const userRow = (m: any) => m?.source === 'user';
     const items = () => this.rows('coach_memory_items');
     const topic = (v: unknown) => {
       const t = String(v ?? '').trim().toLowerCase();
@@ -797,7 +800,7 @@ export class FakeCoachDb {
         });
         items().push(row);
         this.event(user, row.id, 'add', actor, { after: structuredClone(row), thread_id: threadId });
-        bump ||= this.revises(row);
+        bump ||= actor === 'user' || this.revises(row);
         results.push({ op: 'add', id: row.id, applied: true });
       } else if (['update', 'confirm', 'retire', 'forget'].includes(kind)) {
         const row = items().find((m) => m.id === id && m.user_id === user);
@@ -807,30 +810,45 @@ export class FakeCoachDb {
         if (kind === 'update') {
           const text = typeof op.content === 'string' ? content(op.content) : row.content;
           if (!text) { results.push({ op: 'update', id, applied: false, reason: 'invalid_content' }); continue; }
+          const nextTopic = typeof op.topic === 'string' ? topic(op.topic) : row.topic;
+          if (machine && userRow(row) && (text !== row.content || nextTopic !== row.topic)) {
+            results.push({ op: 'update', id, applied: false, reason: 'user_edited' });
+            continue;
+          }
+          // The user's edit of a text: an edit tombstone (the old text's tokens) and no event keeps the old text.
+          const edited = actor === 'user' && text !== row.content;
           Object.assign(row, {
-            content: text, topic: typeof op.topic === 'string' ? topic(op.topic) : row.topic, importance: imp(op.importance, row.importance),
-            version: row.version + 1, updated_at: now, last_confirmed_at: now,
+            content: text, topic: nextTopic, importance: imp(op.importance, row.importance),
+            version: row.version + 1, updated_at: now, last_confirmed_at: now, source: actor === 'user' ? 'user' : row.source,
           });
-          this.event(user, id, 'update', actor, { before, after: structuredClone(row), thread_id: threadId });
-          bump ||= this.revises(before) || this.revises(row);
+          if (edited) for (const e of this.rows('coach_memory_events')) if (e.memory_id === id) { delete e.before?.content; delete e.after?.content; }
+          const old = edited ? (({ content: _, ...rest }) => rest)(before) : before;
+          this.event(user, id, 'update', actor, {
+            before: old, after: structuredClone(row), thread_id: threadId,
+            ...(edited ? { reason: 'user_edit', tokens: tokensOf(before, op) } : {}),
+          });
+          bump ||= actor === 'user' || this.revises(before) || this.revises(row);
         } else if (kind === 'confirm') {
           Object.assign(row, { confirmations: row.confirmations + 1, last_confirmed_at: now });
           this.event(user, id, 'confirm', actor, { thread_id: threadId });
+          bump ||= actor === 'user';
         } else if (kind === 'retire') {
+          if (machine && userRow(row)) { results.push({ op: 'retire', id, applied: false, reason: 'user_edited' }); continue; }
           Object.assign(row, { retired_at: now, retired_reason: String(op.reason || 'retired').slice(0, 300) });
           this.event(user, id, 'retire', actor, { before, thread_id: threadId, reason: row.retired_reason, tokens: tokensOf(before, op) });
-          bump ||= this.revises(before);
+          bump ||= actor === 'user' || this.revises(before);
         } else {
           this.tables.set('coach_memory_items', items().filter((m) => m !== row));
           for (const e of this.rows('coach_memory_events')) if (e.memory_id === id) { delete e.before?.content; delete e.after?.content; }
           this.event(user, id, 'forget', actor, { thread_id: threadId, tokens: tokensOf(before, op), reason: op.reason ?? null });
-          bump ||= this.revises(before);
+          bump ||= actor === 'user' || this.revises(before);
         }
         results.push({ op: kind, id, applied: true });
       } else if (kind === 'merge') {
         const keep = items().find((m) => m.id === id && m.user_id === user && !m.retired_at);
         const others = items().filter((m) => m.user_id === user && !m.retired_at && m.id !== id && (op.ids ?? []).includes(m.id));
         if (!keep || !others.length) { results.push({ op: 'merge', id, applied: false, reason: keep ? 'nothing_to_merge' : 'not_found' }); continue; }
+        if (machine && [keep, ...others].some(userRow)) { results.push({ op: 'merge', id, applied: false, reason: 'user_edited' }); continue; }
         const before = structuredClone(keep);
         Object.assign(keep, {
           content: content(op.content) ?? keep.content, topic: typeof op.topic === 'string' ? topic(op.topic) : keep.topic,
@@ -842,7 +860,7 @@ export class FakeCoachDb {
           Object.assign(m, { retired_at: now, retired_reason: 'merged' });
           this.event(user, m.id, 'merge', actor, { reason: 'merged' });
         }
-        bump ||= [before, keep, ...others].some(this.revises);
+        bump ||= actor === 'user' || [before, keep, ...others].some(this.revises);
         results.push({ op: 'merge', id, applied: true });
       } else if (kind === 'forget_all') {
         for (const m of items().filter((x) => x.user_id === user)) {
@@ -863,7 +881,9 @@ export class FakeCoachDb {
     if (active.length > 200) {
       const score = (m: any) => m.importance / 5 + 0.5 * Math.exp(-Math.max(0, this.clock - micros(m.last_confirmed_at) / 1000) / 86_400_000 / 120)
         + 0.2 * Math.log(1 + m.confirmations);
-      const victims = [...active].sort((a, b) => (score(a) - score(b)) || micros(a.last_confirmed_at) - micros(b.last_confirmed_at)
+      // Rows in the user's own words go last.
+      const victims = [...active].sort((a, b) => (Number(userRow(a)) - Number(userRow(b))) || (score(a) - score(b))
+        || micros(a.last_confirmed_at) - micros(b.last_confirmed_at)
         || micros(a.created_at) - micros(b.created_at) || String(a.id).localeCompare(String(b.id))).slice(0, active.length - 200);
       for (const v of victims) {
         Object.assign(v, { retired_at: this.now(), retired_reason: 'evict' });
