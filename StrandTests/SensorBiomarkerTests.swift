@@ -719,6 +719,7 @@ final class SensorBiomarkerTests: XCTestCase {
         let cases: [(String?, String)] = [
             (nil, "Not enough usable data."),
             ("unknown_wrist_placement", "The strap's wrist placement wasn't verified."),
+            ("placement_unsupported", "This measurement needs the strap on the wrist; it was set as worn elsewhere."),
             ("unknown_orientation", "The strap's orientation wasn't verified."),
             ("insufficient_eligible_time", "Not enough eligible time was recorded."),
             ("unsupported_native_rate", "The sensor's native sample rate isn't supported for this measurement."),
