@@ -708,8 +708,10 @@ struct ManualEventDemoView: View {
     var showEditor = false
     var showCustomType = false
     var showDetail = false
+    var showEventPage = false
     @StateObject private var center: ManualEventCenter
-    init(showEditor: Bool = false, showCustomType: Bool = false, showDetail: Bool = false) {
+    init(showEditor: Bool = false, showCustomType: Bool = false, showDetail: Bool = false, showEventPage: Bool = false) {
+        self.showEventPage = showEventPage
         self.showEditor = showEditor
         self.showCustomType = showCustomType
         self.showDetail = showDetail
@@ -734,10 +736,19 @@ struct ManualEventDemoView: View {
             let bpm = t < start ? 64 + sin(t / 300) * 2 : t < end ? 108 + sin(t / 200) * 6 : 78 - (t - end) / 300
             return [t, bpm.rounded(), bpm - 4, bpm + 4, 60]
         }
+        let hrv: [[Double]] = stride(from: start - 1800, to: end + 1800, by: 300).map { (t: Double) -> [Double] in
+            let value: Double = t < start ? 52 : (t < end ? 31 : 44)
+            return [t, value, 300]
+        }
+        let movement: [[Double]] = stride(from: start - 1800, to: end + 1800, by: 60).map { (t: Double) -> [Double] in
+            let value: Double = t < start ? 0.012 : (t < end ? 0.21 + sin(t / 150) * 0.03 : 0.02)
+            return [t, value, 60]
+        }
         let json: [String: Any] = [
             "version": "manual-event-context-1", "status": "ready", "final": false, "computed_at": end + 3600,
             "event": ["id": event.id.uuidString, "activity_kind": "walking", "start": start, "end": end],
             "device": ["resolution": "entry"],
+            "traces": ["hrv_rmssd_ms": hrv, "movement_g": movement],
             "heart_rate": ["pre": ["n": 1790, "coverage": 0.99, "mean": 64, "min": 58, "max": 71],
                            "during": ["n": 1795, "coverage": 1.0, "mean": 108, "min": 92, "max": 121],
                            "post": ["n": 1780, "coverage": 0.99, "mean": 78, "min": 70, "max": 96],
@@ -758,14 +769,17 @@ struct ManualEventDemoView: View {
     }
 
     var body: some View {
-        if showDetail, let event = center.events.first {
+        if showEventPage, let event = ManualEventPresentation.events(center).first {
+            EventDetailView(event: event, history: ManualEventPresentation.events(center), manual: center)
+        } else if showDetail, let event = center.events.first {
             ManualEventDetailView(entry: event, center: center)
         } else if showCustomType {
             ManualEventCatalogEditor(center: center,
                 initial: ManualEventEntry(id: UUID(), kind: .eventType, label: "My activity", symbol: "bicycle"), owner: center.owner)
         }
         else if showEditor { ManualEventEditor(center: center, request: EventEditorRequest(), owner: center.owner) }
-        else { EventsView(manualEventCenter: center) }
+        // The tab's own routes, so the latest-reaction card and timeline rows open their event page here too.
+        else { EventsView(manualEventCenter: center).tabRouteDestinations() }
     }
 }
 #endif

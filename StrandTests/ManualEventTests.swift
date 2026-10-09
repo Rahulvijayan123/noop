@@ -197,6 +197,37 @@ final class ManualEventTests: XCTestCase {
         XCTAssertEqual(center.effectiveKind(of: own), .rest)
     }
 
+    @MainActor
+    func testLoggedEventsFeedTheEventsTabWithTheirStrapCurves() throws {
+        let store = try ManualEventStore(path: ":memory:")
+        let id = CloudPushIdentity(ownerId: ownerA, sourceId: UUID().uuidString, tokenId: UUID().uuidString, uploadToken: "fixture")
+        let center = ManualEventCenter(store: store, automaticallySync: false, identity: { id }, endpoint: { nil })
+        center.bindAccount()
+        let walking = try XCTUnwrap(center.types.first { $0.label == "Walking" })
+        let entry = ManualEventEntry(id: UUID(), kind: .event, label: "Walking", symbol: walking.symbol, typeId: walking.id,
+                                     startUnixSeconds: 1_791_000_000, endUnixSeconds: 1_791_001_200, note: "Lunch")
+        XCTAssertTrue(center.save(entry, for: ownerA))
+        var events = ManualEventPresentation.events(center)
+        XCTAssertEqual(events.map(\.id), [entry.id.uuidString])
+        XCTAssertNil(events[0].physiology, "no context yet: listed, without curves")
+        XCTAssertEqual(events[0].origin, .reported); XCTAssertEqual(events[0].typeId, walking.id)
+        XCTAssertEqual(events[0].endDate, entry.end)
+        let json: [String: Any] = ["status": "ready", "event": ["id": entry.id.uuidString, "start": 1_791_000_000, "end": 1_791_001_200],
+            "heart_rate": ["trace": ["bin_s": 60, "bins": [[1_790_999_000, 61, 58, 64, 60], [1_791_000_060, 112, 100, 120, 60]]]],
+            "traces": ["hrv_rmssd_ms": [[1_791_000_000, 31, 300]], "movement_g": [[1_791_000_060, 0.25, 60]]]]
+        let context = try XCTUnwrap(ManualEventContext.decode(JSONSerialization.data(withJSONObject: json)))
+        center.showContextForPreview(context, for: entry.id)
+        events = ManualEventPresentation.events(center)
+        let physiology = try XCTUnwrap(events[0].physiology)
+        XCTAssertEqual(physiology.metrics.map(\.name), ["Heart rate", "HRV", "Movement"])
+        XCTAssertEqual(physiology.metrics[2].unit, "mg"); XCTAssertEqual(physiology.metrics[2].points[0].value, 250, accuracy: 0.001)
+        XCTAssertEqual(physiology.metrics[1].points[0].supportSeconds, 300)
+        XCTAssertEqual(physiology.eventStart, entry.start); XCTAssertEqual(physiology.eventEnd, entry.end)
+        XCTAssertEqual(physiology.windowStart, entry.start!.addingTimeInterval(-1800))
+        let stats = EventPhaseStats(physiology: physiology, metric: physiology.metrics[0])
+        XCTAssertEqual(stats.mean(.before) ?? 0, 61, accuracy: 0.001); XCTAssertEqual(stats.mean(.during) ?? 0, 112, accuracy: 0.001)
+    }
+
     func testValidationMatchesTheServerRules() throws {
         var bad = event(); bad.activityKind = "sprinting"
         XCTAssertThrowsError(try bad.validate())

@@ -1,9 +1,13 @@
 # Manual event logging
 
-The top of the Events tab logs real labels. The existing Events content below it keeps its current
-layout and data source, including the release empty state (now worded "No detected events yet", since
-the log above can hold logged ones) and the DEBUG-only physiology, recovery and sample timeline. The
-manual log does not upload sample events.
+The top of the Events tab logs real labels, and the rest of the tab is built from them
+(`ManualEventPresentation`): the latest-reaction card, the timeline with its All / Reported / Detected
+filter, All events and each event's page. A logged event's page draws heart rate, HRV and movement
+(milli-g) before, during and after it from the event's server context, with Before / During / After
+means and the recovery comparison against earlier events of the same type, and opens the full strap
+context (what the classifier saw, baselines, what else was going on). An event without a synced context
+is listed without curves. The DEBUG-only sample events still appear only under `--demo-events` /
+`--demo-seed`, and the manual log does not upload them.
 
 The logger supports saved custom types, favorites, live start/stop, timed and past events, notes,
 editing, JSON export, named duration presets, and a retained archive. A preset's window ends now,
@@ -57,6 +61,7 @@ server from what is already there, never from a model of its own:
 | Part | Source |
 | --- | --- |
 | Heart rate before (30 min), during and after (30 min): n, coverage, mean, range, p10/p50/p90, a binned trace | `noop_hr_samples` (per second) |
+| Traces for the event page: canonical HRV buckets and binned wrist movement, each with its support seconds | `server_metric_series`, `noop_gravity_samples` |
 | Wrist motion | `noop_gravity_samples.dynAccel` |
 | HRV, resting HR, breathing rate, steps, energy | `server_metric_series` (published by the scoring lane) |
 | Classes the activity classifier saw, with seconds and mean confidence; sleep and off-wrist seconds; agreement with the event's kind | `activity_context_runs` (published by the activity lane) |
@@ -67,7 +72,8 @@ server from what is already there, never from a model of its own:
 Lists are bounded (20 Watchdog candidates, exposures and other logged events; 50 wear events), and one
 event whose context cannot be built never fails the others in a request or in the refresh.
 
-The strap is the one the event was logged with (the app's device id, resolved like `findNoopDevice`),
+The strap is the one the event was logged with (the app's device id, resolved like `findNoopDevice`, or
+the server's device UUID when the app stored that),
 else the one with the most heart-rate samples in the window. The status is `running`, `awaiting_data`
 (uploads have not reached the end of the post window yet), `insufficient_data` or `ready`. A context
 is rebuilt while it can change and frozen (`final`) 72 hours after the post window. Comparisons are
@@ -126,5 +132,7 @@ context of a walk built from real sensor rows, classifier runs, baselines, Watch
 exposures, the cache, and account deletion. `manual_events_sql_test.ts` drives the real `scores`
 handler through PostgREST. The Swift checks cover durable history, account switches, stale editors,
 exact and per-item acknowledgements, isolation of refused revisions, offline retry, context fetch and
-cache, activity kinds and the movable time window. `--demo-screen eventdetail` shows the detail sheet
-with a sample context in the simulator.
+cache, activity kinds, the Events-tab presentation and the movable time window.
+`EventLogUITests` (scheme `NOOPiOSUITests`) checks the tab in the simulator: the logged walk leads the
+latest-reaction card and the timeline and opens with its three curves. `--demo-screen eventslog`,
+`eventpage` and `eventdetail` show the tab, the event page and the context sheet with a sample context.

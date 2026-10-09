@@ -6,7 +6,8 @@ import StrandDesign
 // The Events tab renders `[HealthEvent]`. Anything that can fill that array (the backend, the local
 // store, manual logging) drives the whole screen: grouping by day, the All / Reported / Detected filter,
 // the timeline, the latest-reaction card, the full list, the per-event page and the recovery history.
-// No production source feeds the tab yet, so it shows `HealthEvent.current`: empty in a release build.
+// Events the wearer logged feed it (ManualEventPresentation, with curves from each event's server context);
+// `HealthEvent.current` adds nothing in a release build.
 // `HealthEvent.sample` (fabricated events, including a made-up medication) exists in DEBUG builds only and
 // appears only under `--demo-seed` or `--demo-events`, labelled as sample data. Models are `Codable` so a
 // backend payload can decode straight into them.
@@ -37,6 +38,7 @@ enum EventOrigin: String, Codable, Hashable {
 struct PhysiologyPoint: Hashable, Codable {
     var time: Date
     var value: Double
+    var supportSeconds: Double? = nil
 }
 
 struct PhysiologyMetric: Hashable, Codable {
@@ -74,6 +76,15 @@ struct HealthEvent: Identifiable, Hashable, Codable {
     var origin: EventOrigin
     var physiology: EventPhysiology?
     var recovery: EventRecovery?
+    var typeId: UUID? = nil
+    var ownerId: String? = nil
+    var deviceId: String? = nil
+    var endDate: Date? = nil
+
+    func hasSameType(as other: HealthEvent) -> Bool {
+        guard let typeId, let otherType = other.typeId else { return false }
+        return typeId == otherType && ownerId == other.ownerId
+    }
 }
 
 // MARK: - Sample data (DEBUG only, never shown as the wearer's own events)
@@ -114,7 +125,15 @@ extension HealthEvent {
             return HealthEvent(id: id, date: date, title: title, detail: detail, symbol: symbol, tone: tone,
                                origin: origin,
                                physiology: trace.map { EventPhysiology.sample(day: day(ago), start: $0.start, end: $0.end) },
-                               recovery: recovery)
+                               recovery: recovery, typeId: sampleType(title))
+        }
+        /// Same-kind comparisons match on type ids: samples of one title share a stable one (FNV-1a of it).
+        func sampleType(_ title: String) -> UUID {
+            var a: UInt64 = 0xcbf29ce484222325, b: UInt64 = 0x84222325cbf29ce4
+            for byte in title.utf8 { a = (a ^ UInt64(byte)) &* 0x100000001b3; b = (b ^ UInt64(byte)) &* 0x100000001b3 }
+            let bytes = withUnsafeBytes(of: a.bigEndian, Array.init) + withUnsafeBytes(of: b.bigEndian, Array.init)
+            return UUID(uuid: (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7],
+                               bytes[8], bytes[9], bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15]))
         }
         func recovery(_ minutes: Double, _ hrv: Double, _ activityMinutes: Double) -> EventRecovery {
             EventRecovery(timeToRecover: minutes * 60, hrvReturn: hrv, activityReturn: activityMinutes * 60)
@@ -149,8 +168,8 @@ extension HealthEvent {
 #endif
 
 extension HealthEvent {
-    /// The events the Events tab shows. Nothing real feeds it yet, so a release build shows none; the
-    /// fabricated samples are reachable only from a DEBUG demo launch.
+    /// Events beyond the logged ones. A release build adds none; the fabricated samples are reachable only
+    /// from a DEBUG demo launch.
     static var current: [HealthEvent] {
         #if DEBUG
         if DemoLaunch.showsSampleEvents { return sample }
@@ -164,16 +183,23 @@ extension HealthEvent {
 
 /// The Events tab: the latest event the body reacted to, then the newest days of the timeline.
 struct EventsView: View {
-    var events: [HealthEvent] = HealthEvent.current
-    var manualEventCenter: ManualEventCenter = .shared
+    var extraEvents: [HealthEvent] = HealthEvent.current
+    @ObservedObject var manualEventCenter: ManualEventCenter = .shared
     @ObservedObject private var filterState = EventFilterState.shared
 
+    /// The wearer's logged events with their strap context, newest first, plus any DEBUG samples.
+    private var events: [HealthEvent] {
+        (ManualEventPresentation.events(manualEventCenter) + extraEvents).sorted { $0.date > $1.date }
+    }
+
     /// The most recent event that carries a physiology trace.
-    private var featured: HealthEvent? {
+    private func featured(_ events: [HealthEvent]) -> HealthEvent? {
         events.filter { $0.physiology != nil }.max { $0.date < $1.date }
     }
 
     var body: some View {
+        let events = events
+        let featured = featured(events)
         ScreenScaffold(title: "Events", trailing: { HeaderSettingsButton() }) {
             ManualEventLoggingSection(center: manualEventCenter)
             if let featured, let physiology = featured.physiology, !physiology.metrics.isEmpty {
@@ -186,9 +212,8 @@ struct EventsView: View {
                 }
             }
             if events.isEmpty {
-                // Nothing feeds this tab yet: say so once, with no filter to operate on an empty list. Named
-                // "detected" because the event log above can already hold events the person logged.
-                ComingSoon(what: "No detected events yet.")
+                // Nothing logged yet: say so once, with no filter to operate on an empty list.
+                ComingSoon(what: "No events yet.")
             } else {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     SectionHeader("Timeline")

@@ -96,6 +96,11 @@ struct ManualEventContext: Decodable, Equatable, Sendable {
     struct Projection: Decodable, Equatable, Sendable { var status: String?; var reason: String? }
     struct Projections: Decodable, Equatable, Sendable { var activityGroundTruth: Projection? }
     struct Quality: Decodable, Equatable, Sendable { var dataThrough: Double?; var missing: [String]? }
+    /// [t, value, support seconds] rows: canonical HRV buckets and binned wrist movement (g).
+    struct Traces: Decodable, Equatable, Sendable {
+        var hrvRmssdMs: [[Double]]?
+        var movementG: [[Double]]?
+    }
 
     var version: String?
     var status: Status?
@@ -104,6 +109,7 @@ struct ManualEventContext: Decodable, Equatable, Sendable {
     var event: Event?
     var device: Device?
     var heartRate: HeartRate?
+    var traces: Traces?
     var series: Windows?
     var activity: Activity?
     var baselines: Baselines?

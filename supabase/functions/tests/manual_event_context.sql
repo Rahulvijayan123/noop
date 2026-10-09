@@ -160,6 +160,9 @@ BEGIN
      OR (c #>> '{heart_rate,during,coverage}')::numeric <> 1 THEN RAISE EXCEPTION 'heart rate wrong: %', c -> 'heart_rate'; END IF;
   IF jsonb_array_length(c #> '{heart_rate,trace,bins}') NOT BETWEEN 40 AND 241 THEN RAISE EXCEPTION 'trace wrong'; END IF;
   IF (c #>> '{motion,during,dyn_accel_mean}')::numeric <> 0.3 THEN RAISE EXCEPTION 'motion wrong: %', c -> 'motion'; END IF;
+  IF c #> '{traces,hrv_rmssd_ms}' <> jsonb_build_array(jsonb_build_array(pg_temp.s(), 30.0, 300))
+     OR jsonb_array_length(c #> '{traces,movement_g}') <> 80
+     OR (c #>> '{traces,movement_g,30,1}')::numeric <> 0.3 THEN RAISE EXCEPTION 'traces wrong: %', c -> 'traces'; END IF;
   IF (c #>> '{series,during,steps,value}')::numeric <> 2000 OR (c #>> '{series,during,hrv_rmssd_ms,value}')::numeric <> 30
      THEN RAISE EXCEPTION 'series wrong: %', c #> '{series,during}'; END IF;
   IF c #>> '{activity,during,classes,0,class}' <> 'walking' OR (c #>> '{activity,during,classes,0,seconds}')::int <> 1000

@@ -148,6 +148,14 @@ declare
   v_key text;
   v_device uuid;
 begin
+  -- An app that already knows the server's id for the strap may store that UUID instead.
+  if v_external ~* '^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$' then
+    select d.id into v_device from public.devices d where d.user_id = p_user and d.id = v_external::uuid;
+    if v_device is not null then
+      return query select v_device, 'entry'::text;
+      return;
+    end if;
+  end if;
   if v_external is not null and v_external ~ '^[\x20-\x7e]{1,255}$' then
     v_serial := case when v_external like 'whoop-%' then substr(v_external, 7) else '' end;
     for v_source in
@@ -465,6 +473,8 @@ declare
   v_act jsonb; v_act_pre jsonb; v_act_post jsonb;
   v_series jsonb; v_series_pre jsonb; v_series_post jsonb;
   v_trace jsonb;
+  v_hrv_trace jsonb;
+  v_motion_trace jsonb;
   v_bin integer;
   v_through bigint;
   v_status text;
@@ -527,6 +537,20 @@ begin
             from public.noop_hr_samples h
            where v_device is not null and h.user_id = p_user and h.device_id = v_device
              and h.ts >= v_pre_a and h.ts < v_post_b and h.bpm between 25 and 250
+           group by 1) b;
+
+  -- HRV as the scoring lane published it (canonical, motion-gated buckets), and wrist movement on the same
+  -- bins as the heart-rate trace: [t, value, support seconds].
+  select coalesce(jsonb_agg(jsonb_build_array(extract(epoch from m.bucket_start)::bigint, round(m.value::numeric, 1),
+           m.bucket_seconds) order by m.bucket_start), '[]'::jsonb) into v_hrv_trace
+    from public.server_metric_series m
+   where m.user_id = p_user and m.metric = 'hrv_rmssd_ms'
+     and m.bucket_start >= to_timestamp(v_pre_a) and m.bucket_start < to_timestamp(v_post_b);
+  select coalesce(jsonb_agg(jsonb_build_array(b.t, b.v, v_bin) order by b.t), '[]'::jsonb) into v_motion_trace
+    from (select v_pre_a + ((g.ts - v_pre_a) / v_bin) * v_bin as t, round(avg(g."dynAccel")::numeric, 4) as v
+            from public.noop_gravity_samples g
+           where v_device is not null and g.user_id = p_user and g.device_id = v_device
+             and g.ts >= v_pre_a and g.ts < v_post_b and g."dynAccel" is not null
            group by 1) b;
 
   -- How far this device's uploads reach: the context waits until they cover the post window.
@@ -639,6 +663,8 @@ begin
     'heart_rate', jsonb_build_object('pre', v_hr_pre, 'during', v_hr, 'post', v_hr_post,
       'trace', jsonb_build_object('bin_s', v_bin, 'columns', jsonb_build_array('t', 'mean', 'min', 'max', 'n'),
                                   'bins', v_trace)),
+    'traces', jsonb_build_object('columns', jsonb_build_array('t', 'value', 'support_s'),
+      'hrv_rmssd_ms', v_hrv_trace, 'movement_g', v_motion_trace),
     'motion', jsonb_build_object(
       'pre', public.manual_event_motion_stats_v1(p_user, v_device, v_pre_a, v_start),
       'during', case when v_point then null else public.manual_event_motion_stats_v1(p_user, v_device, v_start, v_during_end) end,
