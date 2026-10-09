@@ -39,6 +39,8 @@ final class WatchdogService {
     private var recoveredOffs: Set<Int> = []
     /// Per-minute movement evidence (4 h) for the exercise-session context.
     private let exerciseEvidence = WatchdogExerciseEvidence()
+    /// Episode lineage and phone-only optical evidence to the account.
+    private let serverSync = WatchdogServerSync()
 
     /// Live ring retention: the window plus a margin for a tick that runs late.
     private static let ringSeconds = WatchdogConfig.contextSeconds + 5 * 60
@@ -208,6 +210,19 @@ final class WatchdogService {
             // Awaited, so the outcome is persisted before this tick (and a background task) completes.
             let delivery = await WatchdogNotifier.deliver(result)
             applyDelivery(delivery, result: result, queuedAt: now, key: key, liveAlerts: liveAlerts, model: model)
+        }
+        // Lineage to the account (throttled inside; nothing advances until the server accepted it).
+        let serverDevice = model.hostedReadCandidates.first
+        await serverSync.syncEpisodes(rows: model.baseline.episodeLedger, annotations: model.baseline.episodeAnnotations,
+                                      localDeviceId: key, serverDeviceId: serverDevice, now: now)
+        if let store = await model.repo.storeHandle() {
+            // Not awaited: a first run reads up to six days of aux records and must not lengthen the tick.
+            let ids = model.repo.rawPhysiologyReadIds(store: store)
+            let sync = serverSync
+            Task { @MainActor in
+                await sync.syncQualityMinutes(store: store, readIds: ids, localDeviceId: key,
+                                              serverDeviceId: serverDevice, now: now)
+            }
         }
         return true
     }

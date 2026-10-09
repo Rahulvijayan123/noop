@@ -174,3 +174,64 @@ public enum WatchdogEpisodeLedger: Sendable {
         }
     }
 }
+
+// MARK: - Server record (POST scores/watchdog-episodes, docs/context-watchdog/WATCHDOG_EPISODES.md)
+
+extension WatchdogEpisodeLedger {
+    /// The JSON body for `POST scores/watchdog-episodes`: the alarm lineage (what was judged, against which
+    /// reference, what the wearer said about it) kept on the account, not only on this phone.
+    public static func serverBody(rows: [WatchdogEpisodeLedgerRow], annotations: [WatchdogEpisodeAnnotation],
+                                  serverDeviceId: String, localDeviceId: String, versions: [String: String],
+                                  nowUnix: Int) -> [String: Any] {
+        let encoder = JSONEncoder()
+        func json<T: Encodable>(_ v: T?) -> Any {
+            guard let v, let data = try? encoder.encode(v),
+                  let obj = try? JSONSerialization.jsonObject(with: data) else { return NSNull() }
+            return obj
+        }
+        let byEpisode = Dictionary(annotations.map { ($0.episodeId, $0) }, uniquingKeysWith: { _, b in b })
+        let episodes: [[String: Any]] = rows.map { r in
+            [
+                "episode_id": r.episodeId,
+                "opened_at": r.openedUnix,
+                "last_at": r.lastUnix,
+                "closed_at": r.closedUnix.map { $0 as Any } ?? NSNull(),
+                "max_severity": r.maxSeverity,
+                "peak_severity": r.peakSeverity.map { $0 as Any } ?? NSNull(),
+                "safety": r.safety,
+                "personal_off": r.personalOff,
+                "notify_delivery": r.notifyDelivery,
+                "live_alerts": r.liveAlerts,
+                "off_minute_count": r.offMinutes.count,
+                "unavailable_minutes": r.unavailableMinutes,
+                "headline": r.headline.map { $0 as Any } ?? NSNull(),
+                "event_label": r.eventLabel.map { $0 as Any } ?? NSNull(),
+                "activity_label": r.activityLabel.map { $0 as Any } ?? NSNull(),
+                "contributing": r.contributing ?? [],
+                "signals": json(r.signals),
+                "exercise": json(r.exercise),
+                "annotation": json(byEpisode[r.episodeId]),
+                "versions": versions,
+                "client_updated_at": max(r.lastUnix, byEpisode[r.episodeId]?.enteredUnix ?? 0, r.closedUnix ?? 0),
+            ]
+        }
+        return ["device_id": serverDeviceId, "local_device_id": localDeviceId, "episodes": episodes,
+                "sent_at": nowUnix]
+    }
+
+    /// A stable fingerprint of what would be sent for one episode (resend only when it changed).
+    public static func fingerprint(_ row: WatchdogEpisodeLedgerRow, annotation: WatchdogEpisodeAnnotation?) -> String {
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        // FNV-1a 64 over the sorted-key JSON: stable across launches (Swift's hashValue is reseeded per process) and
+        // available on Linux, where this package also builds.
+        var h: UInt64 = 0xcbf29ce484222325
+        for data in [(try? encoder.encode(row)) ?? Data(), Data([0]), annotation.flatMap { try? encoder.encode($0) } ?? Data()] {
+            for byte in data {
+                h ^= UInt64(byte)
+                h = h &* 0x100000001b3
+            }
+        }
+        return String(h, radix: 16)
+    }
+}
