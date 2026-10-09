@@ -605,7 +605,7 @@ struct SensorBiomarkerLane {
         // 5. Per UTC hour, build the CONTRACTS.md §4 requests and call the sidecar. Only one
         //    hour's decoded samples are resident at a time. A request asks only for families whose
         //    input it carries; a family no request could ask for is published withheld with the
-        //    coverage reason, and one the responses never report becomes `artifact_unavailable`.
+        //    coverage reason, and one the responses never report becomes `model_unavailable`.
         var stagesByFamily: [String: [SensorBiomarkerFamilyStage]] = [:]
         var sentFamilies = Set<String>()
         var requestCount = 0, imuSegmentsSent = 0, ppgSegmentsSent = 0
@@ -671,8 +671,10 @@ struct SensorBiomarkerLane {
                 stats.familiesWithheld += 1
                 stats.familiesWithoutInput += 1
             } else {
-                // Asked, but no request reported this family: explicit withheld with a precise reason.
-                familiesDoc[family] = SensorBiomarkerFamilyStage.withheld(family: family, reason: "artifact_unavailable").jsonValue
+                // Asked, but no request reported this family: its input was sent, so the gap is the
+                // sidecar's (no model answered for it), never the data's.
+                familiesDoc[family] = SensorBiomarkerFamilyStage.withheld(
+                    family: family, reason: SensorBiomarkerInputs.reasonModelUnavailable).jsonValue
                 stats.familiesWithheld += 1
             }
         }
@@ -714,10 +716,13 @@ struct SensorBiomarkerLane {
                               coverage: DayCoverage) -> (String, [String: Int]) {
         switch SensorBiomarkerInputs.requiredModality(of: family) {
         case .ppg?:
-            if resolved.ppg.isEmpty || coverage.ppg.expectedSeconds == 0 { return ("artifact_unavailable", [:]) }
-            return (coverage.ppg.dominantWithheldReason ?? "artifact_unavailable", coverage.ppg.withheld)
+            if resolved.ppg.isEmpty || coverage.ppg.expectedSeconds == 0 {
+                return (SensorBiomarkerInputs.reasonNoVerifiedInput, [:])
+            }
+            return (coverage.ppg.dominantWithheldReason ?? SensorBiomarkerInputs.reasonNoVerifiedInput,
+                    coverage.ppg.withheld)
         case .imu?, nil:
-            return ("artifact_unavailable", [:])
+            return (SensorBiomarkerInputs.reasonNoVerifiedInput, [:])
         }
     }
 
@@ -823,11 +828,12 @@ struct SensorBiomarkerLane {
         return body
     }
 
-    /// Build all-withheld families for a day with no usable input.
+    /// Build all-withheld families for a day with no verified input object.
     mutating func allWithheldFamilies(_ families: [String]) -> [String: JSONValue] {
         var out: [String: JSONValue] = [:]
         for family in families {
-            out[family] = SensorBiomarkerFamilyStage.withheld(family: family, reason: "artifact_unavailable").jsonValue
+            out[family] = SensorBiomarkerFamilyStage.withheld(
+                family: family, reason: SensorBiomarkerInputs.reasonNoVerifiedInput).jsonValue
             stats.familiesWithheld += 1
         }
         return out
@@ -865,7 +871,7 @@ struct SensorBiomarkerLane {
 
     /// Parse one sidecar response into per-family stages. A top-level `withheld` or `error` status
     /// (a provider verdict) becomes withheld families with the envelope's reason — the lane never
-    /// retries a verdict. A family the response did not report becomes `artifact_unavailable`.
+    /// retries a verdict. A family no response reports is withheld by the caller (`model_unavailable`).
     static func parseEnvelope(_ response: InferenceResponse, families: [String]) throws -> [String: SensorBiomarkerFamilyStage] {
         var out: [String: SensorBiomarkerFamilyStage] = [:]
         if response.status == "withheld", response.withheldReason == "timeout" {

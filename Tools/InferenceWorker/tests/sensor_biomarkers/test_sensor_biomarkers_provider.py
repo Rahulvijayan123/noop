@@ -135,7 +135,7 @@ class TestDispatch:
         assert result.status == "ok"
         by_family = {s["family"]: s for s in result.stages}
         assert by_family["movement"]["status"] == "withheld"
-        assert by_family["movement"]["reason"] == "artifact_unavailable"
+        assert by_family["movement"]["reason"] == "no_verified_input"
         assert by_family["ppg_quality"]["status"] == "ok"
         assert by_family["pulse_shape"]["status"] == "ok"
 

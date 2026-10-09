@@ -14,9 +14,16 @@ the implementation only through it:
 The standalone providers (``sensor.biomarkers.paradigma.v1``, ``sensor.biomarkers.rhythm.v1``)
 call the same functions, so each family has one implementation. The three ways an optional family
 can fail to run carry different stable reasons: ``family_disabled`` (the sidecar's flag is off),
-``artifact_unavailable`` / ``runtime_unavailable`` (pinned weights or the isolated runtime are
+``model_unavailable`` / ``runtime_unavailable`` (pinned weights or the isolated runtime are
 missing), and ``adapter_broken`` (import error, interface mismatch, or an exception inside the
 adapter). A broken adapter never takes the other families down with it.
+
+Missing weights used to publish the family reason ``artifact_unavailable``, the same string a family
+without verified input published; the two now read ``model_unavailable`` (here) and
+``no_verified_input`` (no input reached the family), the canonical codes of
+contracts/reason-codes.json. Stored documents keep the old string and readers still accept it. The
+adapter *state* (``GET /v1/providers`` readiness) keeps its name ``artifact_unavailable``: it names
+what is missing, not a data reason.
 """
 
 from __future__ import annotations
@@ -51,10 +58,17 @@ STATE_ARTIFACT_UNAVAILABLE = "artifact_unavailable"
 STATE_RUNTIME_UNAVAILABLE = "runtime_unavailable"
 STATE_BROKEN = "adapter_broken"
 
+#: Family reasons (canonical codes, contracts/reason-codes.json): the model / weights are not available,
+#: and no verified input reached the family. ``artifact_unavailable`` is what both were before
+#: 2026-10-09; it is still read (stored documents) and never written.
+REASON_MODEL_UNAVAILABLE = "model_unavailable"
+REASON_NO_VERIFIED_INPUT = "no_verified_input"
+LEGACY_REASON_ARTIFACT_UNAVAILABLE = "artifact_unavailable"
+
 #: The family reason each non-ready state publishes, and its family status.
 STATE_REASONS: dict[str, tuple[str, str]] = {
     STATE_DISABLED: ("withheld", "family_disabled"),
-    STATE_ARTIFACT_UNAVAILABLE: ("withheld", "artifact_unavailable"),
+    STATE_ARTIFACT_UNAVAILABLE: ("withheld", REASON_MODEL_UNAVAILABLE),
     STATE_RUNTIME_UNAVAILABLE: ("withheld", "runtime_unavailable"),
     STATE_BROKEN: ("error", "adapter_broken"),
 }

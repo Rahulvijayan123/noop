@@ -314,6 +314,62 @@ final class ActivityLaneWearSignalTests: XCTestCase {
         XCTAssertEqual(after.sustainedHrRecoveryMet, true)
     }
 
+    // MARK: - HR upload watermark (awaiting_upload)
+
+    /// An epoch past the HR stream's upload watermark has HR that may not be uploaded yet: `hrPresent`
+    /// is nil (canonical `awaiting_upload`), not false. At or before the watermark, absence is observed.
+    func testHrPresenceIsUnknownPastTheUploadWatermark() {
+        let hrSamples = hr(dayStart, to: dayStart + 300)
+        func evidence(_ s: Int, through: Int?) -> WearSignalEvidence {
+            ActivityLane.wearSignalEvidence(epochStart: s, epochEnd: s + 30, wearIntervals: [],
+                                            recoveryCompletion: nil, hrSamples: hrSamples,
+                                            hrUploadedThrough: through)
+        }
+        XCTAssertEqual(evidence(dayStart + 60, through: nil).hrPresent, true)
+        // No watermark beyond the loaded stream: the tail after the newest sample is awaiting upload.
+        XCTAssertNil(evidence(dayStart + 600, through: nil).hrPresent)
+        XCTAssertNil(evidence(dayStart + 600, through: dayStart + 610).hrPresent,
+                     "an epoch that ends after the watermark is not fully uploaded")
+        // The server holds HR past the epoch: the gap is a real observation.
+        XCTAssertEqual(evidence(dayStart + 600, through: dayStart + 629).hrPresent, false)
+        XCTAssertEqual(evidence(dayStart + 600, through: dayStart + 86_400).hrPresent, false)
+        // The watermark never moves backwards behind the loaded samples.
+        XCTAssertEqual(evidence(dayStart + 270, through: dayStart).hrPresent, true)
+        XCTAssertFalse(ActivityLane.hrAwaitingUpload(epochEnd: dayStart + 300, hrSamples: hrSamples,
+                                                     hrUploadedThrough: dayStart))
+        XCTAssertTrue(ActivityLane.hrAwaitingUpload(epochEnd: dayStart + 301, hrSamples: hrSamples,
+                                                    hrUploadedThrough: nil))
+        XCTAssertTrue(ActivityLane.hrAwaitingUpload(epochEnd: dayStart + 30, hrSamples: [],
+                                                    hrUploadedThrough: nil))
+        XCTAssertEqual(ActivityLane.hrAwaitingUploadReason, "awaiting_upload")
+    }
+
+    /// The live failure: a worn, moving strap whose HR is only uploaded through minute 5. Before the fix
+    /// the tail read "HR absent + high motion" and published `sensor_dropout`; now it abstains (no `wsq`)
+    /// until the HR arrives. With the server holding HR past the day, the same gap is a real dropout.
+    func testNotYetUploadedHrIsNeverPublishedAsSensorDropout() throws {
+        let events: [(ts: Int, kind: String)] = [(dayStart, "WRIST_ON")]
+        let windows = activeWindows(from: dayStart, to: dayStart + 900)
+        let intervals = ActivityLane.wearIntervals(fromEvents: events, from: dayStart, to: dayStart + 900)
+        func document(through: Int?) throws -> [[String: Any]] {
+            try docEpochs(ActivityLane.activityDocument(
+                windows: windows, sleepIntervals: [], exerciseIntervals: [],
+                dayStart: dayStart, dayEnd: dayStart + 900, inputRevision: 7,
+                modelVersion: "hart-activity-1", preprocessingVersion: "activity-preprocess-1",
+                dataThrough: dayStart + 900, wearIntervals: intervals,
+                hrSamples: hr(dayStart, to: dayStart + 300), hrUploadedThrough: through))
+        }
+        let pending = try document(through: dayStart + 299)
+        let tail = pending.filter { ($0["s"] as? Int ?? 0) >= dayStart + 300 }
+        XCTAssertFalse(tail.isEmpty)
+        for e in tail {
+            XCTAssertFalse(e.keys.contains("wsq"), "awaiting upload abstains: \(e["wsq"] ?? "")")
+        }
+        let uploaded = try document(through: dayStart + 86_400)
+        let dropouts = uploaded.filter { ($0["s"] as? Int ?? 0) >= dayStart + 300 && $0["wsq"] as? String == "sensor_dropout" }
+        XCTAssertFalse(dropouts.isEmpty, "with HR uploaded past the gap, absence while moving is dropout")
+    }
+
     /// A whole day with no wear event coverage leaves `durableOffActive` nil (interval semantics:
     /// gaps carry no evidence) — the engine abstains rather than guessing.
     func testNoIntervalCoverageIsNilNotFabricated() {

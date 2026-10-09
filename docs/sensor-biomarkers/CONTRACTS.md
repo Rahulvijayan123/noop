@@ -97,7 +97,13 @@ Reason vocabulary (extends the sidecar `WithheldReason` enum with detail codes i
 `reason`/`reason_counts`): `unverified_sample_clock`, `missing_ppg_anchor`, `saturated_delta`,
 `unverified_optical_dc`, `unknown_wrist_placement`, `unknown_orientation`,
 `insufficient_eligible_time`, `unsupported_native_rate`, `preprocessing_unverified`,
-`artifact_unavailable`, `not_enough_valid_data`, plus the sidecar's existing enum values.
+`no_verified_input`, `model_unavailable`, `not_enough_valid_data`, plus the sidecar's existing enum
+values. `no_verified_input` (no verified object / no usable second reached the family: an empty slot,
+a dark block, a missing modality) and `model_unavailable` (the family's model or pinned weights are not
+available, or the sidecar answered nothing for a family it was sent) are the canonical codes of
+`contracts/reason-codes.json`. Before 2026-10-09 both were published as `artifact_unavailable`; stored
+documents keep that value, readers accept it and show a reason that claims neither cause, and nothing
+writes it any more.
 
 Added by Spec 01: `family_disabled` (flag off), `runtime_unavailable` (an optional family's isolated
 runtime is missing), `adapter_broken` (status `error`; detail `adapter_import_error`,
@@ -160,7 +166,7 @@ One request per (device, contiguous chunk-group); the lane is responsible for ch
 
 Rules:
 - `imu`/`ppg` keys are omitted when no verified raw objects exist for that modality; the
-  corresponding families answer `withheld` with a precise reason (`artifact_unavailable`).
+  corresponding families answer `withheld` with a precise reason (`no_verified_input`).
 - PPG `samples` are ABSOLUTE reconstructed values (baseCode + cumulative deltas, per 1-second v26
   record). Anchored records (NPB1 format 3, protocol 1.5) are sent at their recorded 25 Hz: the anchor
   plus 24 deltas are 25 distinct samples and the next record's anchor is the 26th
@@ -238,7 +244,8 @@ inference time. New entries (parent merges into manifest.json):
 Provisioning scripts live under `Tools/InferenceWorker/scripts/` and stage bytes into the local
 artifact root (gitignored); they record source URL, pinned commit, filename, sha256, size, license.
 Only pinned trusted assets verified by the manifest are ever unpickled/loaded. Missing optional
-artifacts -> provider `not_ready` with `artifact_unavailable`; existing services unaffected.
+artifacts -> provider `not_ready` (adapter state `artifact_unavailable`, family reason
+`model_unavailable`); existing services unaffected.
 
 ## 8. Ownership map (one writer per file)
 

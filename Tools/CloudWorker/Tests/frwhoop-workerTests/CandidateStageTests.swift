@@ -313,6 +313,48 @@ final class CandidateStageTests: XCTestCase {
         XCTAssertEqual(subject.stats.withheld, 1)
     }
 
+    /// The HRV adapter's `unresolved_adjacency` is a data verdict of the sidecar contract: it is
+    /// stored as itself, never coerced to `provider_error` (which would read as our own fault).
+    func testUnresolvedAdjacencyIsCarriedThroughNotCoerced() throws {
+        let server = StubHTTPServer { _ in .json("""
+            {"status":"withheld","metric":"hrv","withheld_reason":"unresolved_adjacency",
+             "diagnostics":{"withheld_detail":"ambiguous_seq_ord"}}
+            """) }
+        defer { server.stop() }
+        let store = FakeCandidateStore()
+        store.selection["hrv"] = selection("shadow")
+        var subject = stage(server: server, store: store)
+        subject.beginDrain(budget: 2)
+        subject.run(claim: claim(), inputs: inputs(beats: sampleBeats()))
+        let record = try XCTUnwrap(store.recorded.first)
+        XCTAssertEqual(record.status, "withheld")
+        XCTAssertEqual(record.withheldReason, "unresolved_adjacency")
+        XCTAssertNil(record.diagnostics?.stringMember("provider_reason_raw"))
+    }
+
+    /// The Swift taxonomy mirrors the sidecar's `WithheldReason` enum member for member
+    /// (Tools/InferenceWorker/src/frwhoop_inference/contract.py), so no provider verdict is
+    /// silently stored as `provider_error`.
+    func testWithheldReasonsMirrorTheSidecarEnum() throws {
+        let contract = URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
+            .deletingLastPathComponent()
+            .appendingPathComponent("InferenceWorker/src/frwhoop_inference/contract.py")
+        let text = try String(contentsOf: contract, encoding: .utf8)
+        guard let start = text.range(of: "class WithheldReason(str, Enum):"),
+              let end = text.range(of: "# Errors", range: start.upperBound..<text.endIndex) else {
+            return XCTFail("WithheldReason enum not found in \(contract.path)")
+        }
+        let body = text[start.upperBound..<end.lowerBound]
+        let regex = try NSRegularExpression(pattern: #"^\s+[A-Z_]+ = "([a-z_]+)"\s*$"#, options: [.anchorsMatchLines])
+        let ns = String(body)
+        let values = Set(regex.matches(in: ns, range: NSRange(ns.startIndex..., in: ns)).compactMap {
+            Range($0.range(at: 1), in: ns).map { String(ns[$0]) }
+        })
+        XCTAssertTrue(values.contains("unresolved_adjacency"))
+        XCTAssertEqual(values, Set(CandidateWithheldReason.allCases.map(\.rawValue)))
+    }
+
     func testUnknownProviderReasonIsCoercedToProviderError() throws {
         let server = StubHTTPServer { _ in .json("""
             {"status":"withheld","metric":"hrv","withheld_reason":"banana"}

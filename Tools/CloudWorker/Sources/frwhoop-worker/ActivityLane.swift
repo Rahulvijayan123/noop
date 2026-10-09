@@ -830,6 +830,10 @@ struct ActivityLane {
         //     the activity day job), so those evidence channels stay nil server-side.
         let hrSamples = try loadHrSamples(user: job.userId, device: job.deviceId,
                                           dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        //     The HR stream's upload watermark: an epoch past it has HR that may not be uploaded yet,
+        //     so its absence is `awaiting_upload` (unknown), never sensor dropout or off-wrist.
+        let hrUploadedThrough = try loadHrUploadedThrough(user: job.userId, device: job.deviceId,
+                                                          from: dayBounds.start)
 
         // 5. Inference per run, outside any transaction, lease renewed around
         //    the long work. Windows are collected per run and folded ONCE
@@ -885,7 +889,8 @@ struct ActivityLane {
             preprocessingVersion: versions.preprocessing,
             dataThrough: dataThrough,
             wearIntervals: wearIntervals,
-            hrSamples: hrSamples)
+            hrSamples: hrSamples,
+            hrUploadedThrough: hrUploadedThrough)
         // The publish RPC validates `p_payload ->> 'day'` against the job's
         // day (20261003120000_activity_context.sql), so the C10 document is
         // stamped with the job day before it is sealed.
@@ -1903,6 +1908,16 @@ struct ActivityLane {
         }
     }
 
+    /// The newest HR second the server holds for the device at or after `from` (the HR stream's upload
+    /// watermark), or nil when there is none. A primary-key range probe: max(ts) under (user, device).
+    private func loadHrUploadedThrough(user: String, device: String, from: Int) throws -> Int? {
+        let rows = try db.query("""
+            select max(ts)::text as ts from public.noop_hr_samples
+            where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint
+            """, [user, device, String(from)])
+        return rows.first.flatMap { Int($0["ts"] ?? "") }
+    }
+
     // MARK: - Wear-signal-quality classification (feat/wear-signal-quality V1)
 
     /// IMU window motion bars for the wear-signal-quality fold. Derived from the lane's real
@@ -1977,10 +1992,17 @@ struct ActivityLane {
     /// charging, battery telemetry, RTC-reset and stream-absence evidence. PPG waveform rows are
     /// not stored or loaded by the activity lane, so `ppgSqi` is always nil here (PpgSqi is
     /// computed on the phone, where the v26 waveform exists).
+    ///
+    /// `hrUploadedThrough` is the upload watermark of the HR stream: the newest `noop_hr_samples` second
+    /// the server holds for this device when the job runs (nil: the newest loaded sample). An epoch that
+    /// ends after it has HR that may simply not be uploaded yet, so absence there is unknown
+    /// (canonical reason `awaiting_upload`, contracts/reason-codes.json), never "HR absent" — which the
+    /// engine would read as sensor dropout or off-wrist.
     static func wearSignalEvidence(epochStart: Int, epochEnd: Int,
                                    wearIntervals: [WearInterval],
                                    recoveryCompletion: Int?,
                                    hrSamples: [HRSample],
+                                   hrUploadedThrough: Int? = nil,
                                    imuMotion: (high: Bool?, quiet: Bool?) = (nil, nil)) -> WearSignalEvidence {
         var durableOffActive: Bool?
         var sustainedHrRecoveryMet: Bool?
@@ -1998,7 +2020,8 @@ struct ActivityLane {
             }
         }
         // No sample with a plausible bpm in the epoch is a real observation only when the day has an
-        // HR stream at all: an empty stream (not uploaded yet) stays unknown, never "HR absent".
+        // HR stream at all and the epoch lies at or before the stream's upload watermark: an empty stream
+        // or a not-yet-uploaded tail stays unknown (`awaiting_upload`), never "HR absent".
         // hrSamples is sorted ascending, so a binary search finds the epoch's first sample.
         var hrPresent: Bool?
         if !hrSamples.isEmpty {
@@ -2013,7 +2036,12 @@ struct ActivityLane {
                 if (30...220).contains(hrSamples[i].bpm) { present = true; break }
                 i += 1
             }
-            hrPresent = present
+            if present {
+                hrPresent = true
+            } else if !Self.hrAwaitingUpload(epochEnd: epochEnd, hrSamples: hrSamples,
+                                             hrUploadedThrough: hrUploadedThrough) {
+                hrPresent = false
+            }
         }
         return WearSignalEvidence(
             durableOffActive: durableOffActive,
@@ -2023,6 +2051,19 @@ struct ActivityLane {
             imuQuiet: imuMotion.quiet)
     }
 
+    /// Canonical reason (contracts/reason-codes.json, family pipeline, inferred on the server) for an epoch
+    /// whose heart rate is past the HR stream's upload watermark.
+    static let hrAwaitingUploadReason = "awaiting_upload"
+
+    /// Whether the epoch `[.., epochEnd)` reaches past the HR upload watermark: its last second is newer
+    /// than the newest HR second the server holds (`hrUploadedThrough`, else the newest loaded sample).
+    /// With no HR at all there is no watermark and the caller already treats the stream as unknown.
+    static func hrAwaitingUpload(epochEnd: Int, hrSamples: [HRSample], hrUploadedThrough: Int?) -> Bool {
+        let loaded = hrSamples.last?.ts
+        guard let through = [loaded, hrUploadedThrough].compactMap({ $0 }).max() else { return true }
+        return epochEnd - 1 > through
+    }
+
     /// Thread one `WearSignalTemporalState` through a day's epochs in time order and classify each
     /// with `WearSignalQualityEngine`, returning epochs with `wearSignal` set. Additive: the
     /// existing three-state `wear` (from the `WearInterval` enrichment) is left UNCHANGED. When no
@@ -2030,7 +2071,8 @@ struct ActivityLane {
     static func applyWearSignal(epochs: [ActivityEpoch],
                                 windows: [ActivityPythonService.WindowPrediction],
                                 wearIntervals: [WearInterval],
-                                hrSamples: [HRSample]) -> [ActivityEpoch] {
+                                hrSamples: [HRSample],
+                                hrUploadedThrough: Int? = nil) -> [ActivityEpoch] {
         guard !epochs.isEmpty else { return epochs }
         let completions = Self.recoveryCompletions(wearIntervals: wearIntervals, hrSamples: hrSamples)
         let ordered = epochs.sorted { $0.startTs < $1.startTs }
@@ -2065,7 +2107,7 @@ struct ActivityLane {
                 epochStart: e.startTs, epochEnd: e.endTs,
                 wearIntervals: wearIntervals,
                 recoveryCompletion: covering.map { completions[$0.start] ?? nil } ?? nil,
-                hrSamples: hrSamples, imuMotion: motion)
+                hrSamples: hrSamples, hrUploadedThrough: hrUploadedThrough, imuMotion: motion)
             let result = WearSignalQualityEngine.classify(evidence, state: &state, epochStart: e.startTs)
             // `.unknown` is the engine's abstention (no evidence resolved a state) and is NOT
             // emitted: an absent `wsq` already means "no wear-signal decision" to every consumer,
@@ -2437,7 +2479,8 @@ struct ActivityLane {
                                  preprocessingVersion: String,
                                  dataThrough: Int,
                                  wearIntervals: [WearInterval] = [],
-                                 hrSamples: [HRSample] = []) throws -> [String: Any] {
+                                 hrSamples: [HRSample] = [],
+                                 hrUploadedThrough: Int? = nil) throws -> [String: Any] {
         let sleepSessions = sleepIntervals.map { Self.sleepSession(from: $0) }
         let exerciseSessions = exerciseIntervals.map { Self.exerciseSession(from: $0) }
         let shared = windows.compactMap {
@@ -2454,7 +2497,7 @@ struct ActivityLane {
         // the existing three-state `wear` enrichment (which stays untouched).
         let classified = Self.applyWearSignal(
             epochs: build.epochs, windows: windows,
-            wearIntervals: wearIntervals, hrSamples: hrSamples)
+            wearIntervals: wearIntervals, hrSamples: hrSamples, hrUploadedThrough: hrUploadedThrough)
         return try activityDocument(epochs: classified,
                                     sleepIntervals: sleepIntervals,
                                     dayStart: dayStart, dayEnd: dayEnd,

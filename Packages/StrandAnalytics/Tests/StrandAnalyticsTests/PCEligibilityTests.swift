@@ -536,6 +536,145 @@ final class PCEligibilityTests: XCTestCase {
         XCTAssertGreaterThan(defaultShare, 0.05)
         XCTAssertLessThan(defaultShare, table[0][0])
     }
+
+    // MARK: Exercise sessions (pc-eligibility-5, rule exercise-session-1's merge and recovery cap)
+
+    func testBoutsAtMostTenMinutesApartAreOneSessionThatExcludesForItsDuration() {
+        // Measurement at F.t0. Bout B: 20 min walking ending 15 min before; bout A: 20 min walking before it.
+        func ref(_ id: String, minutes: Int, endedMinutesAgo: Int, kind: String = "walking") -> PC.BoutRef {
+            PC.BoutRef(boutId: id, kind: kind, endedAt: F.t0 - endedMinutesAgo * 60,
+                       secondsBeforeMeasurement: endedMinutesAgo * 60, durationS: minutes * 60)
+        }
+        let b = ref("b", minutes: 20, endedMinutesAgo: 15)
+        // 11 minutes apart (A ends 46 min before): two 20-minute sessions, the 10-minute floor only.
+        let apart = [ref("a", minutes: 20, endedMinutesAgo: 46), b]
+        let s11 = PC.ExertionBouts.sessions(apart, mergeGapS: 600)
+        XCTAssertEqual(s11.map(\.boutIds), [["a"], ["b"]])
+        let v11 = verdict(track: quiet, bouts: apart)
+        XCTAssertEqual(v11.state, .eligible, "\(v11.reasons)")
+        XCTAssertNil(v11.evidence("exertion_session_s"))
+        // 10 minutes apart (A ends 45 min before): one session from 65 to 15 min before = 50 min, so 50 min.
+        let close = [b, ref("a", minutes: 20, endedMinutesAgo: 45)]
+        let s10 = PC.ExertionBouts.sessions(close, mergeGapS: 600)
+        XCTAssertEqual(s10, [PC.BoutSession(startedAt: F.t0 - 65 * 60, endedAt: F.t0 - 15 * 60,
+                                            secondsBeforeMeasurement: 15 * 60, boutIds: ["a", "b"])])
+        let v10 = verdict(track: quiet, bouts: close)
+        XCTAssertEqual(v10.state, .ineligible)
+        XCTAssertEqual(v10.reasons, [B.recentExertionBout])
+        XCTAssertEqual(v10.evidence("exertion_session_s"), 3000)
+        XCTAssertEqual(v10.evidence("seconds_since_exertion_session"), 900)
+        XCTAssertEqual(v10.evidence("post_bout_exclusion_s"), 3000)
+        // The same session ended 51 minutes before the measurement: past its 50 minutes.
+        let later = [ref("b", minutes: 20, endedMinutesAgo: 51), ref("a", minutes: 20, endedMinutesAgo: 81)]
+        XCTAssertEqual(verdict(track: quiet, bouts: later).state, .eligible)
+        // Overlapping bouts are one session too (in start order, then end: y [40, 30), x [40, 10) min before).
+        let overlap = PC.ExertionBouts.sessions([ref("x", minutes: 30, endedMinutesAgo: 10),
+                                                 ref("y", minutes: 10, endedMinutesAgo: 30)], mergeGapS: 600)
+        XCTAssertEqual(overlap.map(\.boutIds), [["y", "x"]])
+        XCTAssertEqual(overlap.first?.durationS, 1800)
+        XCTAssertEqual(overlap.first?.secondsBeforeMeasurement, 600)
+        // Disabled sessions leave the per-bout doses only.
+        var off = PC.EligibilityConfig()
+        off.sessionExclusionMaxS = 0
+        XCTAssertEqual(verdict(track: quiet, bouts: close, config: off).state, .eligible)
+    }
+
+    func testSessionExclusionIsItsDurationClampedToThirtyToOneHundredTwentyMinutes() {
+        func session(minutes: Int) -> PC.BoutSession {
+            PC.BoutSession(startedAt: F.t0 - minutes * 60, endedAt: F.t0, secondsBeforeMeasurement: 0, boutIds: ["s"])
+        }
+        let c = PC.EligibilityConfig()
+        XCTAssertEqual(B.postSessionExclusionS(session(minutes: 29), c), 0, "under 30 min: the bouts' own doses")
+        XCTAssertEqual(B.postSessionExclusionS(session(minutes: 30), c), 1800)
+        XCTAssertEqual(B.postSessionExclusionS(session(minutes: 60), c), 3600)
+        XCTAssertEqual(B.postSessionExclusionS(session(minutes: 103), c), 6180)
+        XCTAssertEqual(B.postSessionExclusionS(session(minutes: 150), c), 7200, "capped at 120 min")
+        // The session parameters are part of the policy fingerprint.
+        for edit in [{ (p: inout PC.Policy) in p.eligibility.sessionMergeGapS += 60 },
+                     { $0.eligibility.sessionMinDurationS += 60 }, { $0.eligibility.sessionExclusionMinS += 60 },
+                     { $0.eligibility.sessionExclusionMaxS += 60 }] {
+            var p = PC.Policy.default
+            edit(&p)
+            XCTAssertNotEqual(p.fingerprint, PC.Policy.default.fingerprint)
+        }
+        // A short single walk keeps the 10-minute floor.
+        let walk = PC.BoutRef(boutId: "w", kind: "walking", endedAt: F.t0 - 660, secondsBeforeMeasurement: 660,
+                              durationS: 600)
+        XCTAssertEqual(verdict(track: quiet, bouts: [walk]).state, .eligible)
+        var nine = walk
+        nine.endedAt = F.t0 - 540
+        nine.secondsBeforeMeasurement = 540
+        XCTAssertEqual(verdict(track: quiet, bouts: [nine]).reasons, [B.recentExertionBout])
+        XCTAssertNil(verdict(track: quiet, bouts: [nine]).evidence("exertion_session_s"))
+        // The longer of a bout's dose and its session's exclusion wins: a 40-minute run is a 40-minute session
+        // but keeps its 60-minute running dose.
+        let run = PC.BoutRef(boutId: "r", kind: "running", endedAt: F.t0 - 50 * 60, secondsBeforeMeasurement: 50 * 60,
+                             durationS: 40 * 60)
+        let v = verdict(track: quiet, bouts: [run])
+        XCTAssertEqual(v.state, .ineligible)
+        XCTAssertEqual(v.evidence("post_bout_exclusion_s"), 3600)
+        XCTAssertNil(v.evidence("exertion_session_s"), "the 40-minute session alone no longer excludes at 50 min")
+    }
+
+    /// The owner's 2026-10-07 evening (PDT): stepping 21:21-21:25, a walk 21:30-21:35, 66 minutes of gym cardio
+    /// read as mixed_locomotion 21:45-22:51, the walk home 23:00-23:04. Under pc-eligibility-4 the mixed bout got
+    /// the 600 s floor and stable awake rest at 00:40-01:00 was eligible (86-91 bpm in production, audit A). The
+    /// bouts are detected from the strap track here, as the engine does.
+    func testOwnerGymEveningIsOneSessionAndRestStaysExcludedUntilItsRecoveryCap() throws {
+        let tz = "America/Los_Angeles"
+        let identity = PC.DayIdentity(deviceScope: "dev-owner", day: "2026-10-07", timezoneId: tz,
+                                      dayWindow: PC.Engine.dayInterval("2026-10-07", timezoneId: tz))
+        let d0 = identity.dayWindow.start
+        XCTAssertEqual(d0, 1_791_356_400, "2026-10-07 00:00 PDT (UTC-7)")
+        func at(_ h: Int, _ m: Int) -> Int { d0 + h * 3600 + m * 60 }
+        var spans: [(Int, Int, String?)] = [(at(20, 0), at(21, 21), "still"), (at(21, 21), at(21, 25), "stepping"),
+                                            (at(21, 25), at(21, 30), "still"), (at(21, 30), at(21, 35), "walking"),
+                                            (at(21, 35), at(21, 45), "still")]
+        for k in 0..<11 {   // 21:45-22:51: 3 min walking, 3 min stepping (neither holds 80 %: mixed_locomotion)
+            spans.append((at(21, 45) + k * 360, at(21, 45) + k * 360 + 180, "walking"))
+            spans.append((at(21, 45) + k * 360 + 180, at(21, 45) + (k + 1) * 360, "stepping"))
+        }
+        spans += [(at(22, 51), at(23, 0), "still"), (at(23, 0), at(23, 4), "walking"), (at(23, 4), at(27, 30), "still")]
+        let track = F.track(spans)
+        let bouts = PC.ExertionBouts.detect(identity: identity, hart: .empty(.hartEpochs), strap: track, workouts: [],
+                                            observations: PC.SanitizedObservations(heartRate: [], steps: [], breaks: []),
+                                            mode: .retrospective, cutoff: identity.dayWindow.end + 40 * 3600,
+                                            config: .init())
+        XCTAssertEqual(bouts.map(\.interval), [.init(at(21, 21), at(21, 25)), .init(at(21, 30), at(21, 35)),
+                                               .init(at(21, 45), at(22, 51)), .init(at(23, 0), at(23, 4))])
+        XCTAssertEqual(bouts.map(\.kind), ["stepping", "walking", "mixed_locomotion", "walking"])
+
+        func verdict(_ support: PC.Interval, config: PC.EligibilityConfig = .init()) -> PC.EligibilityVerdict {
+            B.evaluate(.stableAwakeRest, metric: .heartRate, support: support, validity: F.validSignal,
+                       activity: PC.IntervalAlgebra.composition(over: support, track: track),
+                       preceding: PC.IntervalAlgebra.precedingHistory(before: support.start, track: track,
+                                                                      lookbackS: 1800),
+                       sleepWear: F.awakeWorn, exertion: [],
+                       recentBouts: PC.ExertionBouts.recentRefs(before: support.start, bouts: bouts, config: .init()),
+                       config: config)
+        }
+        // 00:40-01:00: 96 minutes after the session (21:21-23:04, 103 min) ended, inside its 103-minute exclusion.
+        let night = PC.Interval(at(24, 40), at(25, 0))
+        let v = verdict(night)
+        XCTAssertEqual(v.state, .ineligible)
+        XCTAssertEqual(v.reasons, [B.recentExertionBout])
+        XCTAssertEqual(v.evidence("exertion_session_s"), 103 * 60)
+        XCTAssertEqual(v.evidence("seconds_since_exertion_session"), 96 * 60)
+        XCTAssertEqual(v.evidence("post_bout_exclusion_s"), 103 * 60)
+        XCTAssertEqual(v.policyVersion, "pc-eligibility-5")
+        // pc-eligibility-4 (no sessions): the leak this closes.
+        var v4 = PC.EligibilityConfig()
+        v4.sessionExclusionMaxS = 0
+        XCTAssertEqual(verdict(night, config: v4).state, .eligible)
+        // Every 5-minute support from the walk home to 00:47 is excluded; 00:50 is past the cap again.
+        for m in stride(from: 15, to: 100, by: 5) {
+            let s = PC.Interval(at(23, 4) + m * 60, at(23, 4) + m * 60 + 300)
+            XCTAssertEqual(verdict(s).state, .ineligible, "+\(m) min")
+        }
+        XCTAssertEqual(verdict(PC.Interval(at(23, 4) + 104 * 60, at(23, 4) + 109 * 60)).state, .eligible)
+        // 02:30-02:50: long after the exclusion.
+        XCTAssertEqual(verdict(PC.Interval(at(26, 30), at(26, 50))).state, .eligible)
+    }
 }
 
 /// Stable awake rest: postural settling after a decoder transition event, the source's confidence floor and the
@@ -695,9 +834,11 @@ final class PCEligibilityContextTests: XCTestCase {
         // A short walk: the fixed 10-minute floor, as before.
         XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 9)]), .ineligible)
         XCTAssertEqual(state([bout("walking", minutes: 15, endedMinutesAgo: 11)]), .eligible)
-        // A 70-minute walk is still light (below the first threshold, recovery 5-10 min): the floor only.
-        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 9)]), .ineligible)
-        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 11)]), .eligible)
+        // A 70-minute walk is light as a bout (the floor only), but it is also a 70-minute session, which excludes
+        // for its duration (pc-eligibility-5): bouts carry no intensity, and a gym session can look like this.
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 11)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 69)]), .ineligible)
+        XCTAssertEqual(state([bout("walking", minutes: 70, endedMinutesAgo: 71)]), .eligible)
         XCTAssertEqual(B.postBoutExclusionS(bout("walking", minutes: 120, endedMinutesAgo: 0), .init()), 600)
         // A 40-minute run: 60 minutes; a 75-minute run: 90 minutes.
         XCTAssertEqual(state([bout("running", minutes: 40, endedMinutesAgo: 45)]), .ineligible)

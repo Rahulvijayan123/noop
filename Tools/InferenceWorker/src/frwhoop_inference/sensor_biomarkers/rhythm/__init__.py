@@ -16,7 +16,7 @@ optional-family interface ``sensor.biomarkers.v1`` calls
 Fail-closed by design: importing this package pulls in only numpy/scipy; keras
 and torch are imported lazily inside the adapters, and a missing artifact or a
 broken dependency makes ``make_providers()`` still succeed while the family
-answers ``family_disabled`` / ``artifact_unavailable``. The rhythm family is
+answers ``family_disabled`` / ``model_unavailable``. The rhythm family is
 disabled by default (``FRWHOOP_DEEPBEAT_SHADOW_ENABLED`` /
 ``FRWHOOP_SIAMAF_SHADOW_ENABLED`` must each be exactly ``"1"``).
 """

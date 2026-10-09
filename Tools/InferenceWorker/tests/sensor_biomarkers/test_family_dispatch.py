@@ -267,7 +267,7 @@ class TestDistinctFailureSurfaces:
 
         assert reasons == {
             "disabled": ("family_disabled", "family_disabled"),
-            "weights": ("artifact_unavailable", "artifact_unavailable"),
+            "weights": ("model_unavailable", "model_unavailable"),
             "runtime": ("runtime_unavailable",),
             "broken": ("adapter_broken", "adapter_broken"),
         }

@@ -68,6 +68,11 @@ DETAIL_REASONS: tuple[str, ...] = (
     "insufficient_eligible_time",
     "unsupported_native_rate",
     "preprocessing_unverified",
+    # No verified input reached the family / the model or its weights are not available
+    # (contracts/reason-codes.json). ``artifact_unavailable`` said either before 2026-10-09: kept so
+    # stored documents stay in the vocabulary, never written.
+    "no_verified_input",
+    "model_unavailable",
     "artifact_unavailable",
     "not_enough_valid_data",
     # Optional-family dispatch (docs/model-integration/sensor-families.md): the

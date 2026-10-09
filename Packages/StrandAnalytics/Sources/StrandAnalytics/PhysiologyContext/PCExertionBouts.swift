@@ -471,6 +471,24 @@ extension PhysiologyContext {
         }
     }
 
+    /// Recent bouts close together, as one exercise session (`ExertionBouts.sessions`). A gym or circuit workout
+    /// reaches the strap as short stepping / walking bouts between still sets, so for the post-exertion exclusion the
+    /// session, not each fragment, is what preceded a measurement.
+    public struct BoutSession: Codable, Equatable, Sendable, Hashable {
+        /// Start of the session's first bout and end of its last (unix s).
+        public var startedAt: Int
+        public var endedAt: Int
+        /// From `endedAt` to the measurement the bout refs were taken for.
+        public var secondsBeforeMeasurement: Int
+        public var boutIds: [String]
+        public init(startedAt: Int, endedAt: Int, secondsBeforeMeasurement: Int, boutIds: [String]) {
+            self.startedAt = startedAt; self.endedAt = endedAt
+            self.secondsBeforeMeasurement = secondsBeforeMeasurement; self.boutIds = boutIds
+        }
+        /// First bout start to last bout end, pauses between bouts included.
+        public var durationS: Int { endedAt - startedAt }
+    }
+
     /// Observed-coverage accounting for one earlier day (so trailing windows report their missingness).
     public struct DayCoverage: Codable, Equatable, Sendable {
         public var day: String
@@ -683,6 +701,34 @@ extension PhysiologyContext {
                 .sorted { ($0.interval.end, $0.interval.start, $0.id) > ($1.interval.end, $1.interval.start, $1.id) }
                 .map { BoutRef(boutId: $0.id, kind: $0.kind, endedAt: $0.interval.end,
                                secondsBeforeMeasurement: ts - $0.interval.end, durationS: $0.durationS) }
+        }
+
+        /// Exercise sessions among a measurement's recent bouts: the merge step of rule `exercise-session-1`
+        /// (docs/context-watchdog/EXERCISE_SESSION.md), on bouts instead of evidence minutes. In start order, a bout
+        /// whose start is at most `mergeGapS` after the current session's end joins it (overlapping bouts always
+        /// do). Heart-rate free, like the bouts: the rule's heart-rate load check is not applied (see
+        /// `EligibilityConfig.sessionMergeGapS`). Oldest session first.
+        public static func sessions(_ refs: [BoutRef], mergeGapS: Int) -> [BoutSession] {
+            let sorted = refs.sorted {
+                ($0.endedAt - max(0, $0.durationS), $0.endedAt, $0.boutId)
+                    < ($1.endedAt - max(0, $1.durationS), $1.endedAt, $1.boutId)
+            }
+            var out: [BoutSession] = []
+            for r in sorted {
+                let start = r.endedAt - max(0, r.durationS)
+                if var last = out.last, start - last.endedAt <= mergeGapS {
+                    if r.endedAt > last.endedAt {
+                        last.endedAt = r.endedAt
+                        last.secondsBeforeMeasurement = r.secondsBeforeMeasurement
+                    }
+                    last.boutIds.append(r.boutId)
+                    out[out.count - 1] = last
+                } else {
+                    out.append(BoutSession(startedAt: start, endedAt: r.endedAt,
+                                           secondsBeforeMeasurement: r.secondsBeforeMeasurement, boutIds: [r.boutId]))
+                }
+            }
+            return out
         }
 
         /// Trailing exertion summaries ending at `ts` for each configured window.

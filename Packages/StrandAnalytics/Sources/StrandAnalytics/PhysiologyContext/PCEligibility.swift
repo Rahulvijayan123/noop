@@ -56,8 +56,9 @@ extension PhysiologyContext {
         /// `postBoutExclusionS`. Bouts carry no intensity (they are heart-rate free), so the kind stands in for it.
         /// Literature (Seiler 2007, supine HRV): back to baseline 5-10 min after up to 120 min below the first
         /// ventilatory threshold, ~30 min after threshold work, 90 min or more after hard work in trained
-        /// athletes. Walking and stepping of any length are light: the 600 s floor (that source, which says
-        /// duration below the threshold does not lengthen recovery). Running stands in for threshold-or-harder
+        /// athletes. A walking or stepping bout is light: the 600 s floor (that source, which says duration below
+        /// the threshold does not lengthen recovery), unless it is, or is part of, a session of 30 minutes or more
+        /// (the session exclusion below, since pc-eligibility-5). Running stands in for threshold-or-harder
         /// work: 30 min, and 60 / 90 min when long (the duration steps are conservative choices; the source
         /// grades intensity, not duration). A logged workout of unknown intensity gets 30 min (60 min when it
         /// lasted an hour or more): a conservative choice, not derived from that source.
@@ -68,6 +69,26 @@ extension PhysiologyContext {
             PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 1200, exclusionS: 3600),
             PostBoutDose(kind: ExertionBouts.kindRunning, minDurationS: 3600, exclusionS: 5400),
         ]
+        /// pc-eligibility-5 — exercise sessions (rule `exercise-session-1`, docs/context-watchdog/EXERCISE_SESSION.md).
+        /// A gym or circuit workout reaches the strap as stepping / walking fragments between still sets, or as one
+        /// long `mixed_locomotion` bout, and the kind cannot tell an easy stroll from it: bouts carry no intensity.
+        /// On 2026-10-07 a 66-minute mixed_locomotion bout (HR median 130, peak 142) got only the 600 s floor, and
+        /// stable awake rest was eligible at 86-91 bpm 94-114 minutes later (audit A, 2026-10-09). So bouts at most
+        /// `sessionMergeGapS` apart are one session (the rule's merge gap), and a session spanning at least
+        /// `sessionMinDurationS` excludes stable awake rest after its last bout for its own duration clamped to
+        /// [`sessionExclusionMinS`, `sessionExclusionMaxS`]: the rule's recovery cap (session duration clamped to
+        /// [30, 120] min). The rule ends recovery earlier when heart rate is back within the pre-session reference
+        /// + 10 bpm for 5 minutes, and opens a session only with a heart-rate load; neither is used here, because
+        /// that would make a heart-rate or HRV measurement's eligibility depend on its own signal (V03) and select
+        /// bouts because heart rate rose (System D never does). The cap is never shorter than the rule's recovery,
+        /// so session and recovery minutes stay out of the rest references; the cost is fewer eligible rest
+        /// minutes after long easy walks. Applies to sessions of any bout kind (`mixed_locomotion`, walking,
+        /// stepping fragments, running, logged workouts); the per-bout doses above still apply and the longer
+        /// exclusion wins. `sessionExclusionMaxS` = 0 disables sessions (the per-bout doses remain).
+        public var sessionMergeGapS = 600
+        public var sessionMinDurationS = 1800
+        public var sessionExclusionMinS = 1800
+        public var sessionExclusionMaxS = 7200
         /// Stable awake rest: optional exclusion when the trailing 24 h locomotion exceeds this (nil = record only).
         public var maxLocomotion24hS: Int? = nil
         /// Activity response: a support starting within this many seconds after a bout ended follows that bout.
@@ -253,10 +274,13 @@ extension PhysiologyContext {
 
     public enum Eligibility {
 
+        /// pc-eligibility-5: recent bouts at most 10 minutes apart are one exercise session, and a session of 30
+        /// minutes or more excludes stable awake rest for its duration clamped to 30-120 minutes (rule
+        /// `exercise-session-1`'s recovery cap; `EligibilityConfig.sessionMergeGapS`).
         /// pc-eligibility-4: a decoder transition event counts over its onset-to-detection span `[onsetTs, ts]`
         /// (INT-C), not at its detection second only, so the postural-settling gate can move. Documents decided
-        /// under pc-eligibility-3 are told apart by `PolicyVersions.eligibility` and the policy fingerprint.
-        public static let version = "pc-eligibility-4"
+        /// under an earlier version are told apart by `PolicyVersions.eligibility` and the policy fingerprint.
+        public static let version = "pc-eligibility-5"
         public static let topExclusionReasons = 10
 
         // MARK: Reason codes — positive
@@ -587,8 +611,17 @@ extension PhysiologyContext {
             if config.postBoutExclusionS > 0 {
                 // Every recent bout is checked: a long run two hours ago can still exclude after a short walk.
                 let excluding = recentBouts.filter { $0.secondsBeforeMeasurement < postBoutExclusionS($0, config) }
-                if let deciding = excluding.max(by: { postBoutExclusionS($0, config) < postBoutExclusionS($1, config) }) {
-                    b.diag("post_bout_exclusion_s", Double(postBoutExclusionS(deciding, config)))
+                var exclusion = excluding.map { postBoutExclusionS($0, config) }.max()
+                // And every session the bouts form (pc-eligibility-5): the longest excluding one is recorded.
+                let sessions = ExertionBouts.sessions(recentBouts, mergeGapS: config.sessionMergeGapS)
+                    .filter { $0.secondsBeforeMeasurement < postSessionExclusionS($0, config) }
+                if let s = sessions.max(by: { postSessionExclusionS($0, config) < postSessionExclusionS($1, config) }) {
+                    b.diag("exertion_session_s", Double(s.durationS))
+                    b.diag("seconds_since_exertion_session", Double(s.secondsBeforeMeasurement))
+                    exclusion = max(exclusion ?? 0, postSessionExclusionS(s, config))
+                }
+                if let deciding = exclusion {
+                    b.diag("post_bout_exclusion_s", Double(deciding))
                     b.fail(recentExertionBout)
                 }
             }
@@ -634,6 +667,13 @@ extension PhysiologyContext {
             config.postBoutDoses
                 .filter { ($0.kind == nil || $0.kind == bout.kind) && bout.durationS >= $0.minDurationS }
                 .map(\.exclusionS).reduce(config.postBoutExclusionS, max)
+        }
+
+        /// The post-exertion exclusion of one session: its duration clamped to [`sessionExclusionMinS`,
+        /// `sessionExclusionMaxS`] once it spans `sessionMinDurationS`, else 0 (its bouts' own doses apply).
+        public static func postSessionExclusionS(_ session: BoutSession, _ config: EligibilityConfig) -> Int {
+            guard config.sessionExclusionMaxS > 0, session.durationS >= config.sessionMinDurationS else { return 0 }
+            return min(max(session.durationS, config.sessionExclusionMinS), config.sessionExclusionMaxS)
         }
 
         private static func exertionEvidence(_ b: inout Builder, exertion: [ExertionWindowSummary],
