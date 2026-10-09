@@ -17,7 +17,7 @@ Fail-closed rules (CONTRACTS.md sections 3/7, enforced in tests):
 * the families run ONLY when the env flag (FRWHOOP_PARADIGMA_ENABLED == "1")
   is set AND every pinned artifact in the manifest entry ``paradigma``
   verifies against the artifact root AND the subprocess python exists;
-  otherwise they are withheld ``family_disabled`` / ``artifact_unavailable``
+  otherwise they are withheld ``family_disabled`` / ``model_unavailable``
   / ``runtime_unavailable`` and the standalone provider is not registered,
   so a missing optional artifact never breaks the descriptive families;
 * only manifest-verified bytes are ever unpickled (verified by the runner

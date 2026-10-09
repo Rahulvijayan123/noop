@@ -193,7 +193,7 @@ def test_decode_imu_rejects_missing_imu():
     from frwhoop_inference.sensor_biomarkers.paradigma.provider import _ImuError
     with pytest.raises(_ImuError) as exc:
         _decode_imu({})
-    assert exc.value.reason == "artifact_unavailable"
+    assert exc.value.reason == "no_verified_input"
 
 
 # ---------------------------------------------------------------------------
@@ -251,14 +251,15 @@ def test_unsupported_native_rate_withholds_both_families(paradigma_env):
     assert stages["arm_swing"]["reason"] == "unsupported_native_rate"
 
 
-def test_missing_imu_withholds_with_artifact_unavailable(paradigma_env):
+def test_missing_imu_withholds_with_no_verified_input(paradigma_env):
     provider = make_providers()[0]
     request = build_request_sb(input={"families": ["tremor", "arm_swing"]})
     result = provider.infer(request)
     assert result.status == "ok"
     stages = {s["family"]: s for s in result.stages}
     assert stages["tremor"]["status"] == "withheld"
-    assert stages["tremor"]["reason"] == "artifact_unavailable"
+    # No input is the data's gap, never "model unavailable" (contracts/reason-codes.json).
+    assert stages["tremor"]["reason"] == "no_verified_input"
 
 
 def test_tremor_runs_even_when_arm_swing_gated(paradigma_env):

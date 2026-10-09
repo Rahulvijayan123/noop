@@ -10,7 +10,7 @@ Gates
   must each be exactly ``"1"`` (off by default; both off -> ``family_disabled``);
 * the artifact must exist under the artifact root (``FRWHOOP_MODEL_ROOT`` or
   ``/opt/frwhoop-models``) and match the pinned sha256 before any model is
-  loaded (neither enabled model available -> ``artifact_unavailable``);
+  loaded (neither enabled model available -> ``model_unavailable``);
 * the request must state its native rate, and its sample clock must pass the
   gate (``_common.parse_ppg_payload``), else ``unverified_sample_clock``;
 * none of these ever affects the other sensor-biomarker families.
@@ -80,7 +80,7 @@ FAMILIES = ("rhythm_shadow",)
 
 _FAMILY = "rhythm_shadow"
 _REASON_NOT_REQUESTED = "not_ready"
-_REASON_NO_PPG = "artifact_unavailable"
+_REASON_NO_PPG = "no_verified_input"
 _REASON_BAD_PPG = "blocked_input"
 #: Revision of a rhythm stage no model ran for.
 _NO_MODEL_REVISION = "rhythm-shadow/none"
@@ -113,7 +113,9 @@ _WIRE_REASON: dict[str, str] = {
     "preprocessing_unverified": "unverified",
     "unverified_sample_clock": "unverified",
     "not_enough_valid_data": "insufficient_coverage",
-    "artifact_unavailable": "blocked_artifact",
+    "no_verified_input": "insufficient_coverage",
+    "model_unavailable": "blocked_artifact",
+    "artifact_unavailable": "blocked_artifact",       # legacy family reason (stored documents)
     "artifact_mismatch": "blocked_artifact",
     "unsupported_native_rate": "blocked_input",
     "family_disabled": "not_ready",
@@ -322,14 +324,15 @@ def _rhythm_document(
     elif raw_scores:
         status, reason = "withheld", "preprocessing_unverified"
     else:
-        # Family-level reason uses the CONTRACTS vocabulary: an adapter that
-        # reports "artifact_mismatch" is also "artifact_unavailable" at the
-        # family level (the precise detail stays in ``adapters``).
+        # Family-level reason uses the canonical vocabulary: an adapter whose
+        # weights are missing ("artifact_unavailable") or mismatched
+        # ("artifact_mismatch") is "model_unavailable" at the family level (the
+        # precise detail stays in ``adapters``).
         family_reason = None
         for adapter in adapters.values():
             candidate = adapter.get("reason")
             if candidate in ("artifact_unavailable", "artifact_mismatch"):
-                family_reason = "artifact_unavailable"
+                family_reason = "model_unavailable"
                 break
             family_reason = family_reason or candidate
         status, reason = "withheld", family_reason or "not_ready"

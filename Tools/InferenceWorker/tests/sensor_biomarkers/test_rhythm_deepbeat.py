@@ -180,19 +180,20 @@ def test_sha256_rejects_modified_bytes(rhythm_model_root, tmp_path):
         family_request(ppg_payload(samples_per_segment=7200)),
         model_root=str(bad_root), deepbeat_enabled=True, siamaf_enabled=False)
     assert doc["status"] == "withheld"
-    # family-level reason uses the CONTRACTS vocabulary; the precise
-    # adapter detail stays in the adapters summary
-    assert doc["reason"] == "artifact_unavailable"
+    # family-level reason uses the canonical vocabulary (mismatched weights:
+    # the model is unavailable); the precise adapter detail stays in the
+    # adapters summary
+    assert doc["reason"] == "model_unavailable"
     assert doc["adapters"]["deepbeat"]["reason"] == "artifact_mismatch"
     assert doc["measurements"] == {}
     assert "raw_scores" not in doc
 
 
-def test_missing_artifact_reports_artifact_unavailable(rhythm_model_root, tmp_path):
+def test_missing_artifact_reports_model_unavailable(rhythm_model_root, tmp_path):
     empty_root = tmp_path / "empty"
     empty_root.mkdir()
     doc = compute_rhythm_shadow_document(
         family_request(ppg_payload(samples_per_segment=7200)),
         model_root=str(empty_root), deepbeat_enabled=True, siamaf_enabled=False)
     assert doc["status"] == "withheld"
-    assert doc["reason"] == "artifact_unavailable"
+    assert doc["reason"] == "model_unavailable"

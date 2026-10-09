@@ -153,12 +153,12 @@ def test_short_and_missing_input_withheld(rhythm_model_root):
         model_root=rhythm_model_root, deepbeat_enabled=False, siamaf_enabled=True)
     assert doc["status"] == "withheld"
     assert doc["reason"] == "not_enough_valid_data"
-    # missing ppg entirely
+    # missing ppg entirely: no verified input, not a model problem
     doc = compute_rhythm_shadow_document(
         {"families": ["rhythm_shadow"]},
         model_root=rhythm_model_root, deepbeat_enabled=False, siamaf_enabled=True)
     assert doc["status"] == "withheld"
-    assert doc["reason"] == "artifact_unavailable"
+    assert doc["reason"] == "no_verified_input"
 
 
 def test_unverified_clock_withheld(rhythm_model_root):
