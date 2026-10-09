@@ -42,7 +42,8 @@ Source refs used for the merges: `refs/integ-src/{hang,morning,metricdetail,metr
 Legend: **Live** = runs and is shown once deployed with default settings. **Live (data-gated)** = runs, shows
 "not available: reason" until enough data exists. **Off** = shipped behind a flag that defaults off. **Shadow** =
 computed and stored, never displayed and never shapes a canonical value. **Not wired** = deliberately not connected
-(reason given).
+(reason given). Every server-side "Live" row also needs its worker lane switched on; those switches default off and
+are listed in section 8.
 
 | Feature | Branch | Status | Where it is consumed |
 | --- | --- | --- | --- |
@@ -212,6 +213,16 @@ release-host.sh install DIR/nara-release-<id>.tar.gz
 systemctl restart frwhoop-worker
 ```
 
+**Lane switches the server features depend on.** All default off; check the host's `/etc/frwhoop/worker.env`
+read-only before claiming any server feature is live:
+
+| Switch | Off means |
+| --- | --- |
+| `FRWHOOP_CONTEXT_ENABLED=1` (exactly `1`) | no physiology-context documents: no awake/asleep HR, pulse episodes, stable-awake RR, posture strata, and the coach's `get_measurement_context` reports no data |
+| `FRWHOOP_INFERENCE_URL=http://127.0.0.1:8787` | no sleep-features enrichment (Sleep details, `get_sleep_details`) and no physiology-candidate lane |
+| `FRWHOOP_ACTIVITY_ENABLED=1` (+ the `FRWHOOP_ACTIVITY_*` paths) | no HART windows or server activity days |
+| `FRWHOOP_SENSOR_BIOMARKERS_ENABLED=1`, `FRWHOOP_SENSOR_PPG_ENABLED=1` | no sensor-biomarker days (IMU / PPG families) |
+
 New worker settings (all optional, defaults shown in `deploy/worker.env.example`): `FRWHOOP_CANDIDATE_SCHEDULER=persisted`
 (needs migration 8), `FRWHOOP_CANDIDATE_MAX_ATTEMPTS`, `FRWHOOP_CANDIDATE_REASSEMBLY_BUDGET`,
 `FRWHOOP_CANDIDATE_LEASE_SECONDS`, `FRWHOOP_ACTIVITY_THREADS`/`ELDERNET_THREADS`/`INERTIA_THREADS` (1 each),
@@ -284,6 +295,9 @@ All runs on this machine (macOS 26, Xcode at `/Volumes/External SSD/Xcode.app`),
 - Push, open a PR, merge into `main`, deploy.
 - Deploy migration 5 (`20261008100400`): it fixes a live defect (deleting a user with data fails with FK 23503).
 - ElderNet's Oxford Academic Use Licence: keep fetching weights for shadow use, or not. ActiNet stays unwired.
+  Spec 03's licence-text corrections (`docs/pretrained-models/integration/licence-corrections.md` §6) are proposed,
+  not applied; for example the vendored `inertia/vendor/ssl_wearables_resnet.py` header still says CC BY-NC 4.0 where
+  the upstream text is the Oxford Academic Use Licence.
 - Turning on the PPG anchor (`NOOP_PUSH_ADVERTISE_PPG_ANCHOR`, then `noop.cloud.ppgAnchorUpload`; about 80 bytes per
   optical second).
 - Whether the walking screens (`WalkingInsightsSection`, `WalkingDetailView`, `DayActivityDetailViews`) should keep
@@ -306,13 +320,19 @@ All runs on this machine (macOS 26, Xcode at `/Volumes/External SSD/Xcode.app`),
 - The Charge breakdown's confidence chip uses the engine's tier when the engine scored the shown number; for a
   vendor-imported row it falls back to a raw-HRV maturity count, not the ln fold.
 - Android reads none of the new server documents.
+- The sidecar manifest's `wav2sleep` entry (unwired) still points at mutable `huggingface.co/…/resolve/main/` URLs
+  with `provider_id: sleep_stage`; Spec 03's pinned revision (`18fc32f0`) and provider id `wav2sleep.ppg-only.v1`
+  live in its own constants. Fix the entry before it is ever staged.
+- `calibration-v4` defines a jittered cue (2–5 s); the app's `ActivityCalibrationSession` uses only the nominal
+  `cueSeconds` (the range's lower bound), so the cue never varies.
 - No Linux sidecar run in this stage. Spec 01 recorded one at its own tip; since then `uv.lock` and `pyproject.toml`
   are unchanged but Spec 02/03 changed 46 files under `Tools/InferenceWorker` (pure-Python features and tests, passing
   on macOS). `provision.sh --sidecar-only` probes the new venv before linking it, so a Linux-only failure stops there.
 
 ## 13. Deployment checklist (next stage)
 
-1. Read-only: production's applied migrations (section 6), worker heartbeat identity, sidecar `/healthz`.
+1. Read-only: production's applied migrations (section 6), worker heartbeat identity, sidecar `/healthz`, and the
+   lane switches in `/etc/frwhoop/worker.env` (section 8).
 2. Owner decisions in section 12.
 3. Migrations 1–9 in order, each with `ON_ERROR_STOP` in one transaction.
 4. All edge functions from this commit.
