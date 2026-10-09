@@ -155,6 +155,28 @@ def test_short_input_withheld_not_enough_valid_data(paradigma_env):
     assert stages["arm_swing"]["status"] == "withheld"
 
 
+def test_short_run_beside_long_run_is_left_out_not_adapter_broken(paradigma_env):
+    """A run that cannot fill one window used to fail the whole runner job (adapter_broken)."""
+    provider = provider_one(paradigma_env)
+    block = synth_input(40.0, mode="noise")
+    rng = np.random.default_rng(102)
+    n = 300  # 3 s at 100 Hz, after a 10 s gap
+    block["imu"]["segments"].append({
+        "start_unix": 1_700_000_050,
+        "duration_s": 3.0,
+        "accel_g": (np.tile([0.0, 0.0, 1.0], (n, 1)) + rng.normal(0, 0.02, (n, 3))).tolist(),
+        "gyro_dps": rng.normal(0, 0.05, (n, 3)).tolist(),
+    })
+    result = provider.infer(sb_request(block))
+    assert result.status == "ok"
+    stages = {s["family"]: s for s in result.stages}
+    assert stages["tremor"]["status"] == "ok"
+    assert stages["tremor"]["measurements"]["eligible_rest_seconds"]["count"] == 9
+    assert result.coverage["tremor"]["observed_seconds"] == pytest.approx(43.0)
+    assert result.diagnostics["short_runs_excluded"]["count"] == 1
+    assert result.diagnostics["short_runs_excluded"]["seconds"] == pytest.approx(3.0)
+
+
 def test_low_rate_withheld_unsupported_native_rate(paradigma_env):
     provider = provider_one(paradigma_env)
     result = provider.infer(sb_request(synth_input(40.0, fs=25.0)))

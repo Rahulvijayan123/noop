@@ -86,6 +86,13 @@ FAMILIES = ("tremor", "arm_swing")
 #: (docs/guides/sensor_requirements.md: >= 50 Hz for tremor and gait).
 MIN_NATIVE_RATE_HZ = 50.0
 
+#: Upstream window lengths (TremorConfig 4 s, GaitConfig 6 s). Upstream v1.1.2 cannot cut a
+#: window from a run that does not exceed it (4.0 s fails, 4.1 s passes at 52 Hz), and one such
+#: run fails the whole run_paradigma job, so runs under window + margin never reach the runner.
+TREMOR_WINDOW_S = 4.0
+GAIT_WINDOW_S = 6.0
+SHORT_RUN_MARGIN_S = 0.5
+
 #: Default subprocess lifetime bound (seconds). Bounded lifetimes are a hard
 #: requirement: the runner must never hang a request thread. Override with
 #: FRWHOOP_PARADIGMA_TIMEOUT_S. Through the aggregate route the bound is also
@@ -461,24 +468,26 @@ def _run_families(raw: Mapping[str, Any], requested: Sequence[str], *,
                   "observed_seconds": observed_seconds}
     common = {"placement": placement, "input_provenance": provenance}
 
-    # -- short-run gate: upstream cannot classify a run shorter than one
-    #    4 s tremor window; withhold rather than crash (not_enough_valid_data).
-    window_length_s = 4.0
-    longest_run_s = max(r["duration_s"] for r in runs.values())
-    if longest_run_s < window_length_s:
+    # -- pipelines to run
+    run_pipelines = ["tremor"] if "tremor" in requested else []
+    gait_eligible = "arm_swing" in requested and gates["arm_swing"]["ok"]
+    if gait_eligible:
+        run_pipelines.append("gait")
+
+    # -- short-run gate: drop runs too short for every window the pipelines cut; withhold
+    #    (not_enough_valid_data) only when no run is left, rather than crash the request.
+    window_length_s = TREMOR_WINDOW_S
+    min_run_s = (GAIT_WINDOW_S if gait_eligible else TREMOR_WINDOW_S) + SHORT_RUN_MARGIN_S
+    short_run_ids = [k for k, r in runs.items() if r["duration_s"] < min_run_s]
+    if len(short_run_ids) == len(runs):
         return _Outcome(
             stages=[_withheld_doc(fam, "not_enough_valid_data",
                                   observed_seconds=observed_seconds, eligible_seconds=0.0,
                                   extra=common) for fam in requested],
             coverage={f: {"observed_seconds": observed_seconds,
                           "eligible_seconds": 0.0} for f in requested},
-            diagnostics={"reason_detail": "no run reaches one 4 s window"})
-
-    # -- pipelines to run
-    run_pipelines = ["tremor"] if "tremor" in requested else []
-    gait_eligible = "arm_swing" in requested and gates["arm_swing"]["ok"]
-    if gait_eligible:
-        run_pipelines.append("gait")
+            diagnostics={"reason_detail": f"no run reaches {min_run_s:g} s"})
+    short_runs = {k: runs.pop(k) for k in short_run_ids}
 
     # Apply the WHOOP -> ParaDigMa rotation ONLY for the combined path
     # (the library applies its own right-side transform from watch_side).
@@ -506,6 +515,8 @@ def _run_families(raw: Mapping[str, Any], requested: Sequence[str], *,
         "observed_seconds": observed_seconds,
         "runs": {k: {"start_unix": v["start_unix"], "duration_s": v["duration_s"],
                      "samples": v["sample_count"]} for k, v in runs.items()},
+        "short_runs_excluded": {"min_run_s": min_run_s, "count": len(short_runs),
+                                "seconds": sum(r["duration_s"] for r in short_runs.values())},
     }
 
     if not run_pipelines:
