@@ -7,6 +7,8 @@ import WhoopProtocol
 /// Observed counts only; the server derives the quality class and canonical reasons from them.
 public enum WatchdogQualityMinutes {
     public static let version = "phone-quality-1"
+    /// Optical baseline above this (owner's settled p99 is 42) is shadow-logged as `optical_baseline_high`.
+    public static let baselineHighShadow = 100
 
     public struct Row: Equatable, Sendable {
         public var minuteStart: Int
@@ -59,6 +61,9 @@ public enum WatchdogQualityMinutes {
             if r.v18N > 0, Double(r.sentinelN) / Double(r.v18N) > WatchdogSignalQuality.poorSentinelFrac {
                 r.reasons.append("optical_sentinel")
             }
+            // Shadow only: a possible loose-contact hint (seen once, 10-08 22:00). Deliberately unmapped in
+            // contracts/reason-codes.json, so the server keeps it raw and never surfaces it as a cause.
+            if let b = r.baselineMax, b > Self.baselineHighShadow { r.reasons.append("optical_baseline_high") }
             rows[m] = r
         }
         return rows.values.sorted { $0.minuteStart < $1.minuteStart }

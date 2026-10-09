@@ -1,5 +1,6 @@
 {
   "version": "data-reason-1",
+  "shadow_note": "optical_baseline_high (phone: the strap's optical baseline above 100 in a minute) is deliberately NOT mapped: it is a possible loose-contact hint seen once (10-08 22:00) and stays raw in phone_reasons until a reference session validates it. Unmapped codes are never surfaced as causes.",
   "description": "Canonical reasons a measurement is missing, unreliable or not comparable. Every layer (Swift DataReason, edge reasonCodes.ts, SQL public.reason_codes, Python contract) mirrors this file and a parity test pins it. certainty: confirmed = a device/user/job event says so; inferred = derived from signal patterns; unknown = no evidence about the cause; measured = a counted fact (coverage, history length). effect: what the reason does to the reading.",
   "certainties": ["confirmed", "inferred", "unknown", "measured"],
   "effects": ["excluded", "degraded", "withheld", "not_comparable", "display_only"],
@@ -90,8 +91,7 @@
       "beat_coverage_low": {"code": "insufficient_coverage", "certainty": "measured"},
       "beat_overcount": {"code": "artifact_rejected", "certainty": "inferred"},
       "hr_in_motion_unverified": {"code": "hr_in_motion_unverified", "certainty": "inferred"},
-      "optical_sentinel_at_rest": {"code": "loose_fit", "certainty": "inferred"},
-      "optical_baseline_high": {"code": "loose_fit", "certainty": "inferred"},
+      "optical_sentinel_at_rest": {"code": "motion_artifact", "certainty": "inferred"},
       "strap_not_recording": {"code": "strap_not_recording", "certainty": "confirmed"},
       "transport_gap": {"code": "records_missing", "certainty": "measured"},
       "settling_after_wrist_on": {"code": "just_put_on", "certainty": "confirmed"},
