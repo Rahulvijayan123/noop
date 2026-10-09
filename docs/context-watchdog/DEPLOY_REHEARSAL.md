@@ -33,3 +33,14 @@ merge added `20261009160000_activity_exercise_windows`. The same production sche
 `supabase/postgres:17.6.1.075` container (same extensions; the one expected `schema "public" already exists` error),
 then the concurrent index and all thirteen migrations were applied in deploy order with `ON_ERROR_STOP=1 -1`: **all
 exit 0, no errors.** Both rehearsal containers were removed afterwards.
+
+## Third rehearsal (2026-10-09, workout mode)
+
+`20261009130100` changed again (the logged-workout columns `workout_type` / `workout_basis`, the `logged` session basis
+and the builder's seam `internal.measurement_context_logged_workouts_v1`) and `20261009170000_user_workouts` was added
+([WORKOUTS.md](WORKOUTS.md)). The same production schema dump was restored into a fresh `supabase/postgres:17.6.1.075`
+container (same extensions; the one expected `schema "public" already exists` error), then the concurrent index and all
+fourteen migrations were applied in deploy order as `postgres` with `ON_ERROR_STOP=1 -1`: **all exit 0, no errors.**
+Smoke checks after the chain: 20 catalogue rows; the builder reads the logged-workout seam and still carries the
+placement resolver patched in by `20261009150100`; `public.user_workouts_upsert_v1` exists. The container was removed
+afterwards (logs: `_build-scratch/ctxwd/workouts/rehearsal/`).

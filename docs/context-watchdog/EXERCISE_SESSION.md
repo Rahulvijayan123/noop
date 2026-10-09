@@ -116,6 +116,16 @@ session. The phone's decoder already fuses HART when it arrives, and the Watchdo
 minutes. A model trained on gym exercises themselves (resistance training on an arm IMU) is ported separately in
 shadow mode and is not evidence either until it is validated on the owner's sessions.
 
+## Logged workouts
+
+A workout the wearer logged in workout mode ([WORKOUTS.md](WORKOUTS.md)) does not change the rule. Its minutes are
+strong evidence (on the server this was already "inside a workout the person logged"; the phone and the anomaly service
+now read the same log), so a logged workout of 15 minutes or more confirms itself at its 15th minute and gets its
+recovery from the rule. The load check still decides whether the rule finds a session. On top of the rule, each
+consumer treats a logged minute as `session` (an observed label) from its first minute while the strap is worn: the
+Watchdog compares it with the exercise-session reference (safety bounds unchanged), the measurement-context row records
+`session_basis = logged` with the workout's type, and the anomaly service withholds its windows as exercise.
+
 ## Versioning
 
 The rule id `exercise-session-2` is stored with every derived row. Any change to a threshold is a new id.

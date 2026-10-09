@@ -198,6 +198,9 @@ class Service:
     self.counters["read_ms"] += int((time.time() - t0) * 1000)
     # recontext: minutes cached before the context-hygiene fix get the current rule (idempotent for fresh ones).
     frame = features.recontext(UserState.merge(cached, fresh))
+    # Logged workouts are edited after the fact (logged afterwards, stopped, deleted): re-read them over the whole
+    # cached frame every job, so the minutes beyond the 3 h re-read follow the wearer's latest log.
+    frame = features.refresh_logged(self.db, frame, user, device)
     st.save_frame(frame)
     tz = features.timezone_history(self.db, user)
     resting = features.resting_nights(self.db, user, features.local_day(now, tz))

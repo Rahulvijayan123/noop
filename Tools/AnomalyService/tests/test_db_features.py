@@ -21,7 +21,7 @@ pytestmark = pytest.mark.skipif(not DB, reason="ANOMALY_TEST_PIPELINE_DB not set
 T0 = 1791441000          # 2026-10-08T06:30:00Z = 2026-10-07 23:30 PDT
 DAY = "2026-10-08"       # its UTC day (epoch rows are keyed by UTC day)
 TABLES = ("noop_hr_samples", "noop_gravity_samples", "noop_step_samples", "noop_events", "activity_context_epochs",
-          "server_daily_scores", "scoring_timezone_history")
+          "server_daily_scores", "scoring_timezone_history", "user_workouts")
 
 
 @pytest.fixture()
@@ -135,3 +135,23 @@ def test_timezone_history_and_resting_nights(seeded):
   with db.conn().transaction():
     db.conn().execute("delete from public.scoring_timezone_history where user_id = %s", (user,))
   assert F.timezone_history(db, user) == [(float("-inf"), "America/Los_Angeles")]   # profiles.timezone
+
+
+def test_load_reads_logged_workouts(seeded):
+  # A workout logged in workout mode (20261009170000) over minutes 5..14 of the fixture: the `logged` channel is 1 there
+  # and NaN elsewhere, and refresh_logged re-reads it after the log changes (deleted: NaN everywhere).
+  db, user, device = seeded
+  c = db.conn()
+  with c.transaction():
+    c.execute("""insert into public.user_workouts(user_id, client_id, device_id, workout_type, started_at, ended_at,
+                   client_updated_at)
+                 values (%s, %s, %s, 'strength', to_timestamp(%s), to_timestamp(%s), now())""",
+              (user, str(uuid.uuid4()), device, T0 + 300, T0 + 900))
+  f = F.load(db, user, device, T0, T0 + 1200)
+  logged = f.data["logged"]
+  assert (logged[5:15] == 1).all() and np.isnan(logged[:5]).all() and np.isnan(logged[15:]).all()
+  assert f.counters["logged_workouts"] == 1
+  with c.transaction():
+    c.execute("update public.user_workouts set deleted_at = now() where user_id = %s", (user,))
+  g = F.refresh_logged(db, f, user, device)
+  assert np.isnan(g.data["logged"]).all()

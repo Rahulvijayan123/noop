@@ -38,7 +38,8 @@ Key: `user_id`, `device_id` (the strap the raw rows are stored under), `minute_s
 | | `sleep_state` (`asleep` / `awake` / `in_bed`), `sleep_basis` | scored night (`server_sleep_nights`, frwhoop-server-1) holding the minute: its stage segments (`server_night_stages`) or just the period (`server_night`); outside a night NULL with `outside_server_night` (day scored) or `not_scored` |
 | | `wear_state` (`on_wrist` / `off_wrist` / `charging`), `wear_basis` | `charging`, then wrist events (`wrist_event`; a WRIST_OFF closes at a later WRIST_ON or after 5 sustained minutes of HR, basis `hr_present`), then the epoch, then the run, then HR presence |
 | | `placement`, `placement_basis` | the declared placement in effect at the minute's start, resolved for the strap by `internal.placement_intervals_for_device_v1` (20261009150100; declarations on the strap, its aliases and the installations provably bound to it, else the owner's device-less declaration): basis `declared_strap` / `declared_alias` / `declared_installation` / `declared_account`; NULL with `undeclared` when nothing is declared (`not_resolved` on rows built before 20261009150100) |
-| SESSION | `session_phase` (`none` / `session` / `recovery` / `active`), `session_start`, `session_rule`, `session_basis` | rule `exercise-session-2` (below) |
+| SESSION | `session_phase` (`none` / `session` / `recovery` / `active`), `session_start`, `session_rule`, `session_basis` | rule `exercise-session-2` (below); `session_basis = logged` inside a logged workout |
+| LOGGED | `workout_type` (catalogue id, `workout-types-1`), `workout_basis` (`user_workout` / `manual_session`) | the workout the wearer logged that holds the minute's midpoint (`internal.measurement_context_logged_workouts_v1` → `internal.logged_workouts_v1`, [WORKOUTS.md](WORKOUTS.md)); its attributes are in `public.workout_types`; NULL outside one |
 | COMPLETE | `missing_reasons` | why the minute has no HR, `context_unknown` when activity or the session phase is unknown, and `context_not_comparable` (`in_session` / `recovery` / `movement`) for a session / recovery / active minute |
 | VERSION | `context_version`, `revision`, `computed_at` | `measurement_context_versions`; `revision` is a sequence value bumped only when the row's content changes |
 
@@ -92,6 +93,11 @@ which stretched a non-gym period from 37 to 71 minutes); it only keeps the minut
 rest fallback. Weak counts only within 20 minutes of strong. The rest reference is the median nightly resting HR of
 the 14 nights before the local day (60-day window, `server_daily_scores`) + 10 (`session_basis = sleep_resting_hr`),
 else the median HR of still minutes in the 2 h before the period (`awake_still_median`), else 70 (`default_70`).
+
+A minute inside a workout the wearer logged (workout mode) is strong evidence and never a still minute; while worn and
+awake it is `session` with `session_basis = logged` and `session_start` the workout's start, whatever the rule found
+(an observed label beats the inference), and a recovery the rule found after it stays. Logging, stopping or deleting a
+workout re-queues the local days it touches (`user_workouts_upsert_v1`).
 
 A period that meets the four session conditions is *confirmed* once it holds 15 strong minutes, or when it starts at
 most 30 minutes after the last evidence minute of the previous confirmed session (inheritance only runs forward).

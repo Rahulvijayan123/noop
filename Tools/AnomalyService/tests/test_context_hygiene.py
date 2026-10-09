@@ -381,3 +381,39 @@ def test_link_down_and_contact_state_per_minute():
   # The state at or before each minute's END counts (WatchdogVerifier's contact rule).
   assert np.isnan(c[0]) and np.isnan(c[2]) and c[3] == 1 and c[5] == 1 and c[6] == 0
   assert np.isnan(F.contact_state(m, [])).all()
+
+
+# ---- workout mode: logged workouts (docs/context-watchdog/WORKOUTS.md) ----------------------------------------------
+
+def test_a_logged_still_workout_is_withheld_as_exercise_never_scored_as_rest():
+  # An hour of lifting with the arm still at 92 bpm: no movement evidence and too little load for the rule, so
+  # unlogged it is a rest window. Logged, every minute is exercise from the first, and its windows are withheld.
+  n = 6 * 60
+  hr = np.full(n, 64.0)
+  hr[180:240] = 92.0
+  f = make_frame(n, hr)
+  f2, sessions = F.with_sessions(f)
+  assert sessions == [] and (f2.context[180:240] == "still").all()
+  ws = {w.start: w for w in cand.windows(f2, 0, n * 60)}
+  assert ws[180 * 60].usable and ws[180 * 60].bucket == "rest"
+
+  f.data["logged"] = F.logged_minutes(f.minutes, [{"s": 180 * 60, "e": 240 * 60}])
+  assert np.isnan(f.data["logged"][179]) and f.data["logged"][180] == 1 and np.isnan(f.data["logged"][240])
+  f3, _ = F.with_sessions(f)
+  assert (f3.context[180:240] == F.EXERCISE).all()
+  assert f3.context[245] == "still", "after the logged workout the minutes are judged as they are"
+  strong, _ = F.exertion_evidence(f)
+  assert strong[180:240].all() and not strong[:180].any()
+  ws = {w.start: w for w in cand.windows(f3, 0, n * 60)}
+  assert ws[180 * 60].withheld == "activity" and ws[210 * 60].withheld == "activity"
+  assert ws[300 * 60].usable and ws[300 * 60].bucket == "rest"
+
+
+def test_a_logged_workout_off_the_wrist_stays_off():
+  n = 3 * 60
+  f = make_frame(n, np.full(n, 70.0))
+  f.data["wrist_off"][60:90] = 1
+  f.context[60:90] = "off"
+  f.data["logged"] = F.logged_minutes(f.minutes, [{"s": 50 * 60, "e": 100 * 60}])
+  f2, _ = F.with_sessions(f)
+  assert (f2.context[60:90] == "off").all() and (f2.context[50:60] == F.EXERCISE).all()

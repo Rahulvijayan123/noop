@@ -12,7 +12,9 @@ only toward caution (an epoch never turns a minute with dynAccel ≥ 0.05 g or s
 steady-state rule. Movement evidence for rule exercise-session-2 (exercise_session.py): walk_frac (share of the
 minute's step samples the strap classed walk/run), ep_strong (confident epochs: walking/running/active or a logged
 exercise). An other_movement epoch is not evidence (it covers gym and other awake minutes alike); it still refines a
-minute's context toward caution. Missing is NaN, never 0.
+minute's context toward caution. logged: 1 inside a workout the wearer logged (workout mode, internal.logged_workouts_v1,
+docs/context-watchdog/WORKOUTS.md), NaN otherwise: strong evidence, and with_sessions makes the minute exercise
+whatever the rule found, so it is withheld as exercise and never scored as rest. Missing is NaN, never 0.
 """
 
 from __future__ import annotations
@@ -323,9 +325,10 @@ def exertion_evidence(frame: MinuteFrame) -> tuple[np.ndarray, np.ndarray]:
   nan = np.full(n, np.nan)
   d = frame.data
   dyn, walk, eps = d.get("dyn", nan), d.get("walk_frac", nan), d.get("ep_strong", nan)
+  logged = d.get("logged", nan)
   with np.errstate(invalid="ignore"):
     ok = ~(np.nan_to_num(d.get("wrist_off", nan)) > 0) & ~(d.get("asleep", nan) == 1)
-    strong = ok & ((walk >= WALK_FRAC_STRONG) | (dyn >= STRONG_DYN) | (eps == 1))
+    strong = ok & ((walk >= WALK_FRAC_STRONG) | (dyn >= STRONG_DYN) | (eps == 1) | (logged == 1))
     weak = ok & (dyn >= WEAK_DYN)
   return strong, weak
 
@@ -396,6 +399,10 @@ def with_sessions(frame: MinuteFrame, sleep_rest=None, live: bool = True) -> tup
     if s["confirmed"]:
       phase[s["b"] + 1:s["end"]] = np.where(phase[s["b"] + 1:s["end"]] == 0, 2, phase[s["b"] + 1:s["end"]])
     phase[s["a"]:s["b"] + 1] = 1 if s["confirmed"] else 3
+  # A workout the wearer logged is an observed session: its minutes are exercise whatever the rule found (from the
+  # first minute, without waiting for load), so a window touching it is withheld, never scored as rest.
+  logged_f = np.asarray(frame.data.get("logged", np.full(n, np.nan)), dtype=np.float64)
+  phase[pos[logged_f == 1]] = 1
   ctx = ctx_f.copy()
   p = phase[pos]
   ctx[(p == 1) & (ctx_f != "off")] = EXERCISE
@@ -425,6 +432,40 @@ def _fill(minutes: np.ndarray, rows, value_key: str) -> np.ndarray:
     if i is not None and r[value_key] is not None:
       out[i] = float(r[value_key])
   return out
+
+
+def logged_workouts(cur, user_id: str, device_id: str, lo: int, hi: int) -> list[dict]:
+  """Workouts the wearer logged overlapping [lo, hi): internal.logged_workouts_v1 (20261009170000; workout mode's
+  rows and the manual workout sessions). None on a database without it."""
+  cur.execute("select to_regprocedure('internal.logged_workouts_v1(uuid,uuid,timestamptz,timestamptz)') is not null as ok")
+  if not (cur.fetchone() or {}).get("ok"):
+    return []
+  cur.execute("""select extract(epoch from start_at)::bigint as s, extract(epoch from end_at)::bigint as e,
+                        workout_type, basis
+                   from internal.logged_workouts_v1(%s, %s, to_timestamp(%s), to_timestamp(%s))""",
+              (user_id, device_id, lo, hi))
+  return cur.fetchall()
+
+
+def logged_minutes(minutes: np.ndarray, rows) -> np.ndarray:
+  """1 for a minute whose midpoint a logged workout holds, NaN otherwise (never 0: absence is not evidence)."""
+  out = np.full(len(minutes), np.nan)
+  mids = np.asarray(minutes, dtype=np.int64) + 30
+  for r in rows or ():
+    out[(mids >= int(r["s"])) & (mids < int(r["e"]))] = 1.0
+  return out
+
+
+def refresh_logged(db, frame: MinuteFrame, user_id: str, device_id: str) -> MinuteFrame:
+  """The frame with its `logged` channel re-read over all of its minutes (one small query)."""
+  if not len(frame.minutes):
+    return frame
+  with db.read(statement_timeout_ms=15000) as cur:
+    rows = logged_workouts(cur, user_id, device_id, int(frame.minutes[0]), int(frame.minutes[-1]) + 60)
+  data = dict(frame.data)
+  data["logged"] = logged_minutes(frame.minutes, rows)
+  return MinuteFrame(minutes=frame.minutes, data=data, context=frame.context, family=frame.family,
+                     counters=dict(frame.counters))
 
 
 def device_family(cur, user_id: str, device_id: str) -> str | None:
@@ -489,6 +530,7 @@ def load(db, user_id: str, device_id: str, lo: int, hi: int) -> MinuteFrame:
                       and start_ts >= %s and start_ts < %s
                     order by start_ts""", (user_id, device_id, lo, hi, lo, hi))
     epoch_rows = cur.fetchall()
+    logged_rows = logged_workouts(cur, user_id, device_id, lo, hi)
 
   counters: dict = {}
   hr = _fill(minutes, hr_rows, "v")
@@ -596,5 +638,7 @@ def load(db, user_id: str, device_id: str, lo: int, hi: int) -> MinuteFrame:
     "ep_strong": ep_strong,
     "link_down": link_down_share(minutes, link),
     "contact_lost": contact_state(minutes, contact),
+    "logged": logged_minutes(minutes, logged_rows),
   }
+  counters["logged_workouts"] = len(logged_rows)
   return MinuteFrame(minutes=minutes, data=data, context=context, family=family, counters=counters)

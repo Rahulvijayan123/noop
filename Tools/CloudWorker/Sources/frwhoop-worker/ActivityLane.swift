@@ -951,10 +951,12 @@ struct ActivityLane {
 
         // 6b. ActivityContext v2: the same windows plus their IMU features and the day's stored
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
-        let context = try buildContextDayAndInput(
+        var context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise,
             transitionVersion: transitionVersions, gaitWindows: expertGaitWindows, selection: selection)
+        context.loggedWorkouts = try dayLoggedWorkouts(userId: job.userId, deviceId: job.deviceId,
+                                                       from: dayBounds.start, to: dayBounds.end)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
@@ -1406,7 +1408,10 @@ struct ActivityLane {
                                                         gaitPrior: eldernet.gaitPrior,
                                                         authority: context.selection.flatMap {
                                                             ActivityCandidateDays.authority($0, gait: eldernet)
-                                                        }), candidate)
+                                                        },
+                                                        workouts: LoggedWorkouts.gaitContext(
+                                                            workouts: context.loggedWorkouts,
+                                                            windows: gait.windows)), candidate)
         } catch {
             stats.eldernetShadowFailures += 1
             stats.lastElderNetShadowError = ActivityContextDays.safeReason(error)
@@ -1705,6 +1710,9 @@ struct ActivityLane {
         /// and the lookback input that warmed it up, so a comparison decode can start from the same place.
         var config: ActivityDecoderConfig = ActivityDecoderConfig()
         var lookback: ActivityContextTrackInput? = nil
+        /// Workout mode's logged workouts in the day, for the expert rows' context (the ElderNet gait row labels its
+        /// windows against them). Empty when none was logged or the database predates workout mode.
+        var loggedWorkouts: [LoggedWorkout] = []
     }
 
     mutating func buildContextDayAndInput(
@@ -1962,11 +1970,20 @@ struct ActivityLane {
     /// `ActivityContextDays.lookbackSeconds` before it, so the warm-up decode knows about a night or a workout
     /// that ended just before midnight instead of decoding those minutes as awake and idle (audit D2-11). The
     /// day decode and its fingerprint clip spans to the day themselves.
+    /// The exercise list merges workout mode's typed log into the session records (`LoggedWorkouts.merge`), so the
+    /// epochs' `exercise_session` and the decoder's workout kind see a logged workout, a running one included.
     func daySpans(userId: String, deviceId: String, dayBounds: (start: Int, end: Int)) throws
         -> (nights: [ActivityContextDays.Night], exercise: [(start: Int, end: Int, sport: String)]) {
         let from = dayBounds.start - ActivityContextDays.lookbackSeconds
+        let sessions = try loadWorkouts(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end)
+        let logged = try dayLoggedWorkouts(userId: userId, deviceId: deviceId, from: from, to: dayBounds.end)
         return (try loadPublishedNights(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end),
-                try loadWorkouts(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end))
+                LoggedWorkouts.merge(sessions: sessions, logged: logged))
+    }
+
+    /// Workout mode's logged workouts overlapping `[from, to)` (none on a database without 20261009170000).
+    func dayLoggedWorkouts(userId: String, deviceId: String, from: Int, to: Int) throws -> [LoggedWorkout] {
+        try LoggedWorkouts.load(db: db, user: userId, device: deviceId, from: from, to: to)
     }
 
     private func loadPublishedNights(user: String, device: String,

@@ -7,8 +7,8 @@ they quote production values).
 
 Contents: 1 what was wrong · 2 what changed · 3 how it was verified · 4 deploy order · 5 limits and owner decisions.
 Contracts: [EXERCISE_SESSION.md](EXERCISE_SESSION.md) (rule `exercise-session-2`), [MEASUREMENT_CONTEXT.md](MEASUREMENT_CONTEXT.md)
-(per-minute record), [WATCHDOG_EPISODES.md](WATCHDOG_EPISODES.md) (alarm lineage), `contracts/reason-codes.json` (one
-reason vocabulary, `data-reason-1`).
+(per-minute record), [WATCHDOG_EPISODES.md](WATCHDOG_EPISODES.md) (alarm lineage), [WORKOUTS.md](WORKOUTS.md) (workout
+mode, catalogue `workout-types-1`), `contracts/reason-codes.json` (one reason vocabulary, `data-reason-1`).
 
 ## 1. What was wrong (audit, with the owner's own data)
 
@@ -149,10 +149,13 @@ succeed, retention-sweep's HTTP call still 500s (pre-existing).
    `20261009130200_measurement_context_quality_minutes` · `20261009140000_candidate_withheld_unresolved_adjacency`
    (before the new worker) · `20261009140100_anomaly_window_reason_codes` · `20261009150000_watchdog_episodes` ·
    `20261009150100_placement_device_resolution` · `20261009150200_anomaly_windows_read` ·
-   `20261009160000_activity_exercise_windows` (RecGym shadow head; needs 20261008100600, already in production).
+   `20261009160000_activity_exercise_windows` (RecGym shadow head; needs 20261008100600, already in production) ·
+   `20261009170000_user_workouts` (workout mode: catalogue, `user_workouts`, `internal.logged_workouts_v1`; after
+   130100, whose builder it feeds; WORKOUTS.md).
    Re-applying 20261007160000 or 20261008000000 later would restore the old coach/insight functions: re-apply the
    120000/120100 pair after them.
-3. Edge functions: `scores`, `coach`, `push` (`supabase functions deploy <fn> --project-ref sgoyxzcagqyxexmsidtk`).
+3. Edge functions: `scores` (now also `POST/GET scores/workouts`), `coach`, `push`
+   (`supabase functions deploy <fn> --project-ref sgoyxzcagqyxexmsidtk`).
    No new secrets (`NOOP_SYNC_REQUIRED` defaults on, `NOOP_SYNC_STALE_AFTER_HOURS` 24).
 4. Worker + sidecar release on frwhoop-worker-2 (`deploy/OPERATIONS.md`: package, install, build, switch, restart);
    the second instance 7d49ceba (revision 7f38ceef5, not in this repository) needs the same release if it runs these
@@ -161,8 +164,12 @@ succeed, retention-sweep's HTTP call still 500s (pre-existing).
    `/etc/frwhoop/worker.env` sets `FRWHOOP_EXERCISE_ENABLED=1` with `FRWHOOP_EXERCISE_WEIGHTS_PATH`,
    `FRWHOOP_EXERCISE_WEIGHTS_SHA256` and `FRWHOOP_EXERCISE_MODEL_VERSION=recgym-cnn-transformer-e085ac0`
    (`Tools/ActivityContext/RECGYM.md`); it writes shadow rows only. MetricInsight worker (`sources.py`) on the VPS.
+   The release reads workout mode's log (`LoggedWorkouts.swift`, `internal.logged_workouts_v1`): deploy it after
+   20261009170000 (before it, the lane reads the session records alone, as today). No new worker settings.
 5. Anomaly service on the VPS (`docs/BASELINE_WATCHDOG_V2.md` §5 "Context hygiene"): stop, back up state, install, list
    the reference windows the new rules exclude with `tools/reference_audit.py`, review, purge with `--apply`, start.
+   This install also reads logged workouts (`features.logged_workouts`; none before 20261009170000), so a logged
+   workout's windows are withheld as exercise. No new settings.
 6. Phone build from this branch (set `NOOP_SOURCE_REVISION` to the real HEAD first). Old builds keep working against the
    new server (all additions are optional fields / new routes).
 7. Optional owner repairs: `deploy/placement-rescope-strap.sql` (dry run, then `-v apply=1`; `-v copy=1` optional);
