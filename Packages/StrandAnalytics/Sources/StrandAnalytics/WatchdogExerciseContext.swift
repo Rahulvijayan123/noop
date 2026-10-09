@@ -4,6 +4,11 @@ import Foundation
 /// the sessions in the evidence history behind it, and the in-session safety ceiling. Built by the app from up to
 /// 4 hours of per-minute evidence (`WatchdogService`), or by tests from a tape. It selects which reference a minute
 /// is compared with; it never mutes a check and never widens a safety bound.
+///
+/// A workout the wearer logged (workout mode, docs/context-watchdog/WORKOUTS.md) is an observed label, not an
+/// inference: its minutes are strong movement evidence for the rule, and every window minute it covers is `session`
+/// from its first minute, without waiting for movement or load to open one. The rule itself is unchanged; the safety
+/// bounds (the in-session ceiling, the brady and SpO2 extremes) still judge those minutes.
 public struct WatchdogExerciseContext: Equatable, Sendable {
     public var rule: String
     /// One phase per window minute (aligned with `WatchdogWindow.hr`).
@@ -18,6 +23,8 @@ public struct WatchdogExerciseContext: Equatable, Sendable {
     public var hrCeilingBasis: String
     /// The routine cluster the newest session matches (interpretation and display only).
     public var routine: ExerciseRoutine.Cluster?
+    /// Workouts the wearer logged that overlap the evidence history (oldest first).
+    public var logged: [LoggedWorkoutSpan] = []
 
     public init(rule: String = ExerciseSessionRule.rule, phases: [ExerciseSessionPhase], spans: [ExerciseSessionSpan],
                 restReference: Double, restBasis: String, hrCeiling: Double, hrCeilingBasis: String,
@@ -39,6 +46,11 @@ public struct WatchdogExerciseContext: Equatable, Sendable {
         index >= 0 && index < phases.count ? phases[index] : .none
     }
 
+    /// The logged workout covering the minute starting at `minuteUnix`, if any.
+    public func loggedWorkout(at minuteUnix: Int) -> LoggedWorkoutSpan? {
+        LoggedWorkoutSpan.span(at: minuteUnix, in: logged)
+    }
+
     /// Seconds from the governing session's last evidence minute to `unix` (recovery minutes only).
     public func secondsSinceSessionEnd(at unix: Int) -> Int? {
         guard let s = ExerciseSessionRule.span(at: unix, in: spans), !s.open, unix > s.endUnix else { return nil }
@@ -52,17 +64,41 @@ public struct WatchdogExerciseContext: Equatable, Sendable {
     ///   - windowStart / seqLen: the Watchdog window the phases are for.
     ///   - hrMax: the person's maximum HR (`Profile.hrMax`: their override, else 208 − 0.7·age); `hrMaxFromFormula`
     ///     says which, because a formula maximum gets +5 bpm of tolerance.
+    ///   - logged: workouts the wearer logged (workout mode), running ones up to now. Their minutes are strong
+    ///     evidence for the rule, and the window minutes they cover are `session`.
     public static func build(minutes: [ExerciseSessionMinute], windowStart: Int, seqLen: Int, nowUnix: Int,
                              evaluations: [LBEvaluation], hrMax: Double? = nil, hrMaxFromFormula: Bool = true,
-                             routine: ExerciseRoutine? = nil, calendar: Calendar = .current) -> WatchdogExerciseContext {
-        let (rest, restBasis) = restReference(evaluations: evaluations, minutes: minutes)
-        let spans = ExerciseSessionRule.sessions(minutes: minutes, restReference: rest, nowUnix: nowUnix)
-        let phases = ExerciseSessionRule.phases(spans, fromUnix: windowStart,
+                             routine: ExerciseRoutine? = nil, logged: [LoggedWorkoutSpan] = [],
+                             calendar: Calendar = .current) -> WatchdogExerciseContext {
+        let logged = logged.filter { $0.endUnix > $0.startUnix }.sorted { $0.startUnix < $1.startUnix }
+        let evidence = withLoggedEvidence(minutes, logged: logged)
+        let (rest, restBasis) = restReference(evaluations: evaluations, minutes: evidence)
+        let spans = ExerciseSessionRule.sessions(minutes: evidence, restReference: rest, nowUnix: nowUnix)
+        var phases = ExerciseSessionRule.phases(spans, fromUnix: windowStart,
                                                 toUnix: windowStart + seqLen * WatchdogConfig.gridSeconds)
+        for i in phases.indices where LoggedWorkoutSpan.span(at: windowStart + i * WatchdogConfig.gridSeconds,
+                                                              in: logged) != nil {
+            phases[i] = .session
+        }
         let cluster = spans.last.flatMap { routine?.match(startUnix: $0.startUnix, calendar: calendar) }
         let (ceiling, ceilingBasis) = self.ceiling(hrMax: hrMax, fromFormula: hrMaxFromFormula, routine: routine)
-        return WatchdogExerciseContext(phases: phases, spans: spans, restReference: rest, restBasis: restBasis,
-                                       hrCeiling: ceiling, hrCeilingBasis: ceilingBasis, routine: cluster)
+        var ex = WatchdogExerciseContext(phases: phases, spans: spans, restReference: rest, restBasis: restBasis,
+                                         hrCeiling: ceiling, hrCeilingBasis: ceilingBasis, routine: cluster)
+        ex.logged = logged
+        return ex
+    }
+
+    /// The evidence minutes with every history minute a logged workout covers made strong: the wearer said they were
+    /// exercising. Minutes the history does not hold are not invented, so a logged workout never stretches the grid.
+    static func withLoggedEvidence(_ minutes: [ExerciseSessionMinute],
+                                   logged: [LoggedWorkoutSpan]) -> [ExerciseSessionMinute] {
+        guard !logged.isEmpty else { return minutes }
+        return minutes.map { m in
+            guard !m.strong, LoggedWorkoutSpan.span(at: m.minuteUnix, in: logged) != nil else { return m }
+            var strong = m
+            strong.strong = true
+            return strong
+        }
     }
 
     /// Rest reference for the load check, in order: the established awake-rest HR centre; the established sleep resting

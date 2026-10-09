@@ -268,6 +268,10 @@ private struct DevicesContent: View {
             // Never mixes into a score (I2). Shown only when 2 WHOOP straps share a readable day.
             if let strapCompare { compareRow(strapCompare) }
 
+            // Workout mode (docs/context-watchdog/WORKOUTS.md): start, change and stop a logged workout, so the
+            // strap's readings are judged as that kind of exercise.
+            WorkoutModeSection()
+
             if !removedDevices.isEmpty { removedSection }
 
             dataSection

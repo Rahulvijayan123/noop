@@ -127,6 +127,9 @@ final class AppModel: ObservableObject {
     @Published var activeWorkout: ActiveWorkout?
     /// The just-ended workout, for a brief inline confirmation on Live (cleared on the next start).
     @Published var lastWorkout: WorkoutRow?
+    /// Workout mode's log (docs/context-watchdog/WORKOUTS.md): every live session is a logged workout with a catalogue
+    /// type, which the decoder, the Watchdog and the server read as an observed label.
+    let workoutMode = WorkoutModeStore.shared
 
     /// Records the GPS route of an in-flight distance-type workout (run / ride / walk / hike) from
     /// CoreLocation (#524) , the Apple analogue of Android's `GpsSession` + foreground `LocationManager`.
@@ -1091,6 +1094,8 @@ final class AppModel: ObservableObject {
         // Rehydrate a manual workout that was in flight when iOS killed the app, so it can still be ended
         // + saved on relaunch (#529). Restored here alongside the other UserDefaults-backed state.
         rehydrateActiveWorkout()
+        // Workout mode: a workout left running past the cap while the app was closed ends at the cap.
+        autoEndOverdueWorkout()
 
         AppModel.shared = self   // publish for App Intents (Shortcuts) , see the static above (#42)
 
@@ -1625,6 +1630,13 @@ final class AppModel: ObservableObject {
         // Make the session durable from the first instant (#529): persist it now so an OS kill right
         // after Start , before any HR sample lands , can still be rehydrated + ended on relaunch.
         persistActiveWorkout()
+        // Workout mode: the session is a logged workout of its sport's catalogue type, whichever screen started it,
+        // so the decoder and the Watchdog know it from its first minute. A free-text sport is logged as "other".
+        if workoutMode.active == nil {
+            let type = WorkoutTypeCatalog.resolve(sport: resolved)?.id ?? WorkoutTypeCatalog.otherId
+            _ = try? workoutMode.mutate { try $0.start(typeId: type, now: Int(started.timeIntervalSince1970)) }
+        }
+        syncWorkoutMode(force: true)
         // Workouts & GPS test mode (Test Centre): one session-start line tagged `.workouts`. Zero-cost when
         // off (the gate is one UserDefaults bool read), so the lifecycle of a missing workout is visible.
         emitWorkoutsTrace(WorkoutsTrace.sessionLine(
@@ -1701,6 +1713,13 @@ final class AppModel: ObservableObject {
         w.pausedAt = snap.pausedAtSec.map { Date(timeIntervalSince1970: TimeInterval($0)) }
         w.pausedDuration = TimeInterval(snap.pausedDurationSec ?? 0)
         activeWorkout = w
+        // A session started by a build without workout mode is adopted into the log from its own start.
+        if workoutMode.active == nil {
+            let type = WorkoutTypeCatalog.resolve(sport: snap.sport)?.id ?? WorkoutTypeCatalog.otherId
+            _ = try? workoutMode.mutate {
+                try $0.start(typeId: type, now: Int(Date().timeIntervalSince1970), startUnix: snap.startSec)
+            }
+        }
 
         // Rebuild the transient GPS lifecycle flag as well as the durable workout value. Without this,
         // a distance workout restored after an OS kill resumes as a non-GPS workout: Resume never
@@ -1734,11 +1753,101 @@ final class AppModel: ObservableObject {
     /// Abort the active session without saving a workout.
     func discardWorkout() {
         guard activeWorkout != nil else { return }
+        if let open = workoutMode.active {
+            _ = try? workoutMode.mutate { try $0.delete(id: open.id, now: Int(Date().timeIntervalSince1970)) }
+            syncWorkoutMode(force: true)
+        }
         activeWorkout = nil
         if activeWorkoutIsGps { gpsRecorder.stop() }
         activeWorkoutIsGps = false
         ActiveWorkoutPersistence.clear()
         lastWorkout = nil
+    }
+
+    // MARK: - Workout mode (docs/context-watchdog/WORKOUTS.md)
+
+    /// Start a workout of a catalogue type from the strap screen: the live tracker runs under the type's stored sport
+    /// name (HR, Effort and a route for an outdoor type), and the log records the type itself.
+    func startWorkoutMode(typeId: String) {
+        guard let type = WorkoutTypeCatalog.entry(id: typeId), activeWorkout == nil else { return }
+        autoEndOverdueWorkout()
+        if workoutMode.active != nil { return }
+        startWorkout(sport: type.sportName)
+        // `startWorkout` logged the sport's type; a type whose sport name is shared resolves to the one picked.
+        if workoutMode.active?.typeId != typeId {
+            _ = try? workoutMode.mutate { try $0.changeType(typeId, now: Int(Date().timeIntervalSince1970)) }
+            syncWorkoutMode(force: true)
+        }
+    }
+
+    /// The running workout is a different kind than first picked. The live session keeps its route setting.
+    func changeWorkoutType(_ typeId: String) {
+        guard let type = WorkoutTypeCatalog.entry(id: typeId), workoutMode.active != nil else { return }
+        _ = try? workoutMode.mutate { try $0.changeType(typeId, now: Int(Date().timeIntervalSince1970)) }
+        if var w = activeWorkout {
+            w.sport = type.sportName
+            activeWorkout = w
+            persistActiveWorkout()
+        }
+        syncWorkoutMode(force: true)
+    }
+
+    /// Stop from the strap screen: ends the live session (which closes the log), or closes a logged workout whose
+    /// live session was lost.
+    func stopWorkoutMode() {
+        if activeWorkout != nil {
+            endWorkout()
+        } else if workoutMode.active != nil {
+            _ = try? workoutMode.mutate { try $0.stop(now: Int(Date().timeIntervalSince1970)) }
+            syncWorkoutMode(force: true)
+        }
+    }
+
+    /// Log a workout that already happened (context only: no heart-rate scoring, no Workouts row).
+    @discardableResult
+    func logPastWorkout(typeId: String, start: Date, end: Date) -> Bool {
+        let ok = (try? workoutMode.mutate {
+            try $0.logPast(typeId: typeId, startUnix: Int(start.timeIntervalSince1970),
+                           endUnix: Int(end.timeIntervalSince1970), now: Int(Date().timeIntervalSince1970))
+        }) != nil
+        if ok { syncWorkoutMode(force: true) }
+        return ok
+    }
+
+    func deleteLoggedWorkout(id: String) {
+        if workoutMode.active?.id == id, activeWorkout != nil {
+            discardWorkout()
+            return
+        }
+        _ = try? workoutMode.mutate { try $0.delete(id: id, now: Int(Date().timeIntervalSince1970)) }
+        syncWorkoutMode(force: true)
+    }
+
+    /// A workout still running at workout mode's cap (4 h) was forgotten: it ends at the cap, flagged auto-ended, and
+    /// the live session is saved up to the cap. Checked on relaunch, by the strap screen and on every Watchdog tick.
+    func autoEndOverdueWorkout(now: Date = Date()) {
+        let nowUnix = Int(now.timeIntervalSince1970)
+        guard let open = workoutMode.active, nowUnix >= open.startUnix + WorkoutModeLog.maxOpenSeconds else { return }
+        _ = workoutMode.mutate { $0.autoEndIfOverdue(now: nowUnix) }
+        if activeWorkout != nil {
+            endWorkout(at: Date(timeIntervalSince1970: TimeInterval(open.startUnix + WorkoutModeLog.maxOpenSeconds)))
+        } else {
+            syncWorkoutMode(force: true)
+        }
+    }
+
+    /// Copy pending workout-mode edits to the account (`POST scores/workouts`); nothing leaves the phone while the
+    /// account is not syncing. `force` skips the background throttle (a user action).
+    func syncWorkoutMode(force: Bool = false) {
+        guard CloudPushIdentityStore.current() != nil, workoutMode.log.pendingSync.isEmpty == false else { return }
+        let device = hostedReadCandidates.first, local = hostedLocalDeviceId
+        let now = Int(Date().timeIntervalSince1970)
+        let store = workoutMode
+        Task { @MainActor in
+            await store.sync(serverDeviceId: device, localDeviceId: local, now: now, force: force) {
+                await WorkoutModeStore.post($0)
+            }
+        }
     }
 
     /// Finish the active workout: finalize the GPS route (#524), score the captured HR window, and save it
@@ -1756,9 +1865,17 @@ final class AppModel: ObservableObject {
         elapsedSeconds < minimumWorkoutSeconds
     }
 
-    func endWorkout() {
+    /// `endAt` closes the session earlier than now: a workout left running past workout mode's cap ends at the cap
+    /// (`autoEndOverdueWorkout`), and its heart rate after that is not part of it.
+    func endWorkout(at endAt: Date? = nil) {
         guard let w = activeWorkout else { return }
+        let endDate = endAt ?? Date()
         activeWorkout = nil
+        // Workout mode: close the logged workout with the session (a stop under a minute deletes it, as below).
+        if workoutMode.active != nil {
+            _ = try? workoutMode.mutate { try $0.stop(now: Int(endDate.timeIntervalSince1970)) }
+        }
+        syncWorkoutMode(force: true)
         let wasGps = activeWorkoutIsGps
         activeWorkoutIsGps = false
         // Drop the durable snapshot the instant the session ends , whether it saves below or is discarded
@@ -1773,7 +1890,7 @@ final class AppModel: ObservableObject {
             gpsRecorder.stop()
             route = gpsRecorder.capturedRoute()
         }
-        let samples = w.samples
+        let samples = w.samples.filter { $0.ts <= Int(endDate.timeIntervalSince1970) }
         // Save when there's an HR window OR a real GPS route , a GPS-only walk (HR not streaming) is
         // still a workout (parity with Android's `samples.size < 2 && track.size < 2` discard gate).
         guard samples.count >= 2 || route != nil else {
@@ -1784,7 +1901,7 @@ final class AppModel: ObservableObject {
             lastWorkout = nil
             return
         }
-        let end = Date()
+        let end = endDate
         // A session under a minute is a start/stop the wearer did not mean to keep, and it was the thing
         // that made deletion feel broken: the list filled with 5-30 second entries (#2278). Discarded HERE,
         // at save, rather than retained and pruned later, which is the whole difference between dropping

@@ -228,7 +228,7 @@ final class WatchdogV2ScenarioTests: XCTestCase {
 
     /// `inspect` sees every tick's window (with its exercise context), the carry it was judged with, and the result.
     static func run(_ sc: Scenario, models: [WatchdogModelCandidate]? = nil,
-                    refs: [LBEvaluation], exercise: Bool = true,
+                    refs: [LBEvaluation], exercise: Bool = true, logged: [LoggedWorkoutSpan] = [],
                     inspect: ((Int, WatchdogWindow, WatchdogCarry, WatchdogResult) -> Void)? = nil) -> [TickOut] {
         let tape = generate(sc)
         let evidence = exercise ? evidenceMinutes(tape) : [:]
@@ -268,9 +268,15 @@ final class WatchdogV2ScenarioTests: XCTestCase {
                 if exercise {
                     let hist = stride(from: max(t0, now - WatchdogExerciseContext.historySeconds), to: now, by: 60)
                         .compactMap { evidence[$0] }
+                    // A logged workout is known up to now only (a running one ends at now), like the app's log.
+                    let known = logged.filter { $0.startUnix < now }.map { s -> LoggedWorkoutSpan in
+                        var c = s
+                        if c.endUnix > now { c.endUnix = now; c.open = true }
+                        return c
+                    }
                     w.exercise = WatchdogExerciseContext.build(minutes: hist, windowStart: w.startUnix,
                                                                seqLen: w.hr.count, nowUnix: now, evaluations: refs,
-                                                               hrMax: 195, hrMaxFromFormula: true)
+                                                               hrMax: 195, hrMaxFromFormula: true, logged: known)
                 }
                 window = .success(w)
             }

@@ -532,16 +532,35 @@ public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
     /// Whether the session the minute belongs to is confirmed (rule exercise-session-2); nil when there is no session
     /// (phase "none") and in rows written before -2 (decoded leniently: absent reads as nil).
     public var confirmed: Bool? = nil
+    /// Why the minute is in a session: "logged" (a workout the wearer logged covers it, docs/context-watchdog/
+    /// WORKOUTS.md) or "inferred" (rule exercise-session-2 from movement). nil with phase "none" and in rows written
+    /// before workout mode.
+    public var basis: String? = nil
+    /// The logged workout's catalogue type (`workout-types-1` id) when `basis` is "logged".
+    public var workoutType: String? = nil
 
     public static func make(_ ex: WatchdogExerciseContext, evaluations: [LBEvaluation],
                             nowUnix: Int) -> WatchdogExerciseSnapshot {
         let phase = ex.phases.last ?? .none
-        let span = ExerciseSessionRule.span(at: nowUnix - nowUnix % WatchdogConfig.gridSeconds, in: ex.spans)
+        let minute = nowUnix - nowUnix % WatchdogConfig.gridSeconds
+        let span = ExerciseSessionRule.span(at: minute, in: ex.spans)
+        // A logged workout covering the newest minute is the session's basis (an observed label, so confirmed). The
+        // window's last minute is the one before `nowUnix` while `nowUnix` sits on a minute boundary.
+        let logged = phase == .session
+            ? ex.loggedWorkout(at: minute) ?? ex.loggedWorkout(at: minute - WatchdogConfig.gridSeconds) : nil
         func state(_ s: LBSeries) -> String {
             evaluations.contains { $0.series == s && $0.establishedLong && !$0.stale } ? "established" : "learning"
         }
         let routine = ex.routine.map { c in
             String(format: "%@ %02d:%02d (%d sessions)", c.dayType, c.startMinute / 60, c.startMinute % 60, c.sessions)
+        }
+        if let logged {
+            return WatchdogExerciseSnapshot(
+                rule: ex.rule, phase: phase.rawValue, sessionStartUnix: min(logged.startUnix, span?.startUnix ?? .max),
+                sessionLastMovementUnix: nil, restReference: ex.restReference, restBasis: ex.restBasis,
+                ceilingBpm: ex.hrCeiling, ceilingBasis: ex.hrCeilingBasis,
+                sessionReference: state(.exerciseSessionHR), recoveryReference: state(.exerciseRecoveryHR),
+                routine: routine, confirmed: true, basis: "logged", workoutType: logged.typeId)
         }
         return WatchdogExerciseSnapshot(
             rule: ex.rule, phase: phase.rawValue, sessionStartUnix: phase == .none ? nil : span?.startUnix,
@@ -549,7 +568,8 @@ public struct WatchdogExerciseSnapshot: Equatable, Sendable, Codable {
             restReference: ex.restReference, restBasis: ex.restBasis,
             ceilingBpm: ex.hrCeiling, ceilingBasis: ex.hrCeilingBasis,
             sessionReference: state(.exerciseSessionHR), recoveryReference: state(.exerciseRecoveryHR),
-            routine: routine, confirmed: phase == .none ? nil : span?.confirmed)
+            routine: routine, confirmed: phase == .none ? nil : span?.confirmed,
+            basis: phase == .none ? nil : "inferred")
     }
 }
 
