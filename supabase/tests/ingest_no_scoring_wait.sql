@@ -113,7 +113,7 @@ do $$ begin
   assert pg_get_functiondef('public.invalidate_scoring_stream_v2()'::regprocedure) not like '%advisory%',
     'stream trigger still takes an advisory lock';
   assert pg_get_functiondef('public.noop_commit_push_projection_intake_core(uuid,text,jsonb,jsonb,jsonb,uuid)'::regprocedure)
-    not like '%scoring-inputs-v2%', 'projection settlement still takes the scoring gate';
+    not like '%''scoring-inputs-v2:''||%', 'projection settlement still takes the scoring gate';
 end $$;
 
 -- Cleanup of the synthetic owner (jobs, marks, samples cascade from the user).

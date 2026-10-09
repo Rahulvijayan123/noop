@@ -431,12 +431,12 @@ commit; only the droplet's own `BUILD.json` and process digest identify what it 
 Every new behaviour is off or unchanged by default. When an operator chooses to roll it out (not done
 by the Spec 01 branch), the order matters; details are in `docs/model-integration/`.
 
-1. **Migrations**, in timestamp order: `20261008100000_activity_release_authority.sql` (expert rows
+1. **Migrations**, in timestamp order: `20261008100600_activity_release_authority.sql` (expert rows
    carry `release_mode`/`authority`; joint candidate table), `20261008110000_physiology_candidate_pending.sql`
    (persisted candidate queue), `20261008120000_ppg_transport_anchor.sql` (protocol 1.5 objects). They are
    additive and re-runnable. Follow [docs/BACKEND.md](../docs/BACKEND.md); never `supabase db push` from
    a workstation.
-2. **The `scores` edge function** after migration 20261008100000: its gait/activity routes select the new
+2. **The `scores` edge function** after migration 20261008100600: its gait/activity routes select the new
    columns.
 3. **Sidecar and worker** from one release (`release-host.sh`), then the identity checks above. The worker
    and the candidate migration can go in either order (without the migration the worker keeps the

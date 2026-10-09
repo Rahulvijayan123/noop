@@ -66,7 +66,7 @@ set local statement_timeout = '120s';
 create index if not exists activity_context_epochs_day_revision
   on public.activity_context_epochs(user_id, device_id, day, result_revision desc);
 
-create view public.activity_context_epochs_current with (security_invoker = true) as
+create or replace view public.activity_context_epochs_current with (security_invoker = true) as
 select e.*
   from public.activity_context_epochs e
  where e.result_revision = (select max(x.result_revision) from public.activity_context_epochs x
@@ -81,7 +81,7 @@ revoke all on public.activity_context_epochs_current from public, anon, authenti
 grant select on public.activity_context_epochs_current to authenticated, service_role;
 
 -- 2. What the worker runs, per lane.
-create table public.activity_context_lane_versions (
+create table if not exists public.activity_context_lane_versions (
   algorithm_version text primary key
     check (algorithm_version in ('hart-activity-1', 'streams-activity-1')),
   versions jsonb not null check (jsonb_typeof(versions) = 'object'),
@@ -91,19 +91,20 @@ create table public.activity_context_lane_versions (
 alter table public.activity_context_lane_versions enable row level security;
 revoke all on public.activity_context_lane_versions from public, anon, authenticated;
 grant all on public.activity_context_lane_versions to service_role;
+drop policy if exists activity_context_lane_versions_service on public.activity_context_lane_versions;
 create policy activity_context_lane_versions_service on public.activity_context_lane_versions
   for all to service_role using (true) with check (true);
 
 -- Whether a UTC day has settled as of p_now (2a): 12 h after its end, plus 10 minutes of clock-skew margin
 -- over the worker's own rule.
-create function internal.activity_day_settled(p_day date, p_now timestamptz default clock_timestamp())
+create or replace function internal.activity_day_settled(p_day date, p_now timestamptz default clock_timestamp())
 returns boolean language sql immutable set search_path = '' as $$
   select p_now >= ((p_day + 1)::timestamp at time zone 'UTC') + interval '12 hours 10 minutes'
 $$;
 
 -- The raw-IMU day fingerprint: the trigger's historical literals until a worker registers its versions,
 -- then the registered HART model / preprocessing and the full tag; ';settled' once the day has settled.
-create function internal.activity_hart_day_fingerprint(p_digests text[], p_day date,
+create or replace function internal.activity_hart_day_fingerprint(p_digests text[], p_day date,
   p_now timestamptz default clock_timestamp())
 returns text language sql stable set search_path = '' as $$
   select public.activity_context_fingerprint(p_digests,
@@ -119,7 +120,7 @@ returns text language sql stable set search_path = '' as $$
 $$;
 
 -- The completed scoring revisions a stream day depends on (scoring days D-1..D+1), as enqueue hashes them.
-create function internal.activity_stream_day_marker(p_user uuid, p_device uuid, p_day date)
+create or replace function internal.activity_stream_day_marker(p_user uuid, p_device uuid, p_day date)
 returns text language sql stable set search_path = '' as $$
   select string_agg(f.day::text || ':' || f.completed_revision::text, ',' order by f.day)
     from public.scoring_jobs_v2 f
@@ -127,7 +128,7 @@ returns text language sql stable set search_path = '' as $$
      and f.day between p_day - 1 and p_day + 1
 $$;
 
-create function internal.activity_stream_day_fingerprint(p_user uuid, p_device uuid, p_day date, p_marker text,
+create or replace function internal.activity_stream_day_fingerprint(p_user uuid, p_device uuid, p_day date, p_marker text,
   p_now timestamptz default clock_timestamp())
 returns text language sql stable set search_path = '' as $$
   select encode(extensions.digest(convert_to(
@@ -290,7 +291,7 @@ end $$;
 -- p_versions: {"tag", "decoder", "ontology", "feature_schema", optional "model" / "preprocessing" and an
 -- optional "ordinal" (a decimal string; absent counts as 0). A registration with a lower ordinal than the
 -- stored one is refused: nothing is written, nothing is swept, and the call returns 0.
-create function public.reconcile_activity_context_versions(p_algorithm text, p_versions jsonb,
+create or replace function public.reconcile_activity_context_versions(p_algorithm text, p_versions jsonb,
   p_limit integer default 4)
 returns integer language plpgsql security definer set search_path = '' as $$
 declare r record; touched integer := 0; pending integer; stored jsonb;

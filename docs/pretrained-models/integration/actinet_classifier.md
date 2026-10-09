@@ -74,7 +74,7 @@ A new `ActiNetIntensityStage` beside `ElderNetStage` (`ActivityGaitQuality.swift
 ## 3. Storage (`supabase/migrations`, new)
 
 `activity_intensity_shadow_days`, in the pattern of `20261005170000_activity_motion_heads.sql` plus
-`20261008100000_activity_release_authority.sql`: `user_id` and `device_id` with the composite key to `devices`, a
+`20261008100600_activity_release_authority.sql`: `user_id` and `device_id` with the composite key to `devices`, a
 job fingerprint and input revision, a result-revision sequence, worker-written rows, and a fenced publish function
 with the same lease and revision fence as `publish_activity_motion_heads_day`. Sketch (column checks abbreviated
 where they copy the motion-heads table verbatim):

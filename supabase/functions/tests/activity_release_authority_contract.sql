@@ -1,4 +1,4 @@
--- Activity expert release authority DB contract (20261008100000_activity_release_authority.sql). Runs inside the
+-- Activity expert release authority DB contract (20261008100600_activity_release_authority.sql). Runs inside the
 -- isolated, fully migrated test database (activity_authority_sql_test.ts applies the whole chain, this migration
 -- included). Every fixture change rolls back; no deployed credentials or data are touched.
 --

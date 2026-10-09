@@ -6,7 +6,7 @@ import WhoopProtocol
 /// The joint candidate row and the expert rows' release columns against a real Postgres: written in the same
 /// transaction as the unchanged v2 day document and v1 publish, each under its own savepoint.
 ///
-/// Needs a scratch Postgres with the activity migrations and `20261008100000_activity_release_authority.sql` applied:
+/// Needs a scratch Postgres with the activity migrations and `20261008100600_activity_release_authority.sql` applied:
 /// set FRWHOOP_TEST_DB_URL (skipped otherwise, and skipped when the table is missing). Every test makes its own user
 /// and device and deletes them afterwards.
 final class ActivityCandidateDaysDatabaseTests: XCTestCase {
@@ -37,7 +37,7 @@ final class ActivityCandidateDaysDatabaseTests: XCTestCase {
             "select (to_regclass('public.activity_candidate_days') is not null "
             + "and to_regclass('public.activity_gait_windows_days') is not null) as present", [])
         guard present.first?["present"] == "t" else {
-            throw XCTSkip("apply 20261008100000_activity_release_authority.sql (and the activity migrations)")
+            throw XCTSkip("apply 20261008100600_activity_release_authority.sql (and the activity migrations)")
         }
         let user = UUID().uuidString.lowercased()
         let device = UUID().uuidString.lowercased()

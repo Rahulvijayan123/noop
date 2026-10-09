@@ -37,7 +37,7 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
     }
 
     await t.step('the migration is idempotent: applied again, its contract still holds', async () => {
-      await psqlFile(db.base, new URL('../../migrations/20261008100000_activity_release_authority.sql', import.meta.url));
+      await psqlFile(db.base, new URL('../../migrations/20261008100600_activity_release_authority.sql', import.meta.url));
       const notices = await psqlFile(db.base, new URL('activity_release_authority_contract.sql', import.meta.url));
       assert.match(notices, /PASS 4 privileges/);
     });

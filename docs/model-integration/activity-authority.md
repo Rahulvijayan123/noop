@@ -61,7 +61,7 @@ New on full rows (with `windows`):
 | Field | Type | Meaning |
 |---|---|---|
 | `identity` | object | `model_id, model_version, weights_digest, upstream_commit, preprocessing_version` (the row's model identity; `weights_digest` is recomputed by the publish function from the per-head digests). |
-| `authority` | object \| null | The producer's authority block (below), or `null` for a row written before `20261008100000` or by an older worker. `null` means: no pins and no prior, so the policy reads the row as shadow (`model_not_pinned`). |
+| `authority` | object \| null | The producer's authority block (below), or `null` for a row written before `20261008100600` or by an older worker. `null` means: no pins and no prior, so the policy reads the row as shadow (`model_not_pinned`). |
 
 ### `GET /scores/activity-windows?days=…[&known=…]` (additive fields)
 
@@ -129,7 +129,7 @@ authority capability…"), `activity_windows_route_test.ts` ("the embedded gait 
 full-chain `activity_authority_sql_test.ts`, and `ActivityPhoneAuthorityTests.testTheWindowRoutesDeclareTheAuthorityCapability`.
 
 Compatibility otherwise: every field above is additive; nothing an older phone needs for display is removed.
-Deploy order: apply `20261008100000` before deploying the `scores` function (the route selects the new
+Deploy order: apply `20261008100600` before deploying the `scores` function (the route selects the new
 columns).
 
 ## Authority design
@@ -234,7 +234,7 @@ encoder_config_sha256, checkpoint_sha256`.
 Heartbeat: `meta.lanes[activity].identity` = `expert_policy`, `selection_digest` (last job),
 `<child>.<loaded key>` and `<child>.loaded_digest` for `hart`, `inertia`, `eldernet`, and `<stage>.mode`.
 
-## Migration notes (`20261008100000_activity_release_authority.sql`)
+## Migration notes (`20261008100600_activity_release_authority.sql`)
 
 - `activity_gait_windows_days` and `activity_motion_heads_days`: `release_mode text` (null on old rows; check:
   null, `shadow`, or equal to `mode`) and `authority jsonb` (object or null). A `before insert or update`
@@ -444,7 +444,7 @@ them, and the worker side added no route (its doc, "Motion heads"). `ActivityPho
 | Server | Phone behaviour |
 |---|---|
 | Today's (no release fields) | Gait rows stored with `mode` only; policy reads them as shadow (`model_not_pinned`); canonical decode = HART alone. HART days stored without revision; embedded gait shadow. |
-| Release-authority route (`20261008100000` + new `serverScores.ts`) | Fields stored; rows are at most candidate (`release_mode` never production), so canonical decode is still HART alone; a candidate arm would be admitted by the policy but nothing on the phone decodes one. |
+| Release-authority route (`20261008100600` + new `serverScores.ts`) | Fields stored; rows are at most candidate (`release_mode` never production), so canonical decode is still HART alone; a candidate arm would be admitted by the policy but nothing on the phone decodes one. |
 | A future production row | Admitted to the canonical decode only with pins, a prior and a matching input revision (`testAProductionRowWithItsPinsShapesTheCanonicalDecode`). |
 | Old phone against the new route | Ignores the new fields; its own base defect remains on that build (it is fixed only by shipping this one). |
 
@@ -558,7 +558,7 @@ the code changed here, and all passed in the full run above.
    `TasksMax=` large enough for the worker's threads plus ~8 child threads. Set `FRWHOOP_ACTIVITY_THREADS=1`,
    `FRWHOOP_ELDERNET_THREADS=1` explicitly in the env template so the caps are visible to an operator, and do not
    set `ACTIVITY_GAIT_EXPERT` (the worker clears it for the HART child anyway).
-2. **Deploy order**: apply `20261008100000_activity_release_authority.sql` before deploying the `scores` function
+2. **Deploy order**: apply `20261008100600_activity_release_authority.sql` before deploying the `scores` function
    (the route selects `release_mode`, `input_revision`, `authority`).
 3. **Shared README**: list `activity_candidate_days` as service-role-only and the activity lane's heartbeat
    `identity` keys (`expert_policy`, `selection_digest`, `<child>.<loaded key>`, `<child>.loaded_digest`).
