@@ -3,7 +3,10 @@ import GRDB
 
 /// A full snapshot. Labels in recorded events stay fixed when an event type is renamed.
 struct ManualEventEntry: Codable, Equatable, Identifiable, Sendable {
-    enum Kind: String, Codable, Sendable { case event, eventType = "event_type", preset }
+    /// `observation`: a period someone watched in which every event that happened is logged
+    /// (docs/PHENOTYPE_SIGNATURES.md, "Caregiver evidence"). It is evidence about the time between events, never
+    /// an event: it has no type, no activity kind and never appears in the Events timeline.
+    enum Kind: String, Codable, Sendable { case event, eventType = "event_type", preset, observation }
     var id: UUID
     var kind: Kind
     var label: String
@@ -22,6 +25,9 @@ struct ManualEventEntry: Codable, Equatable, Identifiable, Sendable {
     /// copies its type's kind when logged, like its label. The server maps it to the classifier's classes
     /// and projects definitive kinds into the activity ground-truth labels.
     var activityKind: String?
+    /// How sure the logger was of an event's start, in ± minutes (one of `onsetUncertaintyChoices`). Chosen when
+    /// the event is logged, like `activityKind`; nil means the default (±5 min) and keeps older revisions as they were.
+    var onsetUncertaintyMinutes: Int?
 
     var start: Date? { startUnixSeconds.map(Date.init(timeIntervalSince1970:)) }
     var end: Date? { endUnixSeconds.map(Date.init(timeIntervalSince1970:)) }
@@ -58,6 +64,22 @@ struct ManualEventEntry: Codable, Equatable, Identifiable, Sendable {
         }
     }
 
+    /// ± minutes the logger can choose for an event's start (MANUAL_EVENT_ONSET_UNCERTAINTY_MINUTES on the server).
+    static let onsetUncertaintyChoices = [0, 5, 15, 60]
+    /// What an event without its own value counts as.
+    static let defaultOnsetUncertaintyMinutes = 5
+    /// An observation period is at most a day (MANUAL_EVENT_OBSERVATION_MAX_SECONDS on the server).
+    static let observationMaxSeconds: Double = 86_400
+    static let observationLabel = "Observation"
+    static let observationSymbol = "eye"
+
+    /// A new observation period from `start` to `end`, with its fixed label.
+    static func observation(start: Date, end: Date, note: String? = nil, deviceId: String? = nil) -> Self {
+        Self(id: UUID(), kind: .observation, label: observationLabel, symbol: observationSymbol,
+             startUnixSeconds: start.timeIntervalSince1970, endUnixSeconds: end.timeIntervalSince1970,
+             note: note, deviceId: deviceId)
+    }
+
     private static let originalDefaultTypes: [Self] = zip([
         "Rest", "Walking", "Wrist movement", "Sleeve warming", "Off wrist", "Posture change",
         "Mental arithmetic", "Medication", "Meal", "Caffeine", "Exercise", "Symptoms", "Shower",
@@ -85,7 +107,8 @@ struct ManualEventEntry: Codable, Equatable, Identifiable, Sendable {
               archived == (archivedAt != nil),
               archivedAt.map({ $0.isFinite && $0 >= 0 && $0 <= 32_503_680_000 }) ?? true,
               durationMinutes.map({ (1...1440).contains($0) }) ?? true,
-              activityKind.map({ ActivityKind(rawValue: $0) != nil }) ?? true else {
+              activityKind.map({ ActivityKind(rawValue: $0) != nil }) ?? true,
+              onsetUncertaintyMinutes.map({ kind == .event && Self.onsetUncertaintyChoices.contains($0) }) ?? true else {
             throw ManualEventStore.Error.invalidEntry
         }
         switch kind {
@@ -97,6 +120,13 @@ struct ManualEventEntry: Codable, Equatable, Identifiable, Sendable {
             }
         case .preset:
             guard let minutes = durationMinutes, (1...1440).contains(minutes) else {
+                throw ManualEventStore.Error.invalidEntry
+            }
+        case .observation:
+            guard typeId == nil, activityKind == nil, durationMinutes == nil,
+                  let start = startUnixSeconds, start.isFinite, start >= 946_684_800, start <= 32_503_680_000,
+                  let end = endUnixSeconds, end.isFinite, end > start, end <= 32_503_680_000,
+                  end - start <= Self.observationMaxSeconds else {
                 throw ManualEventStore.Error.invalidEntry
             }
         case .eventType: break

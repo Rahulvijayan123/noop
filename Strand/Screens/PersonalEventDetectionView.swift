@@ -39,9 +39,10 @@ struct EventDetectionSection: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: NoopMetrics.gap) {
-            SectionHeader("Detect automatically")
-            Text("Choose the events Nara should look for in uploaded sensor data. Each event type uses a model selected for you.")
+            SectionHeader("Learn event signatures")
+            Text("Choose the events Nara should learn from. For each one, Nara compares your readings around the events you log with similar times without them, and shows what it finds and how reliable it is. Alerts are off: nothing is detected or sent in this phase.")
                 .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                .fixedSize(horizontal: false, vertical: true)
             if let message = detection.message {
                 Label(message, systemImage: "icloud").font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
             }
@@ -55,15 +56,17 @@ struct EventDetectionSection: View {
                                     Image(systemName: type.symbol).foregroundStyle(StrandPalette.metricPurple).frame(width: 24)
                                     VStack(alignment: .leading, spacing: 3) {
                                         Text(type.label).font(StrandFont.body)
-                                        Text(detection.status(type.id)).font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                                        Text(detection.signatureStatus(type.id, loggedEvents: manual.events.filter { $0.typeId == type.id }.count))
+                                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                                     }
                                     Image(systemName: "info.circle").foregroundStyle(StrandPalette.textTertiary)
                                 }
                             }.buttonStyle(.plain)
                             Spacer()
-                            Toggle(type.label, isOn: Binding(get: { detection.isEnabled(type.id) }, set: { enabled in
+                            Toggle("Learn this event's signature", isOn: Binding(get: { detection.isEnabled(type.id) }, set: { enabled in
                                 detection.enqueue(EventDetectionCommand(action: "setting", typeId: type.id, enabled: enabled), expectedOwner: manual.owner)
                             })).labelsHidden().tint(StrandPalette.accent)
+                                .accessibilityLabel("Learn the \(type.label) signature")
                         }
                     }
                 }
@@ -101,68 +104,102 @@ struct EventDetectionSection: View {
                 }.font(StrandFont.footnote)
             }
         }
-        .sheet(item: $selectedType) { type in DetectorDetailSheet(type: type, owner: manual.owner, detection: detection) }
+        .sheet(item: $selectedType) { type in DetectorDetailSheet(type: type, owner: manual.owner, detection: detection, manual: manual) }
         .sheet(item: $review) { item in DetectionReviewSheet(item: item, owner: manual.owner, manual: manual, detection: detection) }
         .onChange(of: manual.owner) { _ in selectedType = nil; review = nil }
     }
 }
 
+/// One event type: whether Nara learns its signature, what it has learned (EventSignatureCard), and reviewed
+/// times without the event (negative intervals, PR #5), which the signature engine uses as comparison time.
 struct DetectorDetailSheet: View {
     let type: ManualEventEntry
     let owner: String?
     @ObservedObject var detection: EventDetectionCenter
+    @ObservedObject var manual: ManualEventCenter = .shared
     @Environment(\.dismiss) private var dismiss
     @State private var start = Date().addingTimeInterval(-300)
     @State private var end = Date()
     @State private var saved = false
+
+    private var loggedEvents: Int { manual.events.filter { $0.typeId == type.id }.count }
+
     var body: some View {
         NavigationStack {
-            Form {
-                Section("Personal detector") {
-                    LabeledContent("Status", value: detection.status(type.id))
-                    if let model = detection.settings.first(where: { $0.typeId == type.id }) {
-                        if let date = model.lastTrainingAt { LabeledContent("Last evaluation", value: date) }
-                        if let reason = model.detail.reason { Text(reason) }
-                        if let candidate = model.detail.candidate { LabeledContent("Model", value: candidate) }
-                        if let value = model.detail.timeSavedSecondsPerDay {
-                            LabeledContent("Estimated time saved", value: String(format: "%.0f sec/day", value))
-                        }
-                        if let value = model.detail.falseAlertsPerDay { LabeledContent("False alerts", value: String(format: "%.1f/day", value)) }
-                        if let value = model.detail.recall { LabeledContent("Reviewed events detected", value: String(format: "%.0f%%", value * 100)) }
-                        if let value = model.detail.events { LabeledContent("Evaluation events", value: String(value)) }
-                        if let value = model.detail.coverage { LabeledContent("Usable reviewed data", value: String(format: "%.0f%%", value * 100)) }
-                        if let value = model.detail.reviewedHours { LabeledContent("Observed review time", value: String(format: "%.1f hours", value)) }
-                        if let value = model.detail.delaySeconds { LabeledContent("Typical delay", value: String(format: "%.0f sec", value)) }
-                    }
-                    Text("Models are compared each week when new reviewed data is available. Estimated savings include the time used to confirm and dismiss alerts.")
-                }
-                Section("Review a time window") {
-                    Text("Choose a time when you know this event did not happen. This adds a reviewed negative example for this type only.")
-                    DatePicker("Start", selection: $start, in: ...Date())
-                    DatePicker("End", selection: $end, in: ...Date())
-                    Button(saved ? "Saved for sync" : "No \(type.label) in this window") {
-                        guard let device = PersonalEventPresentation.canonicalDevice.flatMap(UUID.init(uuidString:)) else { return }
-                        saved = detection.enqueue(EventDetectionCommand(action: "negative", typeId: type.id,
-                            start: start.timeIntervalSince1970, end: end.timeIntervalSince1970, deviceId: device), expectedOwner: owner)
-                    }.disabled(end <= start || end.timeIntervalSince(start) > 86400 || PersonalEventPresentation.canonicalDevice == nil || saved)
-                    if PersonalEventPresentation.canonicalDevice == nil { Text("Connect a cloud-linked wearable to review sensor intervals.") }
-                }
-                let reviews = detection.negativeReviews.filter { $0.typeId == type.id }
-                if !reviews.isEmpty {
-                    Section("Reviewed negative intervals") {
-                        ForEach(reviews) { review in
-                            VStack(alignment: .leading, spacing: 8) {
-                                Text(Date(timeIntervalSince1970: review.start).formatted(date: .abbreviated, time: .shortened))
-                                Button("Withdraw this review") {
-                                    detection.enqueue(EventDetectionCommand(action: "withdraw", typeId: type.id, reviewId: review.id), expectedOwner: owner)
-                                }.disabled(detection.pending.contains { $0.reviewId == review.id })
+            ScrollView {
+                VStack(alignment: .leading, spacing: NoopMetrics.gap) {
+                    NoopCard {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Toggle(isOn: Binding(get: { detection.isEnabled(type.id) }, set: { enabled in
+                                detection.enqueue(EventDetectionCommand(action: "setting", typeId: type.id, enabled: enabled), expectedOwner: owner)
+                            })) {
+                                Text("Learn this event's signature").font(StrandFont.headline)
+                            }
+                            .tint(StrandPalette.accent)
+                            Text(detection.isEnabled(type.id)
+                                 ? "Nara compares your readings around each logged \(type.label.lowercased()) with similar times without it. No alerts are produced in this phase."
+                                 : "Off. Turn on to learn how your readings change around this event. No alerts are produced in this phase.")
+                                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            if detection.pending.contains(where: { $0.typeId == type.id && $0.action == "setting" }) {
+                                Label("Waiting to sync", systemImage: "icloud.and.arrow.up")
+                                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
                             }
                         }
-                        Text("Withdrawn reviews stay in the retained history and stop supplying negative training labels.")
+                    }
+                    EventSignatureCard(report: detection.signatures[type.id], loggedEvents: loggedEvents,
+                                       checked: detection.signaturesChecked.contains(type.id))
+                    SectionHeader("Mark a time without this event")
+                    NoopCard {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("Choose a time when you know this event did not happen. Nara uses it as comparison time for this type only. To say every event in a period was logged, log an observation period from the Event log menu instead.")
+                                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                                .fixedSize(horizontal: false, vertical: true)
+                            DatePicker("Start", selection: $start, in: ...Date())
+                            DatePicker("End", selection: $end, in: ...Date())
+                            Button(saved ? "Saved for sync" : "No \(type.label) in this window") {
+                                guard let device = PersonalEventPresentation.canonicalDevice.flatMap(UUID.init(uuidString:)) else { return }
+                                saved = detection.enqueue(EventDetectionCommand(action: "negative", typeId: type.id,
+                                    start: start.timeIntervalSince1970, end: end.timeIntervalSince1970, deviceId: device), expectedOwner: owner)
+                            }
+                            .buttonStyle(.bordered)
+                            .disabled(end <= start || end.timeIntervalSince(start) > 86400 || PersonalEventPresentation.canonicalDevice == nil || saved)
+                            if PersonalEventPresentation.canonicalDevice == nil {
+                                Text("Connect a cloud-linked wearable to review sensor intervals.")
+                                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                            }
+                        }
+                        .font(StrandFont.subhead)
+                    }
+                    let reviews = detection.negativeReviews.filter { $0.typeId == type.id }
+                    if !reviews.isEmpty {
+                        SectionHeader("Times without this event")
+                        NoopCard {
+                            VStack(alignment: .leading, spacing: 10) {
+                                ForEach(reviews) { review in
+                                    HStack {
+                                        Text("\(Date(timeIntervalSince1970: review.start).formatted(date: .abbreviated, time: .shortened)) · \(ManualEventFormat.duration(review.end - review.start))")
+                                            .font(StrandFont.subhead)
+                                        Spacer()
+                                        Button("Withdraw") {
+                                            detection.enqueue(EventDetectionCommand(action: "withdraw", typeId: type.id, reviewId: review.id), expectedOwner: owner)
+                                        }
+                                        .font(StrandFont.caption)
+                                        .disabled(detection.pending.contains { $0.reviewId == review.id })
+                                    }
+                                }
+                                Text("Withdrawn reviews stay in the retained history and stop counting as comparison time.")
+                                    .font(StrandFont.caption).foregroundStyle(StrandPalette.textSecondary)
+                            }
+                        }
                     }
                 }
-            }.navigationTitle(type.label)
-                .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+                .padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
+            }
+            .background(StrandPalette.surfaceBase).foregroundStyle(StrandPalette.textPrimary)
+            .navigationTitle(type.label)
+            .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
+            .task(id: type.id) { await detection.loadSignature(for: type.id) }
         }
     }
 }

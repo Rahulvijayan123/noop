@@ -19,6 +19,7 @@ struct EventDetailView: View {
     @State private var selected: Date?
     @State private var showingContext = false
     @State private var review: DetectedEvent?
+    @State private var signatureType: ManualEventEntry?
 
     /// The logged event behind this page, when it is one, for its full strap context.
     private var loggedEntry: ManualEventEntry? {
@@ -43,6 +44,16 @@ struct EventDetailView: View {
                 }
                 .buttonStyle(.bordered).tint(StrandPalette.metricPurple)
                 .sheet(isPresented: $showingContext) { ManualEventDetailView(entry: entry, center: manual) }
+                if let type = manual.types.first(where: { $0.id == entry.typeId }) {
+                    Button { signatureType = type } label: {
+                        Label("What Nara has learned about \(type.label)", systemImage: "chart.line.uptrend.xyaxis")
+                            .font(StrandFont.subhead)
+                    }
+                    .buttonStyle(.bordered).tint(StrandPalette.metricPurple)
+                    .sheet(item: $signatureType) { type in
+                        DetectorDetailSheet(type: type, owner: manual.owner, detection: detection, manual: manual)
+                    }
+                }
             }
             if let detected = detection.detections.first(where: { $0.id.uuidString == event.id }) {
                 Button("Review this event") { review = detected }

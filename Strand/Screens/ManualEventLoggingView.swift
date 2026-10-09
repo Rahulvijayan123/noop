@@ -6,6 +6,7 @@ struct ManualEventLoggingSection: View {
     @ObservedObject var center: ManualEventCenter = .shared
     @State private var editor: EventEditorRequest?
     @State private var library: EventLibraryPage?
+    @State private var observation: ObservationEditorRequest?
     @State private var exportURL: URL?
 
     var body: some View {
@@ -22,6 +23,8 @@ struct ManualEventLoggingSection: View {
                         Button("Event types", systemImage: "tag") { library = .types }
                         Button("Duration presets", systemImage: "timer") { library = .presets }
                         Button("All logged events", systemImage: "list.bullet") { library = .history }
+                        Button("Log an observation period", systemImage: "eye") { observation = ObservationEditorRequest() }
+                        Button("Observation periods", systemImage: "eye.circle") { library = .observations }
                         Button("Archive (trash)", systemImage: "archivebox") { library = .archive }
                         Button("Sync now", systemImage: "arrow.triangle.2.circlepath") {
                             Task { await center.syncNow() }
@@ -118,7 +121,10 @@ struct ManualEventLoggingSection: View {
             if page == .account { NaraAccountView() }
             else { ManualEventLibrary(center: center, page: page) }
         }
-        .onChange(of: center.owner) { _ in editor = nil; library = nil; exportURL = nil }
+        .sheet(item: $observation) { request in
+            ManualObservationEditor(center: center, initial: request.entry, owner: center.owner)
+        }
+        .onChange(of: center.owner) { _ in editor = nil; library = nil; observation = nil; exportURL = nil }
         .task {
             await center.syncNow()
             while !Task.isCancelled {
@@ -135,12 +141,18 @@ private struct EventEditorRequest: Identifiable {
     var event: ManualEventEntry?
 }
 
+private struct ObservationEditorRequest: Identifiable {
+    let id = UUID()
+    var entry: ManualEventEntry?
+}
+
 private enum EventLibraryPage: String, Identifiable {
-    case history, archive, types, presets, account
+    case history, observations, archive, types, presets, account
     var id: String { rawValue }
     var title: String {
         switch self {
         case .history: "Logged events"
+        case .observations: "Observation periods"
         case .archive: "Archive (trash)"
         case .types: "Event types"
         case .presets: "Duration presets"
@@ -248,6 +260,7 @@ private struct ManualEventEditor: View {
     @State private var presetOpen = false
     @State private var presetName = ""
     @State private var presetMinutes = 5
+    @State private var onsetUncertainty = ManualEventEntry.defaultOnsetUncertaintyMinutes
 
     private var availableTypes: [ManualEventEntry] {
         var types = center.types
@@ -279,6 +292,7 @@ private struct ManualEventEditor: View {
                         Label("Start now. End this event from the Events page.", systemImage: "record.circle")
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     }
+                    ManualEventOnsetPicker(selection: $onsetUncertainty)
                     VStack(alignment: .leading, spacing: 10) {
                         Text("Notes").font(StrandFont.headline)
                         TextField("What should you remember?", text: $note, axis: .vertical)
@@ -473,6 +487,7 @@ private struct ManualEventEditor: View {
         if let event = request.event {
             note = event.note ?? ""; live = event.isRunning
             window.start = event.start ?? Date(); window.end = event.end ?? Date()
+            onsetUncertainty = event.onsetUncertaintyMinutes ?? ManualEventEntry.defaultOnsetUncertaintyMinutes
         } else {
             selectedPreset = center.presets.first { $0.durationMinutes == 5 && $0.typeId == nil }?.id
         }
@@ -496,6 +511,10 @@ private struct ManualEventEditor: View {
         event.typeId = type.id; event.label = type.label; event.symbol = type.symbol; event.note = note
         // Like the label, the kind is fixed when the event is logged, so later type edits never relabel it.
         event.activityKind = center.activityKind(for: type)
+        // Chosen when logged. An older event without the field keeps it absent unless the choice changes,
+        // since absent already means the default.
+        event.onsetUncertaintyMinutes = request.event?.onsetUncertaintyMinutes == nil && request.event != nil
+            && onsetUncertainty == ManualEventEntry.defaultOnsetUncertaintyMinutes ? nil : onsetUncertainty
         event.startUnixSeconds = request.event != nil || !live ? window.start.timeIntervalSince1970 : Date().timeIntervalSince1970
         event.endUnixSeconds = live ? nil : window.end.timeIntervalSince1970
         if request.event == nil { event.deviceId = PersonalEventPresentation.canonicalDevice }
@@ -510,18 +529,21 @@ private struct ManualEventLibrary: View {
     @State private var search = ""
     @State private var editing: EventEditorRequest?
     @State private var editingType: ManualEventEntry?
+    @State private var editingObservation: ObservationEditorRequest?
     @State private var pendingArchive: ManualEventEntry?
 
     private var rows: [ManualEventEntry] {
         let all: [ManualEventEntry]
         switch page {
         case .history: all = center.events
+        case .observations: all = center.observations
         case .archive: all = center.archived
         case .types: all = center.types
         case .presets: all = center.presets
         case .account: all = []
         }
-        return all.filter { search.isEmpty || $0.label.localizedCaseInsensitiveContains(search) }
+        return all.filter { search.isEmpty || $0.label.localizedCaseInsensitiveContains(search)
+            || ($0.note?.localizedCaseInsensitiveContains(search) ?? false) }
     }
 
     var body: some View {
@@ -543,15 +565,27 @@ private struct ManualEventLibrary: View {
                         Text("Create a preset in Log Event. Each preset can have its own event type and duration.")
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                     }
+                    if page == .observations {
+                        Text(ManualObservationCopy.explanation)
+                            .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                        Button("Log an observation period", systemImage: "eye") {
+                            editingObservation = ObservationEditorRequest()
+                        }.buttonStyle(.bordered).disabled(center.owner == nil)
+                    }
                     if rows.isEmpty {
-                        Label(page == .archive ? "Archive is empty" : "No entries here yet",
-                              systemImage: page == .archive ? "archivebox" : "tag")
+                        Label(page == .archive ? "Archive is empty" : page == .observations ? "No observation periods yet" : "No entries here yet",
+                              systemImage: page == .archive ? "archivebox" : page == .observations ? "eye" : "tag")
                             .font(StrandFont.subhead).foregroundStyle(StrandPalette.textSecondary)
                             .frame(maxWidth: .infinity, minHeight: 100)
                     }
                     ForEach(rows) { entry in
                         if entry.kind == .event {
                             ManualEventRow(entry: entry, center: center) { editing = EventEditorRequest(event: entry) }
+                        } else if entry.kind == .observation {
+                            ManualObservationRow(entry: entry, center: center) {
+                                editingObservation = ObservationEditorRequest(entry: entry)
+                            }
                         } else { catalogRow(entry) }
                     }
                 }.padding(20).frame(maxWidth: 620).frame(maxWidth: .infinity)
@@ -561,6 +595,7 @@ private struct ManualEventLibrary: View {
             .toolbar { ToolbarItem(placement: .confirmationAction) { Button("Done") { dismiss() } } }
             .sheet(item: $editing) { ManualEventEditor(center: center, request: $0, owner: center.owner) }
             .sheet(item: $editingType) { ManualEventCatalogEditor(center: center, initial: $0, owner: center.owner) }
+            .sheet(item: $editingObservation) { ManualObservationEditor(center: center, initial: $0.entry, owner: center.owner) }
             .alert("Archive this entry?", isPresented: Binding(get: { pendingArchive != nil },
                 set: { if !$0 { pendingArchive = nil } })) {
                 Button("Archive") { if let entry = pendingArchive { center.archive(entry) }; pendingArchive = nil }
@@ -711,9 +746,14 @@ struct ManualEventDemoView: View {
     var showCustomType = false
     var showDetail = false
     var showEventPage = false
+    var showObservationEditor = false
+    var showObservations = false
     @StateObject private var center: ManualEventCenter
-    init(showEditor: Bool = false, showCustomType: Bool = false, showDetail: Bool = false, showEventPage: Bool = false) {
+    init(showEditor: Bool = false, showCustomType: Bool = false, showDetail: Bool = false, showEventPage: Bool = false,
+         showObservationEditor: Bool = false, showObservations: Bool = false) {
         self.showEventPage = showEventPage
+        self.showObservationEditor = showObservationEditor
+        self.showObservations = showObservations
         self.showEditor = showEditor
         self.showCustomType = showCustomType
         self.showDetail = showDetail
@@ -728,6 +768,13 @@ struct ManualEventDemoView: View {
             endUnixSeconds: Date().addingTimeInterval(-1800).timeIntervalSince1970, note: "Walk after lunch")
         _ = center.save(event, for: id.ownerId)
         if let context = Self.sampleContext(for: event) { center.showContextForPreview(context, for: event.id) }
+        if showObservations {
+            let now = Date()
+            _ = center.save(.observation(start: now.addingTimeInterval(-3 * 3600), end: now.addingTimeInterval(-600),
+                                         note: "At home, watched the whole time"), for: id.ownerId)
+            _ = center.save(.observation(start: now.addingTimeInterval(-26 * 3600), end: now.addingTimeInterval(-20 * 3600)),
+                            for: id.ownerId)
+        }
         _center = StateObject(wrappedValue: center)
     }
 
@@ -771,7 +818,11 @@ struct ManualEventDemoView: View {
     }
 
     var body: some View {
-        if showEventPage, let event = ManualEventPresentation.events(center).first {
+        if showObservationEditor {
+            ManualObservationEditor(center: center, initial: nil, owner: center.owner)
+        } else if showObservations {
+            ManualEventLibrary(center: center, page: .observations)
+        } else if showEventPage, let event = ManualEventPresentation.events(center).first {
             EventDetailView(event: event, history: ManualEventPresentation.events(center), manual: center)
         } else if showDetail, let event = center.events.first {
             ManualEventDetailView(entry: event, center: center)

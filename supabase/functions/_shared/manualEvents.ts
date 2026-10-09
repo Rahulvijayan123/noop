@@ -12,6 +12,13 @@ export const MANUAL_EVENTS_MAX_ITEMS = 25;
 export const MANUAL_EVENT_CONTEXT_MAX_IDS = 25;
 /** What a logged activity was, in the activity classifier's terms; 'other' has no classifier counterpart. */
 export const MANUAL_EVENT_ACTIVITY_KINDS = ['rest', 'walking', 'running', 'cycling', 'stairs', 'exercise', 'other'] as const;
+/** Entry kinds. An `observation` is a period a caregiver watched in which every event that happened is logged
+ *  (docs/PHENOTYPE_SIGNATURES.md, "Caregiver evidence"); it is evidence, never an event itself. */
+export const MANUAL_EVENT_KINDS = ['event', 'event_type', 'preset', 'observation'] as const;
+/** How sure the logger is of an event's start: ± minutes, chosen when it is logged (0 = exact). */
+export const MANUAL_EVENT_ONSET_UNCERTAINTY_MINUTES = [0, 5, 15, 60] as const;
+/** An observation period is at most one day long. */
+export const MANUAL_EVENT_OBSERVATION_MAX_SECONDS = 86_400;
 /** 2000-01-01: an event before it is a clock or entry error (the ground-truth table refuses it too). */
 const MIN_EVENT_START = 946_684_800;
 const MAX_INSTANT = 32_503_680_000;
@@ -24,7 +31,7 @@ const optional = (v: unknown, check: (v: unknown) => boolean) => v == null || ch
 const instant = (v: unknown): v is number => typeof v === 'number' && Number.isFinite(v) && v >= 0 && v <= MAX_INSTANT;
 const entryKeys = new Set(['id', 'kind', 'label', 'symbol', 'typeId', 'favorite', 'durationMinutes',
   'startUnixSeconds', 'endUnixSeconds', 'note', 'deviceId', 'timeZoneIdentifier', 'archived', 'archivedAt',
-  'activityKind']);
+  'activityKind', 'onsetUncertaintyMinutes']);
 
 /** Why a revision is refused, or null when it is valid. */
 export function manualEventRevisionProblem(value: unknown): string | null {
@@ -35,7 +42,7 @@ export function manualEventRevisionProblem(value: unknown): string | null {
   }
   const e = value.entry;
   if (Object.keys(e).some(k => !entryKeys.has(k)) || !isUuid(e.id)
-      || !['event', 'event_type', 'preset'].includes(e.kind)) return 'invalid_entry';
+      || !(MANUAL_EVENT_KINDS as readonly unknown[]).includes(e.kind)) return 'invalid_entry';
   if (!text(e.label, 100, true)) return 'invalid_label';
   if (!text(e.symbol, 80, true) || !text(e.timeZoneIdentifier, 100, true)
       || typeof e.favorite !== 'boolean' || typeof e.archived !== 'boolean'
@@ -43,6 +50,10 @@ export function manualEventRevisionProblem(value: unknown): string | null {
   if (!optional(e.note, v => text(v, 2000))) return 'invalid_note';
   if (!optional(e.activityKind, v => (MANUAL_EVENT_ACTIVITY_KINDS as readonly unknown[]).includes(v))) {
     return 'invalid_activity_kind';
+  }
+  if (e.onsetUncertaintyMinutes != null && (e.kind !== 'event'
+      || !(MANUAL_EVENT_ONSET_UNCERTAINTY_MINUTES as readonly unknown[]).includes(e.onsetUncertaintyMinutes))) {
+    return 'invalid_onset_uncertainty';
   }
   if (!optional(e.startUnixSeconds, instant) || !optional(e.endUnixSeconds, instant)
       || !optional(e.archivedAt, instant) || e.archived !== (e.archivedAt != null)) return 'invalid_time';
@@ -53,6 +64,13 @@ export function manualEventRevisionProblem(value: unknown): string | null {
     if (!isUuid(e.typeId)) return 'invalid_entry';
     if (!instant(e.startUnixSeconds) || e.startUnixSeconds < MIN_EVENT_START
         || (e.endUnixSeconds != null && e.endUnixSeconds < e.startUnixSeconds)) return 'invalid_time';
+  }
+  if (e.kind === 'observation') {
+    // Applies to every event type: no type, kind, duration preset or onset of its own; a closed, bounded window.
+    if (e.typeId != null || e.activityKind != null || e.durationMinutes != null) return 'invalid_entry';
+    if (!instant(e.startUnixSeconds) || e.startUnixSeconds < MIN_EVENT_START || !instant(e.endUnixSeconds)
+        || e.endUnixSeconds <= e.startUnixSeconds
+        || e.endUnixSeconds - e.startUnixSeconds > MANUAL_EVENT_OBSERVATION_MAX_SECONDS) return 'invalid_time';
   }
   if (e.kind === 'preset' && (!Number.isInteger(e.durationMinutes)
       || e.durationMinutes < 1 || e.durationMinutes > 1440)) return 'invalid_duration';

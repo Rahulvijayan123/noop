@@ -14,8 +14,36 @@ export function validateDetectionCommand(body: any): boolean {
   return body.action === 'review' && keys(body, [...common, 'detectionId', 'outcome', 'start', 'end'])
     && isUuid(body.detectionId) && ['confirmed', 'rejected', 'unsure', 'archived'].includes(body.outcome);
 }
+/** The report a signature run stores in `event_detector_runs.report` (docs/PHENOTYPE_SIGNATURES.md). */
+export const SIGNATURE_REPORT_VERSION = 'signature-report-1';
+
+/**
+ * `GET /event-detection/signature?typeId=<uuid>`: the newest signature report of the caller's event type, or
+ * null. The service role reads the runs table (clients have no grant on it); the owner comes from the
+ * credential, the type from the query, and only `signature-report-1` reports are returned. The rows are
+ * filtered again here, so a report of another owner, another type or another version can never be returned.
+ */
+export async function readSignatureReport(rest: Pick<SupabaseRest, 'select'>, userId: string, params: URLSearchParams) {
+  if ([...params.keys()].some(k => k !== 'typeId') || params.getAll('typeId').length !== 1) throw fail();
+  const typeId = params.get('typeId')!.toLowerCase();
+  if (!isUuid(typeId)) throw fail();
+  const rows: any[] = await rest.select('event_detector_runs',
+    `user_id=eq.${userId}&type_id=eq.${typeId}&report->>version=eq.${SIGNATURE_REPORT_VERSION}`
+    + '&select=user_id,type_id,id,created_at,report&order=created_at.desc,id.desc&limit=1') ?? [];
+  const latest = rows
+    .filter(r => String(r?.user_id).toLowerCase() === userId.toLowerCase() && String(r?.type_id).toLowerCase() === typeId
+      && r?.report !== null && typeof r?.report === 'object' && !Array.isArray(r.report)
+      && r.report.version === SIGNATURE_REPORT_VERSION)
+    .sort((a, b) => String(b.created_at).localeCompare(String(a.created_at)) || String(b.id).localeCompare(String(a.id)))[0];
+  return { report: latest?.report ?? null };
+}
+
 export async function personalEvents(rest: SupabaseRest, user: {id: string; sourceId: string},
   route: string, params: URLSearchParams, body?: unknown) {
+  if (route === '/event-detection/signature') {
+    if (body !== undefined) throw fail();
+    return await readSignatureReport(rest, user.id, params);
+  }
   if (body !== undefined) {
     if (!validateDetectionCommand(body)) throw fail();
     return await rest.rpc('event_detection_command', { p_user: user.id, p_source: user.sourceId, p_body: body });

@@ -27,6 +27,26 @@ cycling, stairs, exercise, or not an activity. Rest, Walking and Exercise count 
 their fixed UUIDs; their seed revisions stay byte-identical, so they carry no field. An event copies its
 type's kind when it is logged, like its label, so editing a type later never relabels past events.
 
+## Onset uncertainty
+
+An event can say how sure the logger is of its start: `onsetUncertaintyMinutes` is 0, 5, 15 or 60
+(Exact, ±5 min, ±15 min, ±1 h; the editor's "How sure is the start time?" defaults to ±5 min). Like the
+activity kind it is chosen when the event is logged. Absent means the default (±5 min), so older events
+and the factory seeds keep their bytes; editing an older event leaves it absent unless the choice changes.
+Only events carry it. The signature engine (PHENOTYPE_SIGNATURES.md) aligns each onset within it.
+
+## Observation periods
+
+An entry of kind `observation` says "I was watching from ... to ...; every event that happened is
+logged". The Event log menu has "Log an observation period" (start, end, optional note) and an
+"Observation periods" page beside the archive; periods archive and restore like any other entry.
+Rules (app and server): a start from 2000 on, an end after it, at most 24 hours long; no `typeId`,
+`activityKind`, `durationMinutes` or `onsetUncertaintyMinutes`; the label is always "Observation".
+They are evidence for the signature engine (preferred comparison time), never events: they do not appear
+in the Events timeline, get no context and no activity label, and do not count as other or concurrent
+events in any context. App versions before this one cannot read an observation from the history; this
+version skips any cloud revision it cannot read (it stays in the cloud) instead of failing the page.
+
 ## Storage and sync
 
 Sign in before logging. `ManualEventStore` saves each full revision in
@@ -47,8 +67,11 @@ replaced its owner.
 The account-level endpoint is `GET/POST /functions/v1/scores/manual-events`. It uses the same verified
 installation credential or registered account session as scores. No user ID is accepted in the body.
 GET returns account-filtered history in pages of 100, including archived entries. POST accepts at most
-25 revisions and judges each on its own: unknown fields, an unknown activity kind, oversized notes and
-labels, events before 2000 and invalid time ranges come back in `rejected` with a reason, beside `saved`.
+25 revisions and judges each on its own: unknown fields, an unknown kind or activity kind, an onset
+uncertainty outside 0/5/15/60 (`invalid_onset_uncertainty`), oversized notes and labels, events before
+2000, invalid time ranges and observation periods that are open, empty or longer than a day come back in
+`rejected` with a reason, beside `saved`. The table and the append RPC repeat the kind list
+(`manual_event_revisions_kind_check`: event, event_type, preset, observation).
 The database uses RLS for owner reads. Anonymous and authenticated clients cannot write, update, delete,
 truncate or call the writer RPC; the service role can only select and insert. Source ownership is
 checked again in SQL. Deleting the account removes every row through the auth.users foreign keys.
@@ -108,6 +131,8 @@ Apply, in order, with the SQL procedure in [BACKEND.md](BACKEND.md#migrations) (
 
 1. `supabase/migrations/20261008090000_manual_events.sql`
 2. `supabase/migrations/20261008100000_manual_event_context.sql` (also schedules `nara-manual-event-context`)
+3. `supabase/migrations/20261009090000_personal_event_detection.sql`
+4. `supabase/migrations/20261009100000_phenotype_signatures.sql` (observation kind, append RPC, signature index)
 
 Then deploy the `scores` edge function. No worker change is needed: the context reads what the activity,
 scoring, context and anomaly lanes already publish. Until both steps are deployed, the UI reports
@@ -119,11 +144,12 @@ device-only storage and pending sync.
 xcodegen generate
 xcodebuild test -project Strand.xcodeproj -scheme Strand -destination 'platform=macOS' \
   -only-testing:StrandTests/ManualEventTests -only-testing:StrandTests/ManualEventSyncTests
-(cd supabase/functions && deno test --allow-env --no-lock tests/manual_events_test.ts)
+(cd supabase/functions && deno test --allow-env --no-lock tests/manual_events_test.ts tests/phenotype_signatures_test.ts)
 # On the production image (supabase/tests/e2e/pipeline_db.sh up):
 psql "$PIPELINE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/functions/tests/manual_events_retention.sql
 psql "$PIPELINE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/functions/tests/manual_event_context.sql
-(cd supabase/functions && deno test -A --no-lock tests/manual_events_sql_test.ts)
+psql "$PIPELINE_TEST_DATABASE_URL" -X -v ON_ERROR_STOP=1 -f supabase/functions/tests/phenotype_signatures.sql
+(cd supabase/functions && deno test -A --no-lock tests/manual_events_sql_test.ts tests/phenotype_signatures_sql_test.ts)
 ```
 
 The SQL checks exercise RLS, owner/source isolation, idempotent retries, per-item conflict refusal,
@@ -135,4 +161,6 @@ exact and per-item acknowledgements, isolation of refused revisions, offline ret
 cache, activity kinds, the Events-tab presentation and the movable time window.
 `EventLogUITests` (scheme `NOOPiOSUITests`) checks the tab in the simulator: the logged walk leads the
 latest-reaction card and the timeline and opens with its three curves. `--demo-screen eventslog`,
-`eventpage` and `eventdetail` show the tab, the event page and the context sheet with a sample context.
+`eventpage` and `eventdetail` show the tab, the event page and the context sheet with a sample context;
+`eventobservation` and `eventobservations` show the observation editor and page.
+`PhenotypeSignatureTests` covers observation validation, sync and exclusion, and onset uncertainty.

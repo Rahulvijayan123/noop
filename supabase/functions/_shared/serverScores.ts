@@ -363,7 +363,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isManualEvents = route === '/manual-events' && ['GET', 'POST'].includes(req.method);
   const isManualEventContext = route === '/manual-events/context' && req.method === 'GET';
   const isPersonalEvents = (route === '/event-detection' && ['GET', 'POST'].includes(req.method))
-    || (route === '/event-detection/physiology' && req.method === 'GET');
+    || (route === '/event-detection/physiology' && req.method === 'GET')
+    || (route === '/event-detection/signature' && req.method === 'GET');
   const isRead = req.method === 'GET' && route === '/';
   const isDays = req.method === 'GET' && route === '/days';
   const isSeries = req.method === 'GET' && route === '/series';

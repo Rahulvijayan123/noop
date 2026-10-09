@@ -49,6 +49,17 @@ final class ManualEventCenter: ObservableObject {
                 return ($0.startUnixSeconds ?? 0) > ($1.startUnixSeconds ?? 0)
             }
     }
+    /// Observation periods ("I was watching; every event that happened is logged"), newest first. They are
+    /// evidence for the signature engine, never events: `events` and the Events timeline leave them out.
+    var observations: [ManualEventEntry] {
+        entries.filter { $0.kind == .observation && !$0.archived }
+            .sorted { ($0.startUnixSeconds ?? 0) > ($1.startUnixSeconds ?? 0) }
+    }
+    /// The events logged inside an observation period (their start within it).
+    func events(during observation: ManualEventEntry) -> [ManualEventEntry] {
+        guard let start = observation.startUnixSeconds, let end = observation.endUnixSeconds else { return [] }
+        return events.filter { ($0.startUnixSeconds ?? -1) >= start && ($0.startUnixSeconds ?? .infinity) <= end }
+    }
     var archived: [ManualEventEntry] {
         entries.filter(\.archived).sorted { ($0.archivedAt ?? 0) > ($1.archivedAt ?? 0) }
     }
@@ -329,5 +340,18 @@ final class ManualEventCenter: ObservableObject {
     private struct Page: Decodable {
         let revisions: [ManualEventRevision]; let next: String; let hasMore: Bool; let identity: Identity
         enum CodingKeys: String, CodingKey { case revisions, next, hasMore = "has_more", identity }
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            // A revision this version cannot read (a kind or field from a newer app) is skipped like one it
+            // cannot store, so it never stops the rest of the history from syncing. The cloud keeps it.
+            revisions = try c.decode([Lossy].self, forKey: .revisions).compactMap(\.value)
+            next = try c.decode(String.self, forKey: .next)
+            hasMore = try c.decode(Bool.self, forKey: .hasMore)
+            identity = try c.decode(Identity.self, forKey: .identity)
+        }
+    }
+    private struct Lossy: Decodable {
+        let value: ManualEventRevision?
+        init(from decoder: Decoder) throws { value = try? ManualEventRevision(from: decoder) }
     }
 }

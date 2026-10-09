@@ -1,9 +1,19 @@
-# Research code provenance
+# Provenance
 
-The candidate identities, input shortlist, small temporal architectures, sparse-group estimator and frozen encoder adapters were ported and adapted from the user's existing `forecasting-lab` research checkout: `event-matrix/benchmark.py`, `event-matrix/expand_benchmark.py`, `forecasting/models.py`, and `forecasting/encoders.py`. Production code has no dependency on that sibling directory, recordings, benchmark outputs, personal file paths or its dashboard server.
+The signature engine (sig-1) is new code written for this repository against
+[docs/PHENOTYPE_SIGNATURES.md](../../docs/PHENOTYPE_SIGNATURES.md). It contains no vendored third-party source.
 
-The MiniRocket multivariate implementation is vendored from the same benchmark's pinned `angus924/minirocket` source (commit `0b1c245d9c9dbc50886f28bc7b32d5d45b5663d6`). Its GNU GPL version 3 licence is preserved in `personal_events/vendor/MINIROCKET_LICENSE`; the vendored module retains that licence. Only the implementation module is included; benchmark data, weights and result files are excluded.
+Reused from this repository:
 
-The other third-party model packages remain dependencies and retain their upstream licences. Pretrained source code and weights are not included. Maintainers must review their licensing and pin the exact files before enabling those candidates.
+- `policy.py` (`EpisodeState`, `Policy`), the job claim/lease/fence/heartbeat/retry adapter in `database.py`, and
+  the lane, lease-heartbeat and account-cache cleanup structure of `worker.py` come from PR #5 (Hanson Wen).
+- The minute timeline follows the anomaly service (`Tools/AnomalyService/src/frwhoop_anomaly/features.py`):
+  strap sleep state 2 = asleep, the skin-temperature mapping (centidegrees, WHOOP 4.0 anchor rule), wrist
+  ON/OFF events, the exertion/recovery bout rule, and the R-R cleaning rules of `rr.py` (transport pinning,
+  suspect/duplicate/range/fill-value drops, Malik 20 % successive-difference rejection), re-implemented with
+  numpy. That module is not imported.
 
-This implementation reproduces the candidate families, not the old benchmark's performance claims. In particular, the `stacking` candidate is the benchmark's fixed equal-weight ridge-branch score fusion, not a fitted meta-learner. The multiscale CNN is the small custom encoder, not the published InceptionTime ensemble. MiniRocket uses 504 features and training-only PCA. SVM output is a sigmoid-transformed margin, not a calibrated probability.
+PR #5's modelling core (window features, the 25 x 18 model registry, neural heads, frozen encoders, the
+sparse-group estimator, MiniRocket and its GPL-3 licence file, argmax selection and gates) was removed, together
+with the `matrix` extra (torch, xgboost, catboost, xlstm, numba, pycatch22). The remaining dependencies (numpy,
+scipy, scikit-learn, psycopg) keep their upstream licences.

@@ -82,6 +82,12 @@ final class EventDetectionCenter: ObservableObject {
     @Published private(set) var pending: [EventDetectionCommand] = []
     @Published private(set) var negativeReviews: [NegativeEventReview] = []
     @Published private(set) var physiology: [String: EventPhysiology] = [:]
+    /// The newest signature report per event type (signature-report-1), as last received for this owner.
+    @Published private(set) var signatures: [UUID: SignatureReport] = [:]
+    /// Types the cloud has answered for at least once (a report or "none yet").
+    @Published private(set) var signaturesChecked: Set<UUID> = []
+    /// The report bodies as received, kept in the owner's cache so the card shows without a connection.
+    private var signatureBodies: [UUID: Data] = [:]
     @Published private(set) var message: String?
     @Published private(set) var error: String?
     private let identity: () -> CloudPushIdentity?
@@ -105,6 +111,7 @@ final class EventDetectionCenter: ObservableObject {
     private struct Cache: Codable {
         var settings: [EventDetectorSetting]; var detections: [DetectedEvent]; var pending: [EventDetectionCommand]
         var negativeReviews: [NegativeEventReview]?
+        var signatures: [UUID: Data]?
     }
     private func cacheURL(_ owner: String) -> URL? {
         guard let uuid = UUID(uuidString: owner) else { return nil }
@@ -115,10 +122,13 @@ final class EventDetectionCenter: ObservableObject {
         guard next != owner else { return }
         generation = UUID(); syncing = false; owner = next
         settings = []; detections = []; pending = []; negativeReviews = []; physiology = [:]; message = nil; error = nil
+        signatures = [:]; signaturesChecked = []; signatureBodies = [:]
         if let next, let url = cacheURL(next), let data = try? Data(contentsOf: url),
            let cache = try? JSONDecoder().decode(Cache.self, from: data) {
             settings = cache.settings; detections = cache.detections; pending = cache.pending
             negativeReviews = cache.negativeReviews ?? []
+            signatureBodies = cache.signatures ?? [:]
+            signatures = signatureBodies.compactMapValues(SignatureReport.decode)
             message = "Saved results. Refreshing cloud status."
         }
     }
@@ -128,7 +138,8 @@ final class EventDetectionCenter: ObservableObject {
         #if os(iOS)
         try FileManager.default.setAttributes([.protectionKey: FileProtectionType.completeUntilFirstUserAuthentication], ofItemAtPath: directory.path)
         #endif
-        try JSONEncoder().encode(Cache(settings: settings, detections: detections, pending: pending, negativeReviews: negativeReviews)).write(to: url, options: .atomic)
+        try JSONEncoder().encode(Cache(settings: settings, detections: detections, pending: pending, negativeReviews: negativeReviews,
+                                       signatures: signatureBodies)).write(to: url, options: .atomic)
     }
     @discardableResult
     func enqueue(_ command: EventDetectionCommand, expectedOwner: String?) -> Bool {
@@ -201,6 +212,11 @@ final class EventDetectionCenter: ObservableObject {
             } while before != nil
             settings = fetched; detections = all; try persist(); message = nil
             await syncManual()
+            // What each learning type's signature looks like now. A failure keeps the saved report.
+            for setting in settings where setting.enabled {
+                guard started == generation else { return }
+                await loadSignature(for: setting.typeId)
+            }
         } catch {
             guard started == generation else { return }
             message = (error as? Failure) == .unavailable
@@ -208,6 +224,53 @@ final class EventDetectionCenter: ObservableObject {
                 : "Cloud detection could not refresh. Saved results may be out of date; changes will retry."
         }
     }
+    /// `GET <endpoint>/signature?typeId=`: the newest signature report of one event type, or none yet. Only a
+    /// reply for this owner and installation, of this contract and this type, replaces the saved one.
+    func loadSignature(for type: UUID) async {
+        guard let id = identity(), id.ownerId == owner, let url = endpoint() else { return }
+        let started = generation
+        var parts = URLComponents(url: url.appendingPathComponent("signature"), resolvingAgainstBaseURL: false)!
+        parts.queryItems = [URLQueryItem(name: "typeId", value: type.uuidString.lowercased())]
+        var request = URLRequest(url: parts.url!, timeoutInterval: 30)
+        CloudReceiverAuth.apply(id, to: &request)
+        guard let reply = try? await session.data(for: request),
+              let http = reply.1 as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              started == generation, identity()?.scope == id.scope,
+              let root = try? JSONSerialization.jsonObject(with: reply.0) as? [String: Any],
+              let who = root["identity"] as? [String: Any],
+              (who["userId"] as? String)?.lowercased() == id.ownerId,
+              (who["sourceId"] as? String)?.lowercased() == id.sourceId,
+              root.keys.contains("report") else { return }
+        if root["report"] is NSNull {
+            signatures[type] = nil; signatureBodies[type] = nil
+        } else {
+            guard let object = root["report"] as? [String: Any],
+                  let body = try? JSONSerialization.data(withJSONObject: object),
+                  let report = SignatureReport.decode(body),
+                  report.typeId.map({ $0.lowercased() == type.uuidString.lowercased() }) ?? true else { return }
+            signatures[type] = report; signatureBodies[type] = body
+        }
+        signaturesChecked.insert(type)
+        try? persist()
+    }
+
+    /// The short status under a type in the list: off, waiting to sync, or where its signature stands.
+    func signatureStatus(_ type: UUID, loggedEvents: Int) -> String {
+        if pending.contains(where: { $0.typeId == type && $0.action == "setting" }) { return "Waiting to sync" }
+        guard isEnabled(type) else { return "Off" }
+        return SignaturePresentation.status(signatures[type], loggedEvents: loggedEvents).title
+    }
+
+    #if DEBUG
+    /// Simulator screenshots only: show a report without a server.
+    func showSignatureForPreview(_ report: SignatureReport, for type: UUID) {
+        signatures[type] = report; signaturesChecked.insert(type)
+        if !settings.contains(where: { $0.typeId == type }) {
+            settings.append(EventDetectorSetting(typeId: type, enabled: true, revision: 1, state: "needs_examples", detail: .init()))
+        }
+    }
+    #endif
+
     struct TracePoint: Decodable { var time: Double; var value: Double; var support: Double }
     private struct Trace: Decodable {
         var identity: Identity; var heartRate: [TracePoint]; var hrv: [TracePoint]; var movement: [TracePoint]

@@ -1,1 +1,1 @@
-"""Account-owned current-event detection; no production side effects on import."""
+"""Personal physiological signatures of caregiver-logged event types (sig-1); no side effects on import."""
