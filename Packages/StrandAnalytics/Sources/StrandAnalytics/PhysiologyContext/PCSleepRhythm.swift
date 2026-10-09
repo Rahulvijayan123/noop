@@ -70,6 +70,9 @@ extension PhysiologyContext {
         public var timezoneShiftToleranceS = 600
         /// Minimum heart-rate samples in each of sleep and wake for the day/night contrast proxy.
         public var rhythmMinSamples = 1800
+        /// Definition version of the awake-vs-sleep HR block (`DayNightHeartRate`, spec-02). Part of the policy
+        /// fingerprint, so a change to its definition moves the reprocessing key.
+        public var dayNightHeartRateVersion = DayNightHeartRate.methodVersion
         public init() {}
     }
 
@@ -330,6 +333,56 @@ extension PhysiologyContext {
         }
     }
 
+    /// Awake vs main-sleep heart rate on the document's day (spec-02, docs/spec-02/CONTRACT.md §6): the existing
+    /// day/night contrast with BOTH medians and their coverage. The sleep side was selected by a detector that reads
+    /// HR, so this is a masked proxy, never endogenous phase. `percentDip` is an explicitly defined transformation of
+    /// the same two medians (`percentDipDefinition`), not a separate physiological model.
+    public struct DayNightHeartRate: Codable, Equatable, Sendable {
+        public var state: AvailabilityState
+        public var awakeMedianBpm: Double?
+        public var sleepMedianBpm: Double?
+        /// `awakeMedianBpm - sleepMedianBpm` — the value `proxy_hr_day_night_contrast` already publishes.
+        public var differenceBpm: Double?
+        /// `100 × (awake − sleep) / awake`; nil when either median is missing.
+        public var percentDip: Double?
+        public var percentDipDefinition: String
+        public var awakeSamples: Int
+        public var sleepSamples: Int
+        /// Seconds evaluated on each side (awake: the day window outside every sleep episode, up to the cutoff in
+        /// causal mode; sleep: the main sleep episodes).
+        public var awakeEligibleS: Int
+        public var sleepEligibleS: Int
+        /// Distinct observed seconds per eligible second on each side, in [0, 1]; nil without eligible time (no
+        /// main sleep, a main sleep still in progress, or no awake time before the cutoff).
+        public var awakeCoverage: Double?
+        public var sleepCoverage: Double?
+        public var reasons: [ReasonCode]
+        /// Definition version (`pc-day-night-hr-1`); nil in documents written before it was computed.
+        public var method: String? = nil
+        /// `bpm` for the medians and the difference; the dip is a percentage of the awake median.
+        public var units: String? = nil
+        /// Samples each side needs before its median is published (`SleepConfig.rhythmMinSamples`).
+        public var minSamplesPerSide: Int? = nil
+        /// The awake side's window: the day window, up to the cutoff in causal mode (sleep time is excluded).
+        public var awakeWindow: Interval? = nil
+        public init(state: AvailabilityState, awakeMedianBpm: Double?, sleepMedianBpm: Double?, differenceBpm: Double?,
+                    percentDip: Double?, percentDipDefinition: String = DayNightHeartRate.percentDipFormula,
+                    awakeSamples: Int, sleepSamples: Int, awakeEligibleS: Int, sleepEligibleS: Int,
+                    awakeCoverage: Double?, sleepCoverage: Double?, reasons: [ReasonCode],
+                    method: String? = nil, units: String? = nil, minSamplesPerSide: Int? = nil,
+                    awakeWindow: Interval? = nil) {
+            self.state = state; self.awakeMedianBpm = awakeMedianBpm; self.sleepMedianBpm = sleepMedianBpm
+            self.differenceBpm = differenceBpm; self.percentDip = percentDip
+            self.percentDipDefinition = percentDipDefinition; self.awakeSamples = awakeSamples
+            self.sleepSamples = sleepSamples; self.awakeEligibleS = awakeEligibleS; self.sleepEligibleS = sleepEligibleS
+            self.awakeCoverage = awakeCoverage; self.sleepCoverage = sleepCoverage; self.reasons = reasons
+            self.method = method; self.units = units; self.minSamplesPerSide = minSamplesPerSide
+            self.awakeWindow = awakeWindow
+        }
+        public static let percentDipFormula = "100*(awake_median_bpm-sleep_median_bpm)/awake_median_bpm"
+        public static let methodVersion = "pc-day-night-hr-1"
+    }
+
     /// Circadian phase. The inputs (hourly/1 Hz HR, behaviour) cannot measure endogenous phase or a core-temperature
     /// minimum, so this is always `unavailable`; it never blocks the rest of the summary.
     public struct RhythmPhaseEstimate: Codable, Equatable, Sendable {
@@ -360,6 +413,8 @@ extension PhysiologyContext {
         public var rhythm: [RhythmDescriptor]
         public var phase: RhythmPhaseEstimate
         public var finality: Finality
+        /// Awake vs main-sleep HR with both medians and their coverage (spec-02). nil in older documents.
+        public var dayNightHeartRate: DayNightHeartRate? = nil
         public init(episodes: [SleepEpisode], mainSleepId: String?, reasons: [ReasonCode],
                     dependence: [DependenceNote], mainSleep: MainSleepSummary? = nil, naps: NapSummary = .none,
                     totalSleepS: Int? = nil, fragmentation: SleepFragmentation? = nil,
@@ -445,6 +500,10 @@ extension PhysiologyContext {
         public static let labelsReadHeartRate: ReasonCode = "labels_read_heart_rate"
         public static let rhythmSamplesInsufficient: ReasonCode = "rhythm_samples_insufficient"
         public static let endogenousPhaseUnmeasured: ReasonCode = "endogenous_phase_unmeasured"
+        // MARK: Reason codes — awake vs sleep heart rate (spec-02, `DayNightHeartRate`)
+        public static let percentDipDefinition: ReasonCode = "percent_dip_definition"
+        public static let awakeHrInsufficient: ReasonCode = "awake_hr_insufficient"
+        public static let sleepHrInsufficient: ReasonCode = "sleep_hr_insufficient"
         // MARK: Reason codes — dependence notes
         public static let sleepLabelsReadHeartSignals: ReasonCode = "sleep_labels_read_heart_signals"
         public static let rhythmProxyReadsHeartRate: ReasonCode = "rhythm_proxy_reads_heart_rate"
@@ -463,6 +522,7 @@ extension PhysiologyContext {
             stagesUnavailable, timezoneHistoryUnknown, priorZoneAssumedSame, utcOffsetChangedInWindow,
             rhythmProxyOnly, labelsReadHeartRate, rhythmSamplesInsufficient, endogenousPhaseUnmeasured,
             sleepLabelsReadHeartSignals, rhythmProxyReadsHeartRate,
+            percentDipDefinition, awakeHrInsufficient, sleepHrInsufficient,
         ]
 
         /// Band sleep state values (`(sb>>4)&3`: 0 wake / 1 still / 2 asleep / 3 up, `SleepStager.bandStateAsleep`).
@@ -1084,11 +1144,15 @@ extension PhysiologyContext {
             if timing.reasons.contains(timezoneHistoryUnknown) { reasons.append(timezoneHistoryUnknown) }
             let final = !causal && cutoff >= identity.dayWindow.end + config.finalAfterDayEndS
                 && today.allSatisfy { $0.finality == .final }
-            return SleepRhythmSummary(
+            var out = SleepRhythmSummary(
                 episodes: all, mainSleepId: mainSleepId, reasons: unique(reasons).sorted(),
                 dependence: dependence.sorted { ($0.group, $0.note) < ($1.group, $1.note) }, mainSleep: main,
                 naps: napSummary, totalSleepS: totalSleep, fragmentation: fragmentation, sleepLoss: loss,
                 timing: timing, rhythm: [rhythm], phase: .unavailable, finality: final ? .final : .provisional)
+            out.dayNightHeartRate = dayNightHeartRate(mains: mains, all: all, identity: identity,
+                                                      observations: observations, causal: causal, cutoff: cutoff,
+                                                      config: config)
+            return out
         }
 
         static func mainSummary(_ mains: [SleepEpisode]) -> MainSleepSummary? {
@@ -1219,34 +1283,69 @@ extension PhysiologyContext {
             return timing
         }
 
+        /// The two HR samples behind the day/night contrast: plausible (30–220 bpm) samples inside the day's main
+        /// sleep episodes, and plausible samples in the day window (up to the cutoff in causal mode) outside every
+        /// sleep episode. Each sample weighs one: the sanitized stream is one sample per second, so a median over
+        /// samples is a median over observed seconds. `nil` when a main sleep episode is still in progress.
+        struct DayNightSeries {
+            var sleepBpm: [Double]
+            var awakeBpm: [Double]
+            /// Distinct seconds behind each side (equal to the sample counts on a sanitized stream).
+            var sleepSeconds: Int
+            var awakeSeconds: Int
+            /// Merged main-sleep seconds, and day-window seconds outside every sleep episode.
+            var sleepEligibleS: Int
+            var awakeEligibleS: Int
+            var mainSleepIncomplete: Bool
+        }
+
+        static func dayNightSeries(mains: [SleepEpisode], all: [SleepEpisode], identity: DayIdentity,
+                                   observations: SanitizedObservations, causal: Bool, cutoff: Int) -> DayNightSeries {
+            let plausible = 30...220
+            let incomplete = mains.contains(where: { !$0.complete })
+            var sleepBpm: [Double] = []
+            var sleepTs = Set<Int>()
+            if !incomplete {
+                for e in mains {
+                    for s in samples(observations.heartRate, in: e.interval, ts: { $0.ts })
+                    where plausible.contains(s.bpm) {
+                        sleepBpm.append(Double(s.bpm)); sleepTs.insert(s.ts)
+                    }
+                }
+            }
+            let sleepEligible = incomplete ? 0 : merged(mains.map { $0.interval }).reduce(0) { $0 + $1.duration }
+            let dayEnd = causal ? min(identity.dayWindow.end, cutoff) : identity.dayWindow.end
+            var awakeBpm: [Double] = []
+            var awakeTs = Set<Int>()
+            var awakeEligible = 0
+            if dayEnd > identity.dayWindow.start {
+                let day = Interval(identity.dayWindow.start, dayEnd)
+                let sleepTime = merged(all.map { $0.interval })
+                awakeEligible = day.duration - sleepTime.reduce(0) { $0 + $1.overlapSeconds(with: day) }
+                for s in samples(observations.heartRate, in: day, ts: { $0.ts })
+                where plausible.contains(s.bpm) && !sleepTime.contains(where: { $0.contains(s.ts) }) {
+                    awakeBpm.append(Double(s.bpm)); awakeTs.insert(s.ts)
+                }
+            }
+            return DayNightSeries(sleepBpm: sleepBpm, awakeBpm: awakeBpm, sleepSeconds: sleepTs.count,
+                                  awakeSeconds: awakeTs.count, sleepEligibleS: sleepEligible,
+                                  awakeEligibleS: max(0, awakeEligible), mainSleepIncomplete: incomplete)
+        }
+
         /// Median awake HR minus median main-sleep HR on the document's day: a masked proxy whose "sleep" side was
         /// itself selected with heart rate (circular by construction). Never endogenous phase.
         static func dayNightContrast(mains: [SleepEpisode], all: [SleepEpisode], identity: DayIdentity,
                                      observations: SanitizedObservations, causal: Bool, cutoff: Int,
                                      config: SleepConfig) -> RhythmDescriptor {
             var reasons: [ReasonCode] = [rhythmProxyOnly, labelsReadHeartRate]
-            let plausible = 30...220
-            var sleepBpm: [Double] = []
-            if mains.contains(where: { !$0.complete }) {
+            let series = dayNightSeries(mains: mains, all: all, identity: identity, observations: observations,
+                                        causal: causal, cutoff: cutoff)
+            if series.mainSleepIncomplete {
                 reasons.append(mainSleepIncomplete)
                 return RhythmDescriptor(name: dayNightContrastName, value: nil, units: "bpm", isProxy: true,
                                         dependsOnHeartSignals: true, sampleCount: 0, reasons: reasons.sorted())
             }
-            for e in mains {
-                for s in samples(observations.heartRate, in: e.interval, ts: { $0.ts })
-                where plausible.contains(s.bpm) {
-                    sleepBpm.append(Double(s.bpm))
-                }
-            }
-            let dayEnd = causal ? min(identity.dayWindow.end, cutoff) : identity.dayWindow.end
-            var awakeBpm: [Double] = []
-            if dayEnd > identity.dayWindow.start {
-                let sleepTime = merged(all.map { $0.interval })
-                for s in samples(observations.heartRate, in: Interval(identity.dayWindow.start, dayEnd), ts: { $0.ts })
-                where plausible.contains(s.bpm) && !sleepTime.contains(where: { $0.contains(s.ts) }) {
-                    awakeBpm.append(Double(s.bpm))
-                }
-            }
+            let sleepBpm = series.sleepBpm, awakeBpm = series.awakeBpm
             var value: Double? = nil
             if sleepBpm.count >= config.rhythmMinSamples && awakeBpm.count >= config.rhythmMinSamples,
                let a = RobustStats.median(awakeBpm), let b = RobustStats.median(sleepBpm) {
@@ -1257,6 +1356,46 @@ extension PhysiologyContext {
             return RhythmDescriptor(name: dayNightContrastName, value: value, units: "bpm", isProxy: true,
                                     dependsOnHeartSignals: true, sampleCount: sleepBpm.count + awakeBpm.count,
                                     reasons: reasons.sorted())
+        }
+
+        /// Awake vs main-sleep HR with both medians and their coverage (spec-02), over exactly the samples the
+        /// contrast uses and with the same per-side minimum (`rhythmMinSamples`). `differenceBpm` therefore equals
+        /// the contrast's value whenever both are published. Each side stands on its own: an insufficient side is
+        /// nil with `awake_hr_insufficient` / `sleep_hr_insufficient`, the other side is still reported. The
+        /// percent dip is `100 × (awake − sleep) / awake` of the same two medians, flagged `percent_dip_definition`.
+        static func dayNightHeartRate(mains: [SleepEpisode], all: [SleepEpisode], identity: DayIdentity,
+                                      observations: SanitizedObservations, causal: Bool, cutoff: Int,
+                                      config: SleepConfig) -> DayNightHeartRate {
+            let series = dayNightSeries(mains: mains, all: all, identity: identity, observations: observations,
+                                        causal: causal, cutoff: cutoff)
+            var reasons: [ReasonCode] = [rhythmProxyOnly, labelsReadHeartRate]
+            if mains.isEmpty { reasons.append(noMainSleep) }
+            if series.mainSleepIncomplete { reasons.append(mainSleepIncomplete) }
+            let awake = series.awakeBpm.count >= config.rhythmMinSamples ? RobustStats.median(series.awakeBpm) : nil
+            let sleep = series.sleepBpm.count >= config.rhythmMinSamples ? RobustStats.median(series.sleepBpm) : nil
+            if awake == nil { reasons.append(awakeHrInsufficient) }
+            if sleep == nil { reasons.append(sleepHrInsufficient) }
+            var difference: Double? = nil
+            var dip: Double? = nil
+            if let a = awake, let b = sleep {
+                difference = a - b
+                if a > 0 { dip = 100 * (a - b) / a; reasons.append(percentDipDefinition) }
+            }
+            let dayEnd = causal ? min(identity.dayWindow.end, cutoff) : identity.dayWindow.end
+            func coverage(_ seconds: Int, _ eligible: Int) -> Double? {
+                eligible > 0 ? min(1, Double(seconds) / Double(eligible)) : nil
+            }
+            let state: AvailabilityState = awake != nil && sleep != nil ? .supported
+                : (awake != nil || sleep != nil ? .partial : .unavailable)
+            return DayNightHeartRate(
+                state: state, awakeMedianBpm: awake, sleepMedianBpm: sleep, differenceBpm: difference,
+                percentDip: dip, awakeSamples: series.awakeBpm.count, sleepSamples: series.sleepBpm.count,
+                awakeEligibleS: series.awakeEligibleS, sleepEligibleS: series.sleepEligibleS,
+                awakeCoverage: coverage(series.awakeSeconds, series.awakeEligibleS),
+                sleepCoverage: coverage(series.sleepSeconds, series.sleepEligibleS),
+                reasons: unique(reasons).sorted(), method: config.dayNightHeartRateVersion, units: "bpm",
+                minSamplesPerSide: config.rhythmMinSamples,
+                awakeWindow: dayEnd > identity.dayWindow.start ? Interval(identity.dayWindow.start, dayEnd) : nil)
         }
 
         // MARK: - Helpers

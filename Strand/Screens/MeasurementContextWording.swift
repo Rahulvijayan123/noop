@@ -98,7 +98,9 @@ enum MeasurementContextSelection {
         -> [PhysiologyContext.ReferenceComparison] {
         guard !isNightly(e), e.comparisons.isEmpty, e.method.windowS > 0, e.method.windowS % 60 == 0 else { return [] }
         var config = PhysiologyContext.ReferenceConfig()
-        config.stableAwakeWindowS = e.method.windowS
+        // Respiratory rate's stable-awake series is built by its own adapter on the reference's 5-minute grid from
+        // shorter estimates (`resp_rate.stable_awake_5min`), so its window never names the series.
+        if e.metric != .respiratoryRate { config.stableAwakeWindowS = e.method.windowS }
         guard let series = PhysiologyContext.ContextReferences.stableAwakeSeriesKey(metric: e.metric, config: config)
         else { return [] }
         let matching = comparisons.filter { $0.seriesKey == series }
@@ -515,6 +517,29 @@ enum PhysiologyContextWording {
         "rest_after_bout_right_censored": String(localized: "rest after the last bout was cut short"),
         "transition_denominator_too_small": String(localized: "too few changes of activity to compare"),
         "observed_behaviour_not_diagnosis": String(localized: "observed movement only, not a medical judgement"),
+        // Spec-02 (docs/spec-02/CONTRACT.md §6). Producers may add codes: add the phrase here, its catalog entry in
+        // Localizable.xcstrings, and the registry in PhysiologyContextWordingCoverageTests.
+        // Pulse episodes (PulseEpisodes)
+        "pulse_episode_high": String(localized: "heart rate stayed at or above the high threshold while inactive"),
+        "pulse_episode_low": String(localized: "heart rate stayed at or below the low threshold while inactive"),
+        "hr_acceleration_with_movement": String(localized: "heart rate rose quickly together with movement"),
+        "episode_censored_gap": String(localized: "a gap in the heart-rate data"),
+        "episode_censored_qualification": String(localized: "time that did not count as inactive"),
+        "episode_censored_window": String(localized: "the edge of the day's data"),
+        "qualified_inactive_hr_insufficient": String(localized: "too little inactive time with heart-rate data"),
+        "cause_not_attributed": String(localized: "no cause is attributed to it"),
+        "not_rhythm_classification": String(localized: "a description of heart-rate readings, not a heart-rhythm classification"),
+        // Awake vs asleep heart rate (SleepRhythm)
+        "percent_dip_definition": String(localized: "the dip is awake minus asleep, as a share of the awake median"),
+        "awake_hr_insufficient": String(localized: "too little awake heart-rate data"),
+        "sleep_hr_insufficient": String(localized: "too little heart-rate data during sleep"),
+        // Breathing rate after activity and at rest (ExertionBouts, ContextReferences)
+        "respiratory_reference_unavailable": String(localized: "no breathing-rate level from before the activity"),
+        "respiratory_observations_resumed": String(localized: "breathing-rate readings resumed once movement settled"),
+        "respiratory_returned_by_first_observation": String(localized: "breathing rate was already near the earlier level at the first reading"),
+        "respiratory_not_returned_in_follow_up": String(localized: "breathing rate was not back near the earlier level in the time observed"),
+        "respiratory_follow_up_unobserved": String(localized: "no breathing-rate readings after the activity"),
+        "respiratory_return_unconfirmed": String(localized: "too few readings to confirm the breathing rate was back"),
     ]
 
     /// Developer detail: how inputs were cleaned, which estimator or detector ran, provenance of a daily value.
@@ -548,6 +573,8 @@ enum PhysiologyContextWording {
         "frozen_registers_in_other_mode", "frozen_scale_floored_by_current_policy",
         // Change detection internals
         "detector_cusum", "detector_persistence", "no_declared_dependence",
+        // Spec-02 provenance: a stable-awake breathing-rate value came from its own windows
+        "stable_awake_respiration_window",
     ]
 
     /// The explicit plain phrase for a code, or nil (diagnostics-only, or a code this app does not know).
@@ -935,6 +962,65 @@ enum PhysiologyContextWording {
             parts.append(String(localized: "Back near the earlier level after \(duration(back))"))
         }
         return parts.isEmpty ? nil : parts.joined(separator: " \u{00B7} ")
+    }
+
+    // MARK: Spec-02: pulse episodes, awake vs asleep heart rate, breathing after activity
+
+    static func pulseEpisodeKind(_ kind: String) -> String {
+        switch kind {
+        case "sustained_high": return String(localized: "Sustained high pulse")
+        case "sustained_low": return String(localized: "Sustained low pulse")
+        default: return capitalizedFirst(humanized(kind))
+        }
+    }
+
+    /// Where an episode or acceleration happened relative to detected sleep (which itself reads heart rate).
+    static func pulseContext(_ context: String) -> String {
+        switch context {
+        case "asleep": return String(localized: "while asleep")
+        case "awake": return String(localized: "while awake")
+        case "mixed": return String(localized: "partly asleep")
+        default: return String(localized: "sleep or wake unknown")
+        }
+    }
+
+    /// "1 episode, 14 min" / "None found" (evaluated, zero) / "Not evaluated" (nil count): a count is only shown
+    /// with its exposure, and nil is never shown as zero.
+    static func episodeCount(_ count: Int?, seconds: Int?) -> String {
+        guard let count else { return String(localized: "Not evaluated") }
+        if count == 0 { return String(localized: "None found") }
+        let n = count == 1 ? String(localized: "1 episode") : String(localized: "\(count) episodes")
+        guard let seconds, seconds > 0 else { return n }
+        return "\(n) \u{00B7} \(duration(seconds))"
+    }
+
+    /// The breathing-rate return after a bout (spec-02 `respiratory_recovery`), observations only. "Returned by"
+    /// is an upper bound (the first reading was already near the earlier level), never an exact time.
+    static func respiratoryReturn(_ r: PhysiologyContext.RespiratoryRecovery, locale: Locale = .current) -> String {
+        let level = r.referenceBpm.flatMap { $0.isFinite ? value($0, units: "breaths_per_min", locale: locale) : nil }
+        let suffix = level.map { " (\($0))" } ?? ""
+        switch r.state {
+        case "returned":
+            if let last = r.lastAboveOffsetS, let at = r.returnedAtOffsetS {
+                return String(localized: "Breathing rate back near the earlier level between \(duration(last)) and \(duration(at)) after") + suffix
+            }
+            if let at = r.returnedAtOffsetS {
+                return String(localized: "Breathing rate back near the earlier level by \(duration(at)) after") + suffix
+            }
+        case "returned_by":
+            if let by = r.returnedByOffsetS ?? r.firstObservationOffsetS {
+                return String(localized: "Breathing rate already near the earlier level at the first reading, \(duration(by)) after") + suffix
+            }
+        case "not_returned":
+            let observed = r.followUp.duration
+            return String(localized: "Breathing rate not back near the earlier level within \(duration(observed)) after") + suffix
+        default:
+            break
+        }
+        if let why = topReason(r.reasons) ?? topReason(r.censoring) {
+            return String(localized: "Breathing rate afterwards unknown: \(why)")
+        }
+        return String(localized: "Breathing rate afterwards unknown")
     }
 
     // MARK: Exposures

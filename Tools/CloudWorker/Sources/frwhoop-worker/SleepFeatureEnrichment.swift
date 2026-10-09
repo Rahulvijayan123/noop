@@ -60,6 +60,56 @@ struct SleepFeatureHistory {
     let dayRevisions: [(day: String, revision: Int64)]
     /// (day, minuteStartTs, state, valid) — UTC minute grid.
     let minutes: [(day: String, ts: Int, state: Int, valid: Bool)]
+    /// spec-02 §5.1 (docs/spec-02/CONTRACT.md): each history day's published snapshot sleep entries
+    /// (`history.days[].nights`, for the next-night rebound block), from the same snapshot row the
+    /// minute grid folds, so `dayRevisions` already versions them.
+    var nightsByDay: [String: [SleepFeatureHistoryNight]] = [:]
+    /// spec-02 §5.1: the IANA zone each history day's snapshot was interpreted in (`history.days[].timezone`).
+    var timezoneByDay: [String: String] = [:]
+}
+
+/// One published snapshot sleep entry of a history day (spec-02 §5.1 `history.days[].nights[]`). A value
+/// the snapshot did not publish (or published outside the sidecar's accepted range) is nil, never zero.
+struct SleepFeatureHistoryNight: Equatable {
+    let start: Int
+    let end: Int
+    let isNap: Bool
+    let asleepMin: Double?
+    let awakeMin: Double?
+    /// As the snapshot published it (`AnalyticsEngine` session efficiency, a 0–1 fraction).
+    let efficiency: Double?
+
+    /// The sidecar accepts at most this many entries per history day (`MAX_HISTORY_NIGHTS_PER_DAY`).
+    static let maxPerDay = 8
+
+    /// Parse one snapshot `sleep[]` entry; nil when it has no valid span.
+    static func parse(_ entry: [String: Any]) -> SleepFeatureHistoryNight? {
+        guard let startAt = entry["start_at"] as? String, let endAt = entry["end_at"] as? String,
+              let start = SleepFeatureEnrichment.unixSeconds(startAt),
+              let end = SleepFeatureEnrichment.unixSeconds(endAt), end > start else { return nil }
+        func number(_ key: String, _ range: ClosedRange<Double>) -> Double? {
+            guard let v = ContextInputs.number(entry[key]), v.isFinite, range.contains(v) else { return nil }
+            return v
+        }
+        return SleepFeatureHistoryNight(start: start, end: end, isNap: (entry["is_nap"] as? Bool) ?? false,
+                                        asleepMin: number("asleep_min", 0...1440),
+                                        awakeMin: number("awake_min", 0...1440),
+                                        efficiency: number("efficiency", 0...100))
+    }
+
+    /// The entries sent for one day: at most `maxPerDay`, the longest kept (the main night is never
+    /// the one dropped), in start order.
+    static func bounded(_ nights: [SleepFeatureHistoryNight]) -> [SleepFeatureHistoryNight] {
+        let kept = nights.count <= maxPerDay ? nights
+            : Array(nights.sorted { ($0.end - $0.start, $1.start) > ($1.end - $1.start, $0.start) }.prefix(maxPerDay))
+        return kept.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
+    }
+
+    var wire: [String: Any] {
+        ["start": start, "end": end, "is_nap": isNap,
+         "asleep_min": asleepMin ?? NSNull(), "awake_min": awakeMin ?? NSNull(),
+         "efficiency": efficiency ?? NSNull()]
+    }
 }
 
 enum SleepFeatureEnrichment {
@@ -104,6 +154,9 @@ enum SleepFeatureEnrichment {
         let beats: [RRInterval]
         let breathTrack: RespBreathTrack
         let history: SleepFeatureHistory?
+        /// spec-02: the bounded multi-day `rhythm_history` (CONTRACT §5.1), assembled by
+        /// `SleepFeatureRhythmHistory.assemble`; nil sends no key.
+        var rhythmHistory: [String: Any]? = nil
     }
 
     /// What the sidecar reads around a night: the thermal baseline starts 90 min
@@ -184,7 +237,13 @@ enum SleepFeatureEnrichment {
                         for m in minutes.sorted(by: { $0.ts < $1.ts }) {
                             ms.append(["ts": m.ts, "state": m.state, "valid": m.valid])
                         }
-                        return ["day": day, "minutes": ms]
+                        var entry: [String: Any] = ["day": day, "minutes": ms]
+                        // spec-02 §5.1: the day's published sleep entries and zone (rebound).
+                        if let nights = history.nightsByDay[day] {
+                            entry["nights"] = SleepFeatureHistoryNight.bounded(nights).map(\.wire)
+                        }
+                        if let zone = history.timezoneByDay[day], !zone.isEmpty { entry["timezone"] = zone }
+                        return entry
                     },
             ] as [String: Any]
             if let context = request["context"] as? [String: Any] {
@@ -192,6 +251,9 @@ enum SleepFeatureEnrichment {
                 c["history_revision_digest"] = sha256Hex(Data(digest.utf8))
                 request["context"] = c
             }
+        }
+        if let rhythm = input.rhythmHistory {
+            request["rhythm_history"] = rhythm
         }
         return request
     }
@@ -306,7 +368,8 @@ enum SleepFeatureEnrichment {
         // ALGORITHM (like-for-like device/algorithm comparison, spec 4.3; a
         // day republished under another algorithm never mixes into the window).
         let rows = try db.query("""
-            select day::text as day, result_revision::text as rev, payload->'sleep' as sleep
+            select day::text as day, result_revision::text as rev, payload->'sleep' as sleep,
+                   payload->>'timezone' as tz
               from public.scoring_snapshots_v2 s
              where user_id = $1::uuid and device_id = $2::uuid
                and algorithm_version = $5::text
@@ -338,6 +401,8 @@ enum SleepFeatureEnrichment {
 
         var dayRevisions: [(day: String, revision: Int64)] = []
         var minutes: [(day: String, ts: Int, state: Int, valid: Bool)] = []
+        var nightsByDay: [String: [SleepFeatureHistoryNight]] = [:]
+        var timezoneByDay: [String: String] = [:]
         for row in rows {
             let day = row["day"] ?? ""
             guard let rev = Int64(row["rev"] ?? "") else { continue }
@@ -345,6 +410,7 @@ enum SleepFeatureEnrichment {
             // next local midnight, DST-correct (23/25 h days)
             guard let nextDayStart = nextLocalMidnight(afterUnix: dayStart, tz: tz) else { continue }
             dayRevisions.append((day, rev))
+            if let zone = row["tz"], !zone.isEmpty { timezoneByDay[day] = zone }
 
             // The day's staged spans (sleep seconds per minute + session spans).
             var sleepSecByMinute: [Int: Double] = [:]
@@ -352,6 +418,7 @@ enum SleepFeatureEnrichment {
             if let sleepText = row["sleep"], !sleepText.isEmpty,
                let data = sleepText.data(using: .utf8),
                let nights = (try? JSONSerialization.jsonObject(with: data)) as? [[String: Any]] {
+                nightsByDay[day] = nights.compactMap(SleepFeatureHistoryNight.parse)
                 for night in nights {
                     guard let startAt = night["start_at"] as? String, let endAt = night["end_at"] as? String,
                           let start = unixSeconds(startAt), let end = unixSeconds(endAt),
@@ -393,7 +460,8 @@ enum SleepFeatureEnrichment {
             }
         }
         guard !dayRevisions.isEmpty else { return nil }
-        return SleepFeatureHistory(dayRevisions: dayRevisions, minutes: minutes)
+        return SleepFeatureHistory(dayRevisions: dayRevisions, minutes: minutes,
+                                   nightsByDay: nightsByDay, timezoneByDay: timezoneByDay)
     }
 
     /// Local midnight (unix) of `ofDay` ("YYYY-MM-DD") in `tz`.

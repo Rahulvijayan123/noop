@@ -30,7 +30,8 @@ import yasa
 from . import ALGORITHM_VERSION, SCHEMA_VERSION
 from .config import CONFIG, CONFIG_VERSION
 from .contract import SleepFeaturesRequest, fmt_utc
-from . import architecture, continuity, physiology, regularity, respiration, settling, thermal
+from . import architecture, continuity, physiology, prv_nonlinear, regularity, respiration, rhythm, settling, thermal
+from . import rebound  # spec-02 5.5 (owner: respiratory)
 from .timeline import Timeline, actual_sleep_onset, build_timeline, final_sleep_end
 
 try:  # the shadow report is optional at import time; a broken import must not
@@ -159,6 +160,9 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
             ("settling", settling.compute_night),
             ("thermal", thermal.compute_night),
             ("respiratory_variability", respiration.compute_night),
+            # spec-02 §1 / CONTRACT §5.3 (cardiac): secondary SampEn + DFA alpha-1 on
+            # equal-length true-adjacent segments of the main night (naps: not_applicable).
+            ("prv_nonlinear", prv_nonlinear.compute_night),
         ):
             block, err = _isolated(fn, req, tl, CONFIG)
             blocks[key] = block
@@ -201,6 +205,11 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
         })
 
     reg_block, reg_err = _isolated(regularity.compute, req, CONFIG)
+    # spec-02 5.4: document-level rest-activity rhythm from the bounded rhythm_history
+    # (isolated: a failure withholds only this block).
+    rest_activity_block, _ = _isolated(rhythm.rest_activity_rhythm, req, CONFIG)
+    # spec-02 5.5: document-level next-night rebound observations (isolated like every module).
+    rebound_block, _ = _isolated(rebound.compute, req)
     capabilities: dict[str, Any] = {
         # Group B gates (spec section 6 / contract section 7): honest blockers.
         "oxygen_events": {"ready": False, "reason": "unverified_sparse_oxygen"},
@@ -241,6 +250,8 @@ def compute(req: SleepFeaturesRequest, budget_ms: int = 3000) -> dict[str, Any]:
         "status_reasons": sorted(set(status_reasons)),
         "nights": nights_out,
         "regularity": reg_block,
+        "rest_activity_rhythm": rest_activity_block,
+        "rebound": rebound_block,
         "dependencies": {**deps,
                          "config_version": CONFIG_VERSION,
                          "config": CONFIG.to_wire()},

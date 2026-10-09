@@ -13,9 +13,11 @@ import StrandAnalytics
 //                            contraception, NOT a fertility/ovulation predictor, NOT a
 //                            diagnosis. Phase + cycle-day RANGE + probabilistic next-period
 //                            WINDOW (never a hard date).
-//   • BodyClockCard        — CircadianEngine.PhaseEstimate (+ optional JetLagPlan). Estimated
-//                            body-clock phase + a jet-lag / shift plan that is LIGHT + SLEEP
-//                            TIMING only (never a supplement/drug).
+//   • BodyClockCard        — CircadianEngine.PhaseEstimate (+ optional JetLagPlan). An OBSERVED
+//                            HEART-RATE RHYTHM heuristic (cosinor over hourly mean HR — not a
+//                            temperature measurement, despite living in this section; spec-02 §3)
+//                            + a jet-lag / shift plan that is LIGHT + SLEEP TIMING only (never a
+//                            supplement/drug).
 //   • HeadsUpCard          — IllnessSignalEngine.Result. The confounder-suppressed illness
 //                            "heads-up". On-device estimate — not a diagnosis.
 //
@@ -623,8 +625,11 @@ struct CycleTrackerView: View {
 
 // MARK: - 2. Body Clock card
 
-/// Estimated body-clock phase + an optional jet-lag / shift plan. The plan is LIGHT + SLEEP
-/// TIMING only — never a supplement. Behavioural awareness, approximate.
+/// The observed heart-rate rhythm (cosinor over hourly mean HR) against the wearer's schedule + an
+/// optional jet-lag / shift plan. The plan is LIGHT + SLEEP TIMING only — never a supplement.
+/// Behavioural awareness, approximate. NOT a measured temperature minimum, melatonin onset,
+/// endogenous body clock or chronotype diagnosis (spec-02 §3): the copy names heart rate as the
+/// source, and shows the observed heart-rate PEAK time rather than an inferred temperature low.
 struct BodyClockCard: View {
     /// The phase estimate from `CircadianEngine.estimatePhase(...)`, computed in the analytics pass.
     let estimate: CircadianEngine.PhaseEstimate
@@ -648,13 +653,14 @@ struct BodyClockCard: View {
                     .foregroundStyle(StrandPalette.textSecondary)
                     .fixedSize(horizontal: false, vertical: true)
 
-                // The estimated temperature-minimum clock time — the canonical phase marker.
+                // The OBSERVED heart-rate peak (cosinor acrophase of hourly mean HR). The engine's
+                // `hrRhythmReferenceHour` (acrophase − 12 h) is a heuristic offset, never shown as a temperature low.
                 HStack(spacing: 6) {
                     Image(systemName: "moon.stars")
                         .font(StrandFont.icon(.inline))
                         .foregroundStyle(hue)
                         .accessibilityHidden(true)
-                    Text("Estimated body-clock low around \(clockString(estimate.tempMinHour))")
+                    Text("Heart rate typically peaks around \(clockString(estimate.acrophaseHours))")
                         .font(StrandFont.footnote)
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
@@ -682,7 +688,7 @@ struct BodyClockCard: View {
     private var header: some View {
         HStack(alignment: .firstTextBaseline) {
             VStack(alignment: .leading, spacing: 2) {
-                Text("Body clock")
+                Text("Heart-rate rhythm")
                     .font(StrandFont.headline)
                     .foregroundStyle(StrandPalette.textPrimary)
             }
@@ -964,12 +970,12 @@ private func localizedBodyClockNote(_ estimate: CircadianEngine.PhaseEstimate) -
         return String(localized: "Your rhythm is hard to read right now. Keep wearing your device for a clearer picture.")
     }
     if estimate.offsetVsScheduleMinutes > 20 {
-        return String(localized: "Your body clock looks later, with a night-owl tendency.")
+        return String(localized: "Your heart-rate rhythm runs later than your sleep schedule suggests.")
     }
     if estimate.offsetVsScheduleMinutes < -20 {
-        return String(localized: "Your body clock looks earlier, with a morning tendency.")
+        return String(localized: "Your heart-rate rhythm runs earlier than your sleep schedule suggests.")
     }
-    return String(localized: "Your body clock looks aligned with your schedule.")
+    return String(localized: "Your heart-rate rhythm lines up with your sleep schedule.")
 }
 
 private func localizedPlanNote(_ plan: CircadianEngine.JetLagPlan) -> String {
@@ -980,7 +986,7 @@ private func localizedPlanNote(_ plan: CircadianEngine.JetLagPlan) -> String {
     case .delay:
         return String(localized: "Shifting your clock \(hours) h later, about an hour a day. Light and sleep timing only.")
     case .none:
-        return String(localized: "No meaningful body-clock shift is needed. You are about aligned.")
+        return String(localized: "No meaningful schedule shift is needed. You are about aligned.")
     }
 }
 
@@ -1060,8 +1066,8 @@ private func localizedList(_ values: [String]) -> String {
 
             BodyClockCard(
                 estimate: CircadianEngine.PhaseEstimate(
-                    tempMinHour: 5.2, acrophaseHours: 16.0, offsetVsScheduleMinutes: 38,
-                    confidence: .solid, note: "Your body clock looks later (a night-owl lean)."),
+                    hrRhythmReferenceHour: 4.0, acrophaseHours: 16.0, offsetVsScheduleMinutes: 38,
+                    confidence: .solid, note: "Your heart-rate rhythm runs later than your schedule suggests."),
                 plan: CircadianEngine.JetLagPlan(
                     direction: .advance, totalShiftHours: 3, estimatedDays: 3,
                     days: [.init(dayIndex: 1, brightLightStartHour: 7, brightLightEndHour: 9,

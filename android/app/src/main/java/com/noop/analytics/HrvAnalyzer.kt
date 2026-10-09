@@ -197,7 +197,13 @@ object HrvAnalyzer {
      * or ectopic filter) and false when a beat was dropped in between (a splice). Index 0 is always
      * false: the first beat has no predecessor.
      */
-    data class CleanSeries(val nn: List<Double>, val contiguous: List<Boolean>)
+    data class CleanSeries(
+        val nn: List<Double>,
+        val contiguous: List<Boolean>,
+        /** Each survivor's index in the ORIGINAL series (additive; twin of the Swift field, read by
+         *  HrvFreqDomain to place removed beats at their true times). */
+        val keptOriginalIndices: List<Int> = emptyList(),
+    )
 
     /**
      * Clean the RR series (range filter then Malik ectopic rejection, exactly like [cleanRR]) while
@@ -239,7 +245,7 @@ object HrvAnalyzer {
         // A survivor is contiguous with its predecessor only when their ORIGINAL indices are adjacent.
         val contiguous = ArrayList<Boolean>(keptVal.size)
         for (i in keptVal.indices) contiguous.add(i > 0 && keptOrig[i] == keptOrig[i - 1] + 1)
-        return CleanSeries(keptVal, contiguous)
+        return CleanSeries(keptVal, contiguous, keptOrig)
     }
 
     /**

@@ -32,6 +32,12 @@ import WhoopProtocol
 //     window entirely inside one fragment; the nightly values are the MEDIANS of
 //     the eligible windows' SD1/SD2 (windows preserved, never concatenated); the
 //     nightly ratio is the ratio of those two summaries (null when SD2 is zero).
+//   * pNN50 (spec-02 §1, docs/spec-02/CONTRACT.md §4.1) uses EXACTLY the SD1/SD2 pair
+//     set: `HRVAnalyzer.pnn50GapAware` over the cleaned series with the true-pair mask
+//     (cleaner-contiguous AND original ts/seq/ord/source adjacency), per eligible window;
+//     the nightly value is the POOLED proportion 100·ΣNN50/Σpairs with its numerator and
+//     denominator (never a mean of window percentages, never from minute HR). Optical
+//     intervals: a PRV statistic, not ECG pNN50. No eligible window → null with SD1's reason.
 
 extension SleepAnalyticsV1 {
 
@@ -51,12 +57,17 @@ extension SleepAnalyticsV1 {
                 inputSupportedSeconds: 0, inputSupportedFraction: nil, labelSupportedFraction: nil,
                 sourceResolutionSeconds: nil,
                 streamCounts: timeline.streamCounts)
-            return SleepAnalyticsPrvDiagnosticsGroup(
+            var disabled = SleepAnalyticsPrvDiagnosticsGroup(
                 quality: quality,
                 nightlySd1Ms: .disabled(), nightlySd2Ms: .disabled(), nightlyRatio: .disabled(unit: ""),
                 eligibleWindowCount: .disabled(), withheldWindowCount: .disabled(),
                 rejectionFraction: .disabled(unit: ""), validPairs: .disabled(),
                 timingMethod: "disabled", source: "prv_optical", windows: [])
+            disabled.nightlyPnn50Pct = .disabled(unit: "%")
+            disabled.pnn50PairCount = .disabled()
+            disabled.nn50Count = .disabled()
+            disabled.pnn50Method = SleepAnalyticsPrv.pnn50Method
+            return disabled
         }
 
         // ── Observation-identity dedup (never by RR value) ──────────────────────
@@ -166,12 +177,20 @@ extension SleepAnalyticsV1 {
             }
         }
 
+        // The contiguity mask over the cleaned series: true at i exactly when (i-1, i) is a TRUE
+        // pair above (cleaner-contiguous AND an original timestamp/seq/ord/source adjacency) — the
+        // mask `HRVAnalyzer.pnn50GapAware` is called with (spec-02 §1: never the cleaner's mask alone).
+        var isTruePair = [Bool](repeating: false, count: cleanValues.count)
+        for i in truePairPositions { isTruePair[i] = true }
+
         // ── UTC-aligned 5-minute windows inside single fragments ────────────────
         let windowSeconds = config.prvWindowSeconds
         var windows: [SleepAnalyticsPrvWindow] = []
         var withheld = 0
         var withheldByDuration = 0      // review P2-5: clipped tails are withheld AS duration
         var totalValidPairs = 0
+        var totalNn50 = 0                 // pNN50 numerator, pooled over eligible windows
+        var totalPnn50Pairs = 0           // pNN50 denominator (the same pairs as SD1/SD2)
         var totalRejected = 0
         var totalOriginalObservations = 0
 
@@ -188,6 +207,7 @@ extension SleepAnalyticsV1 {
                 // Window pairs: TRUE pairs whose two beats lie inside the window.
                 var u: [Double] = []
                 var v: [Double] = []
+                var windowPairIndices: [Int] = []      // cleaned index i of each pair (i-1, i)
                 for i in truePairPositions {
                     let posA = survivorPositions[i - 1], posB = survivorPositions[i]
                     let a = ordered[posA], b = ordered[posB]
@@ -195,6 +215,7 @@ extension SleepAnalyticsV1 {
                     let aa = cleanValues[i - 1], bb = cleanValues[i]
                     u.append((bb - aa) / 2.0.squareRoot())
                     v.append((aa + bb) / 2.0.squareRoot())
+                    windowPairIndices.append(i)
                 }
                 // Rejection fraction over ORIGINAL deduplicated observations in
                 // the window (before cleaning), the spec's denominator. Rejected =
@@ -216,8 +237,15 @@ extension SleepAnalyticsV1 {
                     && coverage >= config.prvMinCoverageFraction
                     && Double(rejectedInWindow) / Double(max(originalInWindow, 1)) <= config.prvMaxRejectedFraction
                 if gatesPass, let sd1 = stdev(u), let sd2 = stdev(v) {
+                    // pNN50 over EXACTLY this window's SD1/SD2 pair set (spec-02 §1, CONTRACT §4.1).
+                    let pnn50 = SleepAnalyticsPrv.windowPnn50(cleanValues: cleanValues,
+                                                              truePair: isTruePair,
+                                                              pairIndices: windowPairIndices)
                     windows.append(SleepAnalyticsPrvWindow(start: w, sd1Ms: sd1, sd2Ms: sd2,
-                                                          pairs: u.count, coverage: coverage))
+                                                          pairs: u.count, coverage: coverage,
+                                                          pnn50Pct: pnn50?.pct, nn50Count: pnn50?.nn50))
+                    totalNn50 += pnn50?.nn50 ?? 0
+                    totalPnn50Pairs += pnn50?.pairs ?? 0
                     totalValidPairs += u.count
                     totalRejected += rejectedInWindow
                     totalOriginalObservations += originalInWindow
@@ -244,6 +272,9 @@ extension SleepAnalyticsV1 {
         let sd1Metric: SleepAnalyticsMetric
         let sd2Metric: SleepAnalyticsMetric
         let ratioMetric: SleepAnalyticsMetric
+        let pnn50Metric: SleepAnalyticsMetric
+        let pnn50Pairs: SleepAnalyticsCount
+        let nn50: SleepAnalyticsCount
         if windows.isEmpty {
             let reason: SleepAnalyticsReason = timeline.fragments.isEmpty ? .noSamples
                 : (unresolved > 0 ? .unresolvedAdjacency
@@ -253,6 +284,10 @@ extension SleepAnalyticsV1 {
             sd1Metric = .unavailable(reason, unit: "ms")
             sd2Metric = .unavailable(reason, unit: "ms")
             ratioMetric = .unavailable(reason, unit: "")
+            // No eligible window → null with the SAME reason SD1 carries (CONTRACT §4.1).
+            pnn50Metric = .unavailable(reason, unit: "%")
+            pnn50Pairs = .unavailable(reason)
+            nn50 = .unavailable(reason)
         } else {
             let sd1 = median(sd1Values), sd2 = median(sd2Values)
             sd1Metric = .available(sd1, unit: "ms")
@@ -260,6 +295,13 @@ extension SleepAnalyticsV1 {
             ratioMetric = sd2 > 0
                 ? .available(sd1 / sd2, unit: "")
                 : .unavailable(.zeroDenominator, unit: "")
+            // Pooled proportion 100·ΣNN50/Σpairs over the eligible windows — never a mean of window
+            // percentages. Every eligible window has ≥ prvMinValidPairs pairs, so Σpairs > 0.
+            pnn50Metric = totalPnn50Pairs > 0
+                ? .available(100.0 * Double(totalNn50) / Double(totalPnn50Pairs), unit: "%")
+                : .unavailable(.zeroDenominator, unit: "%")
+            pnn50Pairs = .available(totalPnn50Pairs)
+            nn50 = .available(totalNn50)
         }
 
         let rejectionFraction: SleepAnalyticsMetric
@@ -295,7 +337,7 @@ extension SleepAnalyticsV1 {
             duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
             fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
-        return SleepAnalyticsPrvDiagnosticsGroup(
+        var group = SleepAnalyticsPrvDiagnosticsGroup(
             quality: quality,
             nightlySd1Ms: sd1Metric,
             nightlySd2Ms: sd2Metric,
@@ -307,6 +349,11 @@ extension SleepAnalyticsV1 {
             timingMethod: timingMethod,
             source: "prv_optical",
             windows: windows)
+        group.nightlyPnn50Pct = pnn50Metric
+        group.pnn50PairCount = pnn50Pairs
+        group.nn50Count = nn50
+        group.pnn50Method = SleepAnalyticsPrv.pnn50Method
+        return group
     }
 
     /// Sample standard deviation (ddof=1), nil below two samples. Identical values
@@ -326,6 +373,31 @@ extension SleepAnalyticsV1 {
 /// The PRV-specific helpers (observation-identity dedup, Malik keep-flags mirror,
 /// window coverage) kept in their own namespace for testability.
 enum SleepAnalyticsPrv {
+
+    /// How pNN50 is computed (CONTRACT §4.1): `HRVAnalyzer.pnn50GapAware` over the cleaned series with
+    /// the ORIGINAL-adjacency mask, per eligible window, pooled 100·ΣNN50/Σpairs.
+    static let pnn50Method = "pnn50GapAware_original_adjacency_v1"
+
+    /// pNN50 of one eligible window: `HRVAnalyzer.pnn50GapAware` (the canonical gap-aware statistic,
+    /// fixed 50 ms threshold) called on the contiguous cleaned slice that holds the window's pairs, with
+    /// the true-pair mask — so exactly the window's SD1/SD2 pair set is counted. `pairIndices` are the
+    /// cleaned indices i of the window's pairs (i-1, i), ascending. Returns the percentage plus its
+    /// numerator and denominator; nil without a pair.
+    static func windowPnn50(cleanValues: [Double], truePair: [Bool],
+                            pairIndices: [Int]) -> (pct: Double, nn50: Int, pairs: Int)? {
+        guard let first = pairIndices.first, let last = pairIndices.last else { return nil }
+        // The slice [first-1, last]: every cleaned beat inside it lies in the window (the series is
+        // time-ordered and both ends are window beats). Index 0 of the slice never forms a pair.
+        let lo = first - 1
+        let nn = Array(cleanValues[lo...last])
+        var mask = Array(truePair[lo...last])
+        mask[0] = false
+        guard let pct = HRVAnalyzer.pnn50GapAware(nn, mask) else { return nil }
+        let pairs = mask.reduce(0) { $0 + ($1 ? 1 : 0) }
+        // pct = nn50/pairs·100 exactly up to rounding; recover the integer numerator.
+        let nn50 = Int((pct * Double(pairs) / 100.0).rounded())
+        return (pct, nn50, pairs)
+    }
 
     /// Observation identity (bucket|rr|seq|ord|channel): the same rule the
     /// worker's candidate lane uses. Equal legitimate RR values survive as two

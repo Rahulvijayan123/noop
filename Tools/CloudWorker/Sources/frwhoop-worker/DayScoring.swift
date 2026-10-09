@@ -264,7 +264,8 @@ struct DayScorer {
                                       hr: [HRSample], rr: [RRInterval],
                                       skinTemp: [SkinTempSample], skinFamily: DeviceFamily,
                                       dayStart: Int, dayEnd: Int,
-                                      nightWindow: (start: Int, end: Int)) throws -> [String: Any]? {
+                                      nightWindow: (start: Int, end: Int),
+                                      rhythmDay: SleepFeatureRhythmHistory.Day?) throws -> [String: Any]? {
         let sessions = result.sleepSessions
         guard !sessions.isEmpty else { return nil }
 
@@ -308,6 +309,20 @@ struct DayScorer {
                 algorithmVersion: v2StageAlgorithmVersion)
         }
 
+        // The bounded multi-day rhythm history (spec-02 §5.1): the past 34 days' bins, read
+        // from their own published snapshots (`rhythmDay`, one indexed probe per day, no raw
+        // stream re-read), plus the claim day's bins built from this pass's rows. Isolated
+        // under a savepoint: a failure only drops the key, never the transaction.
+        var rhythmHistory: [String: Any]?
+        if let today = rhythmDay {
+            let past = (try? db.isolatingFailures {
+                try SleepFeatureRhythmHistory.loadDays(
+                    db: db, userId: claim.userId, deviceId: claim.deviceId,
+                    todayDay: claim.day, algorithmVersion: v2StageAlgorithmVersion)
+            }) ?? []
+            rhythmHistory = SleepFeatureRhythmHistory.assemble(days: past + [today])
+        }
+
         let tz = TimeZone(identifier: claim.timezoneId) ?? TimeZone(identifier: "UTC")!
         let offsetSec = tz.secondsFromGMT(for: Date(timeIntervalSince1970: TimeInterval(dayStart)))
         let edited: (Int, Int) -> Bool = { start, end in
@@ -331,7 +346,7 @@ struct DayScorer {
             intervalStart: dayStart, intervalEnd: dayEnd,
             stageAlgorithmVersion: v2StageAlgorithmVersion,
             nights: nights, hr: hr, tempCelsius: tempCelsius, beats: beats,
-            breathTrack: breathTrack, history: history))
+            breathTrack: breathTrack, history: history, rhythmHistory: rhythmHistory))
         // Busy keeps the day's published document (the snapshot replaces the whole payload).
         let previous: () -> [String: Any]? = { [db, v2StageAlgorithmVersion] in
             (try? db.isolatingFailures {
@@ -1511,12 +1526,27 @@ struct DayScorer {
         // request (no waveform download / model inference), made once per
         // claimed day inside the payload build, with the history read on the
         // same snapshot as the inputs (consistent).
+        //
+        // spec-02 rhythm history: the claim day's own hourly bins (temperature in the raw
+        // register domain, worn HR, gravity movement), folded from the rows this pass already
+        // loaded (no extra stream read) and published in the snapshot under `rhythmDay`, so a
+        // later day's request reads them back with one indexed query instead of re-aggregating
+        // raw rows inside the scoring transaction. Same dormant default as the enrichment.
+        var rhythmDay: SleepFeatureRhythmHistory.Day?
+        if enrichFeatures, featureEnrichmentClient != nil {
+            let built = SleepFeatureRhythmHistory.buildDay(
+                day: claim.day, timezoneId: claim.timezoneId, dayStart: dayStart, dayEnd: dayEnd,
+                family: skinFamily, revision: claim.inputRevision,
+                hr: hr, skinTemp: skinTemp, gravity: gravity)
+            snapshot[SleepFeatureRhythmHistory.snapshotKey] = SleepFeatureRhythmHistory.snapshotJSON(built)
+            rhythmDay = built
+        }
         if enrichFeatures, let client = featureEnrichmentClient, status != "no_data" {
             if let features = try? attachSleepFeatures(
                 client: client, claim: claim, result: result,
                 hr: hr, rr: rr, skinTemp: skinTemp, skinFamily: skinFamily,
                 dayStart: dayStart, dayEnd: dayEnd,
-                nightWindow: (nightStart, nightEnd)) {
+                nightWindow: (nightStart, nightEnd), rhythmDay: rhythmDay) {
                 var daily = (snapshot["daily"] as? [String: Any]) ?? [:]
                 daily["sleep_features"] = features
                 snapshot["daily"] = daily

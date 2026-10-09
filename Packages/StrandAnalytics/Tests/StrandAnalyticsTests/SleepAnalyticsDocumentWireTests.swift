@@ -25,8 +25,8 @@ final class SleepAnalyticsDocumentWireTests: XCTestCase {
         let json = try JSONSerialization.jsonObject(with: data) as! [String: Any]
         // Top-level spec section 8 keys.
         XCTAssertEqual(json["schema_version"] as? Int, 1)
-        XCTAssertEqual(json["algorithm_version"] as? String, "nara-sleep-analytics-1")
-        XCTAssertEqual(json["config_version"] as? String, "v1")
+        XCTAssertEqual(json["algorithm_version"] as? String, "nara-sleep-analytics-2")
+        XCTAssertEqual(json["config_version"] as? String, "v2")
         XCTAssertEqual(json["scope"] as? String, "main_night")
         XCTAssertNotNil(json["start_at"])
         XCTAssertNotNil(json["end_at"])

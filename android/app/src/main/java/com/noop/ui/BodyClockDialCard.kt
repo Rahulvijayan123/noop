@@ -37,10 +37,15 @@ import kotlin.math.min
 import kotlin.math.roundToInt
 import kotlin.math.sin
 
-// MARK: - 24 h body-clock dial (#1680)
+// MARK: - 24 h heart-rate rhythm dial (#1680; relabelled by spec-02 §3)
 //
-// Two concentric arcs on one ring: the outer is where the body clock wanted the night, the inner is where
-// it happened. Overlap is the whole message — the card exists so "was last night's timing right" is
+// WHAT THE REFERENCE ARC IS. CircadianEngine fits a cosinor to per-hour mean HEART RATE and places a
+// reference window a fixed offset from that heart-rate peak. It is not a measured temperature minimum,
+// melatonin onset, endogenous body clock or chronotype diagnosis, and the copy says "heart-rate rhythm"
+// for that reason. The measured skin-temperature phase is a separate output.
+//
+// Two concentric arcs on one ring: the outer is the window the heart-rate rhythm suggests, the inner is
+// where the night happened. Overlap is the whole message — the card exists so "was last night's timing right" is
 // answerable at a glance, which the text-only BodyClockCard on the Health screen cannot do.
 //
 // VOCABULARY. The caption measures sleepWindowOffsetHours — the distance between the two ARCS DRAWN — and
@@ -49,7 +54,7 @@ import kotlin.math.sin
 // not suit their clock, and that is the case this dial exists to show, so captioning it with the other
 // number would contradict the picture.
 //
-// Nothing here computes a metric: the window, the offset and the chronotype all come from CircadianEngine,
+// Nothing here computes a metric: the window, the offset and the peak-timing bucket all come from CircadianEngine,
 // byte-identical with the Swift twin. Only the drawing is per-platform (visual parity, not pixel parity).
 
 /**
@@ -93,7 +98,7 @@ fun BodyClockDialCard(
 
             // Hour numerals at 00, 06, 12 and 18. The dial carried one longer midnight tick and nothing
             // else, which orients the ring but leaves no time READABLE: the caption claims a night is
-            // "N h later than your body clock" and there was no way to check that against the picture
+            // "N h later than your heart-rate rhythm suggests" and there was no way to check that against the picture
             // (#2350). Paint hoisted and remembered, the idiom `Charts.kt` uses for canvas text.
             val density = LocalDensity.current
             val labelPaint = remember(density) {
@@ -304,7 +309,7 @@ internal fun sweepHours(from: Double, to: Double): Double =
     ((to - from) % 24.0).let { if (it <= 0.0) it + 24.0 else it }
 
 /**
- * Rounded to five minutes: the underlying phase is an activity fit, so a to-the-minute caption would imply
+ * Rounded to five minutes: the underlying phase is a heart-rate fit, so a to-the-minute caption would imply
  * a precision the estimate does not carry.
  */
 @Composable
@@ -316,6 +321,12 @@ private fun alignmentText(offsetHours: Double): String {
     return if (minutes > 0) uiString(R.string.l10n_body_clock_dial_card_1_s_later_than_your_body_50b7d966, amount) else uiString(R.string.l10n_body_clock_dial_card_1_s_earlier_than_your_body_68877f50, amount)
 }
 
+/**
+ * Where the daily heart-rate peak sits on the clock (the engine's absolute bucket). Worded as an
+ * observation about heart-rate timing, never as a chronotype ("morning type") diagnosis: the bucket is
+ * derived from an hourly-mean-HR cosinor, not from a validated chronotype measure. Twin of Apple
+ * `peakTimingText`.
+ */
 @Composable
 private fun chronotypeText(c: CircadianEngine.Chronotype): String = when (c) {
     CircadianEngine.Chronotype.MORNING -> uiString(R.string.l10n_body_clock_dial_card_morning_type_289dd7bf)

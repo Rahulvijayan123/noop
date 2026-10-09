@@ -25,6 +25,13 @@ import WhoopProtocol
 //   * `dynAccel` is NOT interchangeable without a validated feature definition; v1
 //     never substitutes it. Absent raw IMU / the activity classifier changes nothing
 //     here: this group needs only the gravity stream (a test pins that).
+//   * Stage-associated movement (spec-02 §4, docs/spec-02/CONTRACT.md §4.4): each
+//     classified adjacency (t-1, t) is joined to the normalized timeline's label at
+//     its second t (unsupported/uncovered time stays `unknown`, never forward-filled);
+//     a movement bout is attributed to the label at its FIRST moving second. The
+//     stager itself reads wrist movement, so the association is partly built in —
+//     disclosed as `stage_movement_note = stages_may_depend_on_motion`. Descriptive
+//     only: not limb-movement, REM-behaviour or arousal measurement.
 //   * Wear evidence is the adapter's explicit off-wrist intervals (paired
 //     WRIST_OFF/WRIST_ON events); absent HR is unknown evidence, never proof of
 //     nonwear. Movement is never derived from a plotted/smoothed chart.
@@ -58,6 +65,13 @@ extension SleepAnalyticsV1 {
         var eligible = 0
         var moving = 0
         var movementBouts = 0
+        // Stage-associated movement (spec-02 §4, CONTRACT §4.4): per normalized label, keyed by
+        // `SleepAnalyticsLabel.allCases` order (wake, light, deep, rem, unknown).
+        let labels = SleepAnalyticsLabel.allCases
+        var stageEligible = [Int](repeating: 0, count: labels.count)
+        var stageMoving = [Int](repeating: 0, count: labels.count)
+        var stageBoutStarts = [Int](repeating: 0, count: labels.count)
+        var labelAt = SleepAnalyticsMovementStageJoin(timeline: timeline)
         var immobilityComplete = 0, immobilityCensored = 0
         var immobilityDurations: [Double] = []
         var longestImmobility: Double = 0
@@ -81,6 +95,15 @@ extension SleepAnalyticsV1 {
             }
             eligible += adjacencies.count
             moving += adjacencies.filter(\.moving).count
+            // Join each classified adjacency (t-1, t) to the label at its second t (ascending t).
+            var adjacencyLabel: [Int] = []
+            adjacencyLabel.reserveCapacity(adjacencies.count)
+            for adjacency in adjacencies {
+                let index = labelAt.labelIndex(at: adjacency.t)
+                adjacencyLabel.append(index)
+                stageEligible[index] += 1
+                if adjacency.moving { stageMoving[index] += 1 }
+            }
 
             // ── Runs over adjacency time ────────────────────────────────────────
             // A movement bout: a maximal run of CONTIGUOUS moving adjacencies.
@@ -104,6 +127,7 @@ extension SleepAnalyticsV1 {
                 let length = runEndT - runStartT
                 if isMoving {
                     movementBouts += 1
+                    stageBoutStarts[adjacencyLabel[i]] += 1     // the bout's FIRST moving second
                 } else if length > 0 {
                     longestImmobility = max(longestImmobility, Double(length))
                     let leftBounded = i > 0 && adjacencies[i - 1].moving
@@ -175,7 +199,13 @@ extension SleepAnalyticsV1 {
             duplicateFragmentCount: timeline.duplicateFragmentCount > 0 ? timeline.duplicateFragmentCount : nil,
             fragmentOverlapSeconds: timeline.fragmentOverlapSeconds > 0 ? timeline.fragmentOverlapSeconds : nil)
 
-        return SleepAnalyticsMovementGroup(
+        let stageMovement: [SleepAnalyticsStageMovement] = labels.indices.map { k in
+            SleepAnalyticsV1.stageMovementEntry(label: labels[k], eligible: stageEligible[k],
+                                                moving: stageMoving[k], boutStarts: stageBoutStarts[k],
+                                                anyEligible: eligible > 0, config: config)
+        }
+
+        var group = SleepAnalyticsMovementGroup(
             quality: quality,
             movementSeconds: eligible > 0 ? .available(Double(moving), unit: "s") : .unavailable(.noSamples),
             eligibleSeconds: eligible > 0 ? .available(eligibleSeconds, unit: "s") : .unavailable(.noSamples),
@@ -190,6 +220,73 @@ extension SleepAnalyticsV1 {
             thresholdG: config.movementThresholdG,
             sourceResolution: "gravity_1hz_adjacent",
             algorithmVersion: SleepAnalyticsV1.algorithmVersion + "-movement-1")
+        group.stageMovement = stageMovement
+        group.stageMovementNote = SleepAnalyticsV1.stageMovementNote
+        return group
+    }
+
+    /// Disclosure carried with `stage_movement`: the stager reads wrist movement itself.
+    static let stageMovementNote = "stages_may_depend_on_motion"
+
+    /// One label's stage-associated movement entry (CONTRACT §4.4). With no classified adjacency in the
+    /// whole night every metric is `no_samples`; otherwise a label with zero eligible seconds reports
+    /// that real zero exposure and withholds its ratios.
+    static func stageMovementEntry(label: SleepAnalyticsLabel, eligible: Int, moving: Int, boutStarts: Int,
+                                   anyEligible: Bool,
+                                   config: SleepAnalyticsConfig) -> SleepAnalyticsStageMovement {
+        guard anyEligible else {
+            return SleepAnalyticsStageMovement(
+                label: label, eligibleSeconds: .unavailable(.noSamples), movementSeconds: .unavailable(.noSamples),
+                movementPercentage: .unavailable(.noSamples, unit: "%"),
+                movementBoutStarts: .unavailable(.noSamples),
+                movementBoutsPerEligibleHour: .unavailable(.noSamples, unit: "per_h"))
+        }
+        guard eligible > 0 else {
+            return SleepAnalyticsStageMovement(
+                label: label, eligibleSeconds: .available(0, unit: "s"),
+                movementSeconds: .unavailable(.noSamples),
+                movementPercentage: .unavailable(.zeroDenominator, unit: "%"),
+                movementBoutStarts: .unavailable(.noSamples),
+                movementBoutsPerEligibleHour: .unavailable(.zeroDenominator, unit: "per_h"))
+        }
+        let seconds = Double(eligible)
+        let rate = Double(boutStarts) / (seconds / 3600.0)
+        // The per-hour rate needs the primary exposure floor (≥ 1800 eligible s); below it, partial.
+        let rateMetric: SleepAnalyticsMetric = eligible >= config.primaryRateMinObservedSeconds
+            ? .available(rate, unit: "per_h") : .partial(rate, unit: "per_h")
+        return SleepAnalyticsStageMovement(
+            label: label,
+            eligibleSeconds: .available(seconds, unit: "s"),
+            movementSeconds: .available(Double(moving), unit: "s"),
+            movementPercentage: .available(100.0 * Double(moving) / seconds, unit: "%"),
+            movementBoutStarts: .available(boutStarts),
+            movementBoutsPerEligibleHour: rateMetric)
+    }
+}
+
+/// Label-at-second lookup over the normalized timeline for ASCENDING queries (one forward pointer).
+/// A second inside a label-SUPPORTED interval takes that label; a second in an unsupported or `unknown`
+/// interval, or in no interval at all, is `unknown` — never forward-filled from a neighbour.
+struct SleepAnalyticsMovementStageJoin {
+    private let intervals: [SleepAnalyticsTimeline.Interval]
+    private var cursor = 0
+    private var lastQuery = Int.min
+    private let unknownIndex = SleepAnalyticsLabel.allCases.firstIndex(of: .unknown)!
+
+    init(timeline: SleepAnalyticsTimeline) {
+        intervals = timeline.intervals.sorted { $0.start < $1.start }
+    }
+
+    /// Index into `SleepAnalyticsLabel.allCases` of the label at second `t`. Queries must be
+    /// non-decreasing between calls (a smaller `t` restarts the scan).
+    mutating func labelIndex(at t: Int) -> Int {
+        if t < lastQuery { cursor = 0 }
+        lastQuery = t
+        while cursor < intervals.count, intervals[cursor].end <= t { cursor += 1 }
+        guard cursor < intervals.count else { return unknownIndex }
+        let iv = intervals[cursor]
+        guard iv.start <= t, t < iv.end, iv.labelSupported else { return unknownIndex }
+        return SleepAnalyticsLabel.allCases.firstIndex(of: iv.label) ?? unknownIndex
     }
 }
 

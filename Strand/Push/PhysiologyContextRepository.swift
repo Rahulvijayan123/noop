@@ -104,6 +104,9 @@ public struct PhysiologyContextDocument: Sendable, Equatable {
     public let comparisons: [PhysiologyContext.ReferenceComparison]
     public let episodes: [PhysiologyContext.ChangeEpisode]
     public let dependence: [PhysiologyContext.DependenceNote]
+    /// Sustained high / low pulse episodes and HR accelerations with movement (spec-02, `pulse_episodes`). nil when
+    /// the document has none (older documents, or the detector did not run).
+    public let pulseEpisodes: PhysiologyContext.PulseEpisodeSummary?
     /// Array elements that could not be decoded and were left out.
     public let undecodedElements: Int
     /// Members that were present but could not be decoded, by JSON name.
@@ -112,6 +115,9 @@ public struct PhysiologyContextDocument: Sendable, Equatable {
     /// The IANA zone the day is interpreted in, when the header carried one.
     public var timezoneId: String? { header?.identity.timezoneId }
 
+    /// Awake vs main-sleep heart rate with both medians and their coverage (spec-02, `sleep.day_night_heart_rate`).
+    public var dayNightHeartRate: PhysiologyContext.DayNightHeartRate? { sleep?.dayNightHeartRate }
+
     /// Decode a document. Nil only when `data` is not a JSON object.
     ///
     /// The server stores and serves the summary document (envelopes split off) plus interned per-metric envelope
@@ -119,10 +125,13 @@ public struct PhysiologyContextDocument: Sendable, Equatable {
     /// build cannot decode is left out and counted.
     public static func decode(_ data: Data, envelopeTables: [Data] = []) -> PhysiologyContextDocument? {
         let decoder = PhysiologyContext.decoder()
-        guard let lenient = try? decoder.decode(LenientDayDocument.self, from: data) else { return nil }
+        // A spec-02 member this build cannot read is dropped before the members around it are decoded, so the
+        // sleep summary or a bout never disappears because its new sub-member changed shape.
+        let (clean, spec02Dropped) = PhysiologyContextSpec02.sanitizeDay(data)
+        guard let lenient = try? decoder.decode(LenientDayDocument.self, from: clean) else { return nil }
         let tables = envelopeTables.compactMap { try? decoder.decode(PhysiologyContext.EnvelopeTable.self, from: $0) }
         let droppedTables = envelopeTables.count - tables.count
-        let full = (try? decoder.decode(PhysiologyContext.DayDocument.self, from: data))
+        let full = (try? decoder.decode(PhysiologyContext.DayDocument.self, from: clean))
             .map { tables.isEmpty ? $0 : PhysiologyContext.StoredDocument.join(summary: $0, tables: tables) }
         let envelopes = full?.envelopes
             ?? (lenient.envelopes.elements + PhysiologyContext.StoredDocument.envelopes(tables))
@@ -133,8 +142,10 @@ public struct PhysiologyContextDocument: Sendable, Equatable {
             bouts: lenient.bouts.elements, exertion: lenient.exertion.elements, exposures: lenient.exposures,
             dailyValues: lenient.dailyValues.elements, comparisons: lenient.comparisons.elements,
             episodes: lenient.episodes.elements, dependence: lenient.dependence.elements,
+            pulseEpisodes: lenient.pulseEpisodes,
             undecodedElements: lenient.undecodedElements + droppedTables,
-            undecodedMembers: lenient.undecodedMembers + (droppedTables > 0 ? ["envelope_tables"] : []))
+            undecodedMembers: lenient.undecodedMembers + spec02Dropped
+                + (droppedTables > 0 ? ["envelope_tables"] : []))
     }
 }
 
@@ -452,6 +463,10 @@ public actor PhysiologyContextRepository {
 
     static func parseHistory(_ history: [String: Any], from: String, to: String, deviceId: String,
                              mode: PhysiologyContext.ProcessingMode?, fetchedAtMs: Int) -> PhysiologyContextHistory {
+        var history = history
+        if let bouts = history["bouts"] as? [Any] {
+            history["bouts"] = bouts.map { PhysiologyContextSpec02.sanitizeBout($0).bout }
+        }
         let decoded: LenientHistory? = JSONSerialization.isValidJSONObject(history)
             ? (try? JSONSerialization.data(withJSONObject: history))
                 .flatMap { try? PhysiologyContext.decoder().decode(LenientHistory.self, from: $0) }
@@ -650,6 +665,7 @@ private struct LenientDayDocument: Decodable {
     var comparisons = LossyArray<PhysiologyContext.ReferenceComparison>()
     var episodes = LossyArray<PhysiologyContext.ChangeEpisode>()
     var dependence = LossyArray<PhysiologyContext.DependenceNote>()
+    var pulseEpisodes: PhysiologyContext.PulseEpisodeSummary?
     var undecodedMembers: [String] = []
 
     var undecodedElements: Int {
@@ -659,7 +675,7 @@ private struct LenientDayDocument: Decodable {
 
     enum CodingKeys: String, CodingKey {
         case header, status, statusReasons, availability, regimes, envelopes, sleep, bouts, exertion, exposures,
-             dailyValues, comparisons, episodes, dependence
+             dailyValues, comparisons, episodes, dependence, pulseEpisodes
     }
 
     init(from decoder: Decoder) throws {
@@ -691,6 +707,7 @@ private struct LenientDayDocument: Decodable {
         comparisons = many(PhysiologyContext.ReferenceComparison.self, .comparisons)
         episodes = many(PhysiologyContext.ChangeEpisode.self, .episodes)
         dependence = many(PhysiologyContext.DependenceNote.self, .dependence)
+        pulseEpisodes = one(PhysiologyContext.PulseEpisodeSummary.self, .pulseEpisodes)
         undecodedMembers = failed
     }
 }
@@ -710,5 +727,59 @@ private struct LenientHistory: Decodable {
             .flatMap { $0 } ?? LossyArray()
         dailyValues = (try? c.decodeIfPresent(LossyArray<PhysiologyContext.DailyValue>.self, forKey: .dailyValues))
             .flatMap { $0 } ?? LossyArray()
+    }
+}
+
+// MARK: - Spec-02 members
+
+/// The optional spec-02 members of a context document (docs/spec-02/CONTRACT.md §6): `pulse_episodes`,
+/// `sleep.day_night_heart_rate` and `bouts[].recovery.respiratory_recovery`. Each is checked on its own; one this
+/// build cannot decode is removed (and named in `undecodedMembers`) so the member that carries it — the whole sleep
+/// summary, or a bout — still decodes. Everything else passes through byte-for-byte.
+enum PhysiologyContextSpec02 {
+
+    static func decodes<T: Decodable>(_ type: T.Type, _ value: Any) -> Bool {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value) else { return false }
+        return (try? PhysiologyContext.decoder().decode(T.self, from: data)) != nil
+    }
+
+    /// One bout with an unreadable `recovery.respiratory_recovery` removed; `dropped` says whether it was.
+    static func sanitizeBout(_ bout: Any) -> (bout: Any, dropped: Bool) {
+        guard var object = bout as? [String: Any], var recovery = object["recovery"] as? [String: Any],
+              let respiratory = recovery["respiratory_recovery"], !(respiratory is NSNull),
+              !decodes(PhysiologyContext.RespiratoryRecovery.self, respiratory) else { return (bout, false) }
+        recovery.removeValue(forKey: "respiratory_recovery")
+        object["recovery"] = recovery
+        return (object, true)
+    }
+
+    /// The day document with unreadable spec-02 members removed, and the names of the removed members.
+    static func sanitizeDay(_ data: Data) -> (Data, [String]) {
+        guard var object = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return (data, []) }
+        var dropped: [String] = []
+        if let pulse = object["pulse_episodes"], !(pulse is NSNull),
+           !decodes(PhysiologyContext.PulseEpisodeSummary.self, pulse) {
+            object.removeValue(forKey: "pulse_episodes")
+            dropped.append("pulse_episodes")
+        }
+        if var sleep = object["sleep"] as? [String: Any], let dn = sleep["day_night_heart_rate"], !(dn is NSNull),
+           !decodes(PhysiologyContext.DayNightHeartRate.self, dn) {
+            sleep.removeValue(forKey: "day_night_heart_rate")
+            object["sleep"] = sleep
+            dropped.append("sleep.day_night_heart_rate")
+        }
+        if let bouts = object["bouts"] as? [Any] {
+            var anyDropped = false
+            object["bouts"] = bouts.map { bout -> Any in
+                let (clean, wasDropped) = sanitizeBout(bout)
+                anyDropped = anyDropped || wasDropped
+                return clean
+            }
+            if anyDropped { dropped.append("bouts.recovery.respiratory_recovery") }
+        }
+        guard !dropped.isEmpty, JSONSerialization.isValidJSONObject(object),
+              let clean = try? JSONSerialization.data(withJSONObject: object) else { return (data, []) }
+        return (clean, dropped)
     }
 }

@@ -951,9 +951,58 @@ public struct HostedDayResult: Equatable, Sendable {
         guard let raw = daily["sleep_analytics_v1"] else { return nil }
         guard JSONSerialization.isValidJSONObject(raw) else { return nil }
         guard let data = try? JSONSerialization.data(withJSONObject: raw) else { return nil }
-        guard let document = try? JSONDecoder().decode(SleepAnalyticsDocument.self, from: data),
-              document.schemaVersion == SleepAnalyticsV1.schemaVersion else { return nil }
+        var decoded = try? JSONDecoder().decode(SleepAnalyticsDocument.self, from: data)
+        if decoded == nil {
+            // One spec-02 group at a time first, so a malformed morning response does not also drop a
+            // good pNN50; then all of them together.
+            for parts in [[Spec02AnalyticsPart.morningResponse], [.stageMovement], [.pnn50], Spec02AnalyticsPart.allCases] {
+                guard let stripped = withoutSpec02Additions(raw, dropping: Set(parts)) else { continue }
+                if let document = try? JSONDecoder().decode(SleepAnalyticsDocument.self, from: stripped) {
+                    decoded = document
+                    break
+                }
+            }
+        }
+        guard let document = decoded, document.schemaVersion == SleepAnalyticsV1.schemaVersion else { return nil }
         return document
+    }
+
+    /// The spec-02 additions to `sleep_analytics_v1` (docs/spec-02/CONTRACT.md §4).
+    enum Spec02AnalyticsPart: CaseIterable, Hashable {
+        case morningResponse, stageMovement, pnn50
+    }
+
+    /// The spec-02 additions are optional groups and fields on an otherwise strict decoder. When one of them does
+    /// not decode (a newer or malformed shape), it is dropped and the document is decoded again, so the existing
+    /// continuity / stage / movement / thermal / PRV groups survive another group's failure (spec-02 acceptance:
+    /// "existing successful outputs survive another group's failure"). Nil when there was nothing to drop.
+    static func withoutSpec02Additions(_ raw: Any, dropping parts: Set<Spec02AnalyticsPart>) -> Data? {
+        guard var document = raw as? [String: Any] else { return nil }
+        var changed = false
+        if parts.contains(.morningResponse), document.removeValue(forKey: "morning_response") != nil { changed = true }
+        if parts.contains(.stageMovement), var movement = document["movement"] as? [String: Any] {
+            for key in ["stage_movement", "stage_movement_note"] where movement.removeValue(forKey: key) != nil {
+                changed = true
+            }
+            document["movement"] = movement
+        }
+        if parts.contains(.pnn50), var prv = document["prv_diagnostics"] as? [String: Any] {
+            for key in ["nightly_pnn50_pct", "pnn50_pair_count", "nn50_count", "pnn50_method"]
+            where prv.removeValue(forKey: key) != nil {
+                changed = true
+            }
+            if let windows = prv["windows"] as? [[String: Any]] {
+                prv["windows"] = windows.map { window -> [String: Any] in
+                    var w = window
+                    if w.removeValue(forKey: "pnn50_pct") != nil { changed = true }
+                    if w.removeValue(forKey: "nn50_count") != nil { changed = true }
+                    return w
+                }
+            }
+            document["prv_diagnostics"] = prv
+        }
+        guard changed, JSONSerialization.isValidJSONObject(document) else { return nil }
+        return try? JSONSerialization.data(withJSONObject: document)
     }
 }
 

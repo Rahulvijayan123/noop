@@ -65,7 +65,11 @@ struct MeasurementContextDetailModel: Equatable {
         let window = document?.header?.identity.dayWindow ?? envelope?.support
 
         guard let document, let e = envelope else {
-            let sections: [ContextDetailSection?] = [document.flatMap { availabilitySection($0) },
+            // The day-level heart-rate sections (spec-02) do not depend on a measurement, so they show here too.
+            let heartRateDay = heartRatePage(metric) ? document : nil
+            let sections: [ContextDetailSection?] = [heartRateDay.flatMap { dayNightSection($0, locale: locale) },
+                                                     heartRateDay.flatMap { pulseSection($0, locale: locale) },
+                                                     document.flatMap { availabilitySection($0) },
                                                      processingSection(day, document: document, locale: locale)]
             return MeasurementContextDetailModel(
                 title: String(localized: "Insufficient context"),
@@ -86,6 +90,9 @@ struct MeasurementContextDetailModel: Equatable {
             eligibilitySection(e),
             referenceSection(e, document: document, locale: locale),
             exertionSection(e, zone: zone, locale: locale),
+            // Day-level heart-rate context (spec-02): on the heart-rate pages only.
+            heartRatePage(metric) ? dayNightSection(document, locale: locale) : nil,
+            heartRatePage(metric) ? pulseSection(document, locale: locale) : nil,
             exposureSection(e, document: document, zone: zone, locale: locale),
             availabilitySection(document),
             processingSection(day, document: document, locale: locale),
@@ -309,6 +316,120 @@ struct MeasurementContextDetailModel: Equatable {
                                     footnote: nil)
     }
 
+    /// The pages whose card describes heart rate (the day-level heart-rate sections belong there).
+    static func heartRatePage(_ metric: PhysiologyContext.MetricKind) -> Bool {
+        metric == .restingHeartRate || metric == .heartRate
+    }
+
+    /// Awake vs asleep heart rate on the document's day (spec-02 `sleep.day_night_heart_rate`): BOTH medians with
+    /// their own coverage, the difference, and the percent dip with its definition. Nil when the document has none.
+    static func dayNightSection(_ document: PhysiologyContextDocument, locale: Locale) -> ContextDetailSection? {
+        typealias W = PhysiologyContextWording
+        guard let dn = document.dayNightHeartRate else { return nil }
+        func side(_ id: String, _ title: String, median: Double?, samples: Int, eligibleS: Int, coverage: Double?,
+                  missing: PhysiologyContext.ReasonCode) -> ContextDetailRow {
+            var notes: [String] = []
+            if eligibleS > 0 {
+                notes.append(coverage.map { String(localized: "\(W.percent($0, locale: locale)) of \(W.duration(eligibleS)) observed") }
+                             ?? String(localized: "\(W.duration(eligibleS)) evaluated"))
+            }
+            notes.append(samples == 1 ? String(localized: "1 reading") : String(localized: "\(samples) readings"))
+            if median == nil {
+                let code = dn.reasons.contains(missing) ? missing : W.shownReasons(dn.reasons).first
+                if let code { notes.append(W.capitalizedFirst(W.reason(code))) }
+            }
+            return ContextDetailRow(id, title, median.map { W.value($0, units: "bpm", locale: locale) }
+                                        ?? String(localized: "Not available"),
+                                    note: notes.joined(separator: " \u{00B7} "))
+        }
+        var rows = [
+            side("awake", String(localized: "Awake median"), median: dn.awakeMedianBpm, samples: dn.awakeSamples,
+                 eligibleS: dn.awakeEligibleS, coverage: dn.awakeCoverage, missing: PhysiologyContext.SleepRhythm.awakeHrInsufficient),
+            side("asleep", String(localized: "Asleep median"), median: dn.sleepMedianBpm, samples: dn.sleepSamples,
+                 eligibleS: dn.sleepEligibleS, coverage: dn.sleepCoverage, missing: PhysiologyContext.SleepRhythm.sleepHrInsufficient),
+        ]
+        if let diff = dn.differenceBpm {
+            rows.append(ContextDetailRow("difference", String(localized: "Awake minus asleep"),
+                                         W.signedDifference(diff, units: "bpm", locale: locale)))
+        }
+        if let dip = dn.percentDip {
+            rows.append(ContextDetailRow("dip", String(localized: "Dip"), W.value(dip, units: "percent", locale: locale),
+                                         note: String(localized: "Awake minus asleep, as a percentage of the awake median")))
+        }
+        var notes = [String(localized: "Sleep was found partly from heart rate, so this comparison is not independent of it.")]
+        if let r = W.reasonList(dn.reasons.filter { $0 != PhysiologyContext.SleepRhythm.percentDipDefinition }) { notes.append(r) }
+        return ContextDetailSection(id: "dayNightHeartRate", title: String(localized: "Awake and asleep heart rate"),
+                                    rows: rows, footnote: notes.joined(separator: " "))
+    }
+
+    /// Sustained high / low pulse episodes and heart-rate rises with movement over qualified inactive heart rate
+    /// (spec-02 `pulse_episodes`): counts with their exposure, each episode with its censoring, the thresholds.
+    /// Descriptive only: never a rhythm classification, no cause attributed. Nil when the document has none.
+    static func pulseSection(_ document: PhysiologyContextDocument, locale: Locale) -> ContextDetailSection? {
+        typealias W = PhysiologyContextWording
+        typealias PE = PhysiologyContext.PulseEpisodes
+        guard let p = document.pulseEpisodes else { return nil }
+        let zone = W.zone(document.timezoneId)
+        var rows: [ContextDetailRow] = [
+            ContextDetailRow("exposure", String(localized: "Inactive time checked"), W.duration(p.qualifiedInactiveS),
+                             note: String(localized: "\(W.duration(p.qualifiedAsleepS)) asleep \u{00B7} \(W.duration(p.qualifiedAwakeS)) awake")),
+            ContextDetailRow("high", String(localized: "Sustained high"), W.episodeCount(p.highEpisodeCount, seconds: p.highEpisodeS)),
+            ContextDetailRow("low", String(localized: "Sustained low"), W.episodeCount(p.lowEpisodeCount, seconds: p.lowEpisodeS)),
+        ]
+        let shownEpisodes = p.episodes.sorted { ($0.interval.start, $0.id) < ($1.interval.start, $1.id) }
+        for episode in shownEpisodes.prefix(8) {
+            var value: [String] = []
+            if let median = episode.medianBpm {
+                value.append(String(localized: "median \(W.value(median, units: "bpm", locale: locale))"))
+            }
+            if let extreme = episode.extremeBpm {
+                let v = W.value(extreme, units: "bpm", locale: locale)
+                value.append(episode.kind == "sustained_low" ? String(localized: "lowest \(v)") : String(localized: "highest \(v)"))
+            }
+            var notes = [W.pulseContext(episode.context), W.duration(episode.durationS)]
+            if let cut = W.topReason(episode.censoring) { notes.append(String(localized: "Cut short: \(cut)")) }
+            rows.append(ContextDetailRow("episode-\(episode.id)",
+                                         "\(W.pulseEpisodeKind(episode.kind)), \(W.timeRange(episode.interval, zone: zone, locale: locale))",
+                                         value.isEmpty ? String(localized: "Not available") : value.joined(separator: " \u{00B7} "),
+                                         note: notes.joined(separator: " \u{00B7} ")))
+        }
+        if shownEpisodes.count > 8 {
+            rows.append(ContextDetailRow("more", String(localized: "More episodes"), "\(shownEpisodes.count - 8)"))
+        }
+        var rates: [String] = []
+        if let asleep = p.accelerationEventsPerAsleepHour {
+            rates.append(String(localized: "\(asleep.formatted(.number.precision(.fractionLength(1)).locale(locale))) per hour asleep"))
+        }
+        if let awake = p.accelerationEventsPerAwakeHour {
+            rates.append(String(localized: "\(awake.formatted(.number.precision(.fractionLength(1)).locale(locale))) per hour awake"))
+        }
+        rows.append(ContextDetailRow("accelerations", String(localized: "Heart-rate rises with movement"),
+                                     "\(p.accelerationEvents.count)",
+                                     note: rates.isEmpty ? nil : rates.joined(separator: " \u{00B7} ")))
+        let t = Dictionary(p.thresholds.map { ($0.name, $0.value) }, uniquingKeysWith: { a, _ in a })
+        if let enter = t["high_enter_bpm"] {
+            rows.append(ContextDetailRow("threshold-high", String(localized: "High threshold"),
+                                         "\u{2265} \(W.value(enter, units: "bpm", locale: locale))",
+                                         note: t["high_exit_bpm"].map { String(localized: "Ends below \(W.value($0, units: "bpm", locale: locale))") }))
+        }
+        if let enter = t["low_enter_bpm"] {
+            rows.append(ContextDetailRow("threshold-low", String(localized: "Low threshold"),
+                                         "\u{2264} \(W.value(enter, units: "bpm", locale: locale))",
+                                         note: t["low_exit_bpm"].map { String(localized: "Ends above \(W.value($0, units: "bpm", locale: locale))") }))
+        }
+        if let minimum = t["min_duration_s"], minimum.isFinite {
+            rows.append(ContextDetailRow("threshold-duration", String(localized: "Shortest episode counted"),
+                                         W.duration(Int(minimum))))
+        }
+        var notes = [String(localized: "Heart-rate readings during inactive time only. A description, not a heart-rhythm classification, and no cause is attributed.")]
+        if let r = W.reasonList(p.reasons.filter { $0 != PE.causeNotAttributed && $0 != PE.notRhythmClassification }) {
+            notes.append(r)
+        }
+        if p.state != .supported { notes.append(W.availabilityState(p.state)) }
+        return ContextDetailSection(id: "pulseEpisodes", title: String(localized: "Sustained pulse episodes"),
+                                    rows: rows, footnote: notes.joined(separator: " "))
+    }
+
     private static func exposureSection(_ e: PhysiologyContext.MeasurementEnvelope,
                                         document: PhysiologyContextDocument, zone: TimeZone,
                                         locale: Locale) -> ContextDetailSection {
@@ -424,8 +545,9 @@ struct MeasurementContextDetailModel: Equatable {
             rows.append(ContextDetailRow("d-contract", "Contract", "\(h.contractVersion) (schema \(h.schemaVersion))"))
             let v = h.versions
             rows.append(ContextDetailRow("d-versions", "Versions",
-                                         [v.join, v.validity, v.eligibility, v.sleep, v.exertion, v.exposure,
-                                          v.reference, v.change, v.functional, v.featureRegistry].joined(separator: " ")))
+                                         ([v.join, v.validity, v.eligibility, v.sleep, v.exertion, v.exposure,
+                                           v.reference, v.change, v.functional, v.featureRegistry]
+                                          + [v.pulse, v.respiratoryRecovery].compactMap { $0 }).joined(separator: " ")))
             rows.append(ContextDetailRow("d-policy", "Policy fingerprint", h.policyFingerprint))
             rows.append(ContextDetailRow("d-input", "Input fingerprint", h.inputFingerprint))
             if !h.inputRevisions.isEmpty {
@@ -433,6 +555,10 @@ struct MeasurementContextDetailModel: Equatable {
                                              h.inputRevisions.map { "\($0.input)=\($0.revision)" }.joined(separator: " ")))
             }
             rows.append(ContextDetailRow("d-zone", "Day", "\(h.identity.day) \(h.identity.timezoneId)"))
+        }
+        if let p = day.document?.pulseEpisodes {
+            rows.append(ContextDetailRow("d-pulse", "Pulse episodes", "\(p.version) \(p.state.rawValue)",
+                                         note: p.thresholds.map { "\($0.name)=\($0.value)" }.joined(separator: " ")))
         }
         if let doc = day.document, doc.full == nil || doc.undecodedElements > 0 {
             rows.append(ContextDetailRow("d-undecoded", "Not decoded",

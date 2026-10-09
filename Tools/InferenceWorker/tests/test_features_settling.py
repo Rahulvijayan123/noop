@@ -602,8 +602,10 @@ def test_a6_is_iv_exact_spec_formulas():
     is_value = interdaily_stability(days)
     iv_value = intradaily_variance(days)
     assert is_value == pytest.approx(1.0, abs=1e-9)
-    # IV = (n/(n-1)) * (5*23) / (5*1150) with n = 120
-    assert iv_value == pytest.approx((120.0 / 119.0) * (5.0 * 23.0) / (5.0 * 1150.0), abs=1e-9)
+    # spec-02: IV pairs cross midnight (23 -> 0 between consecutive days counts):
+    # IV = (n/(n-1)) * (5*23*1 + 4*23^2) / (5*1150) with n = 120
+    assert iv_value == pytest.approx(
+        (120.0 / 119.0) * (5.0 * 23.0 + 4.0 * 529.0) / (5.0 * 1150.0), abs=1e-9)
 
 
 def test_a6_is_iv_zero_variance_null():

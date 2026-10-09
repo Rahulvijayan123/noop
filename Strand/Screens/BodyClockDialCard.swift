@@ -2,10 +2,16 @@ import SwiftUI
 import StrandAnalytics
 import StrandDesign
 
-/// A 24 h dial comparing the night actually slept against the chronotype-ideal window (#1680).
+/// A 24 h dial comparing the night actually slept against a window suggested by the OBSERVED
+/// heart-rate rhythm heuristic (#1680; relabelled by spec-02 §3).
 ///
-/// Two concentric arcs on one ring: the outer is where the body clock wanted the night, the inner is
-/// where it happened. Overlap is the whole message — the card exists so "was last night's timing right"
+/// WHAT THE REFERENCE ARC IS. `CircadianEngine` fits a cosinor to per-hour mean HEART RATE and places
+/// a reference window a fixed offset from that heart-rate peak. It is not a measured temperature
+/// minimum, melatonin onset, endogenous body clock or chronotype diagnosis, and the copy says
+/// "heart-rate rhythm" for that reason. The measured skin-temperature phase is a separate output.
+///
+/// Two concentric arcs on one ring: the outer is the window the heart-rate rhythm suggests, the inner
+/// is where the night happened. Overlap is the whole message — the card exists so "was last night's timing right"
 /// is answerable at a glance, which the existing text-only `BodyClockCard` on Health cannot do.
 ///
 /// VOCABULARY. The caption measures `sleepWindowOffsetHours` — the distance between the two ARCS DRAWN —
@@ -14,7 +20,7 @@ import StrandDesign
 /// schedule that does not suit their clock, and that is the case this dial exists to show, so captioning
 /// it with the other number would contradict the picture.
 ///
-/// Nothing here computes a metric: the window, the offset and the chronotype all come from
+/// Nothing here computes a metric: the window, the offset and the peak-timing bucket all come from
 /// `CircadianEngine`, byte-identical with the Kotlin twin. Only the drawing is per-platform.
 struct BodyClockDialCard: View {
     let estimate: CircadianEngine.PhaseEstimate
@@ -33,11 +39,11 @@ struct BodyClockDialCard: View {
     }
 
     private var ideal: (bedHour: Double, wakeHour: Double)? {
-        CircadianEngine.idealSleepWindow(tempMinHour: estimate.tempMinHour, durationHours: durationHours)
+        CircadianEngine.idealSleepWindow(referenceHour: estimate.hrRhythmReferenceHour, durationHours: durationHours)
     }
 
     private var offsetHours: Double {
-        CircadianEngine.sleepWindowOffsetHours(tempMinHour: estimate.tempMinHour,
+        CircadianEngine.sleepWindowOffsetHours(referenceHour: estimate.hrRhythmReferenceHour,
                                                actualWakeHour: actualWakeHour)
     }
 
@@ -55,14 +61,14 @@ struct BodyClockDialCard: View {
                         .accessibilityElement(children: .ignore)
                         // Label only. The verdict is the caption Text below, a separate element, so giving
                         // the dial the same string as its VALUE made VoiceOver announce it twice.
-                        .accessibilityLabel(Text("Body clock dial"))
+                        .accessibilityLabel(Text("Heart-rate rhythm dial"))
                     legend
                     Text(alignmentText)
                         .font(StrandFont.title2)
                         .foregroundStyle(StrandPalette.textPrimary)
                         .fixedSize(horizontal: false, vertical: true)
-                    if let chronotype = CircadianEngine.chronotype(estimate) {
-                        Text(chronotypeText(chronotype))
+                    if let peakTiming = CircadianEngine.chronotype(estimate) {
+                        Text(peakTimingText(peakTiming))
                             .font(StrandFont.footnote)
                             .foregroundStyle(StrandPalette.textTertiary)
                     }
@@ -276,7 +282,7 @@ struct BodyClockDialCard: View {
         HStack(spacing: 14) {
             legendItem(colour: hue, dashed: false, label: String(localized: "Last night"))
             legendItem(colour: hue.opacity(0.55), dashed: true,
-                       label: String(localized: "Your clock"))
+                       label: String(localized: "Rhythm estimate"))
             Spacer()
         }
         .accessibilityHidden(true)   // the caption below already states the comparison in words
@@ -303,7 +309,7 @@ struct BodyClockDialCard: View {
     /// imply a precision the estimate does not carry.
     private var alignmentText: String {
         let minutes = Int((offsetHours * 60 / 5).rounded()) * 5
-        if abs(minutes) < 30 { return String(localized: "In sync with your body clock") }
+        if abs(minutes) < 30 { return String(localized: "In line with your heart-rate rhythm") }
         let hours = abs(Double(minutes)) / 60
         // Locale-formatted, NOT String(format:). That is C-locale, so it prints "1.5 h" for a German
         // reader while the Android twin's String.format prints "1,5 h" from the default locale — the two
@@ -312,15 +318,18 @@ struct BodyClockDialCard: View {
             ? "\(hours.formatted(.number.precision(.fractionLength(1)))) h"
             : "\(abs(minutes)) min"
         return minutes > 0
-            ? String(localized: "\(amount) later than your body clock")
-            : String(localized: "\(amount) earlier than your body clock")
+            ? String(localized: "\(amount) later than your heart-rate rhythm suggests")
+            : String(localized: "\(amount) earlier than your heart-rate rhythm suggests")
     }
 
-    private func chronotypeText(_ c: CircadianEngine.Chronotype) -> String {
+    /// Where the daily heart-rate peak sits on the clock (the engine's absolute bucket). Worded as an
+    /// observation about heart-rate timing, never as a chronotype ("morning type") diagnosis: the
+    /// bucket is derived from an hourly-mean-HR cosinor, not from a validated chronotype measure.
+    private func peakTimingText(_ c: CircadianEngine.Chronotype) -> String {
         switch c {
-        case .morning:      return String(localized: "Morning type")
-        case .intermediate: return String(localized: "Intermediate type")
-        case .evening:      return String(localized: "Evening type")
+        case .morning:      return String(localized: "Earlier daily heart-rate peak")
+        case .intermediate: return String(localized: "Mid-afternoon daily heart-rate peak")
+        case .evening:      return String(localized: "Later daily heart-rate peak")
         }
     }
 }
