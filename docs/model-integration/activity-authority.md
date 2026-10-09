@@ -170,6 +170,7 @@ published bytes do not change; the replay test proves it.
 | ElderNet embedded in HART (`--gait-expert eldernet`) | none recorded | always shadow; superseded when a standalone source exists | no |
 | Motion heads (Inertia-1 / ActiNet encoders + Nara head bundle) | `FRWHOOP_INERTIA_MODE` shadow/candidate | `activity_motion_heads_days.release_mode`; stand-in encoder or shadow-tier bundle → shadow; candidate needs the bundle pin | no (as above) |
 | Transition expert (inside HART's service) | ships with the HART child | rides `hart-windows-1`; part of the HART lineage | as HART; see "Provider-to-consumer rows" |
+| RecGym exercise head (`recgym.serve`, Tools/ActivityContext/RECGYM.md) | `FRWHOOP_EXERCISE_*`, shadow only (any other mode is a configuration error) | `activity_exercise_windows.release_mode` (CHECK = shadow); block `ActivityExpertAuthority.shadowOnly(.exerciseRecognition)`; channel `exercise_recognition` has no selection source, so `use` is always `none` | no: shadow is the only value the settings, the table and the publish function accept |
 
 ## Selection policy and where it lives
 
@@ -298,6 +299,7 @@ A new optional activity checkpoint or head bundle plugs in without becoming prod
 | Motion heads, ActiNet/HARNet30 encoder | 30 s @ 20 Hz windows | unavailable for labels (no trained Nara head bundle) → shadow at most | `activity_motion_heads_days` | none | none |
 | Transition expert (inside HART's service) | HART's windows | HART lineage (stamped per window) | `transition` in `hart-windows-1` | `/scores/activity-windows` | phone decoder (as today; not changed here) |
 | Joint candidate (worker) | the job's selection | candidate, never published | `activity_candidate_days` | none (service role only) | none |
+| RecGym exercise head (`recgym.serve`) | same chunks, gravity-free 20 Hz RecGym units, 4 s / 2 s on the absolute even-second grid | shadow only (wrist-trained; the owner's strap is on the upper arm) | `activity_exercise_windows` (one row per window, placement + `placement_supported`) | `/scores/exercise-windows` (inspection) | none |
 
 ## Read-only runtime checklist (droplet)
 
