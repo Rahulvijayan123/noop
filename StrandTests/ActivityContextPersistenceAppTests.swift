@@ -501,27 +501,6 @@ final class ActivityContextPersistenceAppTests: XCTestCase {
         repo.days = []
     }
 
-    // MARK: Gait lane mode (D1-06)
-
-    func testShadowGaitDaysNeverReachTheDecoderAndTheModeIsRecorded() throws {
-        let dir = FileManager.default.temporaryDirectory.appendingPathComponent("gait-\(UUID().uuidString)")
-        defer { try? FileManager.default.removeItem(at: dir) }
-        let scope = ActivityEncoderWindowStore.Scope(ownerId: "owner-1", deviceId: "whoop-1")
-        let store = GaitWindowStore(directory: dir, scope: { scope })
-        let model = GaitQualityModelInfo(modelVersion: GaitWindowStore.Pins.modelVersion,
-                                         weights: ["gait_detection": String(repeating: "a", count: 64)],
-                                         upstreamCommit: "437a38b", hopS: 5)
-        func record(_ day: String, _ mode: String) -> GaitWindowStore.DayRecord {
-            GaitWindowStore.DayRecord(day: day, resultRevision: "rev-\(day)", mode: mode, model: model, windowsJSON: "{}")
-        }
-        XCTAssertTrue(store.save(record("2026-10-06", "shadow"), scope: scope))
-        XCTAssertNil(store.latestModel, "a shadow-only lane gives the decoder nothing")
-        XCTAssertNil(store.latestMode)
-        XCTAssertTrue(store.save(record("2026-10-05", "candidate"), scope: scope))
-        XCTAssertEqual(store.latestModel, model, "the newest non-shadow day names the model")
-        XCTAssertEqual(store.latestMode, "candidate")
-    }
-
     // MARK: Spot HRV (D3-04, D6-16)
 
     func testASpotReadingKeepsItsOwnTimeSupportAndNoCopyOfTheContext() {

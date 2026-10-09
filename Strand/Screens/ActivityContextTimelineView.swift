@@ -99,6 +99,8 @@ enum ActivityFamily: CaseIterable, Hashable {
         switch label {
         case ActivityDisplay.offWrist: return .offWrist
         case ActivityDisplay.unclear: return .unclear
+        case ActivityDisplay.likelySitting: return .sitting
+        case ActivityDisplay.likelyStanding: return .standing
         case "Asleep": return .asleep
         // Lying awake in bed is not sleep, and is drawn in the hypnogram's awake colour so the lane and the
         // sleep page tell the same story about a night.
