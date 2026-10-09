@@ -2,6 +2,7 @@
 // 20261009150000_watchdog_episodes.sql): POST and GET scores/watchdog-episodes.
 import { reasonCode } from './reasonCodes.ts';
 import { isSafeExternalDeviceId } from './keys.ts';
+import { validExerciseWorkoutLineage } from './userWorkouts.ts';
 import type { SupabaseRest } from './rest.ts';
 
 /** At most 50 episodes per call, each at most 16 KiB serialized; the body cap leaves room for the envelope. */
@@ -62,7 +63,9 @@ function validExercise(x: unknown): boolean {
     && optional(x.restReference, isNumber) && optional(x.restBasis, text(64))
     && optional(x.ceilingBpm, isNumber) && optional(x.ceilingBasis, text(64))
     && optional(x.sessionReference, oneOf(REFERENCE_STATES)) && optional(x.recoveryReference, oneOf(REFERENCE_STATES))
-    && optional(x.routine, text(128));
+    && optional(x.routine, text(128))
+    // Workout mode: whether the session was logged by the wearer, and the logged workout's catalogue type.
+    && validExerciseWorkoutLineage(x);
 }
 
 /** WatchdogEpisodeAnnotation; its episodeId must be the episode it is sent with. */

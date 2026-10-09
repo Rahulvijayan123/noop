@@ -107,6 +107,8 @@ const SHARED_REFERENCE_POLICIES = [
   "physiology_feature_defaults.read_versions",
   "physiology_feature_manifests.physiology_feature_manifest_read",
   "physiology_feature_qualifications.read_versions",
+  // The workout-mode catalogue (20261009170000_user_workouts.sql): the same types for every account.
+  "workout_types.workout_types_read",
 ];
 
 /**
@@ -235,6 +237,13 @@ const SERVICE_ONLY_FUNCTIONS = [
   // and its retention.
   "publish_activity_exercise_windows",
   "prune_activity_exercise_windows",
+  // Workout mode (20261009170000_user_workouts.sql): the scores route's write and read, the pipelines' logged-workout
+  // list, the catalogue lookup and the measurement-context builder's seam (internal schema).
+  "user_workouts_upsert_v1",
+  "user_workouts_read_v1",
+  "logged_workouts_v1",
+  "workout_type_for_sport",
+  "measurement_context_logged_workouts_v1",
 ];
 
 Deno.test({

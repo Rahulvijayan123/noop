@@ -20,6 +20,9 @@ import {
   readWatchdogEpisodes,
   submitWatchdogEpisodes,
 } from './watchdogEpisodes.ts';
+import {
+  USER_WORKOUTS_MAX_BODY_BYTES, parseUserWorkoutsQuery, readUserWorkouts, submitUserWorkouts,
+} from './userWorkouts.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -565,11 +568,15 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   // for one device (deviceId) or every device of the owner, like /context-minutes.
   const isWatchdogEpisodesPost = req.method === 'POST' && route === '/watchdog-episodes';
   const isWatchdogEpisodesGet = req.method === 'GET' && route === '/watchdog-episodes';
+  // Workout mode (20261009170000): the wearer's logged workouts. POST with device_id in the body like /watchdog-episodes;
+  // GET for one device (deviceId) or every device of the owner.
+  const isWorkoutsPost = req.method === 'POST' && route === '/workouts';
+  const isWorkoutsGet = req.method === 'GET' && route === '/workouts';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
       && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes
-      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows) {
+      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows && !isWorkoutsPost && !isWorkoutsGet) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -606,19 +613,21 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
-        || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet || isExerciseWindows
+        || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
         : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES
         : isQualityMinutes ? QUALITY_MINUTES_MAX_BODY_BYTES
-        : isWatchdogEpisodesPost ? WATCHDOG_EPISODES_MAX_BODY_BYTES : undefined);
+        : isWatchdogEpisodesPost ? WATCHDOG_EPISODES_MAX_BODY_BYTES
+        : isWorkoutsPost ? USER_WORKOUTS_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates || isContextMinutes
-        || isWatchdogEpisodesGet || isExerciseWindows
+        || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
         || isInsights) ? null
-      : (isPlacementPost || isQualityMinutes || isWatchdogEpisodesPost) ? (requestBody?.device_id ?? null)
+      : (isPlacementPost || isQualityMinutes || isWatchdogEpisodesPost || isWorkoutsPost)
+        ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
     // user-level declaration (the RPC's NULL device scope). Stretch feedback and ground-truth labels
@@ -626,7 +635,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     // request-level device.
     if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet && !isGroundTruthLabels
         && !isInsights && !(isPlacementPost && externalDeviceId == null)
-        && !((isContextMinutes || isWatchdogEpisodesGet) && externalDeviceId == null)
+        && !((isContextMinutes || isWatchdogEpisodesGet || isWorkoutsGet) && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
@@ -635,7 +644,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       ? await createNoopDeviceResolver({ rest })(lookup)
       : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet
         || isGroundTruthLabels || isInsights
-        || ((isContextMinutes || isWatchdogEpisodesGet) && externalDeviceId == null)) ? null
+        || ((isContextMinutes || isWatchdogEpisodesGet || isWorkoutsGet) && externalDeviceId == null)) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -765,6 +774,21 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
       const query = parseWatchdogEpisodesQuery(url.searchParams);
       const read = await readWatchdogEpisodes({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...(externalDeviceId != null ? { device_id: externalDeviceId } : {}), ...read },
+        { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWorkoutsPost) {
+      // The wearer's logged workouts for the strap the body names (findNoopDevice: the canonical strap device, alias-
+      // aware); owner and uploading installation from the credential. The RPC checks owner, device and types again.
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const outcome = await submitUserWorkouts({ rest, userId: user.id, sourceId: user.sourceId, deviceId,
+        body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWorkoutsGet) {
+      if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
+      const query = parseUserWorkoutsQuery(url.searchParams);
+      const read = await readUserWorkouts({ rest, userId: user.id, deviceId, ...query });
       return Response.json({ ...(externalDeviceId != null ? { device_id: externalDeviceId } : {}), ...read },
         { headers: { 'cache-control': 'no-store' } });
     }

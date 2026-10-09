@@ -41,7 +41,13 @@
 --             and is not inside a session or an active period): `session` / `recovery` for a confirmed session,
 --             `active` for a period that meets the session conditions but is not (yet) confirmed (no recovery
 --             after it); session_start, session_rule, session_basis (the rest reference used: sleep_resting_hr,
---             awake_still_median or default_70).
+--             awake_still_median or default_70; `logged` for a minute inside a workout the wearer logged).
+--   LOGGED    workout_type, workout_basis: the workout the wearer logged that covers the minute
+--             (internal.measurement_context_logged_workouts_v1: manual workout sessions here; workout mode's
+--             public.user_workouts from 20261009170000, docs/context-watchdog/WORKOUTS.md). Its minutes are strong
+--             evidence for the rule and are `session` with session_basis `logged`, an observed label rather than an
+--             inference; workout_type is the catalogue id (workout-types-1, NULL when the session names no catalogue
+--             type), its attributes in public.workout_types.
 --   COMPLETE  missing_reasons [{code, certainty[, subcode]}]: why a minute has no heart rate (charging, off_wrist,
 --             strap_not_recording, strap_link_down, awaiting_upload, sensor_dropout, insufficient_coverage),
 --             context_unknown when activity or session phase is unknown, and context_not_comparable (subcode
@@ -175,7 +181,10 @@ create table if not exists public.measurement_context_minutes (
   session_phase    text check (session_phase in ('none', 'session', 'recovery', 'active')),
   session_start    timestamptz,
   session_rule     text,
-  session_basis    text check (session_basis in ('sleep_resting_hr', 'awake_still_median', 'default_70')),
+  session_basis    text check (session_basis in ('sleep_resting_hr', 'awake_still_median', 'default_70', 'logged')),
+  -- logged workout covering the minute (workout mode, docs/context-watchdog/WORKOUTS.md)
+  workout_type     text,
+  workout_basis    text check (workout_basis in ('user_workout', 'manual_session')),
   -- completeness
   observed_s       smallint not null default 0 check (observed_s between 0 and 60),
   missing_reasons  jsonb not null default '[]' check (jsonb_typeof(missing_reasons) = 'array'),
@@ -201,6 +210,24 @@ do $$ begin
     alter table public.measurement_context_minutes drop constraint if exists measurement_context_minutes_session_phase_check;
     alter table public.measurement_context_minutes add constraint measurement_context_minutes_session_phase_check
       check (session_phase in ('none', 'session', 'recovery', 'active'));
+  end if;
+end $$;
+
+-- ... and has neither the logged-workout columns nor the `logged` session basis: add them (no-op on a fresh one).
+alter table public.measurement_context_minutes add column if not exists workout_type text;
+alter table public.measurement_context_minutes add column if not exists workout_basis text;
+do $$ begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.measurement_context_minutes'::regclass
+                    and conname = 'measurement_context_minutes_session_basis_check'
+                    and pg_get_constraintdef(oid) like '%''logged''%') then
+    alter table public.measurement_context_minutes drop constraint if exists measurement_context_minutes_session_basis_check;
+    alter table public.measurement_context_minutes add constraint measurement_context_minutes_session_basis_check
+      check (session_basis in ('sleep_resting_hr', 'awake_still_median', 'default_70', 'logged'));
+  end if;
+  if not exists (select 1 from pg_constraint where conrelid = 'public.measurement_context_minutes'::regclass
+                    and conname = 'measurement_context_minutes_workout_basis_check') then
+    alter table public.measurement_context_minutes add constraint measurement_context_minutes_workout_basis_check
+      check (workout_basis in ('user_workout', 'manual_session'));
   end if;
 end $$;
 
@@ -493,6 +520,22 @@ revoke all on function internal.measurement_context_quality_v1(integer, real, in
   text, boolean, boolean, text, text, text[]) from public, anon, authenticated, service_role;
 
 -- 5. Builder ---------------------------------------------------------------------------------------------------
+-- Workouts the wearer logged that overlap [p_from, p_to) (unix seconds): the builder's one seam for them. Here the
+-- manual workout sessions (public.sessions kind manual_workout: the live tracker and the manual sheet); with no
+-- catalogue yet their type is NULL. 20261009170000_user_workouts.sql replaces this with workout mode's typed log
+-- (public.user_workouts) plus the manual sessions it does not already hold, typed through the catalogue.
+create or replace function internal.measurement_context_logged_workouts_v1(p_user uuid, p_device uuid, p_from bigint,
+                                                                          p_to bigint)
+returns table (start_ts bigint, end_ts bigint, workout_type text, basis text)
+language sql stable security definer set search_path = '' as $$
+  select extract(epoch from s.start_at)::bigint, extract(epoch from s.end_at)::bigint, null::text, 'manual_session'
+    from public.sessions s
+   where s.user_id = p_user and s.device_id = p_device and s.kind = 'manual_workout'
+     and s.start_at < to_timestamp(p_to) and s.end_at > to_timestamp(p_from) and s.end_at > s.start_at
+$$;
+revoke all on function internal.measurement_context_logged_workouts_v1(uuid, uuid, bigint, bigint)
+  from public, anon, authenticated, service_role;
+
 create or replace function internal.measurement_context_version_id(p_backfill boolean)
 returns smallint language sql stable security definer set search_path = '' as $$
   select v.id from public.measurement_context_versions v
@@ -590,7 +633,8 @@ begin
       run_class text, run_conf real, run_ref bigint, run_wear text,
       sleep_state text, sleep_basis text, wear_state text, wear_basis text,
       strong boolean, weak boolean, still boolean, night_rest double precision,
-      session_phase text, session_start bigint, session_basis text
+      session_phase text, session_start bigint, session_basis text,
+      logged boolean, workout_type text, workout_basis text, workout_start bigint
     ) on commit drop;
     create temp table mc_events (ts bigint, kind text) on commit drop;
     create temp table mc_contact (m bigint primary key, c text) on commit drop;
@@ -845,14 +889,27 @@ begin
            when g.hr_n >= 30 then 'hr_present' else 'unknown' end
    where true;
 
+  -- LOGGED: the workout the wearer logged that holds the minute's midpoint (the latest-starting one when two
+  -- overlap), with its catalogue type and where it came from.
+  update pg_temp.mc_grid g
+     set logged = true, workout_type = x.workout_type, workout_basis = x.basis, workout_start = x.start_ts
+    from (select distinct on (g2.m) g2.m, l.workout_type, l.basis, l.start_ts
+            from pg_temp.mc_grid g2
+            join internal.measurement_context_logged_workouts_v1(p_user, p_device, v_lo, v_hi) l
+              on g2.m + 30 >= l.start_ts and g2.m + 30 < l.end_ts
+           order by g2.m, l.start_ts desc, l.basis desc) x
+   where g.m = x.m;
+
   -- SESSION: HR-free evidence per minute (never asleep or off the wrist), the still minutes for the 2 h rest
-  -- fallback, and the nightly resting HR of the 14 nights before each local day (within 60 days).
+  -- fallback, and the nightly resting HR of the 14 nights before each local day (within 60 days). A minute inside a
+  -- logged workout is strong evidence and never a still minute.
   update pg_temp.mc_grid g
      set strong = x.ok and ((g.steps_n > 0 and 2 * (g.step_walk_n + g.step_run_n) >= g.steps_n)
-                            or coalesce(g.dyn_mean >= 0.10, false) or coalesce(g.ep_strong, false)),
+                            or coalesce(g.dyn_mean >= 0.10, false) or coalesce(g.ep_strong, false)
+                            or coalesce(g.logged, false)),
          weak = x.ok and coalesce(g.dyn_mean >= 0.05, false),
          still = x.ok and g.hr_n >= 30 and g.dyn_n > 0 and g.dyn_mean < 0.05 and g.step_walk_n + g.step_run_n = 0
-                 and not coalesce(g.ep_strong or g.ep_other, false)
+                 and not coalesce(g.ep_strong or g.ep_other, false) and not coalesce(g.logged, false)
     from (select m, not (coalesce(wear_state in ('off_wrist', 'charging'), false) or coalesce(sleep_state = 'asleep', false)
                         or coalesce(band_asleep, false)) as ok
             from pg_temp.mc_grid) x
@@ -886,6 +943,13 @@ begin
            session_start = v_lo + v_span.a * 60, session_basis = v_span.rest_basis
      where m >= v_lo + v_span.a * 60 and m <= v_lo + v_span.b * 60;
   end loop;
+  -- A logged workout is an observed session: while worn and awake its minutes are `session` with basis `logged`,
+  -- whatever the rule found (from the first minute, without waiting for load), and a recovery the rule found after it
+  -- stays.
+  update pg_temp.mc_grid g
+     set session_phase = 'session', session_start = g.workout_start, session_basis = 'logged'
+   where g.logged and not (coalesce(g.wear_state in ('off_wrist', 'charging'), false)
+                           or coalesce(g.sleep_state = 'asleep', false) or coalesce(g.band_asleep, false));
   -- Outside sessions: 'none' where motion (or a known off-wrist / asleep state) could have shown movement, else
   -- unknown (NULL).
   update pg_temp.mc_grid g set session_phase = 'none'
@@ -903,7 +967,7 @@ begin
     quality_class, quality_conf, reasons,
     activity_class, activity_conf, posture, exertion, activity_basis, activity_ref,
     sleep_state, sleep_basis, wear_state, wear_basis, placement, placement_basis,
-    session_phase, session_start, session_rule, session_basis, observed_s, missing_reasons,
+    session_phase, session_start, session_rule, session_basis, workout_type, workout_basis, observed_s, missing_reasons,
     context_version, revision, computed_at)
   select p_user, p_device, to_timestamp(g.m), g.local_day, g.utc_offset_s, g.tz_basis,
          g.hr_n, g.hr_mean::real, g.hr_min, g.hr_max, g.rr_n, g.rr_suspect_n, g.dyn_n, g.dyn_mean::real,
@@ -922,6 +986,7 @@ begin
          g.sleep_state, g.sleep_basis, g.wear_state, g.wear_basis, null, 'not_resolved',
          g.session_phase, case when g.session_start is not null then to_timestamp(g.session_start) end,
          case when g.session_phase is not null then 'exercise-session-2' end, g.session_basis,
+         g.workout_type, g.workout_basis,
          least(60, g.observed_s),
          case when g.hr_n > 0 then '[]'::jsonb else jsonb_build_array(case
              when g.wear_state = 'charging' then '{"code": "charging", "certainty": "confirmed"}'::jsonb
@@ -957,14 +1022,15 @@ begin
     reset_event, saturation_event, charging, max_ingested_at, quality_class, quality_conf, reasons,
     activity_class, activity_conf, posture, exertion, activity_basis, activity_ref, sleep_state, sleep_basis,
     wear_state, wear_basis, placement, placement_basis, session_phase, session_start, session_rule, session_basis,
-    observed_s, missing_reasons, context_version, revision, computed_at)
+    workout_type, workout_basis, observed_s, missing_reasons, context_version, revision, computed_at)
   select n.user_id, n.device_id, n.minute_start, n.local_day, n.utc_offset_s, n.tz_basis, n.hr_n, n.hr_mean,
          n.hr_min, n.hr_max, n.rr_n, n.rr_suspect_n, n.dyn_n, n.dyn_mean, n.dyn_p90, n.steps_n, n.step_walk_n,
          n.step_run_n, n.skin_temp_n, n.skin_temp_mean, n.band_sleep_state, n.wrist_event, n.contact_state,
          n.ble_link_down_s, n.reset_event, n.saturation_event, n.charging, n.max_ingested_at, n.quality_class,
          n.quality_conf, n.reasons, n.activity_class, n.activity_conf, n.posture, n.exertion, n.activity_basis,
          n.activity_ref, n.sleep_state, n.sleep_basis, n.wear_state, n.wear_basis, n.placement, n.placement_basis,
-         n.session_phase, n.session_start, n.session_rule, n.session_basis, n.observed_s, n.missing_reasons,
+         n.session_phase, n.session_start, n.session_rule, n.session_basis, n.workout_type, n.workout_basis,
+         n.observed_s, n.missing_reasons,
          n.context_version, nextval('public.measurement_context_minutes_revision_seq'), clock_timestamp()
     from pg_temp.mc_new n
     left join public.measurement_context_minutes o
@@ -988,6 +1054,7 @@ begin
     wear_basis = excluded.wear_basis, placement = excluded.placement, placement_basis = excluded.placement_basis,
     session_phase = excluded.session_phase, session_start = excluded.session_start,
     session_rule = excluded.session_rule, session_basis = excluded.session_basis,
+    workout_type = excluded.workout_type, workout_basis = excluded.workout_basis,
     observed_s = excluded.observed_s, missing_reasons = excluded.missing_reasons,
     context_version = excluded.context_version, revision = excluded.revision, computed_at = excluded.computed_at;
   get diagnostics v_changed = row_count;
