@@ -1,0 +1,18 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nara-personal-events"
+version = "0.1.0"
+requires-python = ">=3.11"
+dependencies = ["numpy==2.2.6", "scipy==1.15.3", "scikit-learn==1.6.1", "joblib==1.5.1", "psycopg[binary]==3.2.9", "threadpoolctl==3.6.0"]
+
+[project.optional-dependencies]
+matrix = ["torch==2.7.1", "xgboost==3.0.2", "catboost==1.2.8", "pycatch22==0.4.5", "numba==0.61.2", "xlstm==2.0.5"]
+
+[project.scripts]
+nara-event-worker = "personal_events.worker:main"
+
+[tool.setuptools.packages.find]
+include = ["personal_events*"]

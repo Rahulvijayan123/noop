@@ -185,11 +185,14 @@ extension HealthEvent {
 struct EventsView: View {
     var extraEvents: [HealthEvent] = HealthEvent.current
     @ObservedObject var manualEventCenter: ManualEventCenter = .shared
+    @ObservedObject private var detection = EventDetectionCenter.shared
     @ObservedObject private var filterState = EventFilterState.shared
 
-    /// The wearer's logged events with their strap context, newest first, plus any DEBUG samples.
+    /// Logged events with their strap context, possible events awaiting review, and any DEBUG samples.
     private var events: [HealthEvent] {
-        (ManualEventPresentation.events(manualEventCenter) + extraEvents).sorted { $0.date > $1.date }
+        let detected = PersonalEventPresentation.events(manual: manualEventCenter, detection: detection)
+            .filter { $0.origin == .detected }
+        return (ManualEventPresentation.events(manualEventCenter) + detected + extraEvents).sorted { $0.date > $1.date }
     }
 
     /// The most recent event that carries a physiology trace.
@@ -202,6 +205,7 @@ struct EventsView: View {
         let featured = featured(events)
         ScreenScaffold(title: "Events", trailing: { HeaderSettingsButton() }) {
             ManualEventLoggingSection(center: manualEventCenter)
+            EventDetectionSection(manual: manualEventCenter, detection: detection)
             if let featured, let physiology = featured.physiology, !physiology.metrics.isEmpty {
                 VStack(alignment: .leading, spacing: NoopMetrics.gap) {
                     SectionHeader("Latest reaction")
@@ -241,6 +245,13 @@ struct EventsView: View {
                     }
                 }
                 .buttonStyle(.plain)
+            }
+        }
+        .task {
+            detection.bindAccount()
+            while !Task.isCancelled {
+                await detection.sync()
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
             }
         }
     }

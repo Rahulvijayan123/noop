@@ -156,9 +156,11 @@ private struct ManualEventRow: View {
     @State private var confirmingArchive = false
     @State private var showingDetail = false
 
+    private var displayType: ManualEventEntry? { center.entries.first { $0.id == entry.typeId } }
+
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            Image(systemName: entry.symbol).font(StrandFont.headline)
+            Image(systemName: displayType?.symbol ?? entry.symbol).font(StrandFont.headline)
                 .foregroundStyle(StrandPalette.metricPurple).frame(width: 32, height: 36)
                 .accessibilityHidden(true)
             Button { showingDetail = true } label: { details }
@@ -496,7 +498,7 @@ private struct ManualEventEditor: View {
         event.activityKind = center.activityKind(for: type)
         event.startUnixSeconds = request.event != nil || !live ? window.start.timeIntervalSince1970 : Date().timeIntervalSince1970
         event.endUnixSeconds = live ? nil : window.end.timeIntervalSince1970
-        if request.event == nil { event.deviceId = AppModel.shared?.deviceRegistry?.activeDeviceId }
+        if request.event == nil { event.deviceId = PersonalEventPresentation.canonicalDevice }
         if center.save(event, for: owner) { dismiss() }
     }
 }

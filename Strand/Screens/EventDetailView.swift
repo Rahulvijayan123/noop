@@ -14,9 +14,11 @@ struct EventDetailView: View {
     var history: [HealthEvent] = []
 
     @ObservedObject var manual: ManualEventCenter = .shared
+    @ObservedObject private var detection = EventDetectionCenter.shared
     @State private var metricIndex = EventDetailView.initialMetricIndex
     @State private var selected: Date?
     @State private var showingContext = false
+    @State private var review: DetectedEvent?
 
     /// The logged event behind this page, when it is one, for its full strap context.
     private var loggedEntry: ManualEventEntry? {
@@ -28,9 +30,11 @@ struct EventDetailView: View {
         guard loggedEntry != nil else { return event }
         return ManualEventPresentation.events(manual).first { $0.id == event.id } ?? event
     }
+    private var currentPhysiology: EventPhysiology? { latest.physiology ?? detection.physiology[event.id] }
 
     var body: some View {
-        ScreenScaffold(title: verbatimKey(event.title), titleDisplay: .navigationBar) {
+        ScreenScaffold(title: verbatimKey(event.ownerId == nil || event.ownerId == detection.owner ? event.title : "Event"), titleDisplay: .navigationBar) {
+            if event.ownerId == nil || event.ownerId == detection.owner {
             EventHeader(event: latest)
             if let entry = loggedEntry {
                 Button { showingContext = true } label: {
@@ -40,7 +44,11 @@ struct EventDetailView: View {
                 .buttonStyle(.bordered).tint(StrandPalette.metricPurple)
                 .sheet(isPresented: $showingContext) { ManualEventDetailView(entry: entry, center: manual) }
             }
-            if let physiology = latest.physiology, !physiology.metrics.isEmpty {
+            if let detected = detection.detections.first(where: { $0.id.uuidString == event.id }) {
+                Button("Review this event") { review = detected }
+                    .buttonStyle(.borderedProminent).tint(StrandPalette.accent)
+            }
+            if let physiology = currentPhysiology, !physiology.metrics.isEmpty {
                 physiologySection(physiology)
             } else {
                 NoopCard {
@@ -52,8 +60,16 @@ struct EventDetailView: View {
                 recoverySection(recovery)
             }
             relatedSection
+            Text("Curves show available cloud readings. Gaps mean data is missing. Movement is accelerometer variation in g; HRV uses measured time windows.")
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
             AboutDisclosure(paragraphs: aboutParagraphs)
+            }
         }
+        .task(id: event.id) { await detection.loadPhysiology(for: event) }
+        .sheet(item: $review) { item in
+            DetectionReviewSheet(item: item, owner: event.ownerId, manual: manual, detection: detection)
+        }
+        .onChange(of: detection.owner) { _ in review = nil }
         .onChangeCompat(of: metricIndex) { _ in selected = nil }
         // A logged event's context may still be filling in: ask once when the page opens.
         .task(id: event.id) { if loggedEntry != nil { await manual.syncNow() } }
@@ -179,7 +195,7 @@ struct EventDetailView: View {
 
     /// This event's after-window against the other events of the same kind with the same metric.
     private var recoveryCurves: EventRecoveryCurves? {
-        guard let physiology = latest.physiology, !physiology.metrics.isEmpty else { return nil }
+        guard let physiology = currentPhysiology, !physiology.metrics.isEmpty else { return nil }
         let metric = metric(in: physiology)
         guard let current = EventRecoveryCurves.curve(for: latest, metricName: metric.name) else { return nil }
         let others = sameKind.compactMap { EventRecoveryCurves.curve(for: $0, metricName: metric.name) }
@@ -193,7 +209,7 @@ struct EventDetailView: View {
     /// The metric pages behind this event's readings.
     @ViewBuilder
     private var relatedSection: some View {
-        let units = Set(latest.physiology?.metrics.map { $0.unit.lowercased() } ?? [])
+        let units = Set(currentPhysiology?.metrics.map { $0.unit.lowercased() } ?? [])
         if units.contains("ms") || units.contains("bpm") {
             NoopListSection("Related") {
                 if units.contains("ms") {

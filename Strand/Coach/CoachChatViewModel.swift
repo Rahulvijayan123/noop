@@ -1445,10 +1445,15 @@ final class CoachChatViewModel: ObservableObject {
             guard let m = CoachChatMessage(stored: row) else { continue }
             put(byId[m.id].map { $0.merged(withServer: m) } ?? m)
         }
-        return order.enumerated()
-            .compactMap { offset, id in byId[id].map { (offset, $0) } }
-            .sorted { a, b in a.1.createdAt != b.1.createdAt ? a.1.createdAt < b.1.createdAt : a.0 < b.0 }
-            .map(\.1)
+        let indexed: [(Int, CoachChatMessage)] = order.enumerated().compactMap { offset, id in
+            guard let message = byId[id] else { return nil }
+            return (offset, message)
+        }
+        let sorted = indexed.sorted { a, b in
+            if a.1.createdAt != b.1.createdAt { return a.1.createdAt < b.1.createdAt }
+            return a.0 < b.0
+        }
+        return sorted.map { $0.1 }
     }
 
     /// The start-up catch-up: maintain for up to 3 quiet threads (no message for 10 minutes) that a pass would
