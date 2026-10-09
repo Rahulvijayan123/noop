@@ -66,6 +66,22 @@ and four time-of-day bands (00–06, 06–12, 12–18, 18–24).
 - `context+response`: `context` plus, for HR, a ridge model of HR on recent movement (motion and steps lagged
   0–10 min, exponentially-weighted recent motion with τ = 3 and 10 min, minutes since exertion). Used only
   if it improves out-of-sample HR fit on the fitting data; otherwise falls back to `context`.
+- `layer1`: HR and HRV z = (x − expected) / scale against the phone's own Layer 1 v2 context-strata reference
+  for the minute's context (`layer1_context.py`): sleep HR while asleep; awake lying / seated / standing HR and
+  ln-RMSSD, else pooled awake rest; steady walking HR. Daily stratum values are `ContextMaterializer.observations`
+  over the phone's `activityContextInterval` rows (400 days of history); a day's reference is
+  `LongitudinalBaseline.evaluate` as of that day from the days before it (T−60…T−8, median, small-sample MAD with
+  trim, AR(1) n_eff, Student-t predictive scale; shown from 4 days, established at 14, stale after 14 days without
+  data), reusing `Tools/MetricInsight` `layer1.py` for the window statistics. Scale = √(predictive between-day² +
+  within-day²) with the Watchdog floors (5 bpm; 8 ms). Nothing while vigorous or unknown, 30 min after effort,
+  10 min after walking, or 3 min after a context / posture change. Provisional references (4–13 days) are used and
+  flagged; established ones first. Other channels, and minutes without a Layer 1 reference, use `context`.
+  `Deviation.source` per minute and channel: `layer1_established`, `layer1_provisional`, `engine_context`, `none`.
+  Pinned to the Swift by `tests/data/layer1_context_expected.json` (recorded by
+  `LayerOneContextMirrorTests`). The server has no per-interval HR / R-R components, decoded posture or evidence
+  quality, so on Postgres `layer1` abstains to `context` with a data-quality note (never approximated).
+- `layer1+tod`: `layer1` plus the shrunk time-of-day band offset of each stratum's residuals (shrunk toward 0,
+  k = 60 minutes), fitted on the fitting mask only (before the cutoff, outside event exclusion windows).
 
 A context with too few fitting minutes borrows its parent's baseline (active → walking → awake pooled; still
 contexts → still pooled → awake); this is flagged in `data_quality.notes`.
@@ -101,7 +117,16 @@ findings can be reported in bpm, ms, °C, breaths/min. No baseline → NaN (abst
 
 - Per (channel, window): mean D, day-clustered bootstrap 95 % CI, consistency = share of events whose D has the
   mean's sign, events with data; also in physical units via the baseline scale.
-- Global test: max-|t| over valid cells of both families, sign flips **shared within a local day**, exact
+- Joint family (sig-4): per post-onset window and family, each event's channel vector d is combined as
+  s = ŵ·d with ŵ = (Σ̂ + λI)⁻¹ μ̂ scaled to unit Σ̂-norm (so s is in SD of normal variation). Σ̂ is the
+  second moment of control-minus-control differences, so channels that move together (heart rate and wrist
+  motion) are not double-counted; λ = 0.2 × mean diagonal; a missing channel counts as no deviation. ŵ is
+  re-estimated inside every sign flip, so the weighting is covered by the family-wise p. A significant joint cell
+  becomes a `basis: "joint"` finding listing each channel's weight and its own change in SD, e.g. "Heart rate
+  rose (+2.8 SD) and movement rose (+1.9 SD) together … (combined +3.1 SD)". Motion and steps are part of a joint
+  signature (a tremor-like phenotype), not a caveat. Replication accepts the first half's top single or joint
+  cell. Switch: `signature.JOINT_FAMILY`.
+- Global test: max-|t| over valid cells of all families, sign flips **shared within a local day**, exact
   when ≤ 12 days; cell p-values are family-wise adjusted. Smallest attainable p = 2 / 2^days is reported.
 - Replication: split events in time; the first part's top cells must hold their sign with CI excluding 0 on
   the later events.
@@ -169,7 +194,7 @@ Stored in `event_detector_runs.report` (PR #5 table) and returned by
 {
   "version": "signature-report-1",
   "type_id": "uuid", "generated_at": 1791600000,
-  "engine": {"version": "sig-3", "normalization": "context"},
+  "engine": {"version": "sig-4", "normalization": "layer1+tod"},
   "status": "insufficient_events | individual_context | no_reliable_signature | emerging | established",
   "evidence": {"events": 8, "event_days": 6, "observation_hours": 12.5, "confirmed_detections": 0,
                "rejected_detections": 0, "negative_intervals": 1, "monitored_days": 9.1,
@@ -199,8 +224,14 @@ Stored in `event_detector_runs.report` (PR #5 table) and returned by
 }
 ```
 
-Keys added in sig-2/sig-3 are optional (`events_used`, `events_dropped`, `control_time_window_min`, `basis`,
-`movement_accompanied`, `expected_recall_ci`, `training_cutoff`, `champion`); finding channels may include
+`data_quality.baselines` (optional, `layer1` modes): `{"mode", "layer1": {"available", "reason"}, "channels": {"hr" |
+"hrv": {"sources": {source: share of worn minutes with data}, "contexts": [{"context", "source": "layer1" |
+"engine_context", "series"?, "status": "established" | "provisional" | "learning" | "none", "days", "center",
+"scale", "unit", "borrowed_from"?}]}}}` - centre and scale in bpm / ms, so the app can say "compared with your seated
+heart-rate baseline (established, 14 days)".
+
+Keys added in sig-2 – sig-4 are optional (`events_used`, `events_dropped`, `control_time_window_min`, `basis`,
+`movement_accompanied`, joint `channels` / `combined_z` / `combined_z_ci`, `data_quality.baselines`, `expected_recall_ci`, `training_cutoff`, `champion`); finding channels may include
 `steps`. Readers must
 ignore unknown keys; the app does.
 

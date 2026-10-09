@@ -32,6 +32,9 @@ TEMP_DETREND_MIN_PRESENT = 30
 WRIST_OFF_EXPIRY_S = 6 * 3600
 STEP_COUNTER_MOD = 65536
 RESP_RANGE = (4, 40)
+# Interval history read for the Layer 1 context references (the phone reads the last 400 days:
+# BaselineStore.refreshContextObservations).
+LAYER1_HISTORY_S = 400 * 86400
 
 
 @dataclasses.dataclass
@@ -433,6 +436,16 @@ def load_whoop_sqlite(path, device, lo, hi, tz_offset_s=0) -> Timeline:
       act_rows = conn.execute(f'select {sel} from "activityContextInterval" where "deviceId" = ? and "endTs" > ? '
                               f'and "startTs" < ? order by "startTs"', (device, lo, hi)).fetchall()
     activity = _activity_dict(act_rows)
+    # Layer 1 context references (layer1_context.py): the full interval rows, with the phone's history horizon.
+    layer1_rows, layer1_reason = None, "this recording has no stored activity-context intervals"
+    if cols_of("activityContextInterval"):
+      from .layer1_context import ROW_COLUMNS, rows_from_tuples
+      present = cols_of("activityContextInterval")
+      sel = ", ".join(f'"{c}"' if c in present else "null" for c in ROW_COLUMNS)
+      layer1_rows = rows_from_tuples(conn.execute(
+        f'select {sel} from "activityContextInterval" where "deviceId" = ? and "endTs" > ? and "startTs" < ? '
+        f'order by "startTs"', (device, lo - LAYER1_HISTORY_S, hi)).fetchall())
+      layer1_reason = None
     sessions = []
     if cols_of("sleepSession"):
       # Sessions may be stored under a derived id ("<device>-noop"): match the device or a "<device>-" prefix.
@@ -444,7 +457,8 @@ def load_whoop_sqlite(path, device, lo, hi, tz_offset_s=0) -> Timeline:
   tl = assemble(minutes, tz_offset_s, device=device, hr=hr, rr=(sumsq, pairs), motion=motion, steps=steps,
                 temp_raw=temp_raw, sleep_frac=sleep_frac, wrist=wrist, activity=activity,
                 sleep_sessions=[(float(a), float(b)) for a, b in sessions])
-  tl.meta.update(source="whoop-sqlite", rr=rr_counters)
+  tl.meta.update(source="whoop-sqlite", rr=rr_counters, context_intervals=layer1_rows,
+                 layer1_unavailable=layer1_reason)
   return tl
 
 
@@ -549,5 +563,9 @@ def load_postgres(db, owner, device, lo, hi, tz_offset_s=0) -> Timeline:
   tl = assemble(minutes, tz_offset_s, device=str(device), hr=hr, rr=(sumsq, pairs), motion=motion, steps=steps,
                 temp_raw=temp_raw, sleep_frac=sleep_frac, wrist=wrist, activity=activity, resp=resp,
                 sleep_sessions=[(r["s"], r["e"]) for r in nights])
-  tl.meta.update(source="postgres", rr=counters)
+  # No server table carries the phone's per-interval HR / R-R components, decoded posture, class confidence and
+  # evidence quality (activity_context_runs has the server decoder's runs without them), so the Layer 1 context
+  # references cannot be built here and the `layer1` normalisation abstains on the server. Never approximated.
+  from .layer1_context import UNAVAILABLE_SERVER
+  tl.meta.update(source="postgres", rr=counters, context_intervals=None, layer1_unavailable=UNAVAILABLE_SERVER)
   return tl

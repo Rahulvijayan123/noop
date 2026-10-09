@@ -82,7 +82,7 @@ struct EventSignatureDemo: View {
     static func emerging(type: UUID, now: Double) -> [String: Any] {
         fill("""
         {"version": "signature-report-1", "type_id": "__TYPE__", "generated_at": __GENERATED__,
-         "engine": {"version": "sig-3", "normalization": "context"}, "status": "emerging",
+         "engine": {"version": "sig-4", "normalization": "context"}, "status": "emerging",
          "evidence": {"events": 9, "event_days": 6, "observation_hours": 12.5, "confirmed_detections": 0,
                       "rejected_detections": 0, "negative_intervals": 1, "monitored_days": 9.1,
                       "events_used": 8, "events_dropped": {"fewer than 3 matched controls": 1}},
@@ -90,6 +90,12 @@ struct EventSignatureDemo: View {
             "p_value": 0.03, "p_min_possible": 0.031, "replicated": false,
             "context_at_onset": {"asleep": 0.0, "still": 0.62, "walking": 0.12, "active": 0.25, "unknown": 0.01},
             "findings": [
+              {"channel": "hr", "unit": "SD", "basis": "joint", "window": [0, 5], "direction": "up", "change": 3.1,
+               "change_ci": [2.0, 4.2], "change_z": 3.1, "consistency": 0.875, "events_with_data": 8,
+               "combined_z": 3.1, "combined_z_ci": [2.0, 4.2],
+               "channels": [{"channel": "hr", "weight": 0.8, "change_z": 2.8, "change": 18.2, "unit": "bpm"},
+                            {"channel": "motion", "weight": 0.5, "change_z": 1.9, "change": 0.02, "unit": "g"}],
+               "text": "Heart rate rose (+2.8 SD) and movement rose (+1.9 SD) together from before onset, within 5 min after onset, in 7 of 8 events (combined +3.1 SD)."},
               {"channel": "hr", "unit": "bpm", "window": [0, 5], "direction": "up", "change": 18.2, "change_ci": [12.1, 24.0],
                "change_z": 2.1, "consistency": 0.875, "events_with_data": 8,
                "text": "Heart rate rose 18 bpm (12–24) from before onset, within 5 min after onset, in 7 of 8 events.",
@@ -118,7 +124,7 @@ struct EventSignatureDemo: View {
     static func noReliable(type: UUID, now: Double) -> [String: Any] {
         fill("""
         {"version": "signature-report-1", "type_id": "__TYPE__", "generated_at": __GENERATED__,
-         "engine": {"version": "sig-3", "normalization": "context"}, "status": "no_reliable_signature",
+         "engine": {"version": "sig-4", "normalization": "context"}, "status": "no_reliable_signature",
          "evidence": {"events": 7, "event_days": 7, "observation_hours": 4.0, "confirmed_detections": 0,
                       "rejected_detections": 0, "negative_intervals": 0, "monitored_days": 11.3},
          "signatures": [{"id": "s1", "label": "all events", "events": 7, "event_days": 7, "p_value": 0.41,

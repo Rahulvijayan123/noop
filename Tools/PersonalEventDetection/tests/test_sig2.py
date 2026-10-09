@@ -63,7 +63,7 @@ class ChangeFamily(unittest.TestCase):
       t2.cols["motion"][i:i + 10] = 0.25; t2.cols["motion_p90"][i:i + 10] = 0.35
     r, _, _ = engine.run(t2, Evidence("T", events_at(onsets), owner="o"), generated_at=1, forward_eval=False)
     self.assertIn(r["status"], ("emerging", "established"))
-    change = [f for f in r["signatures"][0]["findings"] if f["basis"] == "change_from_before" and f["channel"] == "hr"]
+    change = [f for f in r["signatures"][0]["findings"] if f.get("basis") == "change_from_before" and f["channel"] == "hr"]
     self.assertTrue(change, r["signatures"][0]["findings"])
     self.assertEqual(change[0]["direction"], "up")
     self.assertGreater(change[0]["change"], 8)

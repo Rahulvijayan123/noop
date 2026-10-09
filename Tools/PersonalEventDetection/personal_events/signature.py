@@ -19,6 +19,17 @@ BOOTSTRAP = 1000
 MIN_CELL_EVENTS = 3
 T_SD_FLOOR = 0.5
 MAX_FINDINGS = 5
+# Joint family (sig-4): per post-onset window and family, a shrinkage-LDA combination of all channels.
+JOINT_FAMILY = True
+JOINT_SHRINK = 0.2
+# Change-family joint vectors: "std" = change difference / robust SD of control changes (chosen: calibrated on the
+# real-data nulls, and its combined score is in the same SD units as the per-channel values shown); "rank" =
+# centred ranks (exactly symmetric per channel, but bounded, so the combined "SD" is not comparable).
+JOINT_CHANGE_SCALE = "std"
+MAX_JOINT_FINDINGS = 2
+# Replication passes if the first half's top single cell or its top joint cell (first-half weights) holds on the
+# later events. Without it, the joint family cost replications it would otherwise pass (real-data plants).
+REPLICATE_EITHER = True
 # A heart-rate / HRV finding is marked movement_accompanied when steps or motion changed (change family, day-
 # bootstrap CI excluding 0) in an overlapping window in the direction that would explain it: the change may come
 # from moving, not from the event itself.
@@ -71,31 +82,151 @@ def flip_matrix(n_days, rng):
   return np.vstack([np.ones(n_days), F]), False
 
 
-def global_test(D, days, rng):
-  """Max-|t| over valid (channel, window) cells with sign flips shared within a local day.
-  D: (E, K). Returns dict(p, p_min_possible, t_max, cell, exact, cells_tested)."""
+def global_test(D, days, rng, joint=()):
+  """Max-|t| over valid (channel, window) cells, plus the joint cells, with sign flips shared within a local day.
+  D: (E, K). Joint cells re-estimate their channel weights inside every flip (see joint_t), so the family-wise
+  null covers the weight fitting. Returns dict(p, p_min_possible, t_max, cell, exact, cells_tested, p_cells,
+  joint: [(t, adjusted p) per joint cell])."""
   S, N, Q, uniq = day_sums(D, days)
   n = N.sum(axis=0)
   valid = n >= min_cell_events(D.shape[0])
   nd = len(uniq)
   p_min = 2.0 / 2 ** nd if nd else 1.0
-  if not valid.any() or nd < 1:
+  prepared = [joint_prepare(jc, days, D.shape[0]) for jc in joint]
+  joint_ok = [pj is not None for pj in prepared]
+  if (not valid.any() and not any(joint_ok)) or nd < 1:
     return dict(p=None, p_min_possible=p_min, t_max=None, cell=None, exact=True, cells_tested=0,
-                p_cells=np.full(D.shape[1], np.nan))
+                p_cells=np.full(D.shape[1], np.nan), joint=[(None, None)] * len(prepared))
   t_obs = t_stats(S.sum(axis=0), n, Q)
-  T_obs = np.nanmax(np.abs(t_obs[valid]))
-  cell = int(np.flatnonzero(valid)[np.nanargmax(np.abs(t_obs[valid]))])
   F, exact = flip_matrix(nd, rng)
-  T = np.nanmax(np.abs(t_stats(F @ S[:, valid], n[valid], Q[valid])), axis=1)
+  ident = np.ones((1, nd))
+  jt_obs = [float(joint_t(pj, ident)[0]) if pj is not None else np.nan for pj in prepared]
+  parts_obs = [np.abs(t_obs[valid])] + [np.array([t]) for t, ok in zip(jt_obs, joint_ok) if ok]
+  T_obs = float(np.nanmax(np.concatenate(parts_obs)))
+  cell = int(np.flatnonzero(valid)[np.nanargmax(np.abs(t_obs[valid]))]) if valid.any() else None
+  cols = [np.abs(t_stats(F @ S[:, valid], n[valid], Q[valid]))] if valid.any() else []
+  cols += [joint_t(pj, F)[:, None] for pj in prepared if pj is not None]
+  T = np.nanmax(np.nan_to_num(np.concatenate(cols, axis=1), nan=0.0), axis=1)
   hits = np.sum(T >= T_obs - 1e-9 * max(1.0, abs(T_obs)))
   p = hits / len(T)                                  # the identity flip is a row of F in both cases
   # Family-wise (max-t) adjusted p per cell: the share of flips whose max-|t| reaches the cell's |t|.
-  p_cells = np.full(D.shape[1], np.nan)
   Ts = np.sort(T)
-  absd = np.abs(t_obs[valid])
-  p_cells[valid] = (len(Ts) - np.searchsorted(Ts, absd - 1e-9 * np.maximum(1.0, absd), side="left")) / len(Ts)
-  return dict(p=float(max(p, p_min if exact else 1.0 / len(T))), p_min_possible=p_min, t_max=float(T_obs),
-              cell=cell, exact=exact, cells_tested=int(valid.sum()), p_cells=p_cells)
+  adj = lambda x: (len(Ts) - np.searchsorted(Ts, x - 1e-9 * np.maximum(1.0, x), side="left")) / len(Ts)
+  p_cells = np.full(D.shape[1], np.nan)
+  if valid.any():
+    p_cells[valid] = adj(np.abs(t_obs[valid]))
+  jres = [(t, float(adj(np.array([t]))[0])) if ok and np.isfinite(t) else (None, None)
+          for t, ok in zip(jt_obs, joint_ok)]
+  return dict(p=float(max(p, p_min if exact else 1.0 / len(T))), p_min_possible=p_min, t_max=T_obs,
+              cell=cell, exact=exact, cells_tested=int(valid.sum()) + int(sum(joint_ok)), p_cells=p_cells,
+              joint=jres)
+
+
+# --------------------------------------------------------------------------------------------- joint family
+
+def _loo_pseudo_level(M):
+  """Control-minus-other-controls differences (k, p) from control window means M (k, p)."""
+  k = len(M)
+  if k < 2:
+    return np.empty((0, M.shape[1]))
+  fin = np.isfinite(M)
+  tot = np.where(fin, M, 0.0).sum(0); cnt = fin.sum(0)
+  with np.errstate(invalid="ignore", divide="ignore"):
+    others = (tot[None, :] - np.where(fin, M, 0.0)) / (cnt[None, :] - fin)
+  return np.where(fin & ((cnt[None, :] - fin) > 0), M - others, np.nan)
+
+
+def _loo_pseudo_rank(M):
+  """Centred rank of each control's change among the other controls (k, p), in [-1, 1]."""
+  k = len(M)
+  out = np.full(M.shape, np.nan)
+  for j in range(k):
+    others = np.delete(M, j, axis=0)
+    fin = np.isfinite(others)
+    cnt = fin.sum(0)
+    below = np.where(fin, others < M[j][None, :], False).sum(0) + 0.5 * np.where(fin, others == M[j][None, :], False).sum(0)
+    half = cnt / 2.0
+    with np.errstate(invalid="ignore", divide="ignore"):
+      out[j] = np.where(np.isfinite(M[j]) & (cnt >= 2), (below - half) / half, np.nan)
+  return out
+
+
+def joint_cells(paired):
+  """One joint cell per (family, post-onset window). Each holds per-event channel vectors d (E, p; NaN = missing),
+  display z / physical means, and the null covariance Sigma of d estimated from control-minus-control variation
+  of the same quantity (so correlated channels, e.g. HR and motion, are not double-counted)."""
+  cells = []
+  E = paired.D_z.shape[0]
+  if not E:
+    return cells
+  post = [WINDOWS.index(w) for w in CHANGE_WINDOWS]
+  for wi_level, w in zip(post, CHANGE_WINDOWS):
+    pseudo = [_loo_pseudo_level(M[1:, :, wi_level]) for M in (paired.win_z or []) if len(M) > 2]
+    cells.append(dict(family="level", window=w, channels=list(CHANNELS), units=[UNITS[c] for c in CHANNELS],
+                      d=paired.D_z[:, :, wi_level], zdisp=paired.D_z[:, :, wi_level],
+                      phys=paired.D_res[:, :, wi_level], center=paired.center,
+                      pseudo=np.concatenate(pseudo) if pseudo else np.empty((0, len(CHANNELS)))))
+  if paired.D_change is not None and paired.change_win is not None:
+    scale = paired.change_scale if paired.change_scale is not None else np.ones((len(CHANGE_CHANNELS), len(CHANGE_WINDOWS)))
+    for wi, w in enumerate(CHANGE_WINDOWS):
+      ctrl = [M[1:, :, wi] for M in paired.change_win if len(M) > 2]
+      if JOINT_CHANGE_SCALE == "rank":
+        d = paired.D_change_rank[:, :, wi]
+        pseudo = [_loo_pseudo_rank(M) for M in ctrl]
+      else:
+        d = paired.D_change[:, :, wi] / scale[None, :, wi]
+        pseudo = [_loo_pseudo_level(M) / scale[None, :, wi] for M in ctrl]
+      cells.append(dict(family="change", window=w, channels=list(CHANGE_CHANNELS),
+                        units=[CHANGE_UNITS[c] for c in CHANGE_CHANNELS], d=d,
+                        zdisp=paired.D_change[:, :, wi] / scale[None, :, wi], phys=paired.D_change[:, :, wi],
+                        center=None,
+                        pseudo=np.concatenate(pseudo) if pseudo else np.empty((0, len(CHANGE_CHANNELS)))))
+  return cells
+
+
+def joint_prepare(cell, days, n_events):
+  """Channels with data in >= min_cell_events events enter; missing entries are 0 (= no deviation, which is
+  invariant under sign flips). Sigma = second moment of the 0-imputed control pseudo-differences, shrunk by
+  lambda = JOINT_SHRINK * mean diagonal. Returns None when the cell cannot be formed."""
+  d = np.asarray(cell["d"], dtype=np.float64)
+  have = np.isfinite(d)
+  keep = np.flatnonzero(have.sum(0) >= min_cell_events(n_events))
+  P = cell["pseudo"]
+  if len(keep) < 2 or len(P) < 10:
+    return None
+  d = d[:, keep]; have = have[:, keep]; P = P[:, keep]
+  valid = have.any(1)
+  if valid.sum() < min_cell_events(n_events):
+    return None
+  d0 = np.where(have, d, 0.0); d0[~valid] = 0.0
+  P0 = np.where(np.isfinite(P), P, 0.0)
+  sig = P0.T @ P0 / len(P0)
+  lam = JOINT_SHRINK * max(float(np.trace(sig)) / len(keep), 1e-6)
+  sig = sig + lam * np.eye(len(keep))
+  uniq, inv = np.unique(days, return_inverse=True)
+  S = np.zeros((len(uniq), len(keep))); np.add.at(S, inv, d0)
+  return dict(keep=keep, d0=d0, valid=valid, n=float(valid.sum()), S=S, M2=d0.T @ d0, sig=sig,
+              A=np.linalg.inv(sig), inv=inv, cell=cell)
+
+
+def joint_weights(pj, mu):
+  """Shrinkage-LDA direction (Sigma + lambda I)^-1 mu, scaled to unit Sigma-norm (scores in null-SD units)."""
+  w = mu @ pj["A"]
+  norm2 = np.einsum("...i,ij,...j->...", w, pj["sig"], w)
+  with np.errstate(invalid="ignore", divide="ignore"):
+    return w / np.sqrt(norm2)[..., None]
+
+
+def joint_t(pj, F):
+  """Moderated t of the joint score s_i = w . d_i for every sign-flip row of F (P, days). The weights are
+  re-estimated from the flipped event mean in every row, so the max-t null includes the weight fitting.
+  Flipping all signs flips w as well, so s - and t - are unchanged (smallest p stays 2 / 2^days)."""
+  mu = (F @ pj["S"]) / pj["n"]
+  w = joint_weights(pj, mu)
+  mean = np.einsum("pi,pi->p", w, mu)
+  q = np.einsum("pi,ij,pj->p", w, pj["M2"], w)
+  t = t_stats(mean * pj["n"], pj["n"], q)
+  return np.where(np.isfinite(t), t, 0.0)
 
 
 def bootstrap_weights(days, rng, B=BOOTSTRAP):
@@ -155,9 +286,11 @@ def cell_table(X_test, X_phys, X_z, days, W):
 
 # --------------------------------------------------------------------------------------------- replication
 
-def replication(X, days, rng):
-  """X: (E, K) standardised cells of both families. Split events in time by day (first half of the event days vs
-  the rest). The first part's top cell must hold its sign with a day-bootstrap CI excluding 0 on later events."""
+def replication(X, days, rng, joint=()):
+  """X: (E, K) test cells; joint: joint cells. Split events in time by day (first half of the event days vs the
+  rest). The first part's top cell - a single cell, or a joint cell with weights fitted on the first part only -
+  must hold its sign with a day-bootstrap CI excluding 0 on the later events (joint: the later events' scores
+  under the first part's weights)."""
   uniq = np.unique(days)
   if len(uniq) < 4:
     return "not_yet_testable", None
@@ -169,13 +302,54 @@ def replication(X, days, rng):
   n1 = N.sum(axis=0)
   t1 = t_stats(S.sum(axis=0), n1, Q)
   t1 = np.where(n1 >= min_cell_events(int(first.sum())), t1, np.nan)
-  if not np.isfinite(t1).any():
+  best_t = float(np.nanmax(np.abs(t1))) if np.isfinite(t1).any() else -np.inf
+  best_joint = None
+  for q, jc in enumerate(joint):
+    sub = dict(jc, d=np.asarray(jc["d"])[first])
+    pj = joint_prepare(sub, days[first], int(first.sum()))
+    if pj is None:
+      continue
+    t = float(joint_t(pj, np.ones((1, len(np.unique(days[first])))))[0])
+    if t > best_t:
+      best_t, best_joint = t, (q, pj)
+  if not np.isfinite(best_t):
     return "not_yet_testable", None
+  W = bootstrap_weights(days[later], rng)
+  single_best = float(np.nanmax(np.abs(t1))) if np.isfinite(t1).any() else -np.inf
+  if REPLICATE_EITHER and best_joint is not None and np.isfinite(single_best):
+    # Either the first part's top single cell or its top joint cell may replicate.
+    j_res = _replicate_joint(joint, best_joint, days, later, W)
+    s_res = _replicate_single(X, t1, days, later, W)
+    if "replicated" in (j_res[0], s_res[0]):
+      return "replicated", (j_res[1] if j_res[0] == "replicated" else s_res[1])
+    if "failed" in (j_res[0], s_res[0]):
+      return "failed", None
+    return "not_yet_testable", None
+  if best_joint is not None:
+    return _replicate_joint(joint, best_joint, days, later, W)
+  return _replicate_single(X, t1, days, later, W)
+
+
+def _replicate_joint(joint, best_joint, days, later, W):
+  if True:
+    q, pj = best_joint
+    mu = pj["d0"][pj["valid"]].mean(axis=0)
+    w = joint_weights(pj, mu[None, :])[0]
+    d2 = np.asarray(joint[q]["d"])[later][:, pj["keep"]]
+    have = np.isfinite(d2).any(1)
+    if have.sum() < 3:
+      return "not_yet_testable", None
+    s2 = np.where(have, np.where(np.isfinite(d2), d2, 0.0) @ w, np.nan)
+    lo, hi = cluster_ci(s2[:, None], days[later], W)
+    ok = np.isfinite(lo[0]) and lo[0] > 0
+    return ("replicated" if ok else "failed"), ("joint", q)
+
+
+def _replicate_single(X, t1, days, later, W):
   cell = int(np.nanargmax(np.abs(t1)))
   X2 = X[later][:, cell:cell + 1]
   if np.isfinite(X2).sum() < 3:
     return "not_yet_testable", None
-  W = bootstrap_weights(days[later], rng)
   lo, hi = cluster_ci(X2, days[later], W)
   m2 = float(np.nanmean(X2))
   sign = np.sign(t1[cell])
@@ -293,6 +467,73 @@ def findings(table, center, p_cells, normalization="context", alpha=FINDING_ALPH
   return out
 
 
+def joint_findings(jcells, results, days, W, n_events, normalization="context", alpha=FINDING_ALPHA):
+  """At most one joint finding per family (its best window): family-wise adjusted p < alpha and a day-bootstrap
+  CI of the combined score above 0. Channels are listed by their contribution w_c * mean d_c."""
+  usual = "against this person's usual level" if normalization == "raw" else \
+    "against what is usual for the activity and time of day"
+  best = {}
+  for jc, (t, p_) in zip(jcells, results):
+    if t is None or p_ is None or p_ >= alpha:
+      continue
+    if jc["family"] not in best or t > best[jc["family"]][1]:
+      best[jc["family"]] = (jc, t, p_)
+  out = []
+  for family in ("change", "level"):
+    if family not in best or len(out) >= MAX_JOINT_FINDINGS:
+      continue
+    jc, t, p_ = best[family]
+    pj = joint_prepare(jc, days, n_events)
+    if pj is None:
+      continue
+    mu = pj["d0"][pj["valid"]].mean(axis=0)
+    w = joint_weights(pj, mu[None, :])[0]
+    score = pj["d0"] @ w
+    sv = np.where(pj["valid"], score, np.nan)
+    lo, hi = cluster_ci(sv[:, None], days, W)
+    combined = float(np.nanmean(sv))
+    if not (np.isfinite(lo[0]) and lo[0] > 0):
+      continue
+    contrib = w * mu
+    total = float(np.abs(contrib).sum()) or 1.0
+    order = np.argsort(-np.abs(contrib))
+    chans = []
+    for q in order:
+      if abs(contrib[q]) / total < 0.1:
+        continue
+      c = pj["keep"][q]; ch = jc["channels"][c]
+      zc = jc["zdisp"][:, c]; zc = float(np.nanmean(zc)) if np.isfinite(zc).any() else None
+      ph = jc["phys"][:, c]; ph = float(np.nanmean(ph)) if np.isfinite(ph).any() else None
+      if family == "level" and ph is not None:
+        cen = jc["center"][:, c] if jc["center"] is not None else np.array([np.nan])
+        cen = float(np.nanmedian(cen)) if np.isfinite(cen).any() else None
+        ph = float(physical_change(ch, ph, cen))
+      chans.append(dict(channel=ch, weight=round(float(w[q]), 3),
+                        change_z=None if zc is None else round(zc, 2),
+                        change=None if ph is None else round(ph, DECIMALS[ch]), unit=jc["units"][c]))
+    if not chans:
+      continue
+    n_valid = int(pj["valid"].sum())
+    k_pos = int(np.sum(sv[pj["valid"]] > 0))
+    a, b = jc["window"]
+    named = [f"{NAMES[c['channel']] if q == 0 else NAMES[c['channel']].lower()} "
+             f"{'rose' if (c['change_z'] or 0) > 0 else 'fell'}"
+             + (f" ({c['change_z']:+.1f} SD)" if c["change_z"] is not None else "") for q, c in enumerate(chans[:3])]
+    joined = named[0] if len(named) == 1 else ", ".join(named[:-1]) + " and " + named[-1]
+    where = "from before onset" if family == "change" else usual
+    together = " together" if len(named) > 1 else ""
+    text = (f"{joined}{together} {where}, {_window_text(a, b)}, in {k_pos} of {n_valid} events "
+            f"(combined {combined:+.1f} SD).")
+    top = chans[0]
+    out.append(dict(channel=top["channel"], unit="SD", window=[a, b],
+                    direction="up" if (top["change_z"] or 0) >= 0 else "down",
+                    change=round(combined, 2), change_ci=[round(float(lo[0]), 2), round(float(hi[0]), 2)],
+                    change_z=round(combined, 2), consistency=round(k_pos / n_valid, 3), events_with_data=n_valid,
+                    text=text, basis="joint", channels=chans, combined_z=round(combined, 2),
+                    combined_z_ci=[round(float(lo[0]), 2), round(float(hi[0]), 2)]))
+  return out
+
+
 def profile_block(prof_res, days, W, center):
   chans = {}
   for ci, ch in enumerate(CHANNELS):
@@ -330,8 +571,9 @@ def analyse_group(paired, events, days, onset_ctx, rng, label, sid, normalizatio
   center = np.array([np.nanmedian(paired.center[:, ci]) if np.isfinite(paired.center[:, ci]).any() else np.nan
                      for ci in range(len(CHANNELS))])
   X_test, X_phys, X_z = union_matrices(paired)
-  test = global_test(X_test, days, rng)
-  rep, _ = replication(X_test, days, rng)
+  jcells = joint_cells(paired) if JOINT_FAMILY else []
+  test = global_test(X_test, days, rng, joint=jcells)
+  rep, _ = replication(X_test, days, rng, joint=jcells)
   W = bootstrap_weights(days, rng)
   table = cell_table(X_test, X_phys, X_z, days, W)
   status = decide_status(E, nd, test["p"], rep)
@@ -339,9 +581,13 @@ def analyse_group(paired, events, days, onset_ctx, rng, label, sid, normalizatio
   return dict(base, p_value=None if test["p"] is None else round(float(test["p"]), 5),
               p_min_possible=round(float(test["p_min_possible"]), 6), replicated=rep == "replicated",
               replication=rep, context_at_onset=context_share(onset_ctx),
-              findings=findings(table, center, test["p_cells"], normalization) if show else [],
+              findings=(joint_findings(jcells, test["joint"], days, W, E, normalization) +
+                        findings(table, center, test["p_cells"], normalization)) if show else [],
               profile=profile_block(paired.prof_res, days, W, center), status=status,
-              cells_tested=int(test.get("cells_tested", 0)))
+              cells_tested=int(test.get("cells_tested", 0)),
+              joint=[{"family": jc["family"], "window": list(jc["window"]),
+                      "t": None if t is None else round(float(t), 3), "p_adjusted": p_}
+                     for jc, (t, p_) in zip(jcells, test["joint"])])
 
 
 def _two_means(X, iters=25):

@@ -98,6 +98,10 @@ struct EventSignatureCard: View {
                     if let change = SignaturePresentation.change(finding) { chip(change, strong: true) }
                     if let window = SignaturePresentation.window(finding.window) { chip(window) }
                 }
+                let parts = SignaturePresentation.jointParts(finding)
+                if !parts.isEmpty {
+                    HStack(spacing: 6) { ForEach(parts, id: \.self) { chip($0) } }
+                }
                 HStack(spacing: 6) {
                     if let basis = SignaturePresentation.basis(finding) { chip(basis) }
                     if let movement = SignaturePresentation.movement(finding) { chip(movement) }

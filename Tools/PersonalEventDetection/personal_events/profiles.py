@@ -182,6 +182,7 @@ class Paired:
   D_change: np.ndarray = None   # (E, 6, 3) change family in physical units (NaN when u > 15)
   change_scale: np.ndarray = None  # (6, 3) robust SD of control changes (physical units, floored)
   D_change_rank: np.ndarray = None  # (E, 6, 3) event's centred rank among its controls' changes, in [-1, 1]
+  change_win: list = None  # per event: (1 + controls, 6, 3) physical changes; row 0 = the event (joint family)
 
   def subset(self, mask):
     idx = np.flatnonzero(mask)
@@ -189,7 +190,8 @@ class Paired:
                   n_controls=self.n_controls[mask], center=self.center[mask],
                   win_z=None if self.win_z is None else [self.win_z[k] for k in idx],
                   D_change=None if self.D_change is None else self.D_change[mask], change_scale=self.change_scale,
-                  D_change_rank=None if self.D_change_rank is None else self.D_change_rank[mask])
+                  D_change_rank=None if self.D_change_rank is None else self.D_change_rank[mask],
+                  change_win=None if self.change_win is None else [self.change_win[k] for k in idx])
 
 
 def _window_means(P, slices):
@@ -267,6 +269,7 @@ def paired_differences(dev: Deviation, event_idxs, control_idxs, *, tl=None, raw
       center[e, ci] = float(np.median(seg)) if len(seg) else np.nan
   D_change = np.full((E, len(CHANGE_CHANNELS), len(CHANGE_WINDOWS)), np.nan)
   D_rank = np.full_like(D_change, np.nan)
+  change_win = [np.full((1 + len(c), len(CHANGE_CHANNELS), len(CHANGE_WINDOWS)), np.nan) for c in control_idxs]
   scale = np.full((len(CHANGE_CHANNELS), len(CHANGE_WINDOWS)), np.nan)
   if tl is not None and E:
     raw_event_idxs = event_idxs if raw_event_idxs is None else raw_event_idxs
@@ -282,6 +285,7 @@ def paired_differences(dev: Deviation, event_idxs, control_idxs, *, tl=None, raw
         if not len(cs):
           continue
         pooled.append(cs)
+        change_win[e][0, ci] = ev; change_win[e][1:, ci] = cs
         cnt = np.isfinite(cs).sum(axis=0)
         with np.errstate(invalid="ignore", divide="ignore"):
           cm = np.where(cnt > 0, np.nansum(cs, axis=0) / np.maximum(cnt, 1), np.nan)
@@ -301,7 +305,7 @@ def paired_differences(dev: Deviation, event_idxs, control_idxs, *, tl=None, raw
           sd = 1.4826 * float(np.median(np.abs(v - np.median(v)))) if len(v) >= 5 else np.nan
           scale[ci, w] = max(sd, CHANGE_FLOORS[ch]) if np.isfinite(sd) else CHANGE_FLOORS[ch]
   return Paired(D_z=D_z, D_res=D_res, prof_res=prof, n_controls=ncon, center=center, win_z=win_z,
-                D_change=D_change, change_scale=scale, D_change_rank=D_rank)
+                D_change=D_change, change_scale=scale, D_change_rank=D_rank, change_win=change_win)
 
 
 def build(tl: Timeline, ctx: Context, dev: Deviation, events, *, exclusions, preferred_spans, rng,

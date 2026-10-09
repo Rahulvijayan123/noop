@@ -76,9 +76,15 @@ struct SignatureReport: Decodable, Equatable, Sendable {
         /// The person also moved more around these events, which can explain a heart-rate rise or HRV fall
         /// (sig-3 and later; heart-rate and HRV findings only).
         var movementAccompanied: Bool?
+        /// For a `joint` finding (sig-4): the readings that moved together, each with its weight and its own
+        /// change in SD of the person's usual variation; `change` is then the combined score in SD.
+        var channels: [JointChannel] = []
+        var combinedZ: Double?
+        var combinedZCI: [Double] = []
         init(from decoder: Decoder) throws {
             let c = try decoder.container(keyedBy: SignatureJSONKey.self)
             basis = c.lenient("basis"); movementAccompanied = c.lenient("movement_accompanied")
+            channels = c.list("channels"); combinedZ = c.lenient("combined_z"); combinedZCI = c.numbers("combined_z_ci")
             channel = c.lenient("channel"); unit = c.lenient("unit"); window = c.numbers("window")
             direction = c.lenient("direction"); change = c.lenient("change"); changeCI = c.numbers("change_ci")
             changeZ = c.lenient("change_z"); consistency = c.lenient("consistency")
@@ -88,6 +94,19 @@ struct SignatureReport: Decodable, Equatable, Sendable {
         var consistentEvents: Int? {
             guard let consistency, let eventsWithData, consistency.isFinite else { return nil }
             return min(eventsWithData, max(0, Int((consistency * Double(eventsWithData)).rounded())))
+        }
+    }
+
+    struct JointChannel: Decodable, Equatable, Sendable {
+        var channel: String?
+        var weight: Double?
+        var changeZ: Double?
+        var change: Double?
+        var unit: String?
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: SignatureJSONKey.self)
+            channel = c.lenient("channel"); weight = c.lenient("weight"); changeZ = c.lenient("change_z")
+            change = c.lenient("change"); unit = c.lenient("unit")
         }
     }
 
@@ -406,8 +425,20 @@ enum SignaturePresentation {
         switch finding.basis {
         case "change_from_before": "vs the minutes before"
         case "vs_usual_for_context": "vs usual for the activity"
+        case "joint": "readings combined"
         default: nil
         }
+    }
+
+    /// "Heart rate +2.3 SD" per reading of a joint finding, largest weight first; empty for other findings.
+    static func jointParts(_ finding: SignatureReport.Finding) -> [String] {
+        finding.channels
+            .filter { $0.changeZ != nil }
+            .sorted { abs($0.weight ?? 0) > abs($1.weight ?? 0) }
+            .map { part in
+                let z = part.changeZ ?? 0
+                return "\(channelTitle(part.channel)) \(z > 0 ? "+" : z < 0 ? "−" : "")\(String(format: "%.1f", abs(z))) SD"
+            }
     }
 
     /// "with more movement" / "with less movement" when movement changed the way that would explain the finding

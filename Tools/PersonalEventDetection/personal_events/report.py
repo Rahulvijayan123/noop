@@ -5,20 +5,20 @@ import math
 
 import numpy as np
 
-from .baseline import CHANNELS, SOURCE
+from .baseline import CHANNELS, MODES, SOURCE, SOURCES
 from .detector import METHODS
 from .evidence import Evidence, known_before
 from .signature import STATUSES
 from .timeline import Timeline
 
 VERSION = "signature-report-1"
-ENGINE_VERSION = "sig-3"
+ENGINE_VERSION = "sig-4"
 ASSESSMENTS = ("insufficient_data", "too_weak_for_alerts", "promising")
 SIGNATURE_KEYS = ("id", "label", "events", "event_days", "event_ids", "p_value", "p_min_possible", "replicated",
                   "context_at_onset", "findings", "profile")
 # Optional keys added in sig-2 (signature-report-1 stays compatible: nothing renamed or removed).
 OPTIONAL_SIGNATURE_KEYS = ("control_time_window_min",)
-OPTIONAL_FINDING_KEYS = ("basis", "movement_accompanied")
+OPTIONAL_FINDING_KEYS = ("basis", "movement_accompanied", "channels", "combined_z", "combined_z_ci")
 OPTIONAL_EVIDENCE_KEYS = ("events_used", "events_dropped")
 OPTIONAL_DETECTABILITY_KEYS = ("expected_recall_ci",)
 OPTIONAL_RETRO_KEYS = ("training_cutoff", "champion")
@@ -75,7 +75,7 @@ LIMITATIONS = [
 
 
 def build(*, ev: Evidence, tl: Timeline | None, sigs, status, detect, retro, normalization, generated_at,
-          dropped=(), extra_notes=()):
+          dropped=(), extra_notes=(), baselines=None):
   tz = tl.tz_offset_s if tl is not None else 0
   event_days = len({int((e.start + tz) // 86400) for e in ev.events})
   obs_h = sum(max(0.0, sp[1] - sp[0]) for sp in ev.observations) / 3600.0
@@ -113,6 +113,8 @@ def build(*, ev: Evidence, tl: Timeline | None, sigs, status, detect, retro, nor
     "limitations": limitations,
     "alerts_enabled": False,
   }
+  if baselines is not None and tl is not None:
+    report["data_quality"]["baselines"] = baselines   # optional (layer1 normalisations)
   return clean(report)
 
 
@@ -148,6 +150,37 @@ def _ci(x):
   return isinstance(x, list) and len(x) == 2 and all(isinstance(v, OPT_NUM) and not isinstance(v, bool) for v in x)
 
 
+BASELINE_STATUSES = ("established", "provisional", "learning", "none")
+BASELINE_CONTEXT_KEYS = {"context", "source", "status", "days", "center", "scale", "unit"}
+
+
+def validate_baselines(b) -> list:
+  """data_quality.baselines (optional): which baseline each channel's minutes were compared with."""
+  p = []
+  if not isinstance(b, dict) or not isinstance(b.get("channels"), dict) or b.get("mode") not in MODES:
+    return ["baselines"]
+  if "layer1" in b:
+    l1 = b["layer1"]
+    _check(isinstance(l1, dict) and isinstance(l1.get("available"), bool)
+           and isinstance(l1.get("reason"), (str, type(None))), p, "baselines.layer1")
+  for ch, c in b["channels"].items():
+    _check(ch in CHANNELS and isinstance(c, dict) and set(c) == {"sources", "contexts"}, p, f"baselines.{ch}")
+    if not isinstance(c, dict):
+      continue
+    shares = c.get("sources", {})
+    _check(isinstance(shares, dict) and set(shares) <= set(SOURCES)
+           and all(isinstance(v, NUM) and 0 <= v <= 1 for v in shares.values()), p, f"baselines.{ch}.sources")
+    for item in c.get("contexts", []):
+      ok = isinstance(item, dict) and BASELINE_CONTEXT_KEYS <= set(item) <= BASELINE_CONTEXT_KEYS | {"series", "borrowed_from"}
+      _check(ok, p, f"baselines.{ch}.context keys")
+      if not ok:
+        continue
+      _check(item["source"] in ("layer1", "engine_context") and item["status"] in BASELINE_STATUSES
+             and isinstance(item["days"], int) and isinstance(item["center"], OPT_NUM)
+             and isinstance(item["scale"], OPT_NUM) and isinstance(item["unit"], str), p, f"baselines.{ch}.context")
+  return p
+
+
 def validate(r) -> list:
   """Problems with a report against signature-report-1 (empty list = valid)."""
   p = []
@@ -162,7 +195,7 @@ def validate(r) -> list:
   _check(isinstance(r["type_id"], str), p, "type_id")
   _check(isinstance(r["generated_at"], int), p, "generated_at")
   _check(r["engine"] == {"version": ENGINE_VERSION, "normalization": r["engine"].get("normalization")} and
-         r["engine"].get("normalization") in ("raw", "context", "context+response"), p, "engine")
+         r["engine"].get("normalization") in MODES, p, "engine")
   _check(r["status"] in STATUSES, p, "status")
   ev = r["evidence"]
   for k in ("events", "event_days", "confirmed_detections", "rejected_detections", "negative_intervals"):
@@ -192,7 +225,13 @@ def validate(r) -> list:
       req = {"channel", "unit", "window", "direction", "change", "change_ci", "change_z", "consistency",
              "events_with_data", "text"}
       _check(req <= set(f) <= req | set(OPTIONAL_FINDING_KEYS), p, "finding keys")
-      _check(f.get("basis", "vs_usual_for_context") in ("change_from_before", "vs_usual_for_context"), p, "basis")
+      _check(f.get("basis", "vs_usual_for_context") in ("change_from_before", "vs_usual_for_context", "joint"), p, "basis")
+      if f.get("basis") == "joint" or "channels" in f:
+        chans = f.get("channels")
+        _check(isinstance(chans, list) and len(chans) >= 1 and all(
+          isinstance(c, dict) and set(c) == {"channel", "weight", "change_z", "change", "unit"}
+          and c["channel"] in FINDING_CHANNELS and isinstance(c["weight"], NUM) for c in chans), p, "joint channels")
+        _check(isinstance(f.get("combined_z"), NUM) and _ci(f.get("combined_z_ci")), p, "combined_z")
       _check(isinstance(f.get("movement_accompanied", False), bool), p, "movement_accompanied")
       _check(f.get("channel") in FINDING_CHANNELS and f.get("direction") in ("up", "down"), p, "finding channel/direction")
       _check(isinstance(f.get("window"), list) and len(f["window"]) == 2, p, "finding window")
@@ -224,6 +263,8 @@ def validate(r) -> list:
   _check(isinstance(dq.get("monitored_fraction"), NUM), p, "monitored_fraction")
   _check(set(dq.get("channels", {})) == {"hr", "hrv", "resp", "temp", "motion"}, p, "data_quality channels")
   _check(all(isinstance(n, str) for n in dq.get("notes", [None])), p, "notes")
+  if "baselines" in dq:
+    p.extend(validate_baselines(dq["baselines"]))
   _check(isinstance(r["limitations"], list) and all(isinstance(x, str) for x in r["limitations"]), p, "limitations")
   _check(r["alerts_enabled"] is False, p, "alerts_enabled")
   return p

@@ -180,7 +180,7 @@ class DatabaseTests(unittest.TestCase):
     self.assertEqual(s['state'], status)
     self.assertEqual(set(s['detail']), {'status', 'events', 'event_days', 'assessment'})
     self.assertEqual(self.db.row('select count(*) n from event_detections where user_id=%s', (self.owner,))['n'], 0)
-    self.assertEqual(run['report']['engine']['version'], 'sig-3')
+    self.assertEqual(run['report']['engine']['version'], 'sig-4')
     self.assertEqual(run['report']['retrospective']['training_cutoff'], now)
 
   def test_unchanged_inputs_skip_recomputation(self):

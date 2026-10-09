@@ -279,7 +279,26 @@ final class PhenotypeSignatureTests: XCTestCase {
         XCTAssertNil(SignaturePresentation.droppedNote(old))
     }
 
-    // MARK: Status wording
+    func testDecodesAJointFinding() throws {
+        let json = #"""
+        {"version": "signature-report-1", "engine": {"version": "sig-4"}, "status": "established",
+         "signatures": [{"findings": [{"channel": "motion", "unit": "SD", "basis": "joint", "window": [0, 5],
+           "direction": "up", "change": 3.5, "change_ci": [2.1, 4.8], "change_z": 3.5, "consistency": 1.0,
+           "events_with_data": 12, "combined_z": 3.5, "combined_z_ci": [2.1, 4.8],
+           "channels": [{"channel": "hr", "weight": 0.4, "change_z": 2.3, "change": 11.0, "unit": "bpm"},
+                        {"channel": "motion", "weight": 0.9, "change_z": 13.6, "change": 0.05, "unit": "g"},
+                        "bad"],
+           "text": "Movement rose (+13.6 SD) and heart rate rose (+2.3 SD) together from before onset, within 5 min after onset, in 12 of 12 events (combined +3.5 SD)."}]}]}
+        """#
+        let finding = try XCTUnwrap(SignatureReport.decode(Data(json.utf8))?.primary?.findings.first)
+        XCTAssertEqual(finding.basis, "joint"); XCTAssertEqual(finding.combinedZ, 3.5); XCTAssertEqual(finding.combinedZCI, [2.1, 4.8])
+        XCTAssertEqual(finding.channels.count, 2, "an unreadable channel entry is dropped")
+        XCTAssertEqual(SignaturePresentation.jointParts(finding), ["Movement +13.6 SD", "Heart rate +2.3 SD"])
+        XCTAssertEqual(SignaturePresentation.basis(finding), "readings combined")
+        XCTAssertEqual(SignaturePresentation.change(finding), "+3.5 SD (2.1 to 4.8)")
+        XCTAssertNil(SignaturePresentation.movement(finding), "movement is part of a joint signature, not a caveat")
+    }
+
 
     private func report(_ json: String) throws -> SignatureReport {
         let text = "{\"version\": \"signature-report-1\", " + json + "}"

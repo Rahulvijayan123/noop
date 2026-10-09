@@ -128,13 +128,15 @@ class Statistics(unittest.TestCase):
     report, diag, _ = engine.run(tl, Evidence("T", events, owner="o"), generated_at=1, forward_eval=False)
     s = report["signatures"][0]
     self.assertEqual(report["status"], "established")
-    top = s["findings"][0]
+    top = next(f for f in s["findings"] if f["basis"] != "joint")
     self.assertEqual((top["channel"], top["direction"], top["window"]), ("hr", "up", [0, 5]))
     self.assertGreater(top["change"], 9); self.assertLess(top["change"], 21)
     lo, hi = top["change_ci"]; self.assertTrue(lo <= 15 <= hi + 3)
-    bases = {f["basis"] for f in s["findings"] if f["channel"] == "hr"}
+    bases = {f["basis"] for f in s["findings"] if f["channel"] == "hr" and f["basis"] != "joint"}
     self.assertEqual(bases, {"change_from_before", "vs_usual_for_context"})
     for f in s["findings"]:
+      if f["basis"] == "joint":
+        continue
       if f["basis"] == "change_from_before":
         self.assertIn("from before onset", f["text"])
       else:

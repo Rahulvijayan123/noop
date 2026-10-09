@@ -8,6 +8,7 @@ import numpy as np
 
 from . import report as rep
 from . import signature as sig
+from .baseline import LAYER1_MODES
 from .context import classify
 from .evaluation import detectability, fit_models, forward, rng_for
 from .evidence import Evidence
@@ -58,9 +59,23 @@ def run(tl: Timeline | None, ev: Evidence, *, normalization="context", generated
                  f"({borrowed}).")
   if any(f.get("movement_accompanied") for s_ in sigs for f in s_["findings"]):
     notes.append(rep.MOVEMENT_NOTE)
+  baselines = None
+  if normalization in LAYER1_MODES:
+    # Which baseline each minute was compared with (Layer 1 context strata, else the engine's context baseline).
+    baselines = model.normalizer.baselines(tl, ctx)
+    layer1 = baselines.get("layer1", {})
+    used = sum(c["sources"].get(k, 0.0) for c in baselines["channels"].values()
+               for k in ("layer1_established", "layer1_provisional"))
+    if not layer1.get("available"):
+      notes.append(f"Heart rate and HRV are compared with this person's usual for the activity and time of day: "
+                   f"{layer1.get('reason')}.")
+    elif used == 0:
+      notes.append("Heart rate and HRV are compared with this person's usual for the activity and time of day: the "
+                   "phone's personal context baselines are not ready for these days yet (each day needs at least 4 "
+                   "days of data 8 to 60 days before it).")
   report = rep.build(ev=ev, tl=tl, sigs=sigs, status=status, detect=detect,
                      retro=rep.retrospective(fwd, training_cutoff=end), normalization=normalization,
-                     generated_at=generated_at, dropped=built["dropped"], extra_notes=notes)
+                     generated_at=generated_at, dropped=built["dropped"], extra_notes=notes, baselines=baselines)
   timings["total_s"] = round(time.perf_counter() - started, 3)
   diagnostics = rep.clean({
     "dropped_events": [{"id": i, "reason": r} for i, r in built["dropped"]],
@@ -70,7 +85,7 @@ def run(tl: Timeline | None, ev: Evidence, *, normalization="context", generated
     "onset_context_share": {e.id: round(float(x), 3) for e, x in zip(built["events"], built["pre_share"])},
     "baseline_fallback": fallback,
     "controls_from_labelled_negative_time": {e.id: int(p) for e, p in zip(built["events"], built["preferred"])},
-    "signature_detail": [{k: s.get(k) for k in ("id", "status", "replication", "cells_tested")} for s in sigs],
+    "signature_detail": [{k: s.get(k) for k in ("id", "status", "replication", "cells_tested", "joint")} for s in sigs],
     "split": split, "detectability": detect, "model": model.info,
     "thresholds": {m: vars(t) for m, t in model.thresholds.items()},
     "timings": timings, "minutes": len(tl),

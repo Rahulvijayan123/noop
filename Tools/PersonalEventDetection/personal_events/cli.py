@@ -10,6 +10,7 @@ import time
 from pathlib import Path
 
 from . import engine
+from .baseline import MODES
 from .evidence import Evidence, parse_events
 from .inject import parse_spec, plant
 from .report import clean, validate
@@ -97,7 +98,8 @@ def main(argv=None):
   p.add_argument("--observations", help="JSON list of {start, end} observation periods")
   p.add_argument("--type-id", help="event type to analyse (default: the planted type, else the most frequent)")
   p.add_argument("--tz-offset-s", type=int, default=0)
-  p.add_argument("--normalization", choices=("raw", "context", "context+response"), default="context")
+  p.add_argument("--normalization", choices=MODES, default="layer1+tod",
+                 help="layer1+tod (default): the app's Layer 1 context baselines where established or provisional, else the engine's context baseline")
   p.add_argument("--inject", help="planted positive controls, e.g. 'n=8,hr=12,dur=10,unc=5,seed=1'")
   p.add_argument("--from", dest="from_", type=float)
   p.add_argument("--to", type=float)

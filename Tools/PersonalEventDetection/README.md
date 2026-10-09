@@ -1,4 +1,4 @@
-# Personal event signatures (signature engine sig-3)
+# Personal event signatures (signature engine sig-4)
 
 Learns each patient's physiological signature for a caregiver-logged event type from few labelled events and says
 how reliable it is. The design contract is [docs/PHENOTYPE_SIGNATURES.md](../../docs/PHENOTYPE_SIGNATURES.md).
@@ -60,6 +60,29 @@ pretrained weights, no downloads.
   Gaussian 100-decisions/day relation is kept only in diagnostics. `promising` needs recall@1/day >= 0.5 with a
   Wilson lower bound >= 0.3 and d's CI lower bound >= 2.
 
+## sig-4: joint (multi-channel) family
+
+- Per post-onset window ([0,5), [5,15), [15,30]) and per family, the channel vector of each event is combined
+  into one score s_i = w . d_i with the shrinkage-LDA direction w = (Sigma + lambda I)^-1 mu, scaled to unit
+  Sigma-norm (s is in null-SD units). Level family: the 5 context-normalised z differences. Change family: the 6
+  physical changes from before onset divided by the robust SD of control changes (incl. steps).
+- Sigma is the second moment of control-minus-other-controls differences of the same quantities (so correlated
+  channels such as heart rate and motion are not double-counted); lambda = 0.2 x mean diagonal. Missing channel
+  values are 0 (no deviation - invariant under sign flips); a channel enters with data in >= max(3, E/2) events.
+- Validity: w is re-estimated from the flipped event mean inside every day-level sign flip (vectorised), and the
+  6 joint cells join the existing max-t over all cells, so the family-wise p covers the weight fitting.
+  Replication applies the first half's weights to the later events; it passes if the first half's top single
+  cell or its top joint cell holds.
+- A significant joint cell (family-wise p < 0.10, day-bootstrap CI of the combined score > 0) becomes a finding
+  with `basis: "joint"`, `unit: "SD"`, `channels` [{channel, weight, change_z, change, unit}] and `combined_z` /
+  `combined_z_ci`; at most one per family, listed first. Movement channels are contributors there, not a
+  confound (`movement_accompanied` stays on single heart-rate / HRV findings).
+- Real-recording validation (context mode, +/- 5 min, 90 plant runs, 600 random-time nulls): established rises
+  for every plant (tremor-like HR+12 / +8 with a wrist-motion burst: 22 -> 29 % / 11 -> 17 %; HRV-down + HR-up
+  8 -> 17 %; HR-only +25 / +15: 56 -> 68 % / 38 -> 54 %; movement +20 / +30: 43 -> 52 % / 50 -> 60 %); random-time
+  nulls 1.2 -> 1.3 % established, p < 0.05 in 3.1 -> 4.6 % of runs with >= 6 event days. Switch:
+  `signature.JOINT_FAMILY`.
+
 ## sig-3 changes
 
 - **Certified thresholds hold on new days.** Every scorer's threshold is certified on out-of-fold scores: the
@@ -116,7 +139,7 @@ nara-event-worker --lane train
 
 ```sh
 nara-signatures evaluate --sqlite whoop.sqlite --device <deviceId> --events events.json \
-  [--observations observations.json] [--tz-offset-s -25200] [--normalization raw|context|context+response] \
+  [--observations observations.json] [--tz-offset-s -25200] [--normalization raw|context|context+response|layer1|layer1+tod (default)] \
   [--inject 'n=8,hr=12,dur=10,unc=5,seed=1'] [--type-id <type>] [--incumbent-cutoff <unix>] --out report.json
 ```
 

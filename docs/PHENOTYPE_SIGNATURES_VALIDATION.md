@@ -26,6 +26,7 @@ events. Retrospective detection is not reliable enough for alerts, and predictio
 | sig-1 | First engine: context baselines, matched controls by context at the onset minute, level family only, Gaussian expected recall, in-sample threshold certification. |
 | sig-2 | Context from the pre-onset window; stricter control matching with widening; change-from-before family (rank test); fallback baselines; empirical recall; R-R `ord` order; `available_at` filtering; champion/challenger; emerging needs p < 0.05. |
 | sig-3 | Out-of-fold, overdispersion-aware threshold certification; detectors abstain where the baseline has < 3 days; logistic observed-feature rules; `movement_accompanied` findings. |
+| sig-4 | Joint multi-channel family (empirically weighted deviations); Layer 1 v2 context-strata baselines (`layer1`, `layer1+tod`). |
 
 ## 1. False signatures (nulls)
 
@@ -124,7 +125,37 @@ Wake-up is the one real event type with ≥ 6 days, and its signature matches ph
 waking, with movement). No real event type reached `promising` detectability (d 0.3–1.3); retrospective
 detection caught 0 of 7 held-out wake-ups and 1 of 7 sleep onsets (template) at 0.27–0.54 false alerts/day.
 
-## 6. Evidence required before real-time detection
+## 6. sig-4: weighting channels together, and the app's own baselines
+
+Joint family, context mode, ±5 min, same harness (planted amplitudes × U(0.5, 1.5), 20 % non-responders; 90 runs
+per plant, 600 random-time and 60 + 60 walking null sets). "Established" share without → with the joint family:
+
+| Set | Without | With |
+|---|---|---|
+| Random-time null | 1.2 % (p < 0.05 with ≥ 6 days: 3.1 %) | 1.3 % (4.6 %) |
+| Walking null, one per day / uniform | 23.3 % / 21.7 % | 25.0 % / 21.7 % |
+| Tremor-like: HR +12 bpm with a wrist-motion burst, no steps | 22.2 % | 28.9 % |
+| Tremor-like at HR +8 bpm | 11.1 % | 16.7 % |
+| HRV −0.3 ln with HR +10 bpm | 7.8 % | 16.7 % |
+| HR only +25 / +15 | 55.6 % / 37.8 % | 67.8 % / 54.4 % |
+| HR with movement +20 / +30 | 43.3 % / 50.0 % | 52.2 % / 60.0 % |
+
+Weighting channels by how far each deviates (in SD of the person's normal variation) raised power for every
+plant, most for multi-channel events, and kept the random-time null within limits. Accelerometer data exist only
+on the last 3 days of this recording, so the tremor plant's motion component was visible on about a third of
+events; its gain is a lower bound. The joint family is on by default.
+
+Layer 1 baselines: the port reproduces the app's `ContextMaterializer` + `evaluate` + `WatchdogExpectation`
+exactly (866 values, 1e-9 relative, recorded from the Swift). On this recording it changes nothing yet: the
+reference window is T-60…T-8 and needs 4 days to be provisional and 14 to be established; sleep HR becomes
+provisional around 10-11 and awake rest around 10-16, nothing is established before about 10-21. The posture
+strata of the materializer on this branch (`lb-context-1`) stay empty with the current decoder (a still bout
+restarts on every unknown-posture interval); `lb-context-2` on the context-watchdog branch fixes that and the port
+must be re-recorded against it when the branches meet. On the server the inputs (per-interval HR, R-R
+components, posture confidence) are not uploaded, so `layer1` falls back to the engine's context baseline there
+and says so. The benefit of Layer 1 normalisation over the engine's own baseline is therefore not yet measured.
+
+## 7. Evidence required before real-time detection
 
 1. Real caregiver events: ≥ 10–12 per event type on ≥ 8 different days, onset uncertainty ≤ 5 min,
    and a signature that is `established` (p < 0.05 and replicated on later events).

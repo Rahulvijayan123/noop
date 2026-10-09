@@ -3,6 +3,11 @@
 `Normalizer(mode).fit(timeline, context, mask)` learns the patient's normal; `transform` returns z per channel
 plus the expected value in physical units. A channel or context without enough fitting data has no baseline and
 its z is NaN (abstain; no stand-in).
+
+`layer1` / `layer1+tod`: heart rate and HRV are compared with the phone's Layer 1 v2 context-strata reference for
+the minute's context (layer1_context.py: sleep HR, awake lying / seated / standing / pooled rest, steady walking;
+each day from the days before it). Minutes and channels without a Layer 1 reference use the `context` baseline,
+and `Deviation.source` says per minute which one was used.
 """
 from __future__ import annotations
 
@@ -10,6 +15,7 @@ import dataclasses
 
 import numpy as np
 
+from . import layer1_context as l1ctx
 from .context import BANDS, C, CONTEXTS, Context
 from .timeline import Timeline
 
@@ -17,7 +23,11 @@ CHANNELS = ("hr", "hrv", "temp", "resp", "motion")
 SOURCE = {"hr": "hr", "hrv": "ln_rmssd", "temp": "temp_detr", "resp": "resp", "motion": "motion"}
 UNITS = {"hr": "bpm", "hrv": "ms", "temp": "°C", "resp": "breaths/min", "motion": "g"}
 FLOORS = {"hr": 1.0, "hrv": 0.05, "temp": 0.05, "resp": 0.3, "motion": 0.005}
-MODES = ("raw", "context", "context+response")
+MODES = ("raw", "context", "context+response", "layer1", "layer1+tod")
+LAYER1_MODES = ("layer1", "layer1+tod")
+LAYER1_CHANNELS = ("hr", "hrv")
+# Deviation.source values, per minute and channel.
+SOURCES = ("layer1_established", "layer1_provisional", "engine_context", "none")
 SHRINK_K = 60.0
 MIN_GLOBAL = 30
 MIN_CONTEXT = 20
@@ -72,7 +82,8 @@ class Deviation:
   expected: dict   # channel -> (N,) expected value in analysis units (ln ms for hrv)
   scale: dict      # channel -> (N,) robust SD in analysis units
   residual: dict   # channel -> (N,) observed - expected in analysis units
-  support: dict = None  # channel -> (N,) own fitting minutes behind the minute's baseline (0 = fallback/none)
+  support: dict = None  # channel -> (N,) days behind the minute's baseline (0 = none)
+  source: dict = None   # channel -> (N,) str in SOURCES: which baseline the minute was compared with
 
 
 def physical_change(channel, delta, center=None):
@@ -93,6 +104,7 @@ class Normalizer:
     self.params: dict = {}
     self.response: dict | None = None
     self.info: dict = {}
+    self.tod: dict | None = None       # layer1+tod: shrunk time-of-day offsets on the Layer 1 residuals
 
   # ------------------------------------------------------------------------------------------- fitting
   def fit(self, tl: Timeline, ctx: Context, mask: np.ndarray) -> "Normalizer":
@@ -103,10 +115,60 @@ class Normalizer:
       ok = mask & np.isfinite(x)
       self.params[ch] = self._fit_channel(ch, x[ok], ctx.code[ok], cells[ok], tl.local_day[ok])
     self.response = None
+    self.tod = None
     self.info = {"mode": self.mode, "response_used": False}
     if self.mode == "context+response":
       self._fit_response(tl, ctx, mask)
+    if self.mode in LAYER1_MODES:
+      layer = l1ctx.cached(tl, ctx)
+      self.info["layer1"] = {"available": layer.available, "reason": layer.reason}
+      if self.mode == "layer1+tod" and layer.available:
+        self._fit_tod(tl, ctx, mask, layer)
     return self
+
+  # ------------------------------------------------------------------------------------------- Layer 1
+  def _fit_tod(self, tl, ctx, mask, layer):
+    """Shrunk time-of-day offsets of HR / HRV around the Layer 1 reference (Layer 1 has no time of day): per stratum
+    the median residual shrunk toward 0, per (stratum, band) shrunk toward the stratum's offset, weight n/(n+k).
+    Fitted only on `mask` minutes (worn, before the cutoff, outside event exclusion windows)."""
+    self.tod = {}
+    nb = len(BANDS)
+    for ch in LAYER1_CHANNELS:
+      t = layer.tracks[ch]
+      r = tl[SOURCE[ch]] - t.expected
+      ok = mask & np.isfinite(r)
+      table = {}
+      for key in sorted({k for k in t.series[ok] if k is not None}):
+        sel = ok & (t.series == key)
+        n_s = int(sel.sum())
+        if n_s < MIN_CONTEXT:
+          continue
+        w = n_s / (n_s + self.k)
+        base = w * float(np.median(r[sel]))
+        offs = np.full(nb, base)
+        for b in range(nb):
+          sb = sel & (ctx.band == b)
+          n_b = int(sb.sum())
+          if n_b:
+            wb = n_b / (n_b + self.k)
+            offs[b] = wb * float(np.median(r[sb])) + (1 - wb) * base
+        table[key] = offs
+      self.tod[ch] = table
+    self.info["tod_offsets"] = {ch: {k: [round(float(v), 4) for v in o] for k, o in tab.items()}
+                                for ch, tab in self.tod.items()}
+
+  def _layer1_lookup(self, ch, tl, ctx):
+    """(expected, scale, source, days) from Layer 1 for one channel; NaN / "none" where it has no reference."""
+    layer = l1ctx.cached(tl, ctx)
+    t = layer.tracks[ch]
+    e = t.expected.copy()
+    if self.tod and self.tod.get(ch):
+      for key, offs in self.tod[ch].items():
+        sel = t.series == key
+        e[sel] += offs[ctx.band[sel]]
+    source = np.where(t.status == "established", "layer1_established",
+                      np.where(t.status == "provisional", "layer1_provisional", "none"))
+    return e, t.scale_floored, source, t.days
 
   def _fit_channel(self, ch, x, codes, cells, days=None):
     floor = FLOORS[ch]
@@ -246,9 +308,16 @@ class Normalizer:
     return p["center"][ctx.code, ctx.band], p["scale"][ctx.code, ctx.band]
 
   def transform(self, tl: Timeline, ctx: Context) -> Deviation:
-    z, expected, scale, resid = {}, {}, {}, {}
+    z, expected, scale, resid, source, support = {}, {}, {}, {}, {}, {}
     for ch in CHANNELS:
       e, s = self._lookup(ch, ctx)
+      src = np.where(np.isfinite(e) & np.isfinite(s), "engine_context", "none").astype(object)
+      sup = self.support(ch, ctx)
+      if self.mode in LAYER1_MODES and ch in LAYER1_CHANNELS:
+        le, ls, lsrc, ldays = self._layer1_lookup(ch, tl, ctx)
+        use = np.isfinite(le) & np.isfinite(ls)
+        e = np.where(use, le, e); s = np.where(use, ls, s)
+        src = np.where(use, lsrc, src).astype(object); sup = np.where(use, ldays, sup)
       x = tl[SOURCE[ch]]
       if ch == "hr" and self.response is not None and self.response["scale"] is not None:
         X = self.response_features(tl, ctx)
@@ -263,8 +332,8 @@ class Normalizer:
         r = x - e
         z[ch] = r / s
       expected[ch], scale[ch], resid[ch] = e, s, r
-    return Deviation(z=z, expected=expected, scale=scale, residual=resid,
-                     support={ch: self.support(ch, ctx) for ch in CHANNELS})
+      source[ch], support[ch] = src, sup
+    return Deviation(z=z, expected=expected, scale=scale, residual=resid, support=support, source=source)
 
   def support(self, ch, ctx) -> np.ndarray:
     """Distinct local days (>= 30 fitting minutes each) behind the baseline the minute uses (its own context's, or
@@ -276,6 +345,48 @@ class Normalizer:
     if self.mode == "raw":
       return np.where(ctx.code == C["off"], 0.0, float(p.get("global_days", 0)))
     return p["days"].astype(np.float64)[ctx.code]
+
+  def baselines(self, tl: Timeline, ctx: Context, dev: Deviation | None = None) -> dict:
+    """Report summary (data_quality.baselines): per channel the share of worn minutes compared with each baseline
+    source, and per context which baseline it uses, its status, days and centre / scale in physical units - so the
+    app can say "compared with your seated heart-rate baseline (provisional, 9 days)"."""
+    dev = dev if dev is not None else self.transform(tl, ctx)
+    worn = tl["wear"]
+    out = {"mode": self.mode, "channels": {}}
+    layer = l1ctx.cached(tl, ctx) if self.mode in LAYER1_MODES else None
+    if layer is not None:
+      out["layer1"] = {"available": bool(layer.available), "reason": layer.reason}
+    strata = layer.summary() if layer is not None and layer.available else {}
+    for ch in LAYER1_CHANNELS:
+      have = worn & np.isfinite(tl[SOURCE[ch]])
+      n = int(have.sum())
+      shares = {s: (round(float(np.mean(dev.source[ch][have] == s)), 3) if n else 0.0) for s in SOURCES}
+      contexts = []
+      for key, item in strata.items():
+        if item["channel"] != ch:
+          continue
+        contexts.append({"context": item["stratum"], "source": "layer1", "series": key, "status": item["status"],
+                         "days": item["days"], "center": item["center"], "scale": item["scale"],
+                         "unit": item["unit"]})
+      p = self.params.get(ch)
+      if p is not None and self.mode != "raw":
+        for c in range(len(CONTEXTS)):
+          if c == C["off"] or not np.isfinite(p["center"][c]).any():
+            continue
+          w = p["counts"][c].astype(np.float64)
+          w = w if w.sum() > 0 else np.ones(len(BANDS))
+          center = float(np.average(p["center"][c], weights=w)); sc = float(np.average(p["scale"][c], weights=w))
+          if ch == "hrv":
+            mid = float(np.exp(center)); center, sc = mid, mid * float(np.sinh(sc))
+          days = int(p["days"][c])
+          contexts.append({"context": CONTEXTS[c], "source": "engine_context",
+                           # Day thresholds of Layer 1 (shown from 4, established at 14); "learning" below 4.
+                           "status": ("established" if days >= 14 else "provisional" if days >= 4
+                                      else "learning"),
+                           "days": days, "center": center, "scale": sc, "unit": UNITS[ch],
+                           "borrowed_from": p.get("fallback", {}).get(CONTEXTS[c])})
+      out["channels"][ch] = {"sources": shares, "contexts": contexts}
+    return out
 
   def describe(self) -> dict:
     out = dict(self.info)

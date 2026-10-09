@@ -116,8 +116,8 @@ class MovementAnnotation(unittest.TestCase):
   def test_hr_change_with_more_movement_is_marked(self):
     r = self._run(True)
     self.assertEqual(validate(r), [])
-    self.assertEqual(r["engine"]["version"], "sig-3")
-    hr = [f for f in r["signatures"][0]["findings"] if f["channel"] == "hr"]
+    self.assertEqual(r["engine"]["version"], "sig-4")
+    hr = [f for f in r["signatures"][0]["findings"] if f["channel"] == "hr" and f["basis"] != "joint"]
     self.assertTrue(hr)
     self.assertTrue(all(f["movement_accompanied"] for f in hr))
     self.assertTrue(all("together with more movement" in f["text"] for f in hr))
@@ -125,11 +125,12 @@ class MovementAnnotation(unittest.TestCase):
 
   def test_hr_change_without_movement_is_not_marked(self):
     r = self._run(False)
-    hr = [f for f in r["signatures"][0]["findings"] if f["channel"] == "hr"]
+    hr = [f for f in r["signatures"][0]["findings"] if f["channel"] == "hr" and f["basis"] != "joint"]
     self.assertTrue(hr)
     self.assertFalse(any(f["movement_accompanied"] for f in hr))
     self.assertNotIn(MOVEMENT_NOTE, r["data_quality"]["notes"])
-    bad = json.loads(json.dumps(r)); bad["signatures"][0]["findings"][0]["movement_accompanied"] = "yes"
+    bad = json.loads(json.dumps(r))
+    next(f for f in bad["signatures"][0]["findings"] if "movement_accompanied" in f)["movement_accompanied"] = "yes"
     self.assertNotEqual(validate(bad), [])
 
 
