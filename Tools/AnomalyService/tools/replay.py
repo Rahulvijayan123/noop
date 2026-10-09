@@ -25,7 +25,7 @@ import numpy as np
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 from frwhoop_anomaly import candidates as cand  # noqa: E402
 from frwhoop_anomaly.config import Config  # noqa: E402
-from frwhoop_anomaly.features import MinuteFrame, steady_state  # noqa: E402
+from frwhoop_anomaly.features import MinuteFrame, recontext, steady_state  # noqa: E402
 from frwhoop_anomaly.service import Service  # noqa: E402
 from frwhoop_anomaly.state import UserState  # noqa: E402
 
@@ -66,9 +66,10 @@ def npz_frame(path: str) -> MinuteFrame:
   z = np.load(path, allow_pickle=False)
   data = {k[2:]: z[k] for k in z.files if k.startswith("d_")}
   ctx = z["context"].astype(str).astype(object)
-  ctx = steady_state(np.where(ctx == "recovery", "still", ctx).astype(object))   # current steady-state rule
-  return MinuteFrame(minutes=z["minutes"], data=data, context=ctx,
-                     family=str(z["family"]) if "family" in z.files else None, counters={})
+  ctx = np.where(ctx == "recovery", "still", ctx).astype(object)       # the current steady-state rule re-applies
+  frame = MinuteFrame(minutes=z["minutes"], data=data, context=ctx,
+                      family=str(z["family"]) if "family" in z.files else None, counters={})
+  return recontext(frame)                                               # current context hygiene
 
 
 def truncate(f: MinuteFrame, lo: int, hi: int) -> MinuteFrame:

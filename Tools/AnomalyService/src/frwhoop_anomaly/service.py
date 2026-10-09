@@ -1,9 +1,10 @@
 """frwhoop-anomaly main loop.
 
 Every `poll_seconds`: enqueue owners whose server scoring completed (throttled per owner in SQL), then claim and run
-up to `max_jobs_per_cycle` jobs. A job: refresh the minute cache (re-read only the last 3 h), score complete 30-minute
-windows since the watermark with every loaded model, calibrate each model's window scores on the user's own history,
-form candidates and publish them (fenced). A heartbeat thread writes `anomaly_service_heartbeats` every 30 s;
+up to `max_jobs_per_cycle` jobs. A job: refresh the minute cache (re-read only the last 3 h), mark exercise sessions
+and their recovery over the cached minutes (rule exercise-session-1), score complete 30-minute windows since the
+watermark with every loaded model, calibrate each model's window scores on the user's own history, form candidates
+(local day in the person's own time zone) and publish them (fenced). A heartbeat thread writes `anomaly_service_heartbeats` every 30 s;
 systemd gets READY=1 and WATCHDOG=1 (Type=notify, WatchdogSec) so a hung loop is restarted.
 """
 
@@ -194,18 +195,32 @@ class Service:
     t0 = time.time()
     fresh = features.load(self.db, user, device, read_from, now)
     self.counters["read_ms"] += int((time.time() - t0) * 1000)
-    frame = UserState.merge(cached, fresh)
+    # recontext: minutes cached before the context-hygiene fix get the current rule (idempotent for fresh ones).
+    frame = features.recontext(UserState.merge(cached, fresh))
     st.save_frame(frame)
+    tz = features.timezone_history(self.db, user)
+    resting = features.resting_nights(self.db, user, features.local_day(now, tz))
     wm = job.get("watermark_ts")
-    return self.score_frame(frame, st, int(wm.timestamp()) if wm is not None else None, now)
+    return self.score_frame(frame, st, int(wm.timestamp()) if wm is not None else None, now,
+                            tz_history=tz, resting=resting)
 
-  def score_frame(self, frame, st: UserState, wm: int | None, now: int) -> dict:
+  def score_frame(self, frame, st: UserState, wm: int | None, now: int,
+                  tz_history: list[tuple[float, str]] | None = None,
+                  resting: list[tuple[str, float]] | None = None) -> dict:
     """Score one user's minute frame (also used by the offline replay harness, which has no database).
 
+    First, rule exercise-session-1 over the whole cached frame (features.with_sessions): session and recovery
+    minutes are never rest or sleep, for the window gate, UniTS' training windows and the calibration references.
     Per scorer, windows from its own start: normally the watermark's last window onward (bounded by the lookback);
     while that scorer's calibration reference is thin, back to the first window it has not yet considered (≤ 30 h).
     Window results of the last RECENT_SECONDS persist, so a sustained run keeps one candidate_key across jobs.
+    tz_history / resting: the person's time zones (local_day) and nightly resting HR (the session rest reference);
+    None = UTC and no nightly reference.
     """
+    sleep_rest = (lambda t: features.sleep_rest_reference(resting, features.local_day(t, tz_history))) \
+      if resting else None
+    frame, sessions = features.with_sessions(frame, sleep_rest)
+    self.counters["sessions"] = len(sessions)
     for scorer in self.scorers:            # per-user model state (UniTS prompt) before the backfill decision
       t1 = time.time()
       scorer.prepare(frame, st)
@@ -271,7 +286,7 @@ class Service:
     combined, kept = self._load_recent(st, frame, results, score_to)
     self._sustained(st, combined, results)
     self._grow_references(st, combined, score_to)
-    candidates = cand.form_candidates(combined, frame, versions)
+    candidates = cand.form_candidates(combined, frame, versions, tz_history)
     self._carry_run_keys(candidates, kept)
     self._save_recent(st, results, kept, candidates, score_to)
     iso = lambda t: time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(t))
@@ -310,10 +325,12 @@ class Service:
 
   def _grow_references(self, st: UserState, combined: dict, score_to: int) -> None:
     """Quarantined reference growth (no silent drift into "normal"). A scored window joins its model's calibration
-    reference only when (a) it is ≥ REF_QUARANTINE_SECONDS old, (b) it was not flagged, and (c) no window of ANY
-    model was flagged within REF_QUARANTINE_SECONDS of it. So the slowly-building onset of an event that is flagged
-    later (a fever ramp) never becomes "normal". Under the null flags are ~1e-3 per window, so (c) removes almost
-    nothing. Each window is considered once (refmeta "last")."""
+    reference only when (a) it is ≥ REF_QUARANTINE_SECONDS old, (b) it was not flagged, (c) no window of ANY
+    model was flagged within REF_QUARANTINE_SECONDS of it, and (d) it is still usable under the context known NOW:
+    a window scored while an exercise session was not yet recognisable (its first minutes, before the period met
+    the rule) is re-gated against today's session and recovery marks, so gym minutes never become "rest". So the
+    slowly-building onset of an event that is flagged later (a fever ramp) never becomes "normal". Under the null
+    flags are ~1e-3 per window, so (c) removes almost nothing. Each window is considered once (refmeta "last")."""
     Q = REF_QUARANTINE_SECONDS
     flagged = np.array(sorted({r.window.start for rs in combined.values() for r in rs if r.flagged}), dtype=np.int64)
     for model, rs in combined.items():
@@ -324,7 +341,7 @@ class Service:
                and r.window.start + cand.WINDOW_S <= score_to - Q]
         def near_flag(s0: int) -> bool:
           return bool(len(flagged)) and bool(np.any(np.abs(flagged - s0) <= Q))
-        new_rows = [r for r in old if not r.flagged and not near_flag(r.window.start)
+        new_rows = [r for r in old if not r.flagged and not near_flag(r.window.start) and r.window.usable
                     and np.isfinite(r.channel_scores).any()]
         if new_rows:
           new_rows.sort(key=lambda r: r.window.start)
