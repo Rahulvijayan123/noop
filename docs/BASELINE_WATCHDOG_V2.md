@@ -98,7 +98,8 @@ The stored activity-context intervals: the existing HSMM decoder's class, postur
 
 - **Worn.** Not `off_wrist`, and HR present on ≥ 50% of the interval's seconds. (`on_wrist` is the decoder's default, not evidence.)
 - **Posture.** The class and the posture channel must agree, with confidence ≥ 0.6 and evidence quality ≥ 0.5. Anything less goes to the pooled series only.
-- **Still.** Intensity known and ≤ 0.40. Unknown motion is never rest.
+- **Still.** Intensity known and ≤ 0.40. Unknown motion is never rest, and neither is an `in_vehicle` row (a seated
+  ride, however still the wrist reads).
 - **Steady state.**
   - The first interval of every still bout is dropped, and anything within 120 s of a posture change.
   - Anything within 10 min after walking, or 30 min after running, cycling or vigorous activity, is dropped.

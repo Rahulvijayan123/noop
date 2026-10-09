@@ -430,14 +430,15 @@ struct SleepNightDetailView: View {
         // Sleep details (spec 7.5): rendered only when a hosted sleep-features document exists for this
         // night. With no payload this renders nothing.
         let session = night.session
-        SleepFeatureSection(startTs: session.effectiveStartTs, endTs: session.endTs)
         // Sleep analytics (docs/sleep-analytics/spec.md §8 app step 3): the Phase-1
         // `daily.sleep_analytics_v1` document, rendered only when it exists for THIS night AND passes the
         // staleness guard (the night's main-night GROUP is what the guard matches the document's fragments
         // against). No payload, or a stale pre-edit document, renders nothing.
         let group = SleepView.mainNightGroup(night.sourceBlocks, habitualMidsleepSec: night.habitualMidsleepSec)
+        let currentSessions = group.isEmpty ? [night.session] : group
+        SleepFeatureSection(startTs: session.effectiveStartTs, endTs: session.endTs, currentSessions: currentSessions)
         SleepAnalyticsSection(startTs: night.session.effectiveStartTs, endTs: night.session.endTs,
-                              currentSessions: group.isEmpty ? [night.session] : group)
+                              currentSessions: currentSessions)
     }
 
     // MARK: - About

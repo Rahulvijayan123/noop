@@ -2,6 +2,7 @@ import SwiftUI
 import Foundation
 import StrandDesign
 import StrandAnalytics
+import WhoopStore
 
 // SleepFeatureCards.swift — the compact "Sleep details" section (spec-25 §7.5).
 //
@@ -46,6 +47,9 @@ import StrandAnalytics
 struct SleepFeatureSection: View {
     let startTs: Int
     let endTs: Int
+    /// The night's main-night group, so continuity / architecture step aside only when the analytics section
+    /// actually renders for this night (`SleepAnalyticsStaleness`).
+    let currentSessions: [CachedSleepSession]
 
     @EnvironmentObject private var repo: Repository
     @State private var loaded: (document: SleepFeatureDocument, night: SleepFeatureNight, analyticsPresent: Bool)?
@@ -78,8 +82,10 @@ struct SleepFeatureSection: View {
         // still come from `sleep_features` (spec-02 readback fix: the whole section used to hide itself).
         guard !Task.isCancelled, let document = hosted?.sleepFeatures,
               let night = document.night(matchingStart: startTs, end: endTs) else { loaded = nil; return }
-        let plan = SleepFeatureSectionPlan(document: document, night: night,
-                                           analyticsPresent: hosted?.sleepAnalytics != nil)
+        let analyticsPresent = hosted?.sleepAnalytics.map {
+            SleepAnalyticsStaleness.isCurrent(document: $0, sessions: currentSessions)
+        } ?? false
+        let plan = SleepFeatureSectionPlan(document: document, night: night, analyticsPresent: analyticsPresent)
         loaded = plan.isEmpty ? nil : (document, night, plan.analyticsPresent)
     }
 }

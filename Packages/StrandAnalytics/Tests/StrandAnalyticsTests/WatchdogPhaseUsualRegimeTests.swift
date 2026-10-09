@@ -7,16 +7,6 @@ import WhoopProtocol
 final class WatchdogPhaseUsualRegimeTests: XCTestCase {
     private let prompt = UniTSPrompt(hr: 58, rhr: 58, hrv: 48, temp: 33.1, resp: 14, spo2: 97)
 
-    override func setUp() {
-        super.setUp()
-        WatchdogForecastRuntime.testPredict = .some(nil)
-    }
-
-    override func tearDown() {
-        WatchdogForecastRuntime.testPredict = nil
-        super.tearDown()
-    }
-
     // MARK: Day median
 
     func testP2MedianIsExactForFewValuesAndRobustToALateSpike() {
@@ -84,17 +74,34 @@ final class WatchdogPhaseUsualRegimeTests: XCTestCase {
         return w
     }
 
+    /// An established awake-rest HR reference: the Watchdog only learns a usual from minutes a Layer 1 reference
+    /// screened (`WatchdogExpectation`).
+    private func awakeRestReference(asOf: Date) -> LBEvaluation {
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        let c = cal.dateComponents([.year, .month, .day], from: asOf)
+        let day = String(format: "%04d-%02d-%02d", c.year!, c.month!, c.day!)
+        let t = LongitudinalBaseline.isoEpochDay(day)!
+        let rows = (1...40).map {
+            LBDailyObservation(day: LongitudinalBaseline.isoFromEpochDay(t - $0), value: 57 + Double($0 % 3),
+                               qualityStatus: .ok, coverage: 300)
+        }
+        return LongitudinalBaseline.evaluate(asOf: day, series: .awakeRestHR, observations: rows)
+    }
+
     private func ticks(motion: Double, quietSteps: Bool, minutes: Int = 14) throws -> WatchdogCarry {
         // Midday local, away from any civil-day roll.
         var cal = Calendar.current
         cal.timeZone = .current
         let noon = cal.date(bySettingHour: 13, minute: 0, second: 0, of: Date(timeIntervalSince1970: 1_790_000_000))!
         let start = Int(noon.timeIntervalSince1970) - Int(noon.timeIntervalSince1970) % 60
+        let reference = awakeRestReference(asOf: noon)
+        XCTAssertNotNil(WatchdogLiveReferences.lookup([reference], series: [.awakeRestHR]))
         var carry = WatchdogCarry.empty
         for i in 0..<minutes {
             let now = start + i * 60
             let r = Watchdog.evaluate(window: .success(try window(now: now, motion: motion, quietSteps: quietSteps)),
-                                      prompt: prompt, nowUnix: now, previous: carry)
+                                      prompt: prompt, evaluations: [reference], nowUnix: now, previous: carry)
             carry = r.carry
         }
         return carry
@@ -164,11 +171,15 @@ final class WatchdogPhaseUsualRegimeTests: XCTestCase {
         let prov = try XCTUnwrap(r.usualProvenance)
         XCTAssertEqual(prov.requestedKey, WatchdogPhaseKey(phase: .midday, family: .still).id)
         XCTAssertFalse(prov.fallbackUsed)
-        // A result persisted before the field existed decodes with nil provenance.
-        var json = try JSONSerialization.jsonObject(with: JSONEncoder().encode(r)) as! [String: Any]
+        // A result persisted before the field existed decodes with nil provenance. Minutes with no expectation
+        // carry NaN, so the round trip spells non-finite numbers out.
+        let encoder = JSONEncoder()
+        encoder.nonConformingFloatEncodingStrategy = .convertToString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
+        let decoder = JSONDecoder()
+        decoder.nonConformingFloatDecodingStrategy = .convertFromString(positiveInfinity: "inf", negativeInfinity: "-inf", nan: "nan")
+        var json = try JSONSerialization.jsonObject(with: encoder.encode(r)) as! [String: Any]
         json["usualProvenance"] = nil
-        let old = try JSONDecoder().decode(WatchdogResult.self,
-                                           from: JSONSerialization.data(withJSONObject: json))
+        let old = try decoder.decode(WatchdogResult.self, from: JSONSerialization.data(withJSONObject: json))
         XCTAssertNil(old.usualProvenance)
     }
 }

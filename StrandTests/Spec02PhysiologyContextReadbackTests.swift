@@ -195,6 +195,26 @@ final class Spec02PhysiologyContextReadbackTests: XCTestCase {
         XCTAssertTrue(footnote.contains("Daily rhythm is estimated from timing only"))
     }
 
+    @MainActor
+    func testTheCoachReadsTheSheetsOwnRowsAndSaysWhenTheContextIsStale() throws {
+        let contextDay = try makeContextDay(try documentJSON(dayNight: dayNightJSON, pulse: pulseJSON))
+        let text = CoachServerContext.describe(state: .available(contextDay), metric: .restingHeartRate, day: day)
+        XCTAssertTrue(text.contains("Awake and asleep heart rate:"), text)
+        XCTAssertTrue(text.contains("  • Awake median: 64 bpm ("), text)
+        XCTAssertFalse(text.contains("NOTE:"), text)
+        let stale = CoachServerContext.describe(state: .stale(contextDay), metric: .restingHeartRate, day: day)
+        XCTAssertTrue(stale.contains("NOTE: This context was built from an earlier version"), stale)
+        XCTAssertEqual(CoachServerContext.describe(state: .unavailable(.noData), metric: .hrvRmssd, day: day),
+                       "The server has no measurement context for \(day).")
+        XCTAssertEqual(CoachServerContext.metric(named: "HRV"), .hrvRmssd)
+        XCTAssertNil(CoachServerContext.day("yesterday"))
+        for question in ["why is my hrv low", "am i getting sick"] {
+            let names = Set(CoachToolExecutor.definitions(for: question)
+                .compactMap { ($0["function"] as? [String: Any])?["name"] as? String })
+            XCTAssertTrue(names.contains("get_measurement_context"), question)
+        }
+    }
+
     func testAMissingSideSaysWhyAndShowsNoNumber() throws {
         var dn = dayNightJSON
         dn["state"] = "partial"

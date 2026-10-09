@@ -115,8 +115,8 @@ final class ActivityAuthorityReplayTests: XCTestCase {
         var sim = DaySim(start: dayStart + 36_000)
         sim.still(120); sim.walk(120); sim.still(120)
         return ActivityContextDays.trackInput(windows: sim.windows, streams: sim.streams, sleep: [], exercise: [],
-                                              dayStart: dayStart, dayEnd: dayEnd, encoderVersion: "stub-model",
-                                              gaitWindows: embedded)
+                                              dayStart: dayStart, dayEnd: dayEnd, sleepKnownOutsideSessions: false,
+                                              encoderVersion: "stub-model", gaitWindows: embedded)
     }
 
     /// HART-embedded ElderNet windows over the walk (what `--gait-expert eldernet` would add to hart-windows-1).

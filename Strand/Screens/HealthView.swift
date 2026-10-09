@@ -742,11 +742,11 @@ private struct RhythmsSection: View {
                 NoopListSection {
                     if let phase = model.circadianPhase {
                         InsightsDetailLink {
-                            ScreenScaffold(title: "Body clock", titleDisplay: .navigationBar) {
+                            ScreenScaffold(title: "Heart-rate rhythm", titleDisplay: .navigationBar) {
                                 BodyClockCard(estimate: phase)
                             }
                         } label: {
-                            NoopListRow(icon: "clock", iconColor: StrandPalette.metricAmber, title: "Body clock")
+                            NoopListRow(icon: "clock", iconColor: StrandPalette.metricAmber, title: "Heart-rate rhythm")
                         }
                     }
                     if model.circadianPhase != nil && showsCycle {

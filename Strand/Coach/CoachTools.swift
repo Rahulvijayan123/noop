@@ -13,6 +13,8 @@ enum CoachToolDisplayNames {
         case "prepare_chart": return "Metric series"
         case "get_intraday_series": return "Readings through the day"
         case "get_activity_context": return "Activity context"
+        case "get_measurement_context": return "Measurement context"
+        case "get_sleep_details": return "Sleep details"
         case "get_baseline_status": return "Personal baseline"
         case "save_memory": return "Saved note"
         case "get_memories": return "Past context"
@@ -101,6 +103,14 @@ struct CoachToolExecutor {
              "What the wearer was doing (sitting at a desk, standing, walking, running, lying down, sleeping, fidgeting, strap off), from the activity classifier's saved output, with the heart rate, HRV, respiratory rate and steps measured during each activity. Use for questions about posture, movement or context: 'was my heart rate high while I was sitting?', 'how much did I walk today?', 'what was I doing when my HRV dropped?'. Sitting and standing cannot be told apart from a wrist, so a still stretch is often reported as 'Still (sitting or standing)'.",
              ["hours": ("integer", "Hours back from now (default 6, max 168)"),
               "activity": ("string", "Optional: list only one activity: " + CoachActivityContext.activityNames)]),
+        tool("get_measurement_context",
+             "The server's context for one day's measurement of a vital: when it was taken, what the wearer was doing during and just before it, whether the signal passed its checks, sleep or wake and wear, which comparisons it qualifies for and why not, and how it differs from a reference taken in the same state. For heart rate it also gives awake versus asleep heart rate and sustained high or low pulse episodes. Use before calling a reading high or low, and for 'why is my HRV low today?' or 'was that taken while I was moving?'.",
+             ["metric": ("string", CoachServerContext.metricNames),
+              "day": ("string", "Optional: YYYY-MM-DD (default today)")],
+             required: ["metric"]),
+        tool("get_sleep_details",
+             "A night's sleep details from the server: regularity, heart rate by sleep stage, falling asleep, breathing estimated from the heart-rate rhythm (not airflow), temperature and rest-activity rhythm, rebound after short nights and secondary HRV statistics. Use for questions about how a night went beyond the totals in get_daily_metrics.",
+             ["day": ("string", "Optional: the day the night ended, YYYY-MM-DD (default today)")]),
         tool("get_baseline_status",
              "The wearer's PERSONAL BASELINE: for each vital (resting HR, HRV, wrist temperature, respiration, SpO2, awake heart rate), their own 7-day usual and longer 60-day usual with the usual range and how last night compares, plus the live Watchdog check of the last 30 minutes against those usuals, today's daily log and whether a treatment course is logged. Use for 'is this normal for me?', 'am I getting sick?', 'is my HRV/RHR/temperature off?', 'what's my baseline?', or any question comparing now to their usual. Separate from Charge; never a diagnosis."),
         tool("save_memory",
@@ -188,11 +198,12 @@ struct CoachToolExecutor {
             extra = []
         } else if has(["baseline", "usual", "normal for me", "watchdog", "sick", " ill", "unwell", "coming down",
                        "fever", "temperature", "off today", "feel off"]) {
-            extra = ["get_baseline_status", "get_daily_metrics", "get_readiness_analysis"]
+            extra = ["get_baseline_status", "get_daily_metrics", "get_readiness_analysis", "get_measurement_context"]
         } else if has(["should i train", "ready", "readiness", "overreach", "overtrain", "push", "rest day", "fatigue"]) {
             extra = ["get_readiness_analysis", "get_daily_metrics", "get_baseline_status"]
         } else if has(["sleep", "hrv", "recovery", "charge", "resting", "heart rate", "trend", "average", "week"]) {
-            extra = ["get_daily_metrics", "get_readiness_analysis", "get_baseline_status"]
+            extra = ["get_daily_metrics", "get_readiness_analysis", "get_baseline_status", "get_measurement_context",
+                     "get_sleep_details"]
         } else {
             return offered
         }
@@ -221,6 +232,8 @@ struct CoachToolExecutor {
         case "prepare_chart": return chart(args)
         case "get_intraday_series": return await intraday(args)
         case "get_activity_context": return await activityContext(args)
+        case "get_measurement_context": return await measurementContext(args)
+        case "get_sleep_details": return await sleepDetails(args)
         case "get_baseline_status": return baselineStatus()
         case "save_memory": return await saveMemory(args)
         case "get_memories": return await memories(args)
@@ -433,6 +446,35 @@ struct CoachToolExecutor {
         let stored = await repo.storedActivityContextWithStatus(from: from, to: to, reading: .historical)
         return CoachActivityContext.describe(intervals: stored.intervals, from: from, to: to, activity: activity,
                                              storedThrough: stored.through, days: stored.days, now: now)
+    }
+
+    private func measurementContext(_ args: [String: Any]) async -> String {
+        guard let raw = args["metric"] as? String, let metric = CoachServerContext.metric(named: raw) else {
+            return "Unknown metric. Use one of: " + CoachServerContext.metricNames
+        }
+        let day = CoachServerContext.day(args["day"]) ?? Repository.localDayKey(Date())
+        let key = PhysiologyContextStore.Key(day: day, metric: metric)
+        await PhysiologyContextStore.shared.load(key)
+        return CoachServerContext.describe(state: PhysiologyContextStore.shared.state(for: key), metric: metric, day: day)
+    }
+
+    /// The same read as the Sleep page's `SleepFeatureSection`: cache first, then the server.
+    private func sleepDetails(_ args: [String: Any]) async -> String {
+        guard CloudPushIdentityStore.current() != nil, let repository = CloudPushRuntime.shared.scoreRepository() else {
+            return "Sleep details come from cloud scoring, which is not available on this install."
+        }
+        let day = CoachServerContext.day(args["day"]) ?? Repository.localDayKey(Date())
+        let deviceIds = await IntradaySeriesStore.shared.readCandidates
+        var hosted = await repository.cachedDay(day: day, deviceIds: deviceIds)?.hostedResult
+        if hosted?.sleepFeatures == nil {
+            hosted = (try? await repository.refresh(day: day, deviceIds: deviceIds))?.hostedResult
+        }
+        guard let document = hosted?.sleepFeatures, let night = document.night(matchingStart: nil, end: nil) else {
+            return "The server has no sleep details for the night ending \(day)."
+        }
+        let model = SleepFeatureDisplayModel(document: document, night: night,
+                                             analyticsPresent: hosted?.sleepAnalytics != nil)
+        return CoachServerContext.describe(model, day: day)
     }
 
     // MARK: Memory

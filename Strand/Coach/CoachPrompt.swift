@@ -68,7 +68,10 @@ enum CoachPrompt {
 
     ACTIVITY: For what the user was doing (sitting, standing, walking, running, lying down, sleeping) or how heart rate, \
     HRV or respiration differed by activity, call get_activity_context. Report its labels as given: sitting versus \
-    standing is often unresolved from a wrist, and a value it does not list was not measured.
+    standing is often unresolved from a wrist, and a value it does not list was not measured. Before calling one day's \
+    HRV, resting heart rate, heart rate or respiration high or low, call get_measurement_context: it says what the user \
+    was doing when it was measured, whether it qualifies for comparison, and the same-state reference to compare with. \
+    For how a night went beyond the totals, call get_sleep_details.
 
     BASELINE: For "is this normal for me?", "am I getting sick?", or whether a vital is off, call get_baseline_status. \
     It gives the user's own 7-day and 60-day usuals with ranges and the live 30-minute Watchdog check. Compare to those \

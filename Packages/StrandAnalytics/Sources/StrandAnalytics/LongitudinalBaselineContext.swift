@@ -18,6 +18,7 @@ import WhoopStore
 //     or < 30 min after running / cycling / vigorous activity is excluded (orthostatic and post-exercise HR/HRV
 //     transients; HRV fix E, `ActivityTransitionProximity`).
 //   • Motion: intensity must be known and ≤ 0.40 (the HRV-fix motion gate, ≈ 49 mg); unknown motion is never rest.
+//     An `in_vehicle` row (detail on a sitting row) is never rest either, however still the wrist reads.
 //   • HR per stratum-day: sample-weighted mean of interval means. HRV: pooled √(Σd²/Σn) of the stored successive-
 //     difference components (never an average of RMSSDs); rows older than v49 fall back to n = rrBeats − 1.
 //   • Within-day scale: weighted MAD of the interval values (≥ 3 intervals) for live short-window comparisons.
@@ -69,7 +70,9 @@ extension LongitudinalBaseline {
             return Double(r.hrSamples) >= minHrCoverage * Double(r.durationSeconds)
         }
 
+        /// A vehicle ride is seated but not rest (`ActivityContextInterval.detail`), so it never feeds a rest stratum.
         static func still(_ r: ActivityContextIntervalRow) -> Bool {
+            guard r.detail != ActivityDetail.inVehicle.rawValue else { return false }
             guard let i = r.intensity, i <= maxStillIntensity else { return false }
             return (r.locomotion ?? "stationary") == "stationary"
                 && !vigorousClasses.contains(r.activityClass) && !walkingClasses.contains(r.activityClass)

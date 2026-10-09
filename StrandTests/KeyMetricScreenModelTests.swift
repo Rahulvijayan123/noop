@@ -203,7 +203,7 @@ final class KeyMetricScreenModelTests: XCTestCase {
         let document = PhysiologyContextDocument(
             full: nil, header: nil, status: nil, statusReasons: [], availability: [], regimes: nil, envelopes: doc,
             sleep: nil, bouts: [], exertion: [], exposures: nil, dailyValues: [], comparisons: [], episodes: [],
-            dependence: [], undecodedElements: 0, undecodedMembers: [])
+            dependence: [], pulseEpisodes: nil, undecodedElements: 0, undecodedMembers: [])
         let envelopes = KeyMetricWindows.envelopes([document, document], metric: .hrvRmssd, in: interval)
         XCTAssertEqual(envelopes.map(\.support.start), [1_000, 1_300, 1_600, 1_900], "one per window, in order")
         let readings = KeyMetricWindows.readings(envelopes)
