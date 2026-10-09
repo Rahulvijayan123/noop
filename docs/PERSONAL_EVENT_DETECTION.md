@@ -37,6 +37,6 @@ Source-bound training currently uses the research suite's heart-rate and raw-tem
 
 ## Validation record
 
-Local build/test evidence and any unresolved checks are recorded in the replacement PR. Local fixture tests are distinct from a full Supabase deployment test, VPS capacity validation, and physical-phone review. None of those production checks is implied by a passing synthetic detector test.
+See [the local validation record and sample screenshots](PERSONAL_EVENT_DETECTION_VALIDATION.md). Local fixture tests are distinct from a full Supabase deployment test, VPS capacity validation, and physical-phone review. None of those production checks is implied by a passing synthetic detector test.
 
 The small `CoachChatViewModel.merge` expression is split into typed intermediate values to allow the current main branch to compile; its sort and merge behavior is unchanged.
