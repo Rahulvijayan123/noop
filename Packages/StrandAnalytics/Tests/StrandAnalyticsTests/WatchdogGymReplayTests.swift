@@ -148,6 +148,7 @@ final class WatchdogGymReplayTests: XCTestCase {
     }
 
     struct EveningResult {
+        var spans: [String] = []
         var notifications: [String] = []
         var severeMinutes = 0
         var heldMinutes = 0
@@ -216,6 +217,11 @@ final class WatchdogGymReplayTests: XCTestCase {
                     w.exercise = WatchdogExerciseContext.build(minutes: hist, windowStart: w.startUnix,
                                                                seqLen: w.hr.count, nowUnix: now, evaluations: refs,
                                                                hrMax: 195, hrMaxFromFormula: true)
+                    if now == to - to % 60 || now + 60 > to {
+                        let f = DateFormatter(); f.timeZone = TimeZone(identifier: "America/Los_Angeles"); f.dateFormat = "HH:mm"
+                        func t(_ u: Int) -> String { f.string(from: Date(timeIntervalSince1970: TimeInterval(u))) }
+                        out.spans = (w.exercise?.spans ?? []).map { "\(t($0.startUnix))-\(t($0.endUnix)) rec→\($0.recoveryEndUnix.map(t) ?? "open") p50=\(Int($0.hrP50 ?? 0)) rest=\(Int(w.exercise?.restReference ?? 0))/\(w.exercise?.restBasis ?? "")" }
+                    }
                 }
                 // EXERCISE-END
                 let qa = WatchdogSignalQuality.assess(window: w)
@@ -309,6 +315,7 @@ final class WatchdogGymReplayTests: XCTestCase {
                                     r.kinds.sorted { $0.key < $1.key }.map { "\($0.key):\($0.value)" }.joined(separator: ",") as NSString,
                                     r.verdicts.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: ",") as NSString))
                 for n in r.notifications.prefix(4) { lines.append("    notify \(n)") }
+                if ex { lines.append("    sessions(4h before 01:30): " + r.spans.joined(separator: "; ")) }
             }
         }
         print(lines.joined(separator: "\n"))
