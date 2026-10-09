@@ -148,14 +148,19 @@ succeed, retention-sweep's HTTP call still 500s (pre-existing).
    `20261009130100_measurement_context_minutes` (schedules `frwhoop-measurement-context`, every 5 min) ·
    `20261009130200_measurement_context_quality_minutes` · `20261009140000_candidate_withheld_unresolved_adjacency`
    (before the new worker) · `20261009140100_anomaly_window_reason_codes` · `20261009150000_watchdog_episodes` ·
-   `20261009150100_placement_device_resolution` · `20261009150200_anomaly_windows_read`.
+   `20261009150100_placement_device_resolution` · `20261009150200_anomaly_windows_read` ·
+   `20261009160000_activity_exercise_windows` (RecGym shadow head; needs 20261008100600, already in production).
    Re-applying 20261007160000 or 20261008000000 later would restore the old coach/insight functions: re-apply the
    120000/120100 pair after them.
 3. Edge functions: `scores`, `coach`, `push` (`supabase functions deploy <fn> --project-ref sgoyxzcagqyxexmsidtk`).
    No new secrets (`NOOP_SYNC_REQUIRED` defaults on, `NOOP_SYNC_STALE_AFTER_HOURS` 24).
 4. Worker + sidecar release on frwhoop-worker-2 (`deploy/OPERATIONS.md`: package, install, build, switch, restart);
    the second instance 7d49ceba (revision 7f38ceef5, not in this repository) needs the same release if it runs these
-   lanes. MetricInsight worker (`sources.py`) on the VPS.
+   lanes. `deploy/provision.sh --sidecar-only` stages the RecGym checkpoint
+   (`recgym/e085ac0e/wrist_-_imu_only_best.pt`, sha256 `7f0c4adf…51f5d9`). The RecGym head stays off unless
+   `/etc/frwhoop/worker.env` sets `FRWHOOP_EXERCISE_ENABLED=1` with `FRWHOOP_EXERCISE_WEIGHTS_PATH`,
+   `FRWHOOP_EXERCISE_WEIGHTS_SHA256` and `FRWHOOP_EXERCISE_MODEL_VERSION=recgym-cnn-transformer-e085ac0`
+   (`Tools/ActivityContext/RECGYM.md`); it writes shadow rows only. MetricInsight worker (`sources.py`) on the VPS.
 5. Anomaly service on the VPS (`docs/BASELINE_WATCHDOG_V2.md` §5 "Context hygiene"): stop, back up state, install, list
    the reference windows the new rules exclude with `tools/reference_audit.py`, review, purge with `--apply`, start.
 6. Phone build from this branch (set `NOOP_SOURCE_REVISION` to the real HEAD first). Old builds keep working against the
@@ -172,7 +177,13 @@ succeed, retention-sweep's HTTP call still 500s (pre-existing).
   The in-session ceiling uses the profile's HR max (owner: age 19 → 195 + 5) until 7 sessions exist.
 - The session rule cannot tell a workout from other vigorous movement with high HR (e.g. stairs, a late-night walk);
   10-07 00:16–00:30 (HR up to 132, arm nearly still, within movement evidence) is treated as part of the session.
-  A "Were you exercising?" confirmation would make sessions observed instead of inferred.
+  Rule -2's confirmation (15 strong minutes) cuts stored non-gym sessions from 6 to 1 on the owner's data, with a thin
+  margin (weakest gym session 19 strong minutes). A "Were you exercising?" confirmation would make sessions observed
+  instead of inferred.
+- No activity model detects lifting on the owner's upper arm: HART, ActiNet and ElderNet see the cardio part only
+  (EXERCISE_SESSION.md, "Activity models"), and the RecGym CNN-Transformer, the one model trained on gym exercises,
+  scores gym against daytime at AUC 0.53 (chance; movement alone does as well; RECGYM.md). All stay annotation or
+  shadow only.
 - Rhythm (DeepBeat/SiamAF) stays withheld until its sample clock is verified; no phone heuristic replaces it.
 - The anomaly service still needs ~2 weeks of calibration (96 windows per model per bucket); activity windows are
   withheld with an explicit reason rather than scored against rest.

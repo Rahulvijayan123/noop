@@ -24,3 +24,12 @@ repo-built database:
 The production run itself was not executed from this session: the session's permission policy refused it as a
 production deploy. Recording format for production: `supabase_migrations.schema_migrations (version, name,
 statements)` with the file text as the single statement, as earlier deploys did.
+
+## Second rehearsal (2026-10-09, after rule exercise-session-2 and the RecGym merge)
+
+Three migrations changed after the first rehearsal (`20261009130100` rule -2 and the `active` phase,
+`20261009150200` the `active` share in the window mix, `20261009140100` / `20261009150000` comments only) and the RecGym
+merge added `20261009160000_activity_exercise_windows`. The same production schema dump was restored into a fresh
+`supabase/postgres:17.6.1.075` container (same extensions; the one expected `schema "public" already exists` error),
+then the concurrent index and all thirteen migrations were applied in deploy order with `ON_ERROR_STOP=1 -1`: **all
+exit 0, no errors.** Both rehearsal containers were removed afterwards.
