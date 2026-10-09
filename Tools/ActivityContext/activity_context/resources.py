@@ -27,7 +27,8 @@ from .inertia.subproc import PYTHON_ENV_ALLOWLIST, safe_env
 THREAD_ENV = ("OMP_NUM_THREADS", "OPENBLAS_NUM_THREADS", "MKL_NUM_THREADS", "VECLIB_MAXIMUM_THREADS",
               "NUMEXPR_NUM_THREADS")
 # What a serve child may read from this process's environment (never the whole of it, inertia/subproc.py).
-CHILD_ENV_ALLOWLIST = PYTHON_ENV_ALLOWLIST + ("ELDERNET_WEIGHTS_DIR", "ELDERNET_UPSTREAM_DIR", "ACTIVITY_THREADS",
+CHILD_ENV_ALLOWLIST = PYTHON_ENV_ALLOWLIST + ("ELDERNET_WEIGHTS_DIR", "ELDERNET_UPSTREAM_DIR", "RECGYM_WEIGHTS_PATH",
+                                              "ACTIVITY_THREADS",
                                               "HF_HUB_OFFLINE", "TRANSFORMERS_OFFLINE")
 
 

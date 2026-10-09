@@ -111,6 +111,22 @@ NOOP builds on prior community reverse-engineering and interoperability work:
   University of Oxford, 2022; CC BY 4.0; doi:10.5287/bodleian:ORQ2abnbR), plus the CC BY 4.0 sets listed
   under Inertia-1 above.
 
+## Activity context (RecGym gym-exercise recognition, shadow)
+- **`MKorp7/HAR_IMU_CNN-Transformer`** (MIT, "Copyright (c) 2025 MKorp7") — the CNN + Transformer exercise
+  classifier. Pinned to commit `e085ac0e116aa5997d5f593ac1d0dd0c801859b1`. `src/models/imu_transformer.py`
+  (inference) and `src/data/recgym.py` (offline scaler reproduction only) are vendored byte for byte under
+  `Tools/ActivityContext/activity_context/recgym/vendor/` with the MIT notice, upstream path and commit in every
+  file. The checkpoint (`models.zip:models/wrist_-_imu_only_best.pt`, wrist, IMU only, 12 classes) is not
+  committed: it is staged by sha256 from the pinned commit (sidecar model manifest entry `recgym_cnn_transformer`,
+  or `python -m activity_context.recgym.weights fetch`). Contract: `Tools/ActivityContext/RECGYM.md`.
+- **RecGym** (Bian, S. & Lukowicz, P. (2025), UCI Machine Learning Repository, doi:10.24432/C5PW4K; CC BY 4.0;
+  intro paper Bian, Rey, Yuan & Lukowicz, arXiv:2503.06311) — the model's training data. The StandardScaler upstream
+  fitted on it was not shipped; `activity_context/recgym/recgym_wrist_imu_scaler.json` is Nara's refit from the
+  public dataset (Kaggle mirror `zhaxidelebsz/10-gym-exercises-with-615-abstracted-features` v6, the copy upstream
+  used), and twelve test-subject windows are part of the golden fixture
+  `Tools/ActivityContext/fixtures/recgym/golden_upstream.json`. Changes made (by Nara): wrist IMU windows only,
+  upstream's own windowing; the values are unchanged.
+
 ## Xiaomi Smart Band (Mi Band) import
 - **`artyomxx/xiaomi-band-ios-export`** — documented the Mi Fitness iOS app's on-device
   SQLite layout (`DataBase/<user_id>/de/<user_id>.db`, JSON `value` columns, the `*_day`

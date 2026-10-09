@@ -50,6 +50,17 @@ eldernet-offline = [
     "torch==2.8.0",
     "pandas==3.0.6",
 ]
+# RecGym gym-exercise recognition (activity_context.recgym): the MIT CNN + Transformer, CPU inference, numpy-only
+# preprocessing (shared polyphase resampler + a Madgwick IMU filter in pure Python). SHADOW only (RECGYM.md).
+recgym = [
+    "torch==2.8.0",
+]
+# Offline RecGym scaler reproduction (activity_context.recgym.reproduce / make_golden). Never imported by serve.
+recgym-offline = [
+    "torch==2.8.0",
+    "pandas==2.2.3",
+    "scikit-learn==1.5.2",
+]
 # Offline head training / evaluation (never needed by the serve process).
 inertia-train = [
     "scikit-learn==1.9.1",
@@ -66,12 +77,14 @@ activity-fetch = "activity_context.fetch_artifacts:main"
 activity-inertia-serve = "activity_context.inertia.serve:main"
 activity-eldernet-serve = "activity_context.eldernet.serve:main"
 activity-eldernet-run = "activity_context.eldernet.run:main"
+activity-recgym-serve = "activity_context.recgym.serve:main"
 
 [tool.setuptools.packages.find]
 include = ["activity_context*"]
 
 [tool.setuptools.package-data]
 "activity_context.inertia" = ["*.json"]
+"activity_context.recgym" = ["*.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
