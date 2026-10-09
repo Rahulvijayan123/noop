@@ -144,16 +144,17 @@ def test_providers_lists_capabilities_and_recorded_models(live_server):
     assert set(models) == {"neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa", "wav2sleep",
                            "no_eeg_sleep_staging", "rr_estimation", "stepcount",
                            "cnn_wrist_model_freeliving",
-                           "paradigma", "deepbeat", "siamaf"}
+                           "paradigma", "deepbeat", "siamaf", "recgym_cnn_transformer"}
     assert models["wav2sleep"]["status"] == "blocked_input"
     assert models["stepcount"]["status"] == "blocked_license"
     assert models["stepcount"]["wired"] is False
     assert models["no_eeg_sleep_staging"]["status"] == "unverified"
-    # six entries are wired now: the HRV dependency, the two landed sleep
-    # candidates and the three additive sensor-biomarker lanes.
+    # seven entries are wired now: the HRV dependency, the two landed sleep
+    # candidates, the three additive sensor-biomarker lanes and the activity
+    # lane's RecGym checkpoint (staged and verified here, loaded by the worker's child).
     wired = {m["id"] for m in body["models"] if m["wired"]}
     assert wired == {"neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa",
-                     "paradigma", "deepbeat", "siamaf"}
+                     "paradigma", "deepbeat", "siamaf", "recgym_cnn_transformer"}
     assert models["hypnospy"]["provider_id"] == "hypnospy.hr-boundary.v1"
     assert models["sleepecg_wrn_gru_mesa"]["provider_id"] == "sleepecg.wrn-gru-mesa.v1"
     assert models["sleepecg_wrn_gru_mesa"]["status"] == "shadow_eligible"

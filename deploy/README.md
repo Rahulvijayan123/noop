@@ -199,6 +199,38 @@ Without a model dir the child boots the numpy baseline instead of the HART check
 Rollback is `FRWHOOP_ACTIVITY_ENABLED` off (or `activity` in `FRWHOOP_DISABLE_LANES`) and a
 restart; the migration is additive and needs no revert.
 
+#### RecGym exercise head (shadow only, off by default)
+
+A fourth activity child, `python -m activity_context.recgym.serve` (Tools/ActivityContext/RECGYM.md). It needs
+only torch (already in the activity venv). Order:
+
+1. Migration `20261009160000_activity_exercise_windows.sql` (additive, re-runnable), then the `scores` function
+   if `GET /scores/exercise-windows` is wanted.
+2. The release (`release-host.sh install/build/switch`), which carries `Tools/ActivityContext/activity_context/recgym`
+   and the sidecar manifest entry `recgym_cnn_transformer`.
+3. `deploy/provision.sh --sidecar-only` (or the model section alone: `--models-only --models-root /opt/frwhoop-models`)
+   stages `models.zip` from the pinned upstream commit and extracts `recgym/e085ac0e/wrist_-_imu_only_best.pt`, both
+   sha256-verified, into a new model revision (optional entry: a failed fetch withholds only this entry). Check it
+   as the worker user:
+
+   ```bash
+   W=/opt/frwhoop-models/current/recgym/e085ac0e/wrist_-_imu_only_best.pt
+   sha256sum $W    # 7f0c4adf066bb842eeb0c114e765fd3cf1ca3a7ca6ef6cf5344f5f142651f5d9
+   printf '%s\n' '{"id":"1","op":"ping"}' '{"id":"2","op":"shutdown"}' | su -s /bin/bash frwhoop -c \
+     "cd /opt/noop/current/Tools/ActivityContext && HOME=/var/lib/frwhoop \
+      /var/lib/frwhoop/activity-venv/bin/python -m activity_context.recgym.serve --weights-path $W"
+   # "model_status": "recgym_loaded", loaded.weights_sha256 = the digest above
+   ```
+
+4. `/etc/frwhoop/worker.env`: `FRWHOOP_EXERCISE_ENABLED=1`, `FRWHOOP_EXERCISE_WEIGHTS_PATH=$W`, and the pins
+   `FRWHOOP_EXERCISE_WEIGHTS_SHA256` / `FRWHOOP_EXERCISE_MODEL_VERSION` (worker.env.example); `systemctl restart
+   frwhoop-worker`. The start-up log says `exercise shadow enabled`; the heartbeat carries `exercise_*` counters
+   and `recgym.*` identity.
+
+Rollback: `FRWHOOP_EXERCISE_ENABLED` unset and a restart (the table can stay; `prune_activity_exercise_windows`
+empties it over the retention). Resources (macOS, 1 thread, `python -m activity_context.resources --hours 2`):
+about 200 MB RSS after load, 440 MB peak, ~0.9 s per one-hour chunk; not measured on the droplet.
+
 The lane also stores ActivityContext v2 day documents. Apply the second migration BEFORE (or with) the
 worker upgrade, the same way as every other migration (never `supabase db push`):
 

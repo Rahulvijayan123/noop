@@ -25,8 +25,9 @@ MATERIALIZER = REPO_PACKAGE_ROOT / "scripts" / "materialize_model_root.py"
 REAL_MANIFEST = REPO_PACKAGE_ROOT / "models" / "manifest.json"
 SERVICE_UNIT = DEPLOY_DIR / "frwhoop-inference.service"
 
-#: Optional url artifacts staged from fixture bytes in these tests.
-OPTIONAL_ENTRIES = ("paradigma", "deepbeat", "siamaf")
+#: Optional url artifacts staged from fixture bytes in these tests (RecGym's checkpoint is a zip member of its url
+#: archive: the fixture archive holds fixture member bytes).
+OPTIONAL_ENTRIES = ("paradigma", "deepbeat", "siamaf", "recgym_cnn_transformer")
 
 
 def load_materializer():
@@ -48,6 +49,17 @@ def fixture_bytes(name: str) -> bytes:
     return seed * (64 + len(name))
 
 
+def fixture_zip(members: dict[str, bytes]) -> bytes:
+    """A deterministic zip archive of ``members`` (fixed timestamps, stored in name order)."""
+    import zipfile
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for name in sorted(members):
+            info = zipfile.ZipInfo(name, date_time=(2026, 1, 1, 0, 0, 0))
+            archive.writestr(info, members[name])
+    return buffer.getvalue()
+
+
 def manifest_with_fixture_optionals(directory: Path) -> tuple[Path, dict[str, bytes]]:
     """A copy of the real manifest with the optional url artifacts pinned to fixture bytes.
 
@@ -59,8 +71,21 @@ def manifest_with_fixture_optionals(directory: Path) -> tuple[Path, dict[str, by
     for entry in manifest["entries"]:
         if entry["id"] not in OPTIONAL_ENTRIES:
             continue
+        members: dict[str, dict[str, bytes]] = {}
         for artifact in entry["artifacts"]:
-            blob = fixture_bytes(artifact["name"])
+            source = artifact.get("source") or {}
+            if source.get("kind") == "zip_member":
+                blob = fixture_bytes(artifact["name"])
+                artifact["sha256"] = hashlib.sha256(blob).hexdigest()
+                artifact["size_bytes"] = len(blob)
+                members.setdefault(source["artifact"], {})[source["member"]] = blob
+        for artifact in entry["artifacts"]:
+            if (artifact.get("source") or {}).get("kind") == "zip_member":
+                continue
+            if artifact["name"] in members:
+                blob = fixture_zip(members[artifact["name"]])
+            else:
+                blob = fixture_bytes(artifact["name"])
             artifact["sha256"] = hashlib.sha256(blob).hexdigest()
             artifact["size_bytes"] = len(blob)
             served[artifact["url"]] = blob
