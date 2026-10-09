@@ -19,19 +19,19 @@ final class PCRegimeLineageTests: XCTestCase {
     // MARK: Versions (INT-C review)
 
     func testPolicyVersionsDistinguishTheNewEventPlacementAndStrata() {
-        XCTAssertEqual(PC.Eligibility.version, "pc-eligibility-4")
-        XCTAssertEqual(PC.EligibilityConfig().version, "pc-eligibility-4")
+        XCTAssertEqual(PC.Eligibility.version, "pc-eligibility-5")
+        XCTAssertEqual(PC.EligibilityConfig().version, "pc-eligibility-5")
         XCTAssertEqual(PC.IntervalAlgebra.version, "pc-join-3")
         XCTAssertEqual(PC.JoinConfig().version, "pc-join-3")
         XCTAssertEqual(PC.ReferenceConfig().version, "pc-reference-4")
         XCTAssertEqual(PC.ContextReferences.version, "pc-reference-4")
         XCTAssertEqual(PC.PostureConfig().version, "pc-posture-2")
         let v = PC.Policy.default.versions
-        XCTAssertEqual(v.eligibility, "pc-eligibility-4")
+        XCTAssertEqual(v.eligibility, "pc-eligibility-5")
         XCTAssertEqual(v.join, "pc-join-3")
         // A document decided under the old placement has a different policy fingerprint.
         var old = PC.Policy.default
-        old.eligibility.version = "pc-eligibility-3"
+        old.eligibility.version = "pc-eligibility-4"
         old.join.version = "pc-join-2"
         XCTAssertNotEqual(old.fingerprint, PC.Policy.default.fingerprint)
     }
