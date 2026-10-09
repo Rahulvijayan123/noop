@@ -1,0 +1,165 @@
+import Foundation
+
+// DataReason.swift — the canonical reasons a reading is missing, unreliable or not comparable
+// (contracts/reason-codes.json, data-reason-1). Every layer mirrors that file; DataReasonTests pins this table to it.
+// Generated from the JSON; edit the JSON first.
+
+public enum DataReasonCertainty: String, Codable, Sendable, CaseIterable {
+    /// A device, user or job event says so.
+    case confirmed
+    /// Derived from signal patterns; never shown as a fact.
+    case inferred
+    /// No evidence about the cause.
+    case unknown
+    /// A counted fact (coverage, history length).
+    case measured
+}
+
+public enum DataReasonEffect: String, Codable, Sendable, CaseIterable {
+    case excluded, degraded, withheld
+    case notComparable = "not_comparable"
+    case displayOnly = "display_only"
+}
+
+public struct DataReasonCode: Equatable, Hashable, Sendable {
+    public var code: String
+    public var family: String
+    public var defaultCertainty: DataReasonCertainty
+    public var effect: DataReasonEffect
+}
+
+/// One canonical reason attached to a reading, with how sure we are of the cause.
+public struct DataReason: Equatable, Hashable, Sendable, Codable {
+    public var code: String
+    public var certainty: DataReasonCertainty
+    public var subcode: String?
+    /// The original code from the vocabulary it came from, for audit.
+    public var legacy: String?
+
+    public init(code: String, certainty: DataReasonCertainty, subcode: String? = nil, legacy: String? = nil) {
+        self.code = code; self.certainty = certainty; self.subcode = subcode; self.legacy = legacy
+    }
+
+    public var effect: DataReasonEffect? { DataReasonCatalog.byCode[code]?.effect }
+    public var family: String? { DataReasonCatalog.byCode[code]?.family }
+
+    /// Maps a code from one of the existing vocabularies ("watchdog_quality", "watchdog_unavailable",
+    /// "anomaly_withheld", "sensor_biomarker", "layer1") to its canonical reason. Nil = not mapped.
+    public static func from(vocabulary: String, legacy: String) -> DataReason? {
+        guard let m = DataReasonCatalog.legacy[vocabulary]?[legacy] else { return nil }
+        return DataReason(code: m.code, certainty: m.certainty, subcode: m.subcode, legacy: legacy)
+    }
+
+    /// The Watchdog's per-minute quality reasons, canonicalised (unmapped informational codes are dropped).
+    public static func fromWatchdogQuality(_ reasons: [String]) -> [DataReason] {
+        var seen = Set<DataReason>()
+        return reasons.compactMap { from(vocabulary: "watchdog_quality", legacy: $0) }.filter { seen.insert($0).inserted }
+    }
+}
+
+public enum DataReasonCatalog {
+    public static let version = "data-reason-1"
+
+    public struct Mapping: Equatable, Sendable {
+        public var code: String
+        public var certainty: DataReasonCertainty
+        public var subcode: String?
+        public init(code: String, certainty: DataReasonCertainty, subcode: String? = nil) {
+            self.code = code; self.certainty = certainty; self.subcode = subcode
+        }
+    }
+
+    public static let codes: [DataReasonCode] = [
+        .init(code: "off_wrist", family: "wear", defaultCertainty: .inferred, effect: .excluded),
+        .init(code: "strap_not_recording", family: "link", defaultCertainty: .inferred, effect: .excluded),
+        .init(code: "charging", family: "wear", defaultCertainty: .confirmed, effect: .excluded),
+        .init(code: "just_put_on", family: "wear", defaultCertainty: .confirmed, effect: .degraded),
+        .init(code: "held_value_at_off", family: "wear", defaultCertainty: .confirmed, effect: .excluded),
+        .init(code: "loose_fit", family: "contact", defaultCertainty: .inferred, effect: .degraded),
+        .init(code: "sensor_dropout", family: "contact", defaultCertainty: .inferred, effect: .excluded),
+        .init(code: "motion_artifact", family: "motion", defaultCertainty: .inferred, effect: .degraded),
+        .init(code: "hr_in_motion_unverified", family: "motion", defaultCertainty: .inferred, effect: .degraded),
+        .init(code: "optical_saturation", family: "quality", defaultCertainty: .confirmed, effect: .excluded),
+        .init(code: "strap_link_down", family: "link", defaultCertainty: .confirmed, effect: .displayOnly),
+        .init(code: "strap_reset", family: "link", defaultCertainty: .confirmed, effect: .degraded),
+        .init(code: "app_not_running", family: "pipeline", defaultCertainty: .unknown, effect: .displayOnly),
+        .init(code: "awaiting_offload", family: "pipeline", defaultCertainty: .confirmed, effect: .withheld),
+        .init(code: "awaiting_upload", family: "pipeline", defaultCertainty: .inferred, effect: .withheld),
+        .init(code: "awaiting_processing", family: "pipeline", defaultCertainty: .confirmed, effect: .withheld),
+        .init(code: "data_lost", family: "pipeline", defaultCertainty: .confirmed, effect: .excluded),
+        .init(code: "no_verified_input", family: "pipeline", defaultCertainty: .confirmed, effect: .withheld),
+        .init(code: "stale", family: "pipeline", defaultCertainty: .confirmed, effect: .displayOnly),
+        .init(code: "insufficient_coverage", family: "coverage", defaultCertainty: .measured, effect: .withheld),
+        .init(code: "artifact_rejected", family: "quality", defaultCertainty: .inferred, effect: .degraded),
+        .init(code: "implausible_value", family: "quality", defaultCertainty: .inferred, effect: .excluded),
+        .init(code: "clock_unverified", family: "clock", defaultCertainty: .inferred, effect: .withheld),
+        .init(code: "context_not_comparable", family: "context", defaultCertainty: .inferred, effect: .notComparable),
+        .init(code: "context_unknown", family: "context", defaultCertainty: .unknown, effect: .notComparable),
+        .init(code: "placement_unknown", family: "placement", defaultCertainty: .unknown, effect: .notComparable),
+        .init(code: "placement_unsupported", family: "placement", defaultCertainty: .confirmed, effect: .notComparable),
+        .init(code: "learning", family: "model", defaultCertainty: .measured, effect: .withheld),
+        .init(code: "model_unavailable", family: "model", defaultCertainty: .confirmed, effect: .withheld),
+        .init(code: "user_confounder", family: "user", defaultCertainty: .confirmed, effect: .displayOnly),
+    ]
+
+    public static let byCode: [String: DataReasonCode] = Dictionary(uniqueKeysWithValues: codes.map { ($0.code, $0) })
+
+    public static let legacy: [String: [String: Mapping]] = [
+        "watchdog_quality": [
+            "wrist_off_event": .init(code: "off_wrist", certainty: .confirmed),
+            "optical_baseline_zero": .init(code: "off_wrist", certainty: .inferred),
+            "charging": .init(code: "charging", certainty: .confirmed),
+            "strap_reset_unrecovered": .init(code: "strap_reset", certainty: .confirmed),
+            "hr_absent": .init(code: "sensor_dropout", certainty: .inferred),
+            "skin_temp_unconfirmed": .init(code: "context_unknown", certainty: .unknown),
+            "rr_pileup": .init(code: "artifact_rejected", certainty: .inferred),
+            "optical_saturation": .init(code: "optical_saturation", certainty: .confirmed),
+            "contact_not_detected": .init(code: "loose_fit", certainty: .inferred),
+            "optical_sentinel": .init(code: "motion_artifact", certainty: .inferred),
+            "motion_mode_optics": .init(code: "motion_artifact", certainty: .inferred),
+            "beat_coverage_low": .init(code: "insufficient_coverage", certainty: .measured),
+            "beat_overcount": .init(code: "artifact_rejected", certainty: .inferred),
+            "hr_in_motion_unverified": .init(code: "hr_in_motion_unverified", certainty: .inferred),
+            "optical_sentinel_at_rest": .init(code: "loose_fit", certainty: .inferred),
+            "optical_baseline_high": .init(code: "loose_fit", certainty: .inferred),
+            "strap_not_recording": .init(code: "strap_not_recording", certainty: .confirmed),
+            "transport_gap": .init(code: "awaiting_upload", certainty: .inferred),
+            "settling_after_wrist_on": .init(code: "just_put_on", certainty: .confirmed),
+            "no_signal_metadata": .init(code: "context_unknown", certainty: .unknown),
+            "no_motion_sample": .init(code: "context_unknown", certainty: .unknown),
+        ],
+        "watchdog_unavailable": [
+            "wristOff": .init(code: "off_wrist", certainty: .confirmed),
+            "coverage": .init(code: "insufficient_coverage", certainty: .measured),
+            "gap": .init(code: "insufficient_coverage", certainty: .measured),
+            "stale": .init(code: "stale", certainty: .confirmed),
+            "empty": .init(code: "insufficient_coverage", certainty: .measured),
+        ],
+        "anomaly_withheld": [
+            "off_wrist": .init(code: "off_wrist", certainty: .inferred),
+            "low_hr_coverage": .init(code: "insufficient_coverage", certainty: .measured),
+            "activity": .init(code: "context_not_comparable", certainty: .inferred, subcode: "movement"),
+            "recovery": .init(code: "context_not_comparable", certainty: .inferred, subcode: "recovery"),
+            "context_unknown": .init(code: "context_unknown", certainty: .unknown),
+            "calibrating": .init(code: "learning", certainty: .measured),
+        ],
+        "sensor_biomarker": [
+            "insufficient_coverage": .init(code: "insufficient_coverage", certainty: .measured),
+            "unknown_wrist_placement": .init(code: "placement_unknown", certainty: .unknown),
+            "unverified_sample_clock": .init(code: "clock_unverified", certainty: .inferred),
+            "unverified_optical_dc": .init(code: "no_verified_input", certainty: .confirmed),
+            "no_verified_input": .init(code: "no_verified_input", certainty: .confirmed),
+            "model_unavailable": .init(code: "model_unavailable", certainty: .confirmed),
+            "adapter_broken": .init(code: "model_unavailable", certainty: .confirmed),
+        ],
+        "layer1": [
+            "low_coverage": .init(code: "insufficient_coverage", certainty: .measured),
+            "out_of_range": .init(code: "implausible_value", certainty: .inferred),
+            "poor_signal": .init(code: "artifact_rejected", certainty: .inferred),
+            "charging": .init(code: "charging", certainty: .confirmed),
+            "device_off": .init(code: "strap_not_recording", certainty: .inferred),
+            "app_fail": .init(code: "app_not_running", certainty: .unknown),
+            "stale": .init(code: "stale", certainty: .confirmed),
+        ],
+    ]
+}

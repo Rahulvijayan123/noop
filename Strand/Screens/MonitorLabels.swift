@@ -68,7 +68,7 @@ enum MonitorLabels {
         switch caps {
         case "IN RANGE": return "In range"
         case "OFF": return "Off usual"
-        case "WEAK SIGNAL": return "Weak signal"
+        case "NOT RECENT": return "Not recent"
         case "NOT ENOUGH NIGHTS": return "Not enough nights"
         case "BUILDING": return "Building"
         default: return caps.prefix(1).uppercased() + caps.dropFirst().lowercased()

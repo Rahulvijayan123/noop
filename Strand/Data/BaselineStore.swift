@@ -649,7 +649,8 @@ final class BaselineStore: ObservableObject {
     private func verdict(show: Bool, trust: Int?, z: Double?, k: Double) -> String {
         if !show { return "BUILDING" }
         if (trust ?? 0) < LongitudinalBaseline.trustHideThreshold { return "NOT ENOUGH NIGHTS" }
-        if evaluation?.stale == true { return "WEAK SIGNAL" }
+        // Layer 1 `stale` means no recent day (canonical reason `stale`), not a poor signal.
+        if evaluation?.stale == true { return "NOT RECENT" }
         if LongitudinalBaseline.isOffUsual(z: z, k: k) { return "OFF" }
         return "IN RANGE"
     }
