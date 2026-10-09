@@ -76,13 +76,19 @@ class DatabaseTests(unittest.TestCase):
     def test_swift_uuid_rejection_and_review_withdrawal(self):
         self.command(action='setting',enabled=True)
         event=dict(id=str(uuid.uuid4()),kind='event',label='Walking',symbol='figure.walk',typeId=str(self.typ),
-                   favorite=False,timeZoneIdentifier='UTC',archived=False,deviceId=str(self.device),startUnixSeconds=1000,endUnixSeconds=1200)
+                   favorite=False,timeZoneIdentifier='UTC',archived=False,deviceId=str(self.device).upper(),startUnixSeconds=1000,endUnixSeconds=1200)
         self.append(event)
         eid=uuid.uuid4()
         self.db.execute('insert into event_detections(user_id,id,type_id,device_id,start_at,end_at,model_id) values(%s,%s,%s,%s,100,200,%s)',(self.owner,eid,self.typ,self.device,uuid.uuid4()))
         self.command(action='review',detectionId=str(eid).upper(),outcome='rejected',start=100,end=200)
         data=self.db.dataset(dict(user_id=self.owner,type_id=self.typ))
         self.assertIn((100,200),data['negatives'])
+        confirmed=uuid.uuid4()
+        self.db.execute('insert into event_detections(user_id,id,type_id,device_id,start_at,end_at,model_id) values(%s,%s,%s,%s,300,400,%s)',(self.owner,confirmed,self.typ,self.device,uuid.uuid4()))
+        self.command(action='review',detectionId=str(confirmed),outcome='confirmed',start=300,end=400)
+        data=self.db.dataset(dict(user_id=self.owner,type_id=self.typ))
+        self.assertEqual(data['device'],str(self.device))
+        self.assertEqual({p['id'] for p in data['positives']},{event['id'],str(confirmed)})
         review=self.command(action='negative',deviceId=str(self.device),start=500,end=600)['saved']
         self.assertIn((500,600),self.db.dataset(dict(user_id=self.owner,type_id=self.typ))['negatives'])
         self.command(action='withdraw',reviewId=str(review).upper())
@@ -96,6 +102,17 @@ class DatabaseTests(unittest.TestCase):
         self.command(action='review',detectionId=str(eid),outcome='confirmed',start=100,end=200)
         self.command(action='review',detectionId=str(eid),outcome='rejected',start=100,end=200)
         self.assertFalse(self.db.row('select entry from manual_events_current where user_id=%s and entity_id=%s',(self.owner,manual))['entry']['archived'])
+    def test_confirmation_links_only_the_same_wearable(self):
+        self.command(action='setting',enabled=True)
+        same=uuid.uuid4(); other=uuid.uuid4(); eid=uuid.uuid4()
+        event=dict(kind='event',label='Walking',symbol='figure.walk',typeId=str(self.typ),
+            favorite=False,timeZoneIdentifier='UTC',archived=False,startUnixSeconds=100,endUnixSeconds=200)
+        self.append(dict(event,id=str(same),deviceId=str(self.device).upper()))
+        # The later revision from a second wearable must not win the time-overlap match.
+        self.append(dict(event,id=str(other),deviceId=str(uuid.uuid4())),2000)
+        self.db.execute('insert into event_detections(user_id,id,type_id,device_id,start_at,end_at,model_id) values(%s,%s,%s,%s,100,200,%s)',(self.owner,eid,self.typ,self.device,uuid.uuid4()))
+        self.command(action='review',detectionId=str(eid),outcome='confirmed',start=100,end=200)
+        self.assertEqual(self.db.row('select manual_event_id from event_detections where user_id=%s and id=%s',(self.owner,eid))['manual_event_id'],same)
     def test_physiology_does_not_leak_foreign_device_or_bridge_missing_samples(self):
         self.db.execute('insert into noop_hr_samples values(%s,%s,100,70),(%s,%s,500,90)',(self.owner,self.device,self.owner,self.device))
         self.db.execute('insert into server_metric_series values(%s,%s,\'hrv_rmssd_ms\',to_timestamp(100),300,45)',(self.owner,self.device))

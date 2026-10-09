@@ -27,7 +27,10 @@ function request(method:string,body?:unknown,suffix='',token='noop_a') {
 Deno.test('personal events: bounded commands reject injected ownership and invalid reviews',()=>{
   assert(validateDetectionCommand(command));
   assert(validateDetectionCommand({action:'negative',requestId:A,typeId:T,deviceId:S,start:100,end:400}));
+  assert(validateDetectionCommand({action:'withdraw',requestId:A,typeId:T,reviewId:S}));
   for(const body of [{...command,user_id:B},{...command,enabled:'true'},
+    {action:'withdraw',requestId:A,typeId:T,reviewId:'invalid'},
+    {action:'withdraw',requestId:A,typeId:T,reviewId:S,user_id:B},
     {action:'review',requestId:A,typeId:T,detectionId:S,outcome:'delete',start:1,end:2},
     {action:'negative',requestId:A,typeId:T,deviceId:S,start:1,end:90000},
     {action:'review',requestId:A,typeId:T,detectionId:S,outcome:'confirmed',start:4,end:2}]) assertFalse(validateDetectionCommand(body));

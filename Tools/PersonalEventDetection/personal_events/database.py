@@ -71,9 +71,13 @@ class Database:
             and entry->>'kind'='event' and (entry->>'typeId')::uuid=%s and not (entry->>'archived')::boolean
             and entry->>'endUnixSeconds' is not null""",(owner,typ))
         reviews=self.rows("select id,body,created_at from event_detection_reviews where user_id=%s order by created_at,id",(owner,))
-        devices={e['entry'].get('deviceId') for e in entries if e['entry'].get('deviceId')}
+        # Swift UUID strings are uppercase; database-generated confirmations are lowercase.
+        # Normalize before source selection so one wearable retains all of its examples.
+        for e in entries:
+            value=e['entry'].get('deviceId')
+            e['entry']['deviceId']=str(uuid.UUID(value)) if valid_uuid(value) else None
+        devices={e['entry']['deviceId'] for e in entries if e['entry']['deviceId']}
         # A model trains and serves on a specified sensor source; never silently mix straps.
-        devices={d for d in devices if valid_uuid(d)}
         if not devices: raise ValueError('Log completed events with a cloud-linked wearable first.')
         device=max(sorted(devices),key=lambda d:sum(e['entry'].get('deviceId')==d for e in entries))
         positive=[dict(id=e['entry']['id'],start=e['entry']['startUnixSeconds'],end=e['entry']['endUnixSeconds'],available=e['received_at'].timestamp())

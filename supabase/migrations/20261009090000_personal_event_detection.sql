@@ -170,6 +170,7 @@ begin
       if eid is null then
         select entity_id into eid from manual_events_current where user_id=p_user
           and entry->>'kind'='event' and (entry->>'typeId')::uuid=typ
+          and lower(entry->>'deviceId')=r.device_id::text
           and (entry->>'archived')::boolean=false
           and (entry->>'startUnixSeconds')::double precision <= (p_body->>'end')::double precision
           and coalesce((entry->>'endUnixSeconds')::double precision,extract(epoch from now())) >= (p_body->>'start')::double precision
