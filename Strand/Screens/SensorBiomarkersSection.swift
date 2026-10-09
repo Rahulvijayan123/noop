@@ -392,6 +392,10 @@ struct SensorBiomarkersViewModel: Equatable {
         switch reason {
         case "unknown_wrist_placement":
             return String(localized: "The strap's wrist placement wasn't verified.")
+        case "placement_unsupported":
+            // Canonical, confirmed: the wearer declared the strap worn off the wrist (e.g. upper arm), and this
+            // measurement is built for the wrist.
+            return String(localized: "This measurement needs the strap on the wrist; it was set as worn elsewhere.")
         case "unknown_orientation":
             return String(localized: "The strap's orientation wasn't verified.")
         case "insufficient_eligible_time":

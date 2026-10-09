@@ -188,7 +188,8 @@ begin
   assert r.missing_reasons = '[{"code": "context_unknown", "certainty": "unknown"}]', r.missing_reasons::text;
   assert r.wear_state = 'on_wrist' and r.wear_basis = 'hr_present';
   assert r.sleep_state is null and r.sleep_basis = 'not_scored';
-  assert r.placement is null and r.placement_basis = 'not_resolved';
+  -- Nothing declared for this owner (20261009150100 resolves placement): unknown stays unknown.
+  assert r.placement is null and r.placement_basis = 'undeclared', format('%s %s', r.placement, r.placement_basis);
 
   -- Night: stages from the scored night, asleep movement is not evidence.
   r := pg_temp.mcm('2026-09-15 06:10:00+00');
@@ -363,8 +364,12 @@ begin
   assert not has_table_privilege('authenticated', 'public.measurement_context_minutes', 'insert');
   assert not has_table_privilege('authenticated', 'public.measurement_context_versions', 'select');
   -- Built without a trigger on any noop_* table and without the scoring gate.
+  -- (The placement trigger on placement_intervals re-queues built days after a declaration, 20261009150100; no
+  -- noop_* table carries a measurement-context trigger.)
   assert not exists (select 1 from pg_trigger t join pg_proc p on p.oid = t.tgfoid
-                      where not t.tgisinternal and p.prosrc like '%measurement_context%');
+                       join pg_class c on c.oid = t.tgrelid join pg_namespace n on n.oid = c.relnamespace
+                      where not t.tgisinternal and p.prosrc like '%measurement_context%'
+                        and n.nspname = 'public' and c.relname like 'noop\_%');
   assert not exists (select 1 from pg_proc p join pg_namespace n on n.oid = p.pronamespace
                       where n.nspname = 'internal' and p.proname like '%measurement_context%'
                         and p.prosrc like '%scoring-inputs%');

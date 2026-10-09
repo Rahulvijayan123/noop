@@ -166,6 +166,8 @@ struct SensorBiomarkerLane {
     var tablesCheckedAt: Date?
     /// Whether `placement_intervals` exists (probed once; the lane runs on databases without it).
     var placementTablePresent: Bool?
+    /// Whether the strap placement resolver (20261009150100) exists (probed once with the table).
+    var placementResolverPresent: Bool?
     var lastReconcileAt: Date?
     var backoffUntil: Date?
     var consecutiveFailures = 0
@@ -639,7 +641,8 @@ struct SensorBiomarkerLane {
                 ppgSegmentsSent += built.input.ppg?.segments.count ?? 0
                 sentFamilies.formUnion(built.input.families)
                 for (family, stage) in stages {
-                    stagesByFamily[family, default: []].append(stage)
+                    stagesByFamily[family, default: []].append(Self.placementReason(stage,
+                                                                                    placement: built.input.placement))
                 }
             }
         }
@@ -691,6 +694,25 @@ struct SensorBiomarkerLane {
             stats.ppgEligibleSeconds += coverage.ppg.eligibleSeconds
         }
         return published
+    }
+
+    /// Canonical `placement_unsupported` (contracts/reason-codes.json, confirmed: the wearer declared it).
+    static let reasonPlacementUnsupported = "placement_unsupported"
+    /// The provider's reason when it cannot verify a wrist side (ParaDigMa arm swing).
+    static let reasonUnknownWristPlacement = "unknown_wrist_placement"
+
+    /// A wrist-trained family withheld for an unverified wrist side, in a request whose every second is declared
+    /// worn off the wrist (bicep or other), is withheld because the placement is unsupported: the declared location
+    /// is the reason, and it is known, not unknown. Any other stage is returned unchanged.
+    static func placementReason(_ stage: SensorBiomarkerFamilyStage,
+                                placement: SensorBiomarkerInputs.PlacementSummary) -> SensorBiomarkerFamilyStage {
+        guard stage.status == "withheld", stage.reason == reasonUnknownWristPlacement,
+              ["bicep", "other"].contains(placement.bodyLocation) else { return stage }
+        return SensorBiomarkerFamilyStage(family: stage.family, status: stage.status, releaseTier: stage.releaseTier,
+            providerRevision: stage.providerRevision, observedSeconds: stage.observedSeconds,
+            eligibleSeconds: stage.eligibleSeconds, contactState: stage.contactState,
+            reason: reasonPlacementUnsupported, reasonCounts: stage.reasonCounts, measurements: stage.measurements,
+            extra: stage.extra)
     }
 
     /// The day's actual input coverage (UTC day bounds; objects can reach past them).
@@ -757,8 +779,23 @@ struct SensorBiomarkerLane {
         }
     }
 
-    static let placementPresentSQL = "select (to_regclass('public.placement_intervals') is not null)::text as present"
-    /// The owner's recorded placement for the device (and user-level declarations) overlapping the day.
+    static let placementPresentSQL = """
+        select (to_regclass('public.placement_intervals') is not null)::text as present,
+               (to_regprocedure('internal.placement_intervals_for_device_v1(uuid,uuid,timestamptz,timestamptz)')
+                  is not null)::text as resolver
+        """
+    /// The strap's placement overlapping the day, resolved (20261009150100,
+    /// `internal.placement_intervals_for_device_v1`): declarations on the strap, its aliases and the installation
+    /// devices provably bound to it (the phone declares under its installation-scoped local id) as device-scoped
+    /// pieces, plus the owner's device-less declarations. Same columns and parameters as `placementSQL`.
+    static let placementResolvedSQL = """
+        select r.placement as placement, r.source as source, (r.scope = 'device')::text as device_scoped,
+               extract(epoch from r.effective_start)::bigint::text as start_ts,
+               coalesce(extract(epoch from r.effective_end)::bigint::text, '') as end_ts
+          from internal.placement_intervals_for_device_v1($1::uuid, $2::uuid, $4::timestamptz, $3::timestamptz) r
+         order by r.effective_start, (r.scope = 'account') desc, r.interval_id
+        """
+    /// The read before the resolver: the device's own declarations and user-level ones overlapping the day.
     static let placementSQL = """
         select p.placement as placement, p.source as source, (p.device_id is not null)::text as device_scoped,
                extract(epoch from p.effective_start)::bigint::text as start_ts,
@@ -785,11 +822,13 @@ struct SensorBiomarkerLane {
                                         dayBounds: (start: Int64, end: Int64)) throws -> [SensorBiomarkerInputs.PlacementInterval] {
         do {
             if placementTablePresent == nil {
-                placementTablePresent = (try db.query(Self.placementPresentSQL, [])).first?["present"].map(isTrue) ?? false
+                let probe = try db.query(Self.placementPresentSQL, []).first
+                placementTablePresent = probe?["present"].map(isTrue) ?? false
+                placementResolverPresent = probe?["resolver"].map(isTrue) ?? false
             }
             guard placementTablePresent == true else { return [] }
-            let rows = try db.query(Self.placementSQL, [job.userId, job.deviceId,
-                                                        Self.iso(dayBounds.end), Self.iso(dayBounds.start)])
+            let rows = try db.query(placementResolverPresent == true ? Self.placementResolvedSQL : Self.placementSQL,
+                                    [job.userId, job.deviceId, Self.iso(dayBounds.end), Self.iso(dayBounds.start)])
             return Self.parsePlacementRows(rows)
         } catch let e as PostgresClient.Error where e.kind == .connectionLost {
             throw e

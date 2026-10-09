@@ -8,6 +8,8 @@ import WhoopProtocol
 /// PlacementCloudSync request path runs with no network.
 private final class PlacementStub: URLProtocol {
     static var status = 200
+    /// Per-request statuses, first request first; `status` once it runs out.
+    static var statusQueue: [Int] = []
     static var body: [String: Any] = [:]
     static var requests: [URLRequest] = []
     static var requestBodies: [Data] = []
@@ -23,7 +25,8 @@ private final class PlacementStub: URLProtocol {
         let data = PlacementStub.body.isEmpty
             ? PlacementStub.responseData
             : ((try? JSONSerialization.data(withJSONObject: PlacementStub.body)) ?? Data())
-        let http = HTTPURLResponse(url: request.url!, statusCode: PlacementStub.status,
+        let status = PlacementStub.statusQueue.isEmpty ? PlacementStub.status : PlacementStub.statusQueue.removeFirst()
+        let http = HTTPURLResponse(url: request.url!, statusCode: status,
                                    httpVersion: "HTTP/1.1", headerFields: nil)!
         client?.urlProtocol(self, didReceive: http, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: data)
@@ -416,6 +419,72 @@ final class PlacementTests: XCTestCase {
             XCTAssertEqual(body?["effective_start"] as? String,
                            PlacementCloudSync.isoUTC(index == 0 ? t1 : t1.addingTimeInterval(3600)))
         }
+    }
+
+    /// The phone declares under its local id; once the strap's serial is known the declaration is sent for the
+    /// strap's own cloud device (where the server stores every sample), so every server lane reads it.
+    func testPushSendsTheStrapsCloudDeviceWhenKnown() async throws {
+        PlacementStub.status = 200
+        PlacementStub.statusQueue = []
+        PlacementStub.body = [:]
+        PlacementStub.requests = []
+        PlacementStub.requestBodies = []
+        let (_, placement) = try await store()
+        try placement.setCurrent(.bicep, deviceId: "my-whoop", at: day())
+        try placement.setCurrent(.wrist, deviceId: "other-local", at: day().addingTimeInterval(60))
+        let sync = PlacementCloudSync(
+            session: PlacementStub.session(),
+            endpoint: { URL(string: "https://example.invalid/functions/v1/scores")! },
+            identity: { CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
+                                          sourceId: "22222222-2222-4222-8222-222222222222",
+                                          tokenId: "t", uploadToken: "noop_x") },
+            store: { placement },
+            localDevices: { [.init(local: "my-whoop", cloud: "whoop-MGB0000001")] })
+        let uploaded = try await sync.pushPending()
+        XCTAssertEqual(uploaded, 2)
+        let sent = PlacementStub.requestBodies.map { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        XCTAssertEqual(sent.count, 2)
+        XCTAssertEqual(sent[0]?["device_id"] as? String, "whoop-MGB0000001", "the strap's own device")
+        XCTAssertEqual(sent[0]?["placement"] as? String, "bicep")
+        XCTAssertEqual(sent[1]?["device_id"] as? String, "other-local", "an id with no cloud mapping is sent as before")
+        XCTAssertTrue(try placement.pendingChanges().isEmpty)
+        XCTAssertNil(PlacementCloudSync.cloudDeviceId(forLocal: "my-whoop",
+                                                      localDevices: [.init(local: "my-whoop", cloud: "my-whoop")]))
+    }
+
+    /// Backward compatible: a server that has not registered the strap's device yet answers 409, and the same
+    /// declaration goes again under the local id, exactly what earlier builds sent.
+    func testPushRetriesUnderTheLocalIdWhenTheStrapIsNotRegistered() async throws {
+        PlacementStub.status = 200
+        PlacementStub.statusQueue = [409, 200]
+        PlacementStub.body = [:]
+        PlacementStub.requests = []
+        PlacementStub.requestBodies = []
+        let (_, placement) = try await store()
+        try placement.setCurrent(.bicep, deviceId: "my-whoop", at: day())
+        let sync = PlacementCloudSync(
+            session: PlacementStub.session(),
+            endpoint: { URL(string: "https://example.invalid/functions/v1/scores")! },
+            identity: { CloudPushIdentity(ownerId: "11111111-1111-4111-8111-111111111111",
+                                          sourceId: "22222222-2222-4222-8222-222222222222",
+                                          tokenId: "t", uploadToken: "noop_x") },
+            store: { placement },
+            localDevices: { [.init(local: "my-whoop", cloud: "whoop-MGB0000001")] })
+        let uploaded = try await sync.pushPending()
+        XCTAssertEqual(uploaded, 1)
+        let sent = PlacementStub.requestBodies.map { (try? JSONSerialization.jsonObject(with: $0)) as? [String: Any] }
+        XCTAssertEqual(sent.map { $0?["device_id"] as? String }, ["whoop-MGB0000001", "my-whoop"])
+        XCTAssertTrue(try placement.pendingChanges().isEmpty)
+        // A 409 for the local id too stays unsynced (retried later), never dropped.
+        PlacementStub.statusQueue = [409, 409]
+        try placement.setCurrent(.wrist, deviceId: "my-whoop", at: day().addingTimeInterval(3600))
+        do {
+            _ = try await sync.pushPending()
+            XCTFail("expected serverRejected")
+        } catch PlacementSyncError.serverRejected {
+        }
+        XCTAssertEqual(try placement.pendingChanges().count, 1)
+        PlacementStub.statusQueue = []
     }
 
     func testPushFailureLeavesRowsUnsynced() async throws {
