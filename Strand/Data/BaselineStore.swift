@@ -93,8 +93,14 @@ final class BaselineStore: ObservableObject {
     /// Explicit "set a new reference" days (frozen-anchor epochs). Device-family epochs are added at evaluate time.
     @Published private(set) var reanchorDays: [String] = []
     private let reanchorKey = "noop.baseline.reanchor.v1"
-    /// Memo for `watchdogPromptEvaluations`: the Watchdog tick asks every 20 s with identical inputs.
-    private var promptMemo: (key: String, evals: [LBEvaluation])?
+    /// Memo for `watchdogPromptEvaluations`: the Watchdog tick asks every 20 s. `key` is what the evaluations
+    /// are structurally built from; `liveSamples` is the live tape's resting-HR count, which grows every tick
+    /// and only nudges the live stub series, so it alone does not invalidate the memo until it is stale.
+    private var promptMemo: (key: String, liveSamples: Int, at: Date, evals: [LBEvaluation])?
+    /// How long a memo whose only change is the growing live tape is reused. A full re-evaluation of the 16
+    /// Watchdog series replays every day of history on the main actor (0.5-1 s on a phone in Debug, seconds
+    /// once there are months of nights); doing it every 20 s was the app's dominant periodic main-thread hang.
+    static let livePromptRefreshSeconds: TimeInterval = 300
 
     struct SeriesReadiness: Equatable {
         var show7: Bool
@@ -311,15 +317,20 @@ final class BaselineStore: ObservableObject {
     func watchdogPromptEvaluations(days: [DailyMetric]) -> [LBEvaluation] {
         let asOf = Self.livePromptAsOf(days: days)
         let key = "\(asOf)|\(days.count)|\(days.last?.day ?? "")|\(days.last?.restingHr ?? -1)|\(contextVersion)|"
-            + "\(dayLogsByDay.count)|\(dayTapeByDay[Self.dayKey(Date())]?.restHR.n ?? 0)|\(reanchorDays.count)"
-        if let memo = promptMemo, memo.key == key { return memo.evals }
+            + "\(dayLogsByDay.count)|\(reanchorDays.count)"
+        let liveSamples = dayTapeByDay[Self.dayKey(Date())]?.restHR.n ?? 0
+        let now = Date()
+        if let memo = promptMemo, memo.key == key,
+           memo.liveSamples == liveSamples || now.timeIntervalSince(memo.at) < Self.livePromptRefreshSeconds {
+            return memo.evals
+        }
         let request = LBTrialRequest(dayLogsByDay: dayLogsByDay, referenceEpochs: referenceEpochs)
         let evals = Self.watchdogSeries.map { series in
             LongitudinalBaseline.evaluate(asOf: asOf, series: series,
                                           observations: observations(from: days, series: series),
                                           trial: request)
         }
-        promptMemo = (key, evals)
+        promptMemo = (key, liveSamples, now, evals)
         return evals
     }
 
@@ -926,11 +937,8 @@ final class BaselineStore: ObservableObject {
     }
 
     static func dayKey(_ date: Date) -> String {
-        let f = DateFormatter()
-        f.locale = Locale(identifier: "en_US_POSIX")
-        f.timeZone = .current
-        f.dateFormat = "yyyy-MM-dd"
-        return f.string(from: date)
+        // The Watchdog tick asks for today's and yesterday's key every 20 s; one shared formatter, local zone.
+        Repository.localDayKey(date)
     }
 
     /// ~80 nights ending 2026-09-11: quiet longer usual, a late spike, and a raised last week.
@@ -1104,12 +1112,16 @@ enum BaselineOffPaint {
 }
 
 enum BaselinePlotScale {
-    static func date(fromISO day: String) -> Date {
+    private static let isoDayFormatter: DateFormatter = {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
         f.timeZone = TimeZone(secondsFromGMT: 0)
         f.dateFormat = "yyyy-MM-dd"
-        return f.date(from: day) ?? Date(timeIntervalSince1970: 0)
+        return f
+    }()
+
+    static func date(fromISO day: String) -> Date {
+        isoDayFormatter.date(from: day) ?? Date(timeIntervalSince1970: 0)
     }
 
     static func mediumDate(_ day: String) -> String {

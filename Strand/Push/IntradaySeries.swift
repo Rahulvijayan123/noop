@@ -534,12 +534,18 @@ public struct IntradaySeriesWindow: Equatable, Sendable {
             normalized = String(text[..<dot]) + "." + digits.padding(toLength: 3, withPad: "0", startingAt: 0)
                 + String(text[end...])
         }
-        let formatter = ISO8601DateFormatter()
-        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let date = formatter.date(from: normalized) { return date }
-        formatter.formatOptions = [.withInternetDateTime]
-        return formatter.date(from: normalized)
+        if let date = isoWithFraction.date(from: normalized) { return date }
+        return isoPlain.date(from: normalized)
     }
+
+    /// Built once: this runs for every point of every window, and creating and configuring an
+    /// `ISO8601DateFormatter` per call is the cost that showed up in the hang traces. Both are only read.
+    private static let isoWithFraction: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime, .withFractionalSeconds]; return f
+    }()
+    private static let isoPlain: ISO8601DateFormatter = {
+        let f = ISO8601DateFormatter(); f.formatOptions = [.withInternetDateTime]; return f
+    }()
 }
 
 /// Which stretch of time a screen asks the server for.

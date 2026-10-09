@@ -1191,7 +1191,24 @@ public enum LongitudinalBaseline {
         let d = doy - (153 * mp + 2) / 5 + 1
         let m = mp < 10 ? mp + 3 : mp - 9
         let yy = m <= 2 ? y + 1 : y
-        return String(format: "%04d-%02d-%02d", yy, m, d)
+        return isoString(year: yy, month: m, day: d)
+    }
+
+    /// `String(format: "%04d-%02d-%02d")` without the format parser. The baseline replay names a day for every
+    /// epoch of every window of every scored day (`nightIsClean`, `habitMatches`, the missingness log), so this
+    /// ran hundreds of thousands of times per Watchdog tick; a `String(format:)` call costs microseconds, and
+    /// in a Debug build tens of them. Years outside 0...9999 (never a real night) keep the formatter's output.
+    static func isoString(year: Int, month: Int, day: Int) -> String {
+        guard (0...9999).contains(year), (1...12).contains(month), (1...31).contains(day) else {
+            return String(format: "%04d-%02d-%02d", year, month, day)
+        }
+        let zero = UInt8(ascii: "0")
+        let bytes: [UInt8] = [
+            zero + UInt8(year / 1000), zero + UInt8(year / 100 % 10), zero + UInt8(year / 10 % 10), zero + UInt8(year % 10),
+            UInt8(ascii: "-"), zero + UInt8(month / 10), zero + UInt8(month % 10),
+            UInt8(ascii: "-"), zero + UInt8(day / 10), zero + UInt8(day % 10),
+        ]
+        return String(decoding: bytes, as: UTF8.self)
     }
 
     /// LABEL: inclusive window length
