@@ -2,7 +2,7 @@
 
 One rule, implemented twice: on the phone in `Packages/StrandAnalytics/Sources/StrandAnalytics/ExerciseSession.swift`
 (the Watchdog and the Layer 1 context strata) and on the server in the measurement-context minute builder
-(`supabase/migrations/2026100910xxxx_measurement_context_minutes.sql`). Both are pinned by the shared fixture
+(`supabase/migrations/2026100913xxxx_measurement_context_minutes.sql`). Both are pinned by the shared fixture
 `contracts/reference/exercise-session-1.json`.
 
 ## Why
