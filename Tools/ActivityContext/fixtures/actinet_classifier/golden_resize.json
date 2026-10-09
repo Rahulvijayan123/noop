@@ -1,0 +1,28 @@
+{
+ "actipy_index_unchanged": true,
+ "actipy_info": {
+  "CalibErrorAfter(mg)": null,
+  "CalibErrorBefore(mg)": null,
+  "CalibNumSamples": 2,
+  "CalibOK": 0,
+  "Covers24hOK": 0,
+  "NonwearTime(days)": 0.0,
+  "NumInterrupts": 0,
+  "NumNonwearEpisodes": 0,
+  "WearTime(days)": 0.0012730324074074074
+ },
+ "actipy_values_unchanged": true,
+ "bin_starts_s": [
+  0.0,
+  30.0,
+  60.0,
+  90.0
+ ],
+ "infer_freq": "10L",
+ "n_seconds": 110,
+ "resample_skipped": true,
+ "seed": 7,
+ "t0": 1760000040,
+ "tail_bin_valid_in_upstream": true,
+ "window_dtype": "float64"
+}

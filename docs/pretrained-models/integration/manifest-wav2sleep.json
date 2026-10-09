@@ -1,0 +1,98 @@
+{
+ "_fragment": "REPLACES the existing entries[] item with id \"wav2sleep\" in Tools/InferenceWorker/models/manifest.json (same position, no new entry). Phase A = apply now. Phase B = the delta to apply together with the registration hunk in wav2sleep.md, after Spec 01's anchored PPG transport lands. Remove this _fragment and _phase_b key when merging. Re-checked against Spec 01 783ac84da on 2026-10-08: every artifact declares source {kind: url}; artifact-level required_for_readiness removed (Spec 01 gates readiness on the entry only).",
+ "id": "wav2sleep",
+ "kind": "model_checkpoint",
+ "name": "wav2sleep PPG-only (shadow adapter)",
+ "revision": "278e30463c8149c4e6899b8784da492fec695bd9",
+ "revision_date": "2026-07-16",
+ "revision_kind": "code_commit",
+ "code_url": "https://github.com/joncarter1/wav2sleep",
+ "code_revision": "278e30463c8149c4e6899b8784da492fec695bd9",
+ "code_revision_date": "2026-07-16",
+ "code_content_identical_since": "8b2a7b1ca5caab4fe7efcf75faa0a125f5ea24c4",
+ "source_url": "https://huggingface.co/joncarter/wav2sleep",
+ "weights_revision": "18fc32f095f10c1f7a91a56298e7598d02c58529",
+ "weights_revision_date": "2026-02-02",
+ "weights_revision_note": "278e3046 is the GitHub code commit, not a Hugging Face revision (its resolve URL returns 404). The pinned bytes are served by HF commit 18fc32f0 (first commit carrying them) and by HEAD 8b6e46ab (README-only change). The earlier HF upload b0d9856c is a different checkpoint (11,899,656 bytes, sha256 51605afc...) and is not used.",
+ "license": "MIT",
+ "license_evidence": "code: repository LICENSE (MIT, (c) 2026 Jonathan Carter, sha256 4d7f2e5bbae4970024ccbad782883bfd4d3c8241ff3d2e3a07051fb7082f1fa8, copied to frwhoop_sleep/wav2sleep_vendored/LICENSE); weights: Hugging Face model card license: mit",
+ "rights_verdict": "clear",
+ "status": "blocked_input",
+ "status_reason": "adapter implemented (wav2sleep.ppg-only.v1, shadow-only, disabled by default) and bit-identical to the official code on synthetic fixtures at 24 and 25 Hz with max_length_hours equal to the run length (max abs probability diff 0, argmax 100%; against the official 10-h default padding only 395/960 and 398/960 agree, deviation D1); blocked because no anchored, contiguous overnight PPG reaches the server (Spec 01 transport not landed, no overnight raw-optical capture) and there is no WHOOP sleep-stage evaluation set",
+ "provider_id": "wav2sleep.ppg-only.v1",
+ "wired": false,
+ "release_mode": "shadow",
+ "input_contract": "PPG only: input.ppg.segments[] absolute ADC counts at a declared native rate of 25 Hz (anchored v26) or 24 Hz, with the Spec 01 members run_id, config.identity, config.known=true, config.stable=true and clock.packet_timing_verified=true with clock.samples_per_second equal to ppg.native_rate_hz; segments joined only within one run_id and only when contiguous; each run is one recording resampled to the pinned 1024-per-30-s grid (34.133 Hz, linear interpolation, no padding) and z-scored over the run; ECG/ABD/THX absent; PPG-derived respiration/RSA refused as ABD/THX; window <= 10 h (1200 epochs), >= 4 h scored from runs >= 2 h, >= 75% coverage; output: per-30-s epoch softmax probabilities + logits (wake/light/deep/rem) with mask, mask reason and native-sample provenance, argmax label as a separate field",
+ "label_space": "wav2sleep/wake-light-deep-rem",
+ "class_order": [
+  "wake",
+  "light",
+  "deep",
+  "rem"
+ ],
+ "vendored_code": {
+  "path": "Tools/InferenceWorker/src/frwhoop_inference/frwhoop_sleep/wav2sleep_vendored",
+  "upstream": "https://github.com/joncarter1/wav2sleep",
+  "pinned_commit": "278e30463c8149c4e6899b8784da492fec695bd9",
+  "record": "wav2sleep_vendored/UPSTREAM_DIFF.json (per-file upstream/vendored sha256 + unified diff) and PROVENANCE.md",
+  "files": {
+   "settings.py": "verbatim",
+   "models/wav2sleep.py": "verbatim",
+   "models/blocks.py": "verbatim",
+   "models/utils.py": "verbatim",
+   "data/preprocessing.py": "verbatim (test oracle)",
+   "data/utils.py": "extract (no pyarrow)",
+   "data/zscore.py": "extract of ParquetDataset._zscore_normalize"
+  },
+  "new_dependencies": []
+ },
+ "artifacts": [
+  {
+   "name": "state_dict.pth",
+   "path": "wav2sleep/278e3046/state_dict.pth",
+   "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/state_dict.pth",
+   "source": {
+    "kind": "url"
+   },
+   "size_bytes": 9666562,
+   "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc",
+   "verify_at_startup": true,
+   "note": "torch.load(weights_only=True) after size+sha256 verification; strict state_dict load (177 float32 tensors, 2,391,172 parameters)"
+  },
+  {
+   "name": "config.yaml",
+   "path": "wav2sleep/278e3046/config.yaml",
+   "url": "https://huggingface.co/joncarter/wav2sleep/resolve/18fc32f095f10c1f7a91a56298e7598d02c58529/config.yaml",
+   "source": {
+    "kind": "url"
+   },
+   "size_bytes": 749,
+   "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509",
+   "git_blob": "f5a5bcc1eaca8c35f36eccc3f7913f9e1b801353",
+   "verify_at_startup": true,
+   "note": "yaml.safe_load + allowlisted constructor (no hydra); the same blob is checkpoints/wav2sleep/config.yaml in the code repository at 8b2a7b1c"
+  }
+ ],
+ "required_for_readiness": false,
+ "accuracy_label": "unverified_accuracy_shadow_only",
+ "loader": "vendored model code + yaml.safe_load allowlisted builder + torch.load(weights_only=True) + load_state_dict(strict=True); eval, no grad",
+ "runtime_note": "optional shadow lane, disabled by default (FRWHOOP_WAV2SLEEP_SHADOW_ENABLED exactly \"1\"); a disabled lane reports ready and never gates process readiness; enabled without verified artifacts it reports not ready (blocked_artifact); one forward per process, thread cap FRWHOOP_WAV2SLEEP_THREADS (default 1, max 4); measured on Apple M4 Max for a 10-h night: ~0.8 CPU-s at 1 thread, peak RSS ~1.3 GB (forward activations ~0.9 GB); not measured on the Droplet",
+ "consumer": "sleep_stage_shadow_comparison (proposed, docs/pretrained-models/integration/wav2sleep.md); never canonical stages, never apnea events, never user-facing",
+ "activation_gates": [
+  "Spec 01 anchored PPG transport landed and deployed (anchor, run_id, config.identity/known, verified clock)",
+  "contiguous overnight raw-optical PPG capture",
+  "WHOOP optical polarity and wrist-vs-finger domain characterised (the checkpoint is polarity-sensitive)",
+  "a WHOOP sleep-stage evaluation set with reference stages",
+  "CPU/memory measured on the 4 vCPU / 8 GB Droplet in the Spec 01 bounded worker process",
+  "shadow comparison store + job, registration, identity and manifest fragments applied"
+ ],
+ "_phase_b": {
+  "when": "together with the registration hunk (providers/__init__.py) after Spec 01 lands",
+  "set": {
+   "wired": true
+  },
+  "keep": {
+   "status": "blocked_input. Spec 01's materializer stages only wired entries with status eligible or shadow_eligible (artifacts.entry_stage_decision), and test_manifest.py pins staged == 7, so wired+blocked_input stages nothing. Move to shadow_eligible only after a real anchored overnight night passes the gates, and update the staged count then."
+  }
+ }
+}

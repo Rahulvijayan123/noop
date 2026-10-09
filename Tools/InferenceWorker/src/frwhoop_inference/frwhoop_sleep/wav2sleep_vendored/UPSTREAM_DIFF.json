@@ -1,0 +1,147 @@
+{
+ "content_identical_since": {
+  "commit": "8b2a7b1ca5caab4fe7efcf75faa0a125f5ea24c4",
+  "date": "2026-02-02T13:43:45Z",
+  "evidence": "git blob ids of every vendored upstream file are identical at 8b2a7b1c and 278e3046; between them the only src/ change is api.py device resolution ('auto' -> cuda/cpu), which is not vendored"
+ },
+ "files": {
+  "data/__init__.py": {
+   "header_lines": 12,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+   "upstream_path": "src/wav2sleep/data/__init__.py",
+   "upstream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "vendored_sha256": "511a1d3d5074e1f6efa4fcd7f3fd64dae98e077d3b8f3c1210c8ee7b72eaf733"
+  },
+  "data/preprocessing.py": {
+   "header_lines": 13,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "2f4d0496a84f5c5de548d6dff3cd741dd6b7aa5e",
+   "upstream_path": "src/wav2sleep/data/preprocessing.py",
+   "upstream_sha256": "cd8060c95e0db2e8fe673bceb5004697c2376ada3da835f7adfb700e49cf7295",
+   "vendored_sha256": "28b43087590633967c45467ec635d85507c7a13712244f2fe0e2c2a639df5d3d"
+  },
+  "data/utils.py": {
+   "header_lines": 15,
+   "kind": "extract",
+   "removed": [
+    {
+     "kind": "import",
+     "line": "import os"
+    },
+    {
+     "kind": "import",
+     "line": "from glob import glob"
+    },
+    {
+     "kind": "import",
+     "line": "import pyarrow.parquet as pq"
+    },
+    {
+     "kind": "function",
+     "name": "get_parquet_cols"
+    },
+    {
+     "kind": "function",
+     "name": "get_parquet_fps"
+    }
+   ],
+   "retained": [
+    "convert_int_stage",
+    "convert_str_stage",
+    "interpolate_index"
+   ],
+   "unified_diff": "--- upstream/src/wav2sleep/data/utils.py\n+++ vendored/data/utils.py\n@@ -1,27 +1,6 @@\n-import os\n-from glob import glob\n \n import numpy as np\n import pandas as pd\n-import pyarrow.parquet as pq\n-\n-\n-def get_parquet_cols(fp: str) -> set[str]:\n-    \"\"\"Get list of column names from parquet file.\"\"\"\n-    cols = pq.read_schema(fp, memory_map=True).names\n-    if '__index_level_0__' in cols:\n-        cols.remove('__index_level_0__')\n-    return cols\n-\n-\n-def get_parquet_fps(folder: str, recursive: bool = False) -> list[str]:\n-    \"\"\"Return parquet files in a folder.\"\"\"\n-    if not os.path.exists(folder):\n-        raise FileNotFoundError(folder)\n-    if recursive:\n-        return glob(f'{folder}/**/*.parquet', recursive=True)\n-    else:\n-        return glob(f'{folder}/*.parquet')\n \n \n def convert_int_stage(stage: int | str):\n",
+   "upstream_git_blob": "590486ef91aa574c9560c51413442db2e8f90f00",
+   "upstream_path": "src/wav2sleep/data/utils.py",
+   "upstream_sha256": "0901c75ed31a5ab00f1a1e50808765e7d461025fad503a6b4fdb1340ff5c8c7c",
+   "vendored_sha256": "3eff477a84b9b7c71761e1b2c887941bf303b562d9d8ebd97146628c9206357a"
+  },
+  "data/zscore.py": {
+   "header_lines": 16,
+   "kind": "extract",
+   "retained": [
+    "ParquetDataset._zscore_normalize -> _zscore_normalize"
+   ],
+   "transform": "removed the @staticmethod decorator line and one 4-space indent level; added the three imports the method body uses (typing.Dict, torch, torch.Tensor)",
+   "unified_diff": "--- upstream/src/wav2sleep/data/dataset.py\n+++ vendored/data/zscore.py\n@@ -1,199 +1,18 @@\n-\"\"\"PyTorch dataset.\"\"\"\n-\n-import logging\n from typing import Dict\n \n-import pandas as pd\n import torch\n from torch import Tensor\n-from torch.utils.data import Dataset\n-\n-from ..settings import (\n-    CAUSAL_NORM_BASELINE_TAU_SECONDS,\n-    CAUSAL_NORM_MIN_SIGMA,\n-    CAUSAL_NORM_TAU_SECONDS,\n-    COLS_TO_SAMPLES_PER_EPOCH,\n-    INTEGER_LABEL_MAPS,\n-    LABEL,\n-    NORM_OUTLIER_THRESHOLD,\n-)\n-from .normalization import causal_rolling_normalize\n-\n-logger = logging.getLogger(__name__)\n \n \n-class ParquetDataset(Dataset):\n-    \"\"\"Subclass of torch.utils.data.Dataset.\n-\n-    The methods implemented are:\n-    1. __get_item__, which is used by the PyTorch dataloader to get samples\n-    2. __len__, which tells the dataloader how many samples there are.\n-\n-    See here for more info on custom PyTorch data loading:\n-    https://pytorch.org/tutorials/beginner/data_loading_tutorial.html\n-    \"\"\"\n-\n-    def __init__(\n-        self,\n-        parquet_fps: list[str],\n-        columns: list[str],\n-        num_classes: int = 4,\n-        require_labels: bool = True,\n-        max_length_hours: int | None = None,\n-        causal: bool = False,\n-    ):\n-        \"\"\"\n-        Class for creating a time-series sleep dataset for deep learning.\n-\n-        Args:\n-            parquet_fps: List of parquet filepaths.\n-            columns: Subset of columns to use from the parquet files.\n-            num_classes: Number of sleep stage classes to use.\n-            require_labels: If True, raise an error if no labels are found in the parquet files.\n-            max_length_hours: Maximum recording length in hours (truncates longer recordings).\n-            causal: If True, apply causal normalization using exponential moving average.\n-                If False, apply non-causal z-score normalization using global statistics.\n-\n-        Notes:\n-            Normalization behavior:\n-            - causal=True: Uses exponential moving average (EMA) normalization with parameters\n-              from settings.py (tau=15min, outlier_threshold=4.0). This is suitable for\n-              real-time or streaming applications where future information must not leak.\n-            - causal=False: Uses standard z-score normalization with global mean/std computed\n-              across the entire recording. This gives better normalization but uses future info.\n-        \"\"\"\n-        self.files = parquet_fps\n-        self.columns = columns\n-        for col in self.columns:\n-            if col not in COLS_TO_SAMPLES_PER_EPOCH:\n-                raise ValueError(f'Column {col} unrecognised.')\n-        self.map = INTEGER_LABEL_MAPS[num_classes]\n-        self.require_labels = require_labels\n-        self.max_length_epochs = 1_000_000 if max_length_hours is None else max_length_hours * 60 * 2\n-        self.causal = causal\n-\n-    @staticmethod\n-    def _zscore_normalize(signals: Dict[str, Tensor]) -> Dict[str, Tensor]:\n-        out: Dict[str, Tensor] = {}\n-        eps = 1e-6\n-        for k, x in signals.items():\n-            if x.numel() == 0 or not torch.isfinite(x).all():\n-                out[k] = x\n-                continue\n-            mu = torch.mean(x)\n-            std = torch.std(x)\n-            std = std if std > eps else torch.tensor(eps, dtype=x.dtype, device=x.device)\n-            out[k] = (x - mu) / std\n-        return out\n-\n-    def _causal_normalize(self, signals: Dict[str, Tensor]) -> Dict[str, Tensor]:\n-        \"\"\"Apply causal rolling normalization to signals using EMA.\n-\n-        This normalization is causal (online), meaning it only uses past samples to compute\n-        statistics at each time point. This prevents future information leakage and makes\n-        it suitable for real-time or streaming applications.\n-\n-        Args:\n-            signals: Dictionary mapping signal names to 1D tensors\n-\n-        Returns:\n-            Dictionary with same keys as input, containing normalized signals\n-        \"\"\"\n-\n-        out: Dict[str, Tensor] = {}\n-        for k, x in signals.items():\n-            # Skip invalid/missing signals\n-            if x.numel() == 0 or not torch.isfinite(x).all() or torch.isinf(x).any():\n-                out[k] = x\n-                continue\n-\n-            # Get signal-specific sampling frequency\n-            if k not in COLS_TO_SAMPLES_PER_EPOCH:\n-                logger.warning(f'Unknown signal {k}, skipping causal normalization')\n-                out[k] = x\n-                continue\n-\n-            samples_per_epoch = COLS_TO_SAMPLES_PER_EPOCH[k]\n-            sampling_freq = samples_per_epoch / 30.0\n-\n-            # Apply causal normalization with separate tau for baseline and variance\n-            # This handles signals with baseline drift (like CFS/CCSHS PPG) while\n-            # keeping variance estimation stable. min_sigma prevents NaN from flat epochs.\n-            out[k] = causal_rolling_normalize(\n-                signal=x,\n-                sampling_freq=sampling_freq,\n-                tau_seconds=CAUSAL_NORM_TAU_SECONDS,\n-                outlier_threshold_sigma=NORM_OUTLIER_THRESHOLD,\n-                baseline_tau_seconds=CAUSAL_NORM_BASELINE_TAU_SECONDS,\n-                min_sigma=CAUSAL_NORM_MIN_SIGMA,\n-            )\n-        return out\n-\n-    def __getitem__(self, idx) -> tuple[dict[str, Tensor], Tensor]:\n-        \"\"\"Return a sample of data for neural network training/evaluation.\n-\n-        Samples are turned into training batches automatically by the torch.Dataloader class.\n-        \"\"\"\n-        fp = self.files[idx]\n-        df = try_read_parquet(fp)\n-        signal_dict = {}\n-        found_col = False\n-        cols_to_pad = []\n-        prev_inferred_recording_length_epochs = None\n-        for col in self.columns:\n-            if col in df.columns:\n-                found_col = True\n-                x_T = torch.from_numpy(df[col].dropna().values).float()\n-                if torch.isinf(x_T).any():\n-                    raise ValueError(f'{fp=} has inf. values for {col=}')\n-                # Check that signals have the same effective length.\n-                inferred_recording_length_epochs = x_T.shape[0] // COLS_TO_SAMPLES_PER_EPOCH[col]\n-                if prev_inferred_recording_length_epochs is None:\n-                    prev_inferred_recording_length_epochs = inferred_recording_length_epochs\n-                elif prev_inferred_recording_length_epochs != inferred_recording_length_epochs:\n-                    raise ValueError(\n-                        f'{prev_inferred_recording_length_epochs=} != {inferred_recording_length_epochs=} for {fp=}'\n-                    )\n-                # Truncate as desired.\n-                signal_dict[col] = x_T[\n-                    : COLS_TO_SAMPLES_PER_EPOCH[col] * min(inferred_recording_length_epochs, self.max_length_epochs)\n-                ]\n-            else:\n-                cols_to_pad.append(col)\n-        if not found_col:\n-            raise ValueError(f'No relevant columns found in {fp=}. {self.columns=}')\n-        # Apply normalization based on causal mode.\n-        if self.causal:\n-            signal_dict = self._causal_normalize(signal_dict)\n-        else:\n-            signal_dict = self._zscore_normalize(signal_dict)\n-        for col in cols_to_pad:\n-            # Use recording length inferred from other signals to pad with correct length.\n-            sig_len = COLS_TO_SAMPLES_PER_EPOCH[col] * min(inferred_recording_length_epochs, self.max_length_epochs)\n-            signal_dict[col] = torch.full((sig_len,), float('-inf')).float()\n-        if self.require_labels or LABEL in df.columns:\n-            labels = df[LABEL].dropna().map(self.map)\n-            labels = torch.from_numpy(labels.fillna(-1).values.T).float()\n-            if labels.shape[0] != inferred_recording_length_epochs:\n-                raise ValueError(f'{labels.shape=} != {inferred_recording_length_epochs=} for {fp=}')\n-            # Truncate as desired.\n-            labels = labels[: self.max_length_epochs]\n-        else:\n-            labels = torch.full((inferred_recording_length_epochs,), -1).float()[: self.max_length_epochs]\n-        return signal_dict, labels\n-\n-    def __len__(self) -> int:\n-        \"\"\"Length of dataset.\"\"\"\n-        return len(self.files)\n-\n-\n-def try_read_parquet(fp: str, columns: list[str] | None = None, max_retries: int = 3):\n-    \"\"\"Read parquet with retries for flaky filesystems.\"\"\"\n-    try:\n-        return pd.read_parquet(fp, columns=columns)\n-    except Exception as e:\n-        logger.error(f'Failed to read parquet {fp=} - {e}')\n-        if max_retries > 0:\n-            return try_read_parquet(fp, columns=columns, max_retries=max_retries - 1)\n-        else:\n-            raise ValueError(f'Failed to read parquet {fp=}')\n+def _zscore_normalize(signals: Dict[str, Tensor]) -> Dict[str, Tensor]:\n+    out: Dict[str, Tensor] = {}\n+    eps = 1e-6\n+    for k, x in signals.items():\n+        if x.numel() == 0 or not torch.isfinite(x).all():\n+            out[k] = x\n+            continue\n+        mu = torch.mean(x)\n+        std = torch.std(x)\n+        std = std if std > eps else torch.tensor(eps, dtype=x.dtype, device=x.device)\n+        out[k] = (x - mu) / std\n+    return out\n",
+   "upstream_git_blob": "14a7ea6aa4d891757409277bd834387465bd75f3",
+   "upstream_method_lines": [
+    75,
+    87
+   ],
+   "upstream_method_text_sha256": "b628c26c2ecb8709000825a9891e2358ba42861946cbe76a4b66ba4d972cbb83",
+   "upstream_path": "src/wav2sleep/data/dataset.py",
+   "upstream_sha256": "026c6834a8ae80192a323e1caa85bbc354e16d96ee78ee836937f0c37d86f8ae",
+   "vendored_sha256": "6970d03d2a668d8646c119d8e8f0026f02dde3520c35bbcdab90d3df1bb9fa01"
+  },
+  "models/__init__.py": {
+   "header_lines": 12,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+   "upstream_path": "src/wav2sleep/models/__init__.py",
+   "upstream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+   "vendored_sha256": "506e3d476c08e11c433fc04fd085eb404fa05bc6517726fc414a447932108e57"
+  },
+  "models/blocks.py": {
+   "header_lines": 13,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "b8c36b0c9715b7aa7be7728b92d795da016f89dd",
+   "upstream_path": "src/wav2sleep/models/blocks.py",
+   "upstream_sha256": "ee542b3ff394071cde2d3fb542dadb3b204c8f31ed557d9a298e0743bf0ee5ea",
+   "vendored_sha256": "ae712d5ad3b1ac26ca0aacd4c65b579a9782d049e66d1157c05160895d3da776"
+  },
+  "models/utils.py": {
+   "header_lines": 13,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "c7d9d73ca573112c5f944e1c45d385dd64065662",
+   "upstream_path": "src/wav2sleep/models/utils.py",
+   "upstream_sha256": "8582074e870b30a5362fa6fd5533284a6a203b4a98b9065b79289112ef926082",
+   "vendored_sha256": "9f016a7403eee806552a339c592c8ac9f928f2f2d6706e7ce5760966643521a5"
+  },
+  "models/wav2sleep.py": {
+   "header_lines": 13,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "a2d8de54c43bf859cb60359c104da337374a3f01",
+   "upstream_path": "src/wav2sleep/models/wav2sleep.py",
+   "upstream_sha256": "800347f169cf05cbdf2bc135453fe9b86b9505ee4400ff1d5fa134af2ea45247",
+   "vendored_sha256": "f5df8375d269ceaf3e2eca21ebad97903df3dec3fa2f9499ac230de1d1789bbc"
+  },
+  "settings.py": {
+   "header_lines": 13,
+   "kind": "verbatim",
+   "unified_diff": "",
+   "upstream_git_blob": "7fe5d875f8116583fb5af15344f95b24db335e9e",
+   "upstream_path": "src/wav2sleep/settings.py",
+   "upstream_sha256": "69c6e4d78a283a6bcf066b9c877ea2a13411be857a48d38042de434e459b28e6",
+   "vendored_sha256": "09f6cf1c58473c7bc6182f5c47017de6381b72cf12cec104a1ddad2ea457b624"
+  }
+ },
+ "generated_by": "_build-scratch/spec03-physio/vendor_wav2sleep.py (outside the repo)",
+ "license": {
+  "copyright": "Copyright (c) 2026 Jonathan Carter",
+  "file": "LICENSE",
+  "model_card_license": "mit (Hugging Face cardData.license for joncarter/wav2sleep, API metadata)",
+  "sha256": "4d7f2e5bbae4970024ccbad782883bfd4d3c8241ff3d2e3a07051fb7082f1fa8",
+  "spdx": "MIT",
+  "upstream_path": "LICENSE"
+ },
+ "not_vendored": {
+  "src/wav2sleep/api.py": "hydra/omegaconf/tqdm/pyedflib loader and DataLoader wrapper; replaced by the adapter's explicit allowlisted config builder + strict state_dict load",
+  "src/wav2sleep/data/dataset.py": "only _zscore_normalize is extracted (data/zscore.py)",
+  "src/wav2sleep/data/edf.py": "EDF reader (pyedflib); WHOOP input is not EDF",
+  "src/wav2sleep/data/normalization.py": "causal EMA normalization (numba); the released checkpoint is non-causal (signal_encoders.causal=false)",
+  "src/wav2sleep/hub.py": "Hugging Face download helper; the sidecar never downloads at inference",
+  "src/wav2sleep/models/ppgnet.py": "baseline model, not the released checkpoint",
+  "src/wav2sleep/trainer/": "training code; no training is performed"
+ },
+ "pinned_commit": "278e30463c8149c4e6899b8784da492fec695bd9",
+ "pinned_commit_date": "2026-07-16T18:25:04+09:00",
+ "upstream": "https://github.com/joncarter1/wav2sleep"
+}
