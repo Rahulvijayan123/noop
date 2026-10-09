@@ -17,8 +17,9 @@
 --     window's reason is the withheld row's (model 'none'), else the one reason every model row shares (e.g.
 --     learning), else null. context.kind is the service's bucket (rest / sleep). context.mix: shares of the window's
 --     minutes (of its full length, so missing minutes count as unknown) from measurement_context_minutes:
---     session / recovery / no_session / unknown (rule exercise-session-1 phase; unknown = no motion evidence or no
---     minute row), asleep, off_wrist (incl. charging), the
+--     session / recovery / active / no_session / unknown (rule exercise-session-2 phase; active = a period that met
+--     the session conditions but is not confirmed; unknown = no motion evidence or no minute row), asleep,
+--     off_wrist (incl. charging), the
 --     activity classes copied there, and the quality classes; mix_basis measurement_context_minutes, or none (and
 --     mix null) when no minute row exists yet.
 -- Read only; nothing is written. Existing fields of the route are unchanged (the windows are an opt-in member).
@@ -76,6 +77,7 @@ begin
            count(mc.minute_start) as n,
            count(*) filter (where mc.session_phase = 'session') as session,
            count(*) filter (where mc.session_phase = 'recovery') as recovery,
+           count(*) filter (where mc.session_phase = 'active') as active,
            count(*) filter (where mc.session_phase = 'none') as phase_none,
            count(*) filter (where mc.sleep_state = 'asleep') as asleep,
            count(*) filter (where mc.wear_state in ('off_wrist', 'charging')) as off_wrist,
@@ -106,8 +108,10 @@ begin
              'mix', case when x.n = 0 then null else jsonb_build_object(
                'session', round((x.session / x.span_min)::numeric, 3),
                'recovery', round((x.recovery / x.span_min)::numeric, 3),
+               'active', round((x.active / x.span_min)::numeric, 3),
                'no_session', round((x.phase_none / x.span_min)::numeric, 3),
-               'unknown', round((greatest(0, x.span_min - x.session - x.recovery - x.phase_none) / x.span_min)::numeric, 3),
+               'unknown', round((greatest(0, x.span_min - x.session - x.recovery - x.active - x.phase_none)
+                                 / x.span_min)::numeric, 3),
                'asleep', round((x.asleep / x.span_min)::numeric, 3),
                'off_wrist', round((x.off_wrist / x.span_min)::numeric, 3),
                'activity', (select jsonb_object_agg(k, round((v::numeric / x.span_min::numeric), 3))

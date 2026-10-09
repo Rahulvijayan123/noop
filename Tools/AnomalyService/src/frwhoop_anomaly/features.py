@@ -9,9 +9,10 @@ the latest standard-HR contact state says "supported, not detected", 0 when dete
 {asleep, still, recovery, walking, active, off, unknown}: from dynAccel / steps / strap sleep state, refined by the
 server activity classifier's 30 s epochs (the CURRENT lineage, activity_context_epochs_current, confidence ≥ 0.6)
 only toward caution (an epoch never turns a minute with dynAccel ≥ 0.05 g or steps into still); then the
-steady-state rule. Movement evidence for rule exercise-session-1 (exercise_session.py): walk_frac (share of the
-minute's step samples the strap classed walk/run), ep_strong / ep_weak (confident epochs: walking/running/active
-or a logged exercise / other_movement). Missing is NaN, never 0.
+steady-state rule. Movement evidence for rule exercise-session-2 (exercise_session.py): walk_frac (share of the
+minute's step samples the strap classed walk/run), ep_strong (confident epochs: walking/running/active or a logged
+exercise). An other_movement epoch is not evidence (it covers gym and other awake minutes alike); it still refines a
+minute's context toward caution. Missing is NaN, never 0.
 """
 
 from __future__ import annotations
@@ -39,7 +40,7 @@ RECOVERY_AFTER_ACTIVE_MIN = 30
 RECOVERY_AFTER_WALKING_MIN = 10
 RECOVERY_SETTLE_MIN = 2
 EPOCH_MIN_CONFIDENCE = 0.6
-# Rule exercise-session-1 evidence thresholds (docs/context-watchdog/EXERCISE_SESSION.md).
+# Rule exercise-session-2 evidence thresholds (docs/context-watchdog/EXERCISE_SESSION.md).
 STRONG_DYN = 0.10
 WEAK_DYN = STILL_DYN
 WALK_FRAC_STRONG = 0.5
@@ -123,12 +124,12 @@ def epoch_context(minutes: np.ndarray, rows, min_conf: float = EPOCH_MIN_CONFIDE
   return out
 
 
-def epoch_evidence(minutes: np.ndarray, rows, min_conf: float = EPOCH_MIN_CONFIDENCE) -> tuple[np.ndarray, np.ndarray]:
-  """Per-minute movement evidence from confident epochs (rule exercise-session-1): strong when an epoch of the
-  minute is walking / running, exertion "active", or inside a logged exercise session; weak when it is
-  other_movement. NaN where no confident epoch covers the minute; off-wrist and asleep epochs are never evidence."""
+def epoch_evidence(minutes: np.ndarray, rows, min_conf: float = EPOCH_MIN_CONFIDENCE) -> np.ndarray:
+  """Per-minute strong movement evidence from confident epochs (rule exercise-session-2): 1 when an epoch of the
+  minute is walking / running, exertion "active", or inside a logged exercise session, else 0. NaN where no
+  confident epoch covers the minute; off-wrist and asleep epochs are never evidence. Epochs give no weak evidence:
+  other_movement covers 27 % of gym minutes and 29 % of other awake minutes (EXERCISE_SESSION.md)."""
   strong = np.full(len(minutes), np.nan)
-  weak = np.full(len(minutes), np.nan)
   index = {int(m): i for i, m in enumerate(minutes)}
   for r in rows:
     if r["conf"] is None or r["conf"] < min_conf:
@@ -137,14 +138,12 @@ def epoch_evidence(minutes: np.ndarray, rows, min_conf: float = EPOCH_MIN_CONFID
     if i is None:
       continue
     if r["wear_state"] == "off_wrist" or r["sleep_state"] == "asleep":
-      s = w = 0.0
+      s = 0.0
     else:
       s = float(r["motion_label"] in ("walking", "running") or r["exertion_context"] == "active"
                 or r.get("exercise_session") == "true")
-      w = float(r["motion_label"] == "other_movement")
     strong[i] = max(s, 0.0 if np.isnan(strong[i]) else strong[i])
-    weak[i] = max(w, 0.0 if np.isnan(weak[i]) else weak[i])
-  return strong, weak
+  return strong
 
 
 def base_context(dyn: np.ndarray, steps: np.ndarray, asleep: np.ndarray, wrist_off: np.ndarray,
@@ -303,10 +302,13 @@ def sleep_rest_reference(nights: list[tuple[str, float]] | None, day: str) -> fl
   return float(statistics.median(vals)) if vals else None
 
 
-# ---- rule exercise-session-1 over the minute frame ----------------------------------------------------------------
+# ---- rule exercise-session-2 over the minute frame ----------------------------------------------------------------
 
 EXERCISE = "exercise"
 EXERCISE_RECOVERY = "exercise_recovery"
+# A period that met the session conditions but is not confirmed (phase `active`): never rest, no recovery after it,
+# and no exercise label (it trains no exercise reference). Windows touching it are withheld as "activity".
+EXERCISE_ACTIVE = "exercise_active"
 PRE_REST_WINDOW_MIN = 120
 DEFAULT_REST_BPM = es.DEFAULT_REST_BPM
 
@@ -314,29 +316,33 @@ DEFAULT_REST_BPM = es.DEFAULT_REST_BPM
 def exertion_evidence(frame: MinuteFrame) -> tuple[np.ndarray, np.ndarray]:
   """Per-minute HR-free evidence (EXERCISE_SESSION.md): strong = walk/run step classes on ≥ half the minute's step
   samples, dynAccel ≥ 0.10 g, or a confident walking / running / active / logged-exercise epoch; weak = dynAccel
-  ≥ 0.05 g or an other_movement epoch. Off-wrist and asleep minutes are never evidence. A frame cached before
-  these channels existed has NaN there, which is no evidence (dynAccel still counts)."""
+  ≥ 0.05 g. Off-wrist and asleep minutes are never evidence. A frame cached before these channels existed has NaN
+  there, which is no evidence (dynAccel still counts). The `ep_weak` channel (other_movement epochs, rule -1) that a
+  frame cached before rule -2 still carries is not read."""
   n = len(frame.minutes)
   nan = np.full(n, np.nan)
   d = frame.data
-  dyn, walk = d.get("dyn", nan), d.get("walk_frac", nan)
-  eps, epw = d.get("ep_strong", nan), d.get("ep_weak", nan)
+  dyn, walk, eps = d.get("dyn", nan), d.get("walk_frac", nan), d.get("ep_strong", nan)
   with np.errstate(invalid="ignore"):
     ok = ~(np.nan_to_num(d.get("wrist_off", nan)) > 0) & ~(d.get("asleep", nan) == 1)
     strong = ok & ((walk >= WALK_FRAC_STRONG) | (dyn >= STRONG_DYN) | (eps == 1))
-    weak = ok & ((dyn >= WEAK_DYN) | (epw == 1))
+    weak = ok & (dyn >= WEAK_DYN)
   return strong, weak
 
 
 def with_sessions(frame: MinuteFrame, sleep_rest=None, live: bool = True) -> tuple[MinuteFrame, list[dict]]:
-  """The frame with rule exercise-session-1 applied: every minute of a session becomes EXERCISE and every minute of
-  its recovery EXERCISE_RECOVERY (off-wrist minutes stay "off"), so neither can count as rest or sleep. Returns the
-  new frame (data shared, context copied) and the sessions as unix spans.
+  """The frame with rule exercise-session-2 applied: every minute of a confirmed session becomes EXERCISE and every
+  minute of its recovery EXERCISE_RECOVERY; every minute of a period that met the session conditions but is not
+  confirmed becomes EXERCISE_ACTIVE, with no recovery after it (off-wrist minutes stay "off"). None of them can
+  count as rest or sleep, and only EXERCISE is exercise. Returns the new frame (data shared, context copied) and the
+  sessions as unix spans with `confirmed` / `confirmed_at` (unix, None when unconfirmed).
 
   Rest reference per period (EXERCISE_SESSION.md order; the server has no established awake-rest centre):
   `sleep_rest(unix)` + 10 (the nightly resting HR of the nights before), else the median HR of the still, awake
   minutes in the 2 h before the period, else 70 bpm. With `live`, a period still open at the frame's end (newest
-  evidence ≤ 10 min old) counts once conditions 1–3 hold, as on the phone; its duration is checked when it ends."""
+  evidence ≤ 10 min old) counts once conditions 1–3 hold, as on the phone; its duration is checked when it ends. An
+  open period covers the minutes up to the frame's end, confirmed or not (live opening is unchanged); it is
+  confirmed by its strong minutes so far (or inherited) and otherwise stays EXERCISE_ACTIVE."""
   n = len(frame.minutes)
   if n == 0:
     return frame, []
@@ -363,6 +369,13 @@ def with_sessions(frame: MinuteFrame, sleep_rest=None, live: bool = True) -> tup
 
   spans = [dict(s, open=False) for s in es.session_spans(hr, strong, weak, rest)]
   if live:
+    # The last period is still open while its newest evidence is at most MERGE_GAP_MIN minutes old. Unconfirmed, it
+    # covers the minutes up to now itself (it has no recovery to cover them).
+    for s in spans[-1:]:
+      if size - 1 - s["b"] <= es.MERGE_GAP_MIN:
+        s["open"] = True
+        if not s["confirmed"]:
+          s.update(b=size - 1, end=size)
     ev = es.anchored(strong, weak)
     tail = es.periods(ev)[-1:] if any(ev) else []
     for a, b in tail:
@@ -374,17 +387,24 @@ def with_sessions(frame: MinuteFrame, sleep_rest=None, live: bool = True) -> tup
         n_strong = sum(strong[a:b + 1])
         load = sum(1 for i in range(a, b + 1) if hr[i] is not None and hr[i] >= r + es.LOAD_DELTA_BPM)
         if dense and n_strong >= es.MIN_STRONG and load >= es.MIN_LOAD_MIN:
-          spans.append({"a": a, "b": size - 1, "end": size, "pre": None, "rest": r, "open": True})
-  phase = np.zeros(size, dtype=np.int8)           # 0 none, 1 session, 2 recovery
+          last_confirmed = max((s["b"] for s in spans if s["confirmed"]), default=None)
+          at = es.confirmation(a, b, strong, last_confirmed)
+          spans.append({"a": a, "b": size - 1, "end": size, "pre": None, "rest": r, "open": True,
+                        "confirmed": at is not None, "confirmed_at": at})
+  phase = np.zeros(size, dtype=np.int8)           # 0 none, 1 session, 2 recovery, 3 active (unconfirmed)
   for s in spans:
-    phase[s["b"] + 1:s["end"]] = np.where(phase[s["b"] + 1:s["end"]] == 0, 2, phase[s["b"] + 1:s["end"]])
-    phase[s["a"]:s["b"] + 1] = 1
+    if s["confirmed"]:
+      phase[s["b"] + 1:s["end"]] = np.where(phase[s["b"] + 1:s["end"]] == 0, 2, phase[s["b"] + 1:s["end"]])
+    phase[s["a"]:s["b"] + 1] = 1 if s["confirmed"] else 3
   ctx = ctx_f.copy()
   p = phase[pos]
   ctx[(p == 1) & (ctx_f != "off")] = EXERCISE
   ctx[(p == 2) & (ctx_f != "off")] = EXERCISE_RECOVERY
+  ctx[(p == 3) & (ctx_f != "off")] = EXERCISE_ACTIVE
   out = [{"start": t0 + s["a"] * 60, "end": t0 + s["b"] * 60, "recovery_end": t0 + s["end"] * 60,
-          "open": s["open"], "rest_reference": round(float(s["rest"]), 1),
+          "open": s["open"], "confirmed": bool(s["confirmed"]),
+          "confirmed_at": None if s["confirmed_at"] is None else t0 + s["confirmed_at"] * 60,
+          "rest_reference": round(float(s["rest"]), 1),
           "pre_reference": None if s["pre"] is None else round(float(s["pre"]), 1)} for s in spans]
   return MinuteFrame(minutes=frame.minutes, data=frame.data, context=ctx, family=frame.family,
                      counters=dict(frame.counters)), out
@@ -558,7 +578,7 @@ def load(db, user_id: str, device_id: str, lo: int, hi: int) -> MinuteFrame:
     moved = (np.isfinite(dyn) & (dyn >= STILL_DYN)) | (np.isfinite(steps) & (steps > 0))
   counters["epoch_restful_refused"] = int(sum(1 for i, c in enumerate(epoch_ctx) if c in RESTFUL and moved[i]))
   context = steady_state(merged)
-  ep_strong, ep_weak = epoch_evidence(minutes, epoch_rows)
+  ep_strong = epoch_evidence(minutes, epoch_rows)
 
   data = {
     "hr": np.where(hr_n >= MIN_HR_SECONDS, hr, np.nan),
@@ -574,7 +594,6 @@ def load(db, user_id: str, device_id: str, lo: int, hi: int) -> MinuteFrame:
     "wrist_off": wrist_off.astype(float),
     "walk_frac": walk_frac,
     "ep_strong": ep_strong,
-    "ep_weak": ep_weak,
     "link_down": link_down_share(minutes, link),
     "contact_lost": contact_state(minutes, contact),
   }

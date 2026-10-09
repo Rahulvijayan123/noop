@@ -8,7 +8,8 @@
 --
 -- Checks: a withheld window carries its canonical reason (stored, or mapped from the legacy value for an older row);
 -- a window every model is still learning on says learning; a window one model scored has no window reason; the
--- context mix comes from the minute rows over the window's full length (missing minutes are unknown) and is null
+-- context mix comes from the minute rows over the window's full length (missing minutes are unknown; an unconfirmed
+-- active period is its own share) and is null
 -- with basis none when no minute exists; the range is bounded; another owner's device is refused; only the service
 -- role executes the function.
 \set ON_ERROR_STOP on
@@ -53,9 +54,19 @@ insert into public.measurement_context_minutes (user_id, device_id, minute_start
     context_version, revision)
 select :'u', :'d', timestamptz '2026-10-07 21:00+00' + make_interval(mins => i), '2026-10-07', -25200, 'profile',
        'good', case when i < 15 then 'walking' else 'stationary' end, 'activity_epoch', 'outside_server_night',
-       'on_wrist', 'hr_present', case when i < 15 then 'session' else 'recovery' end, 'exercise-session-1',
+       'on_wrist', 'hr_present', case when i < 15 then 'session' else 'recovery' end, 'exercise-session-2',
        (select min(id) from public.measurement_context_versions), nextval('public.measurement_context_minutes_revision_seq')
   from generate_series(0, 19) i;
+-- W3's minutes: 12 in a period that met the session conditions but is not confirmed (rule exercise-session-2
+-- phase active), 18 outside any session.
+insert into public.measurement_context_minutes (user_id, device_id, minute_start, local_day, utc_offset_s, tz_basis,
+    quality_class, activity_class, activity_basis, sleep_basis, wear_state, wear_basis, session_phase, session_rule,
+    context_version, revision)
+select :'u', :'d', timestamptz '2026-10-07 22:00+00' + make_interval(mins => i), '2026-10-07', -25200, 'profile',
+       'good', case when i < 12 then 'walking' else 'stationary' end, 'activity_epoch', 'outside_server_night',
+       'on_wrist', 'hr_present', case when i < 12 then 'active' else 'none' end, 'exercise-session-2',
+       (select min(id) from public.measurement_context_versions), nextval('public.measurement_context_minutes_revision_seq')
+  from generate_series(0, 29) i;
 
 do $$
 declare u uuid := current_setting('awr.u')::uuid; d uuid := current_setting('awr.d')::uuid; r jsonb; w jsonb;
@@ -69,8 +80,8 @@ begin
                            "legacy": "activity"}', (w -> 'reason')::text;
   assert w -> 'context' ->> 'kind' = 'rest' and w -> 'context' ->> 'mix_basis' = 'measurement_context_minutes';
   assert (w -> 'context' ->> 'minutes')::integer = 20;
-  assert w -> 'context' -> 'mix' = '{"session": 0.500, "recovery": 0.167, "no_session": 0.000, "unknown": 0.333,
-         "asleep": 0.000, "off_wrist": 0.000, "activity": {"walking": 0.500, "stationary": 0.167},
+  assert w -> 'context' -> 'mix' = '{"session": 0.500, "recovery": 0.167, "active": 0.000, "no_session": 0.000,
+         "unknown": 0.333, "asleep": 0.000, "off_wrist": 0.000, "activity": {"walking": 0.500, "stationary": 0.167},
          "quality": {"good": 0.667}}', (w -> 'context' -> 'mix')::text;
   assert jsonb_array_length(w -> 'models') = 1 and w -> 'models' -> 0 ->> 'model' = 'none';
 
@@ -85,6 +96,8 @@ begin
   assert w -> 'reason' = '{"code": "learning", "certainty": "measured", "legacy": "calibrating"}', (w -> 'reason')::text;
   assert jsonb_array_length(w -> 'models') = 2;
   assert w -> 'models' -> 0 ->> 'model' = 'timesfm-3.0' and (w -> 'models' -> 0 ->> 'p')::float8 = 0.4;
+  assert w -> 'context' -> 'mix' @> '{"session": 0.000, "recovery": 0.000, "active": 0.400, "no_session": 0.600,
+         "unknown": 0.000}', 'an unconfirmed active period is its own share: ' || (w -> 'context' -> 'mix')::text;
 
   w := r -> 3;
   assert w -> 'reason' = 'null'::jsonb, 'one model scored it: no window reason';

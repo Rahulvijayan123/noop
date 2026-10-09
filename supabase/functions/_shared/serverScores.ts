@@ -268,9 +268,10 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
  * `{start_ts, end_ts, usable, reason, context: {kind, mix_basis, minutes, mix}, models: [{model, channel_group,
  * score, p, usable, reason}]}`. `reason` is canonical (contracts/reason-codes.json data-reason-1:
  * `{code, certainty, subcode?, legacy}`, `legacy` the service's own value), null for a scored window; `context.mix`
- * the shares of the window's minutes in an exercise session / recovery / neither / unknown, asleep, off the wrist,
- * per activity class and quality class (measurement_context_minutes; null with `mix_basis: none` when no minute row
- * exists), and `reason_codes_version` names the vocabulary. Without the parameters the response is unchanged.
+ * the shares of the window's minutes in an exercise session / recovery / an unconfirmed active period / neither /
+ * unknown, asleep, off the wrist, per activity class and quality class (measurement_context_minutes; null with
+ * `mix_basis: none` when no minute row exists), and `reason_codes_version` names the vocabulary. Without the
+ * parameters the response is unchanged.
  */
 export const ANOMALY_CANDIDATES_MAX_ROWS = 200;
 const ANOMALY_WINDOWS_MAX_RANGE_SECONDS = 3 * 86_400;

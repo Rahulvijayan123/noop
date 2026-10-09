@@ -38,8 +38,8 @@ Key: `user_id`, `device_id` (the strap the raw rows are stored under), `minute_s
 | | `sleep_state` (`asleep` / `awake` / `in_bed`), `sleep_basis` | scored night (`server_sleep_nights`, frwhoop-server-1) holding the minute: its stage segments (`server_night_stages`) or just the period (`server_night`); outside a night NULL with `outside_server_night` (day scored) or `not_scored` |
 | | `wear_state` (`on_wrist` / `off_wrist` / `charging`), `wear_basis` | `charging`, then wrist events (`wrist_event`; a WRIST_OFF closes at a later WRIST_ON or after 5 sustained minutes of HR, basis `hr_present`), then the epoch, then the run, then HR presence |
 | | `placement`, `placement_basis` | the declared placement in effect at the minute's start, resolved for the strap by `internal.placement_intervals_for_device_v1` (20261009150100; declarations on the strap, its aliases and the installations provably bound to it, else the owner's device-less declaration): basis `declared_strap` / `declared_alias` / `declared_installation` / `declared_account`; NULL with `undeclared` when nothing is declared (`not_resolved` on rows built before 20261009150100) |
-| SESSION | `session_phase` (`none` / `session` / `recovery`), `session_start`, `session_rule`, `session_basis` | rule `exercise-session-1` (below) |
-| COMPLETE | `missing_reasons` | why the minute has no HR, and `context_unknown` when activity or the session phase is unknown |
+| SESSION | `session_phase` (`none` / `session` / `recovery` / `active`), `session_start`, `session_rule`, `session_basis` | rule `exercise-session-2` (below) |
+| COMPLETE | `missing_reasons` | why the minute has no HR, `context_unknown` when activity or the session phase is unknown, and `context_not_comparable` (`in_session` / `recovery` / `movement`) for a session / recovery / active minute |
 | VERSION | `context_version`, `revision`, `computed_at` | `measurement_context_versions`; `revision` is a sequence value bumped only when the row's content changes |
 
 Reasons (`reasons`, `missing_reasons`) are JSON arrays of `{code, certainty}` (plus `subcode` where the code has
@@ -76,26 +76,42 @@ event, else inferred), strap_not_recording (phone: paused), strap_link_down (con
 phone saw the strap's record index skip — lost in transfer, may never arrive), awaiting_upload (inferred: no HR has been
 uploaded at or after this minute; never in a backfill),
 sensor_dropout (inferred: believed worn), insufficient_coverage (measured). Plus context_unknown (unknown) when no
-activity lineage covers the minute or its session phase is unknown.
+activity lineage covers the minute or its session phase is unknown, then, for a minute inside a session, its recovery
+or an active period, context_not_comparable (inferred) with subcode `in_session`, `recovery` or `movement`: the
+reading is not comparable with a rest reference.
 
-### Rule `exercise-session-1`
+### Rule `exercise-session-2`
 
-`docs/context-watchdog/EXERCISE_SESSION.md`; the SQL port `internal.exercise_session_spans_v1` reproduces every case
-of `contracts/reference/exercise-session-1.json`. Evidence per minute (never heart rate; never asleep or off the
-wrist): strong = walk/run step classes on at least half of the minute's step samples, dyn_mean ≥ 0.10 g, or a
-confident (≥ 0.6) epoch that is walking / running, exertion `active` or inside a logged exercise; weak = dyn_mean ≥
-0.05 g or a confident `other_movement` epoch (as the anomaly service reads it). Weak counts only within 20 minutes of
-strong. The rest reference is the median nightly resting HR of the 14 nights before the local day (60-day window,
-`server_daily_scores`) + 10 (`session_basis = sleep_resting_hr`), else the median HR of still minutes in the 2 h
-before the period (`awake_still_median`), else 70 (`default_70`). The server runs the rule in batch mode over 6 h
-before and 4 h after the minutes it writes, and rebuilds as data arrives, so an ongoing session appears once it has
-lasted 12 minutes. `session_phase` is NULL when the minute had no motion evidence at all (no IMU, no steps, no epoch)
-and is not inside a session or recovery.
+`docs/context-watchdog/EXERCISE_SESSION.md`; the SQL port `internal.exercise_session_spans_v2` reproduces every case
+of `contracts/reference/exercise-session-2.json` (start, end, recovery end, pre-session reference, `confirmed`,
+`confirmed_at`). Evidence per minute (never heart rate; never asleep or off the wrist): strong = walk/run step
+classes on at least half of the minute's step samples, dyn_mean ≥ 0.10 g, or a confident (≥ 0.6) epoch that is
+walking / running, exertion `active` or inside a logged exercise; weak = dyn_mean ≥ 0.05 g. A HART `other_movement`
+epoch is not evidence (it covers 27 % of gym minutes and 29 % of other awake minutes; rule -1 counted it as weak,
+which stretched a non-gym period from 37 to 71 minutes); it only keeps the minute out of the still minutes of the
+rest fallback. Weak counts only within 20 minutes of strong. The rest reference is the median nightly resting HR of
+the 14 nights before the local day (60-day window, `server_daily_scores`) + 10 (`session_basis = sleep_resting_hr`),
+else the median HR of still minutes in the 2 h before the period (`awake_still_median`), else 70 (`default_70`).
+
+A period that meets the four session conditions is *confirmed* once it holds 15 strong minutes, or when it starts at
+most 30 minutes after the last evidence minute of the previous confirmed session (inheritance only runs forward).
+A confirmed session's minutes are `session`, followed by `recovery`. A period that meets the conditions but is not
+confirmed is `active`: no recovery after it (the next minutes are judged as they are), its minutes are skipped by a
+later session's pre-session reference, and it still ends the recovery of a confirmed session before it.
+
+The server runs the rule in batch mode over 6 h before and 4 h after the minutes it writes, on the data stored so far,
+and rebuilds as data arrives: each queued local day (an upload, new scores, a newer activity document) is rebuilt
+whole, `[00:00 − 3 h, 24:00)`, and only rows whose content changed are rewritten (with a new `revision`). So a
+period still growing appears once it has lasted 12 minutes, as `active` while it holds fewer than 15 strong minutes
+(and inherits nothing), and its rows become `session` (with the recovery after it) on the first rebuild after the
+15th strong minute is stored; once the period has ended the rows match the batch answer over the whole period.
+`session_phase` is NULL when the minute had no motion evidence at all (no IMU, no steps, no epoch) and is not inside
+a session, a recovery or an active period.
 
 ## Versions (`public.measurement_context_versions`)
 
 `(id, builder_version, rule_ids, reason_codes_version, backfill, notes, created_at)`. Two rows today:
-`mcm-1 / {exercise-session-1, mcq-1} / data-reason-1` live and the same with `backfill = true`. A row keeps the
+`mcm-1 / {exercise-session-2, mcq-1} / data-reason-1` live and the same with `backfill = true`. A row keeps the
 version that last changed its content. Any threshold change is a new builder version or rule id.
 
 ## Write paths (all service-only; no trigger on any `noop_*` table; the scoring lock is never taken)
@@ -126,7 +142,7 @@ the owner when `deviceId` is absent). `[from, to)` at most 1440 minutes. Respons
            "hr_n": 60, "quality_class": "fair", "quality_conf": 0.6,
            "reasons": [{"code": "hr_in_motion_unverified", "certainty": "inferred", "effect": "degraded", "family": "motion"}],
            "session_phase": "session", "session_start": 1789999980, "…": "…"}],
- "versions": {"1": {"builder_version": "mcm-1", "rule_ids": ["exercise-session-1", "mcq-1"],
+ "versions": {"1": {"builder_version": "mcm-1", "rule_ids": ["exercise-session-2", "mcq-1"],
                     "reason_codes_version": "data-reason-1", "backfill": false}},
  "truncated": false, "identity": {"…": "…"}}
 ```

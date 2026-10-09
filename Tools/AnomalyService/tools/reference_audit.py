@@ -12,7 +12,7 @@ window start is known against the minute frame:
 
 The frame is the state's own minute cache (frame.npz, 7 days) unless --frame gives one exported with
 tools/export_frame.py (read-only). Context is re-derived with features.recontext (the stored label may only move
-toward caution) and rule exercise-session-1 (features.with_sessions; --sleep-rest gives the nightly resting HR the
+toward caution) and rule exercise-session-2 (features.with_sessions; --sleep-rest gives the nightly resting HR the
 service would read, else the 2 h-before median / 70 bpm fallback). A row is EXCLUDED when its window is not usable
 now; rows whose start is unknown or outside the frame are listed as "not_checked" and never removed.
 

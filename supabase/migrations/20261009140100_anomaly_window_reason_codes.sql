@@ -10,7 +10,7 @@
 -- days); a reader maps a row with a null reason_code from its withheld_reason the same way.
 --
 -- New withheld value `recovery`: the service now withholds a window that overlaps the recovery after an exercise
--- session (rule exercise-session-1); withheld_reason has no check constraint, so no constraint changes.
+-- session (rule exercise-session-2); withheld_reason has no check constraint, so no constraint changes.
 --
 -- publish_anomaly_result_v1 is re-created with its signature, grants and behaviour unchanged except that it also
 -- writes the two columns. Deploy order does not matter: an old service against this function gets the mapped

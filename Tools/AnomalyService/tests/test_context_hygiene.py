@@ -1,6 +1,7 @@
 """Context hygiene (audit 2026-10-09, A-watchdog R6 / F-deploy 2-3): epochs only toward caution, exercise session /
-recovery windows withheld (rule exercise-session-1; its fixture parity is tests/test_exercise_session.py), references
-re-gated, local day in the person's own zone, canonical reason codes. No database, no model weights."""
+recovery / unconfirmed active-period windows withheld (rule exercise-session-2; its fixture parity is
+tests/test_exercise_session.py), other_movement epochs are no evidence, references re-gated, local day in the
+person's own zone, canonical reason codes. No database, no model weights."""
 import datetime as dt
 import json
 import os
@@ -83,8 +84,7 @@ def owner_1007_frame():
   data = {k: np.full(n, np.nan) for k in F.TARGETS}
   data["hr"] = hr
   data.update({"dyn": dyn, "steps": steps, "asleep": np.zeros(n), "hr_n": np.full(n, 60.0), "rr_cov": np.ones(n),
-               "wrist_off": np.zeros(n), "walk_frac": walk, "ep_strong": np.full(n, np.nan),
-               "ep_weak": np.full(n, np.nan)})
+               "wrist_off": np.zeros(n), "walk_frac": walk, "ep_strong": np.full(n, np.nan)})
   base = F.base_context(dyn, steps, data["asleep"], data["wrist_off"], data["hr_n"])
   stationary = ["still" if b in ("still", "unknown") else None for b in base]
   old = base.copy()                                   # the pre-fix merge: any confident epoch label won
@@ -108,6 +108,7 @@ def test_owner_1007_late_window_is_no_longer_a_rest_window():
   assert len(sessions) == 1
   s = sessions[0]
   assert (s["start"], s["end"]) == (pdt("21:21"), pdt("23:04"))         # one session: bouts ≤ 10 min apart merge
+  assert s["confirmed"] and pdt("21:45") < s["confirmed_at"] < pdt("21:55")   # the 15th strong minute
   assert pdt("23:30") < s["recovery_end"] <= pdt("23:50")         # HR back within pre-session + 10 bpm
   assert s["rest_reference"] == pytest.approx(70, abs=1.5)              # still minutes of the 2 h before
   after = {w.start: w for w in cand.windows(frame, int(frame.minutes[0]), int(frame.minutes[-1]))}
@@ -143,9 +144,19 @@ def test_a_session_still_in_progress_counts_once_it_has_load():
   f.data["walk_frac"] = np.zeros(n)
   f2, sessions = F.with_sessions(f)
   assert len(sessions) == 1 and sessions[0]["open"]
-  assert (f2.context[n - 10:] == F.EXERCISE).all()
+  # Opened live (never back to a rest comparison), but 10 strong minutes do not confirm it yet: active.
+  assert not sessions[0]["confirmed"] and sessions[0]["confirmed_at"] is None
+  assert (f2.context[n - 10:] == F.EXERCISE_ACTIVE).all()
   _, closed = F.with_sessions(f, live=False)
   assert closed == []
+  # 16 strong minutes so far: confirmed at the 15th, an exercise session while it is still open.
+  hr[n - 16:] = 120.0
+  f = make_frame(n, hr)
+  f.data["dyn"][n - 16:] = 0.12
+  f2, sessions = F.with_sessions(f)
+  assert len(sessions) == 1 and sessions[0]["open"] and sessions[0]["confirmed"]
+  assert sessions[0]["confirmed_at"] == int(f.minutes[n - 2])
+  assert (f2.context[n - 16:] == F.EXERCISE).all()
 
 
 def test_sessions_work_on_a_frame_cached_before_the_evidence_channels():
@@ -160,6 +171,117 @@ def test_sessions_work_on_a_frame_cached_before_the_evidence_channels():
   assert len(sessions) == 1 and sessions[0]["rest_reference"] == 65.0   # nightly resting HR + 10
   assert (f2.context[120:180] == F.EXERCISE).all() and f2.context[185] == F.EXERCISE_RECOVERY
   assert f2.context[260] == "still"
+
+
+def unconfirmed_period_frame():
+  """Two days at 70 bpm, still. Day 2, minutes P..P+24 (P = 02:00): 100 bpm with weak movement every other minute and
+  4 strong minutes, so the session conditions hold but the period is not confirmed (the fixture's late-night case);
+  then 15 still minutes at 98 bpm, which rule -1 called recovery."""
+  n = 2 * 1440
+  P = 1440 + 120
+  hr = np.full(n, 70.0)
+  hr[P:P + 25] = 100.0
+  hr[P + 25:P + 40] = 98.0
+  f = make_frame(n, hr)
+  f.data["dyn"][P:P + 25:2] = 0.06
+  for k in (2, 10, 16, 24):
+    f.data["dyn"][P + k] = 0.12
+  return f, P
+
+
+def test_an_unconfirmed_period_is_withheld_as_activity_with_no_recovery(tmp_path):
+  f, P = unconfirmed_period_frame()
+  f2, sessions = F.with_sessions(f)
+  assert len(sessions) == 1
+  s = sessions[0]
+  assert (s["start"], s["end"]) == (P * 60, (P + 24) * 60) and not s["open"]
+  assert not s["confirmed"] and s["confirmed_at"] is None
+  assert s["recovery_end"] == s["end"] + 60                                 # no recovery after it
+  assert (f2.context[P:P + 25] == F.EXERCISE_ACTIVE).all()
+  assert not np.isin(f2.context, (F.EXERCISE, F.EXERCISE_RECOVERY)).any()   # neither exercise nor its recovery
+  assert (f2.context[P + 25:P + 40] == "still").all()                        # judged as rest again right away
+  assert not np.isin(f2.context[P:P + 25], ("still", "asleep")).any()        # never rest (UniTS training, gate)
+
+  ws = {w.start: w for w in cand.windows(f2, 0, len(f.minutes) * 60)}
+  assert ws[P * 60].withheld == "activity" and ws[P * 60].context_mix[F.EXERCISE_ACTIVE] == pytest.approx(25 / 30)
+  assert reasons.canonical("activity") == ("context_not_comparable/movement", "inferred")
+  assert ws[(P + 30) * 60].usable and ws[(P + 30) * 60].bucket == "rest"   # rule -1: withheld as recovery
+
+  # Through the service: the window is never scored, never joins a reference, and is published withheld with
+  # the canonical movement reason; the still window after it is scored and later joins the rest reference.
+  stub = StubScorer()
+  svc = Service(cfg(tmp_path), scorers=[stub])
+  st = UserState(str(tmp_path), UID, DID)
+  out = svc.score_frame(f, st, None, len(f.minutes) * 60)
+  assert P * 60 not in stub.asked and (P + 30) * 60 in stub.asked
+  row = next(r for r in out["window_scores"]
+             if r["window_start"] == dt.datetime.fromtimestamp(P * 60, tz=dt.timezone.utc).isoformat())
+  assert (row["usable"], row["withheld_reason"], row["reason_code"]) == (False, "activity",
+                                                                         "context_not_comparable/movement")
+  starts = set(st.load_ref_starts("stub", "rest").astype(np.int64).tolist())
+  assert P * 60 not in starts and (P + 30) * 60 in starts
+
+
+def test_an_unconfirmed_period_still_open_covers_up_to_now_and_ends_the_recovery_before_it():
+  # A confirmed hour-long session, then a short block (6 strong minutes) 20 minutes later: it inherits confirmation
+  # (rule -2 carry-over). 40 minutes later instead, it stays unconfirmed; either way the earlier session's recovery
+  # (HR never back within pre-session + 10, cap 60 min) stops where the block starts.
+  rest = lambda t: 60.0                                  # nightly resting HR: rest reference 70 for every period
+  for gap, confirmed in ((20, True), (40, False)):
+    n = 400
+    hr = np.full(n, 70.0)
+    hr[60:120] = 130.0
+    hr[120:120 + gap] = 105.0
+    b0 = 120 + gap
+    hr[b0:b0 + 16] = 120.0
+    f = make_frame(n, hr)
+    f.data["dyn"][60:120] = 0.12                         # 60 strong minutes: confirmed
+    f.data["dyn"][b0:b0 + 16] = 0.06
+    f.data["dyn"][b0:b0 + 16:3] = 0.12                   # 6 strong minutes
+    f2, sessions = F.with_sessions(f, sleep_rest=rest)
+    assert [x["confirmed"] for x in sessions] == [True, confirmed], gap
+    assert sessions[0]["recovery_end"] == b0 * 60, gap   # clamped by the next period, confirmed or not
+    assert sessions[1]["confirmed_at"] == (b0 * 60 if confirmed else None)
+    assert (f2.context[b0:b0 + 16] == (F.EXERCISE if confirmed else F.EXERCISE_ACTIVE)).all()
+    assert (f2.context[120:b0] == F.EXERCISE_RECOVERY).all()
+  # Still open at the frame's end (newest evidence 4 minutes old): the unconfirmed block covers the minutes up to
+  # now and stays active.
+  k = b0 + 20
+  view_ = F.MinuteFrame(minutes=f.minutes[:k], data={a: v[:k] for a, v in f.data.items()}, context=f.context[:k],
+                        family=f.family, counters={})
+  f3, live = F.with_sessions(view_, sleep_rest=rest)
+  assert live[-1]["open"] and not live[-1]["confirmed"] and live[-1]["end"] == int(view_.minutes[-1])
+  assert (f3.context[b0:] == F.EXERCISE_ACTIVE).all()
+
+
+def test_other_movement_epochs_are_no_longer_movement_evidence():
+  # Confident awake on-wrist epochs: other_movement is copied as context (toward caution) but is not evidence.
+  m = np.arange(4, dtype=np.int64) * 60
+  row = lambda t, label, ex="unknown": {"start_ts": t, "motion_label": label, "sleep_state": "awake",
+                                        "exertion_context": ex, "wear_state": "on_wrist", "exercise_session": "false",
+                                        "conf": 0.9}
+  rows = [row(0, "other_movement"), row(30, "other_movement"), row(60, "walking"), row(120, "stationary", "active")]
+  strong = F.epoch_evidence(m, rows)
+  assert list(strong[:3]) == [0.0, 1.0, 1.0] and np.isnan(strong[3])
+  assert F.epoch_context(m, rows)[0] == "walking"                         # still kept out of rest
+
+  # Two strong minutes 21 minutes apart, the minutes between at 110 bpm with an other_movement epoch each (as a
+  # frame cached under rule -1 carries them: ep_weak = 1). Rule -1 read that as one period; now there is none.
+  n = 300
+  hr = np.full(n, 70.0)
+  hr[120:142] = 110.0
+  f = make_frame(n, hr)
+  f.data["dyn"][[120, 141]] = 0.12
+  f.data["ep_strong"] = np.where(np.isin(np.arange(n), [120, 141]), np.nan, 0.0)
+  f.data["ep_weak"] = np.where((np.arange(n) > 120) & (np.arange(n) < 141), 1.0, 0.0)
+  strong, weak = F.exertion_evidence(f)
+  assert not weak[121:141].any() and strong[[120, 141]].all()
+  f2, sessions = F.with_sessions(f)
+  assert sessions == [] and (f2.context == "still").all()
+  # The same minutes with real weak movement (dynAccel ≥ 0.05 g) do form a period: the test is not vacuous.
+  f.data["dyn"][121:141] = 0.06
+  _, sessions = F.with_sessions(f)
+  assert len(sessions) == 1 and not sessions[0]["confirmed"]
 
 
 def test_a_window_scored_before_its_session_was_recognisable_never_joins_the_reference(tmp_path):

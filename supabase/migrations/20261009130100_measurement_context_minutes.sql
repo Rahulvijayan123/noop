@@ -36,14 +36,17 @@
 --             was scored, not_scored otherwise); wear_state on_wrist | off_wrist | charging (basis charging,
 --             wrist_event, activity_epoch, activity_run, hr_present or unknown); placement NULL with
 --             placement_basis not_resolved (placement resolution is owned by the placement work and lands later).
---   SESSION   rule exercise-session-1 (docs/context-watchdog/EXERCISE_SESSION.md) over the OBSERVED evidence:
---             session_phase none | session | recovery (NULL when the minute has no motion evidence at all and is
---             not inside a session), session_start, session_rule, session_basis (the rest reference used:
---             sleep_resting_hr, awake_still_median or default_70).
---   COMPLETE  missing_reasons [{code, certainty}]: why a minute has no heart rate (charging, off_wrist,
---             strap_not_recording, strap_link_down, awaiting_upload, sensor_dropout, insufficient_coverage) and
---             context_unknown when activity or session phase is unknown. Unknown stays unknown: no value is
---             fabricated to fill a gap.
+--   SESSION   rule exercise-session-2 (docs/context-watchdog/EXERCISE_SESSION.md) over the OBSERVED evidence:
+--             session_phase none | session | recovery | active (NULL when the minute has no motion evidence at all
+--             and is not inside a session or an active period): `session` / `recovery` for a confirmed session,
+--             `active` for a period that meets the session conditions but is not (yet) confirmed (no recovery
+--             after it); session_start, session_rule, session_basis (the rest reference used: sleep_resting_hr,
+--             awake_still_median or default_70).
+--   COMPLETE  missing_reasons [{code, certainty[, subcode]}]: why a minute has no heart rate (charging, off_wrist,
+--             strap_not_recording, strap_link_down, awaiting_upload, sensor_dropout, insufficient_coverage),
+--             context_unknown when activity or session phase is unknown, and context_not_comparable (subcode
+--             in_session / recovery / movement) for a session / recovery / active minute. Unknown stays unknown: no
+--             value is fabricated to fill a gap.
 --   VERSION   context_version -> measurement_context_versions (builder, rule ids, reason-codes version, backfill
 --             flag), revision (a sequence value, bumped only when the row's content changes), computed_at.
 --
@@ -85,7 +88,7 @@ create table if not exists public.measurement_context_versions (
   unique (builder_version, rule_ids, reason_codes_version, backfill)
 );
 comment on table public.measurement_context_versions is
-  'Recipes that produced measurement_context_minutes rows: builder version, rule ids (exercise-session-1, mcq-1), '
+  'Recipes that produced measurement_context_minutes rows: builder version, rule ids (exercise-session-2, mcq-1), '
   'reason-codes version and whether the rows were written by a backfill from stored data only.';
 alter table public.measurement_context_versions enable row level security;
 revoke all on public.measurement_context_versions from public, anon, authenticated;
@@ -99,9 +102,9 @@ do $$ begin
 end $$;
 
 insert into public.measurement_context_versions (builder_version, rule_ids, reason_codes_version, backfill, notes)
-values ('mcm-1', array['exercise-session-1', 'mcq-1'], 'data-reason-1', false,
+values ('mcm-1', array['exercise-session-2', 'mcq-1'], 'data-reason-1', false,
         'Live builder (pg_cron, quality-minutes route).'),
-       ('mcm-1', array['exercise-session-1', 'mcq-1'], 'data-reason-1', true,
+       ('mcm-1', array['exercise-session-2', 'mcq-1'], 'data-reason-1', true,
         'Backfill from stored rows only: no phone evidence unless it was already stored; awaiting_upload is never '
         'asserted.')
 on conflict (builder_version, rule_ids, reason_codes_version, backfill) do nothing;
@@ -168,8 +171,8 @@ create table if not exists public.measurement_context_minutes (
                                                       'hr_present', 'unknown')),
   placement        text,
   placement_basis  text not null default 'not_resolved',
-  -- exercise session (rule exercise-session-1)
-  session_phase    text check (session_phase in ('none', 'session', 'recovery')),
+  -- exercise session (rule exercise-session-2)
+  session_phase    text check (session_phase in ('none', 'session', 'recovery', 'active')),
   session_start    timestamptz,
   session_rule     text,
   session_basis    text check (session_basis in ('sleep_resting_hr', 'awake_still_median', 'default_70')),
@@ -186,10 +189,20 @@ create table if not exists public.measurement_context_minutes (
 comment on table public.measurement_context_minutes is
   'Per-minute measurement context (20261009130100): observed acquisition facts, phone optical evidence, derived '
   'quality with canonical reasons, copied activity / sleep / wear / placement with their basis, rule '
-  'exercise-session-1 phase, local time and missing-data reasons. revision bumps only on a content change.';
+  'exercise-session-2 phase, local time and missing-data reasons. revision bumps only on a content change.';
 
 create index if not exists measurement_context_minutes_revision
   on public.measurement_context_minutes (user_id, device_id, revision);
+-- A database that ran an earlier draft of this file has the three-phase check: widen it (no-op on a fresh one).
+do $$ begin
+  if not exists (select 1 from pg_constraint where conrelid = 'public.measurement_context_minutes'::regclass
+                    and conname = 'measurement_context_minutes_session_phase_check'
+                    and pg_get_constraintdef(oid) like '%''active''%') then
+    alter table public.measurement_context_minutes drop constraint if exists measurement_context_minutes_session_phase_check;
+    alter table public.measurement_context_minutes add constraint measurement_context_minutes_session_phase_check
+      check (session_phase in ('none', 'session', 'recovery', 'active'));
+  end if;
+end $$;
 
 alter table public.measurement_context_minutes enable row level security;
 revoke all on public.measurement_context_minutes from public, anon, authenticated;
@@ -209,25 +222,30 @@ do $$ begin
   end if;
 end $$;
 
--- 3. Rule exercise-session-1 -----------------------------------------------------------------------------------
--- Over a contiguous minute grid, ported from contracts/reference/exercise_session_1.py and pinned to
--- contracts/reference/exercise-session-1.json (supabase/tests/measurement_context_minutes.sql). Arrays hold one
+-- 3. Rule exercise-session-2 -----------------------------------------------------------------------------------
+-- Over a contiguous minute grid, ported from contracts/reference/exercise_session_2.py and pinned to
+-- contracts/reference/exercise-session-2.json (supabase/tests/measurement_context_minutes.sql). Arrays hold one
 -- element per minute, oldest first: hr is the minute's mean bpm or NULL; strong / weak are the minute's HR-free
 -- evidence with asleep and off-wrist minutes already removed by the caller. Batch mode: each period is judged as it
--- stands in the grid (the builder re-runs as data arrives, so an ongoing session appears once it is 12 minutes long).
+-- stands in the grid (the builder re-runs as data arrives, so an ongoing period appears once it is 12 minutes long,
+-- as `active` until it holds 15 strong minutes, then as a session).
 --
 -- The rest reference of a period is resolved at its first evidence minute `a`: p_fixed_rest when given (the
 -- fixture), else p_night_rest[a] + 10 (median nightly resting HR of the recent nights before that local day), else
 -- the median HR of the p_still minutes in the 2 h before `a`, else 70 bpm.
 --
--- One row per session, as 0-based minute indices like the reference: a / b = first / last evidence minute,
--- recovery_end = the first minute that is no longer recovery (exclusive).
-create or replace function internal.exercise_session_spans_v1(
+-- One row per period that meets the session conditions, as 0-based minute indices like the reference: a / b =
+-- first / last evidence minute, recovery_end = the first minute that is no longer recovery (exclusive). confirmed:
+-- the period holds 15 strong minutes (confirmed_at = the 15th), or it starts at most 30 minutes after the last
+-- evidence minute of the previous confirmed session (confirmed_at = a; inheritance only runs forward). An
+-- unconfirmed period has no recovery (recovery_end = b + 1) and confirmed_at NULL; its minutes are skipped by later
+-- pre-session references, and it still ends the recovery of a confirmed session before it.
+create or replace function internal.exercise_session_spans_v2(
   p_hr double precision[], p_strong boolean[], p_weak boolean[],
   p_still boolean[] default null, p_night_rest double precision[] default null,
   p_fixed_rest double precision default null)
 returns table (a integer, b integer, recovery_end integer, pre_reference double precision,
-               rest_reference double precision, rest_basis text)
+               rest_reference double precision, rest_basis text, confirmed boolean, confirmed_at integer)
 language plpgsql immutable set search_path = '' as $$
 declare
   c_merge_gap constant integer := 10;
@@ -246,6 +264,8 @@ declare
   c_pre_near constant integer := 10;
   c_rest_window constant integer := 120;
   c_default_rest constant double precision := 70;
+  c_confirm_strong constant integer := 15;
+  c_inherit constant integer := 30;
   n integer := coalesce(array_length(p_hr, 1), 0);
   ev boolean[];
   next_strong integer[];
@@ -260,7 +280,7 @@ declare
   busy boolean[];
   i integer; j integer; k integer; s integer; va integer; vb integer; lim integer; e integer; run integer;
   n_strong integer; load integer; dense boolean; r double precision; rb text; pre double precision;
-  prev_pre double precision;
+  prev_pre double precision; last_confirmed integer; conf integer;
 begin
   if n = 0 then return; end if;
   if coalesce(array_length(p_strong, 1), 0) <> n or coalesce(array_length(p_weak, 1), 0) <> n
@@ -336,10 +356,12 @@ begin
     end if;
   end loop;
 
-  -- Recovery: from the last evidence minute until heart rate is back within pre + c_return_delta for
-  -- c_return_run minutes, the cap (duration clamped to [30, 120] minutes) or the next session.
+  -- Confirmation, then recovery for a confirmed session: from the last evidence minute until heart rate is back
+  -- within pre + c_return_delta for c_return_run minutes, the cap (duration clamped to [30, 120] minutes) or the
+  -- next period that meets the session conditions (confirmed or not).
   busy := array_fill(false, array[n]);
   prev_pre := null;
+  last_confirmed := null;
   for k in 1..coalesce(array_length(fa, 1), 0) loop
     va := fa[k]; vb := fb[k]; r := fr[k];
     select percentile_cont(0.5) within group (order by p_hr[x]) into pre
@@ -347,6 +369,26 @@ begin
      where p_hr[x] is not null and not busy[x];
     pre := coalesce(pre, prev_pre, r);
     prev_pre := pre;
+    conf := null;
+    if last_confirmed is not null and va - last_confirmed <= c_inherit then
+      conf := va;
+    else
+      n_strong := 0;
+      for i in va..vb loop
+        if coalesce(p_strong[i], false) then
+          n_strong := n_strong + 1;
+          if n_strong = c_confirm_strong then conf := i; exit; end if;
+        end if;
+      end loop;
+    end if;
+    a := va - 1; b := vb - 1; pre_reference := pre; rest_reference := r; rest_basis := fbasis[k];
+    if conf is null then
+      for i in va .. vb loop busy[i] := true; end loop;
+      recovery_end := vb; confirmed := false; confirmed_at := null;
+      return next;
+      continue;
+    end if;
+    last_confirmed := vb;
     lim := least(n + 1, vb + 1 + least(greatest(vb - va + 1, c_cap_lo), c_cap_hi));
     if k < array_length(fa, 1) then lim := least(lim, fa[k + 1]); end if;
     e := lim;
@@ -360,13 +402,15 @@ begin
       end if;
     end loop;
     for i in va .. e - 1 loop busy[i] := true; end loop;
-    a := va - 1; b := vb - 1; recovery_end := e - 1;
-    pre_reference := pre; rest_reference := r; rest_basis := fbasis[k];
+    recovery_end := e - 1; confirmed := true; confirmed_at := conf - 1;
     return next;
   end loop;
 end $$;
-revoke all on function internal.exercise_session_spans_v1(double precision[], boolean[], boolean[], boolean[],
+revoke all on function internal.exercise_session_spans_v2(double precision[], boolean[], boolean[], boolean[],
   double precision[], double precision) from public, anon, authenticated, service_role;
+-- An earlier draft of this file defined rule exercise-session-1 as exercise_session_spans_v1 (never deployed).
+drop function if exists internal.exercise_session_spans_v1(double precision[], boolean[], boolean[], boolean[],
+  double precision[], double precision);
 
 -- 4. Quality rule mcq-1 ----------------------------------------------------------------------------------------
 -- One minute's HR-level quality from its own columns (first match wins). The phone's grades and legacy reasons
@@ -452,7 +496,7 @@ revoke all on function internal.measurement_context_quality_v1(integer, real, in
 create or replace function internal.measurement_context_version_id(p_backfill boolean)
 returns smallint language sql stable security definer set search_path = '' as $$
   select v.id from public.measurement_context_versions v
-   where v.builder_version = 'mcm-1' and v.rule_ids = array['exercise-session-1', 'mcq-1']
+   where v.builder_version = 'mcm-1' and v.rule_ids = array['exercise-session-2', 'mcq-1']
      and v.reason_codes_version = 'data-reason-1' and v.backfill = coalesce(p_backfill, false)
 $$;
 revoke all on function internal.measurement_context_version_id(boolean) from public, anon, authenticated, service_role;
@@ -542,7 +586,7 @@ begin
       contact_state text, ble_link_down_s integer, reset_event boolean, saturation_event boolean, charging boolean,
       tz_raw text, tz text, tz_basis text, local_day date, utc_offset_s integer,
       ep_class text, ep_conf real, ep_posture text, ep_exertion text, ep_ref bigint, ep_wear text,
-      ep_strong boolean, ep_weak boolean,
+      ep_strong boolean, ep_other boolean,
       run_class text, run_conf real, run_ref bigint, run_wear text,
       sleep_state text, sleep_basis text, wear_state text, wear_basis text,
       strong boolean, weak boolean, still boolean, night_rest double precision,
@@ -724,14 +768,16 @@ begin
              and e.start_ts < v_hi and e.end_ts > v_lo
            order by mm.m, least(e.end_ts, mm.m + 60) - greatest(e.start_ts, mm.m) desc, e.confidence desc) x
    where g.m = x.m;
-  -- ... and its movement evidence for rule exercise-session-1: a confident (>= 0.6) epoch of the minute that is
-  -- walking / running, exertion active or inside a logged exercise is strong; other_movement is weak. An asleep or
+  -- ... and its movement evidence for rule exercise-session-2: a confident (>= 0.6) epoch of the minute that is
+  -- walking / running, exertion active or inside a logged exercise is strong. An other_movement epoch is NOT
+  -- evidence (it covers gym and non-gym awake minutes alike, EXERCISE_SESSION.md); it only keeps the minute out of
+  -- the still minutes of the rest fallback, as it keeps it out of the anomaly service's still context. An asleep or
   -- off-wrist epoch is never evidence.
-  update pg_temp.mc_grid g set ep_strong = x.strong, ep_weak = x.weak
+  update pg_temp.mc_grid g set ep_strong = x.strong, ep_other = x.other
     from (select mm.m,
                  bool_or(e.motion_label in ('walking', 'running') or e.exertion_context = 'active'
                          or e.exercise_session = 'true') as strong,
-                 bool_or(e.motion_label = 'other_movement') as weak
+                 bool_or(e.motion_label = 'other_movement') as other
             from public.activity_context_epochs_current e
            cross join lateral (select distinct v.m from (values (e.start_ts - e.start_ts % 60),
                                                                 ((e.end_ts - 1) - (e.end_ts - 1) % 60)) v(m)) mm
@@ -804,9 +850,9 @@ begin
   update pg_temp.mc_grid g
      set strong = x.ok and ((g.steps_n > 0 and 2 * (g.step_walk_n + g.step_run_n) >= g.steps_n)
                             or coalesce(g.dyn_mean >= 0.10, false) or coalesce(g.ep_strong, false)),
-         weak = x.ok and (coalesce(g.dyn_mean >= 0.05, false) or coalesce(g.ep_weak, false)),
+         weak = x.ok and coalesce(g.dyn_mean >= 0.05, false),
          still = x.ok and g.hr_n >= 30 and g.dyn_n > 0 and g.dyn_mean < 0.05 and g.step_walk_n + g.step_run_n = 0
-                 and not coalesce(g.ep_strong or g.ep_weak, false)
+                 and not coalesce(g.ep_strong or g.ep_other, false)
     from (select m, not (coalesce(wear_state in ('off_wrist', 'charging'), false) or coalesce(sleep_state = 'asleep', false)
                         or coalesce(band_asleep, false)) as ok
             from pg_temp.mc_grid) x
@@ -825,12 +871,19 @@ begin
          array_agg(weak order by m), array_agg(still order by m), array_agg(night_rest order by m)
     into v_hr, v_strong, v_weak, v_still, v_night
     from pg_temp.mc_grid;
-  for v_span in select * from internal.exercise_session_spans_v1(v_hr, v_strong, v_weak, v_still, v_night) loop
+  -- A confirmed session's minutes are `session`, then `recovery`; a period that meets the session conditions but is
+  -- not (yet) confirmed is `active`, with no recovery. Batch over the data so far: a growing period is `active` until
+  -- it holds 15 strong minutes (or inherits), and every later rebuild of the day re-judges it, so the stored rows
+  -- converge to the answer over the whole period.
+  for v_span in select * from internal.exercise_session_spans_v2(v_hr, v_strong, v_weak, v_still, v_night) loop
+    if v_span.confirmed then
+      update pg_temp.mc_grid
+         set session_phase = 'recovery', session_start = v_lo + v_span.a * 60, session_basis = v_span.rest_basis
+       where m >= v_lo + (v_span.b + 1) * 60 and m < v_lo + v_span.recovery_end * 60 and session_phase is null;
+    end if;
     update pg_temp.mc_grid
-       set session_phase = 'recovery', session_start = v_lo + v_span.a * 60, session_basis = v_span.rest_basis
-     where m >= v_lo + (v_span.b + 1) * 60 and m < v_lo + v_span.recovery_end * 60 and session_phase is null;
-    update pg_temp.mc_grid
-       set session_phase = 'session', session_start = v_lo + v_span.a * 60, session_basis = v_span.rest_basis
+       set session_phase = case when v_span.confirmed then 'session' else 'active' end,
+           session_start = v_lo + v_span.a * 60, session_basis = v_span.rest_basis
      where m >= v_lo + v_span.a * 60 and m <= v_lo + v_span.b * 60;
   end loop;
   -- Outside sessions: 'none' where motion (or a known off-wrist / asleep state) could have shown movement, else
@@ -868,7 +921,7 @@ begin
          case when g.ep_class is not null then g.ep_ref else g.run_ref end,
          g.sleep_state, g.sleep_basis, g.wear_state, g.wear_basis, null, 'not_resolved',
          g.session_phase, case when g.session_start is not null then to_timestamp(g.session_start) end,
-         case when g.session_phase is not null then 'exercise-session-1' end, g.session_basis,
+         case when g.session_phase is not null then 'exercise-session-2' end, g.session_basis,
          least(60, g.observed_s),
          case when g.hr_n > 0 then '[]'::jsonb else jsonb_build_array(case
              when g.wear_state = 'charging' then '{"code": "charging", "certainty": "confirmed"}'::jsonb
@@ -882,7 +935,12 @@ begin
              when g.wear_state = 'on_wrist' then '{"code": "sensor_dropout", "certainty": "inferred"}'::jsonb
              else '{"code": "insufficient_coverage", "certainty": "measured"}'::jsonb end) end
          || case when g.ep_class is null and g.run_class is null or g.session_phase is null
-                 then '[{"code": "context_unknown", "certainty": "unknown"}]'::jsonb else '[]'::jsonb end,
+                 then '[{"code": "context_unknown", "certainty": "unknown"}]'::jsonb else '[]'::jsonb end
+         || case g.session_phase
+              when 'session' then '[{"code": "context_not_comparable", "subcode": "in_session", "certainty": "inferred"}]'::jsonb
+              when 'recovery' then '[{"code": "context_not_comparable", "subcode": "recovery", "certainty": "inferred"}]'::jsonb
+              when 'active' then '[{"code": "context_not_comparable", "subcode": "movement", "certainty": "inferred"}]'::jsonb
+              else '[]'::jsonb end,
          v_version, 0, clock_timestamp()
     from pg_temp.mc_grid g
     left join public.measurement_context_minutes o

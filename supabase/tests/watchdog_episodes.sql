@@ -42,7 +42,7 @@ insert into wde_ep values ('{
   "activity_label": "exercise_session", "contributing": ["HR"],
   "signals": [{"name": "HR", "unit": "bpm", "observed": 108, "usual": 88, "reconstructed": null, "energy": 2.4,
                "trustPct": 90, "rangeHalf": 6.5}],
-  "exercise": {"rule": "exercise-session-1", "phase": "recovery", "sessionStartUnix": 1791433200,
+  "exercise": {"rule": "exercise-session-2", "phase": "recovery", "confirmed": true, "sessionStartUnix": 1791433200,
                "sessionLastMovementUnix": 1791438600, "restReference": 66, "restBasis": "sleep_resting_hr",
                "ceilingBpm": 185, "ceilingBasis": "age_formula", "sessionReference": "learning",
                "recoveryReference": "learning", "routine": null},
@@ -50,7 +50,7 @@ insert into wde_ep values ('{
                  "enteredUnix": 1791439500, "reporter": "wearer", "status": "entered", "exertion": "hard",
                  "sensor": "just_on", "note": null},
   "quality_reasons": [{"code": "context_not_comparable", "subcode": "recovery", "certainty": "inferred"}],
-  "versions": {"watchdog": "v3.1", "baseline": "lb-context-1", "exercise_rule": "exercise-session-1",
+  "versions": {"watchdog": "v3.1", "baseline": "lb-context-1", "exercise_rule": "exercise-session-2",
                "reason_codes": "data-reason-1"},
   "client_updated_at": 1791441210}');
 
@@ -74,7 +74,7 @@ begin
   assert w.context -> 'exercise' = e -> 'exercise' and w.annotation = e -> 'annotation';
   assert w.context ->> 'activity_label' = 'exercise_session';
   assert w.context -> 'quality_reasons' = e -> 'quality_reasons';
-  assert w.versions ->> 'exercise_rule' = 'exercise-session-1';
+  assert w.versions ->> 'exercise_rule' = 'exercise-session-2';
   assert w.client_updated_at = to_timestamp(1791441210);
   select * into w from public.watchdog_episodes where user_id = u and device_id = d and episode_id = 'wd-1791500000';
   assert w.annotation is null and w.peak_severity is null and not (w.context ? 'exercise') and w.context = '{"activity_label": "exercise_session"}';

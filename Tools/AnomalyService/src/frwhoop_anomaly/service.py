@@ -2,7 +2,7 @@
 
 Every `poll_seconds`: enqueue owners whose server scoring completed (throttled per owner in SQL), then claim and run
 up to `max_jobs_per_cycle` jobs. A job: refresh the minute cache (re-read only the last 3 h), mark exercise sessions
-and their recovery over the cached minutes (rule exercise-session-1), score complete 30-minute windows since the
+and their recovery over the cached minutes (rule exercise-session-2), score complete 30-minute windows since the
 watermark with every loaded model, calibrate each model's window scores on the user's own history, form candidates
 (local day in the person's own time zone) and publish them (fenced). A heartbeat thread writes
 `anomaly_service_heartbeats` every 30 s; systemd gets READY=1 and WATCHDOG=1 (Type=notify, WatchdogSec) so a hung
@@ -210,8 +210,9 @@ class Service:
                   resting: list[tuple[str, float]] | None = None) -> dict:
     """Score one user's minute frame (also used by the offline replay harness, which has no database).
 
-    First, rule exercise-session-1 over the whole cached frame (features.with_sessions): session and recovery
-    minutes are never rest or sleep, for the window gate, UniTS' training windows and the calibration references.
+    First, rule exercise-session-2 over the whole cached frame (features.with_sessions): session, recovery and
+    unconfirmed active-period minutes are never rest or sleep, for the window gate, UniTS' training windows and the
+    calibration references.
     Per scorer, windows from its own start: normally the watermark's last window onward (bounded by the lookback);
     while that scorer's calibration reference is thin, back to the first window it has not yet considered (≤ 30 h).
     Window results of the last RECENT_SECONDS persist, so a sustained run keeps one candidate_key across jobs.

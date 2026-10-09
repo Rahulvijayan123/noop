@@ -1,12 +1,15 @@
-"""Rule `exercise-session-1` (docs/context-watchdog/EXERCISE_SESSION.md), ported from the shared reference
-`contracts/reference/exercise_session_1.py` and pinned to its fixture `contracts/reference/exercise-session-1.json`
+"""Rule `exercise-session-2` (docs/context-watchdog/EXERCISE_SESSION.md), ported from the shared reference
+`contracts/reference/exercise_session_2.py` and pinned to its fixture `contracts/reference/exercise-session-2.json`
 (tests/test_exercise_session.py). The algorithm is the reference's (the density scan uses prefix sums so a long
 period stays linear). The one extension: the rest reference may be a function of the period's first minute, because
 the service resolves it per period (the nightly resting heart rate of the nights before, else the person's still
 minutes before the period), where the fixture passes one number per case.
 
 A strap sees resistance training as mostly still. A session is a period OPENED BY MOVEMENT (heart rate never opens
-one) that keeps its still minutes, followed by a recovery phase; neither belongs in a rest or sleep reference.
+one) that keeps its still minutes. It is CONFIRMED once the period holds MIN_CONFIRM_STRONG strong minutes, or when
+it starts at most INHERIT_MIN minutes after the last evidence minute of a confirmed session; a confirmed session is
+followed by a recovery phase. An unconfirmed one (phase `active`) has no recovery. None of them belongs in a rest or
+sleep reference.
 """
 
 from __future__ import annotations
@@ -14,7 +17,7 @@ from __future__ import annotations
 import statistics
 from typing import Callable, Sequence
 
-RULE = "exercise-session-1"
+RULE = "exercise-session-2"
 MERGE_GAP_MIN = 10
 ANCHOR_MIN = 20
 SPAN_MIN = 10
@@ -27,6 +30,8 @@ RETURN_DELTA_BPM = 10
 RETURN_RUN_MIN = 5
 RECOVERY_CAP = (30, 120)
 PRE_WINDOW = (45, 10)
+MIN_CONFIRM_STRONG = 15
+INHERIT_MIN = 30
 DEFAULT_REST_BPM = 70.0
 
 Rest = float | Callable[[int], float]
@@ -90,9 +95,25 @@ def pre_reference(a: int, hr, rest: float, busy: set[int], fallback: float | Non
   return fallback if fallback is not None else rest
 
 
+def confirmation(a: int, b: int, strong, last_confirmed_end: int | None) -> int | None:
+  """Minute index that confirms the session [a, b], or None. Inherited (index `a`) when the period starts at most
+  INHERIT_MIN minutes after the last evidence minute of the previous confirmed session; otherwise the minute of the
+  MIN_CONFIRM_STRONG-th strong minute in the period (counted so far, so an open period is judged as it stands)."""
+  if last_confirmed_end is not None and a - last_confirmed_end <= INHERIT_MIN:
+    return a
+  count = 0
+  for i in range(a, b + 1):
+    count += 1 if strong[i] else 0
+    if count == MIN_CONFIRM_STRONG:
+      return i
+  return None
+
+
 def session_spans(hr, strong, weak, rest: Rest) -> list[dict]:
-  """Completed sessions over a contiguous minute grid, as minute indices: {a, b, end, pre, rest} where a/b are the
-  first/last evidence minute and `end` the first minute that is no longer recovery (exclusive)."""
+  """Sessions over a contiguous minute grid, as minute indices: {a, b, end, pre, rest, confirmed, confirmed_at}
+  where a/b are the first/last evidence minute, `end` the first minute that is no longer recovery (exclusive; b + 1
+  for an unconfirmed session, which has no recovery) and `confirmed_at` the confirming minute (None when
+  unconfirmed)."""
   n = len(hr)
   ev = anchored(strong, weak)
   found = []
@@ -103,9 +124,17 @@ def session_spans(hr, strong, weak, rest: Rest) -> list[dict]:
   out = []
   busy: set[int] = set()
   previous_pre = None
+  last_confirmed_end = None
   for k, (a, b, r) in enumerate(found):
     pre = pre_reference(a, hr, r, busy, previous_pre)
     previous_pre = pre
+    confirmed_at = confirmation(a, b, strong, last_confirmed_end)
+    if confirmed_at is None:
+      busy.update(range(a, b + 1))
+      out.append({"a": a, "b": b, "end": b + 1, "pre": float(pre), "rest": r, "confirmed": False,
+                  "confirmed_at": None})
+      continue
+    last_confirmed_end = b
     duration = b - a + 1
     cap = min(max(duration, RECOVERY_CAP[0]), RECOVERY_CAP[1])
     limit = min(n, b + 1 + cap)
@@ -122,11 +151,14 @@ def session_spans(hr, strong, weak, rest: Rest) -> list[dict]:
       else:
         run = 0
     busy.update(range(a, end))
-    out.append({"a": a, "b": b, "end": end, "pre": float(pre), "rest": r})
+    out.append({"a": a, "b": b, "end": end, "pre": float(pre), "rest": r, "confirmed": True,
+                "confirmed_at": confirmed_at})
   return out
 
 
 def sessions(t0: int, hr, strong, weak, rest: Rest) -> list[dict]:
-  """The reference's output: [{start, end, recovery_end, pre_reference}] in unix seconds."""
+  """The reference's output: [{start, end, recovery_end, pre_reference, confirmed, confirmed_at}] in unix seconds."""
   return [{"start": t0 + s["a"] * 60, "end": t0 + s["b"] * 60, "recovery_end": t0 + s["end"] * 60,
-           "pre_reference": round(float(s["pre"]), 3)} for s in session_spans(hr, strong, weak, rest)]
+           "pre_reference": round(float(s["pre"]), 3), "confirmed": s["confirmed"],
+           "confirmed_at": None if s["confirmed_at"] is None else t0 + s["confirmed_at"] * 60}
+          for s in session_spans(hr, strong, weak, rest)]

@@ -3,7 +3,7 @@
 -- WHY
 -- The phone's Watchdog keeps a journal of every episode it opened (WatchdogEpisodeLedgerRow: severity, whether a
 -- verified safety alert happened, whether and how the page was delivered, the evidence at the strongest tick, the
--- exercise context of rule exercise-session-1) and the wearer's optional note after a page
+-- exercise context of rule exercise-session-2) and the wearer's optional note after a page
 -- (WatchdogEpisodeAnnotation). Both lived only in UserDefaults on one phone, for 21 days: a reinstall lost them,
 -- the server could not check an alarm against its own context, and the owner's gym-evening annotations
 -- ("exertion: hard", "sensor: just_on") were never seen by anything that learns (audit A-watchdog D10, F-deploy).

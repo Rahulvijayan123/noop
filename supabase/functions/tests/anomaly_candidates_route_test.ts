@@ -89,8 +89,8 @@ const WINDOW = {
   start_ts: '2026-10-07T21:00:00+00:00', end_ts: '2026-10-07T21:30:00+00:00', usable: false,
   reason: { code: 'context_not_comparable', subcode: 'movement', certainty: 'inferred', legacy: 'activity' },
   context: { kind: 'rest', mix_basis: 'measurement_context_minutes', minutes: 30,
-    mix: { session: 1, recovery: 0, no_session: 0, unknown: 0, asleep: 0, off_wrist: 0, activity: { walking: 1 },
-      quality: { good: 1 } } },
+    mix: { session: 1, recovery: 0, active: 0, no_session: 0, unknown: 0, asleep: 0, off_wrist: 0,
+      activity: { walking: 1 }, quality: { good: 1 } } },
   models: [{ model: 'none', channel_group: 'all', score: null, p: null, usable: false,
     reason: { code: 'context_not_comparable', subcode: 'movement', certainty: 'inferred', legacy: 'activity' } }],
 };

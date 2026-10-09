@@ -21,7 +21,7 @@ const PEAK_SEVERITIES = new Set(['withinLimits', 'note', 'candidate', 'active', 
 const DELIVERIES = new Set(['', 'queued', 'sent', 'denied', 'failed', 'skipped']);
 const CERTAINTIES = new Set(['confirmed', 'inferred', 'unknown', 'measured']);
 // WatchdogExerciseSnapshot / WatchdogEpisodeAnnotation enums (StrandAnalytics).
-const EXERCISE_PHASES = new Set(['session', 'recovery', 'none']);
+const EXERCISE_PHASES = new Set(['session', 'recovery', 'active', 'none']);
 const REFERENCE_STATES = new Set(['established', 'learning']);
 const ANNOTATION_STATUS = new Set(['pending', 'entered', 'skipped', 'expired']);
 const EXERTION = new Set(['rest', 'light', 'hard']);
@@ -49,10 +49,15 @@ function validSignal(s: unknown): boolean {
     && optional(s.energy, isNumber) && optional(s.trustPct, Number.isSafeInteger) && optional(s.rangeHalf, isNumber);
 }
 
-/** WatchdogExerciseSnapshot (rule exercise-session-1). */
+/**
+ * WatchdogExerciseSnapshot (rule exercise-session-2): phase session / recovery / active (a period that met the
+ * session conditions and ended unconfirmed) / none; `confirmed` true / false, or null / absent when not known (or
+ * sent by a phone on rule -1).
+ */
 function validExercise(x: unknown): boolean {
   if (!isObject(x)) return false;
   return text(64)(x.rule) && (x.rule as string).length > 0 && oneOf(EXERCISE_PHASES)(x.phase)
+    && optional(x.confirmed, (v) => typeof v === 'boolean')
     && optional(x.sessionStartUnix, isUnix) && optional(x.sessionLastMovementUnix, isUnix)
     && optional(x.restReference, isNumber) && optional(x.restBasis, text(64))
     && optional(x.ceilingBpm, isNumber) && optional(x.ceilingBasis, text(64))

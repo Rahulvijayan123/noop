@@ -223,7 +223,7 @@ const SERVICE_ONLY_FUNCTIONS = [
   "measurement_context_discover_v1",
   "measurement_context_process_v1",
   "measurement_context_quality_v1",
-  "exercise_session_spans_v1",
+  "exercise_session_spans_v2",
   // Phone Watchdog episodes (20261009150000_watchdog_episodes.sql): the scores route's write and read.
   "watchdog_episodes_upsert_v1",
   "watchdog_episodes_read_v1",

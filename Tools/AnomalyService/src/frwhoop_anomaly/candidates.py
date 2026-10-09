@@ -2,11 +2,12 @@
 
 * Windows are 30-minute wall-clock blocks (:00 / :30), scored once complete (end ≤ newest data − 5 min).
 * A window is USABLE when ≥ 70 % of its minutes have HR on ≥ 30 s AND ≥ 70 % are still or asleep (not "recovery":
-  still minutes within 30 min of vigorous / 10 min of walking) AND none of its minutes is in an exercise session or
-  its recovery (rule exercise-session-1, features.with_sessions). Activity-dominated, recovering, off-wrist or poorly
-  measured windows are withheld with a reason (the phone's activity and quality checks would fail them anyway; the
-  models are not asked to explain exercise): a window touching a session is "activity", one touching a session's
-  recovery "recovery" (canonical context_not_comparable/movement and /recovery, reasons.py).
+  still minutes within 30 min of vigorous / 10 min of walking) AND none of its minutes is in an exercise session,
+  its recovery, or an unconfirmed active period (rule exercise-session-2, features.with_sessions). Activity-dominated,
+  recovering, off-wrist or poorly measured windows are withheld with a reason (the phone's activity and quality
+  checks would fail them anyway; the models are not asked to explain exercise): a window touching a session or an
+  active period is "activity", one touching a session's recovery "recovery" (canonical
+  context_not_comparable/movement and /recovery, reasons.py). An active period has no recovery after it.
 * Context bucket: "sleep" when ≥ 50 % of the minutes are asleep, else "rest". Calibration references are per bucket.
 * Each model's window p: per-channel empirical p against the user's own reference, Bonferroni over channels
   (calibration.MultiChannel). A model FLAGS a window at p < ALPHA (1e-3) — the "window" rule — or when the mean of
@@ -28,10 +29,11 @@ import datetime as dt
 import numpy as np
 
 from . import reasons
-from .features import EXERCISE, EXERCISE_RECOVERY, TARGETS, local_day
+from .features import EXERCISE, EXERCISE_ACTIVE, EXERCISE_RECOVERY, TARGETS, local_day
 
 WINDOW_S = 1800
-MIX_KEYS = ("still", "asleep", "recovery", "walking", "active", "off", "unknown", EXERCISE, EXERCISE_RECOVERY)
+MIX_KEYS = ("still", "asleep", "recovery", "walking", "active", "off", "unknown", EXERCISE, EXERCISE_RECOVERY,
+            EXERCISE_ACTIVE)
 ALPHA = 1e-3
 STRONG = 1e-4
 CHANNEL_ALPHA = 0.01
@@ -68,7 +70,7 @@ def windows(frame, lo: int, hi: int) -> list[Window]:
       withheld = "off_wrist"
     elif quality < MIN_QUALITY:
       withheld = "low_hr_coverage"
-    elif mix[EXERCISE] > 0:
+    elif mix[EXERCISE] > 0 or mix[EXERCISE_ACTIVE] > 0:
       withheld = "activity"
     elif mix[EXERCISE_RECOVERY] > 0:
       withheld = "recovery"

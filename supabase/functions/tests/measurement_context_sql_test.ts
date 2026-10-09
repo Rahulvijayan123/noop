@@ -1,7 +1,8 @@
 // The per-minute measurement context on the production Postgres image with the full migration chain: runs
-// supabase/tests/measurement_context_minutes.sql (rule exercise-session-1 parity with
-// contracts/reference/exercise-session-1.json, a synthetic day built from raw rows, idempotence, backfill, the
-// pg_cron path, RLS between two owners) inside the pipeline container. Docker-gated like auth_isolation_sql_test.ts:
+// supabase/tests/measurement_context_minutes.sql (rule exercise-session-2 parity with
+// contracts/reference/exercise-session-2.json, a synthetic day built from raw rows, active periods / other_movement /
+// a growing period in the builder, idempotence, backfill, the pg_cron path, RLS between two owners) inside the
+// pipeline container. Docker-gated like auth_isolation_sql_test.ts:
 //
 //   set -a; source ~/.cache/nara-pipeline-db/pipeline.env; set +a
 //   cd supabase/functions
@@ -33,12 +34,12 @@ async function runSqlFile(file: URL, vars: Record<string, string>, appName: stri
 }
 
 Deno.test({
-  name: 'measurement context minutes: exercise-session-1 parity, synthetic day, idempotence, backfill, cron, RLS',
+  name: 'measurement context minutes: exercise-session-2 parity, synthetic day, idempotence, backfill, cron, RLS',
   ignore: !container,
   sanitizeOps: false,
   sanitizeResources: false,
   fn: async () => {
-    const fixture = await Deno.readTextFile(new URL('../../../contracts/reference/exercise-session-1.json', import.meta.url));
+    const fixture = await Deno.readTextFile(new URL('../../../contracts/reference/exercise-session-2.json', import.meta.url));
     const run = await runSqlFile(new URL('../../tests/measurement_context_minutes.sql', import.meta.url), { fixture },
       'measurement-context-minutes');
     assert.equal(run.code, 0, run.stderr.slice(-4000));

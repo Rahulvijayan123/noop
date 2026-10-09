@@ -26,13 +26,13 @@ function episode(overrides: Record<string, unknown> = {}) {
     event_label: 'abnormal_multi_direction', activity_label: 'exercise_session', contributing: ['HR'],
     signals: [{ name: 'HR', unit: 'bpm', observed: 108, usual: 88, reconstructed: null, energy: 2.4, trustPct: 90,
       rangeHalf: 6.5 }],
-    exercise: { rule: 'exercise-session-1', phase: 'recovery', sessionStartUnix: 1791433200,
+    exercise: { rule: 'exercise-session-2', phase: 'recovery', confirmed: true, sessionStartUnix: 1791433200,
       sessionLastMovementUnix: 1791438600, restReference: 66, restBasis: 'sleep_resting_hr', ceilingBpm: 185,
       ceilingBasis: 'age_formula', sessionReference: 'learning', recoveryReference: 'learning', routine: null },
     annotation: { episodeId: 'wd-1791438841', deviceId: 'my-whoop', eventUnix: 1791438900, enteredUnix: 1791439500,
       reporter: 'wearer', status: 'entered', exertion: 'hard', sensor: 'just_on' },
     quality_reasons: [{ code: 'context_not_comparable', subcode: 'recovery', certainty: 'inferred' }],
-    versions: { watchdog: 'v3.1', baseline: 'lb-context-1', exercise_rule: 'exercise-session-1',
+    versions: { watchdog: 'v3.1', baseline: 'lb-context-1', exercise_rule: 'exercise-session-2',
       reason_codes: 'data-reason-1' },
     client_updated_at: 1791441210,
     ...overrides,
@@ -121,8 +121,12 @@ Deno.test('watchdog episodes POST: an invalid batch is refused whole with its fi
     [{ device_id: STRAP, episodes: [episode({ client_updated_at: '1791441210' })] }, 400, 'invalid_client_updated_at'],
     [{ device_id: STRAP, episodes: [episode({ episode_id: 'wd 1' })] }, 400, 'invalid_episode_id'],
     [{ device_id: STRAP, episodes: [episode({ safety: 'no' })] }, 400, 'invalid_episode'],
-    [{ device_id: STRAP, episodes: [episode({ exercise: { rule: 'exercise-session-1', phase: 'gym' } })] },
+    [{ device_id: STRAP, episodes: [episode({ exercise: { rule: 'exercise-session-2', phase: 'gym' } })] },
       400, 'invalid_exercise'],
+    [{ device_id: STRAP, episodes: [episode({ exercise: { rule: 'exercise-session-2', phase: 'active',
+      confirmed: 'no' } })] }, 400, 'invalid_exercise'],
+    [{ device_id: STRAP, episodes: [episode({ exercise: { rule: 'exercise-session-2', phase: 'session',
+      confirmed: 1 } })] }, 400, 'invalid_exercise'],
     [{ device_id: STRAP, episodes: [episode({ annotation: { ...episode().annotation, episodeId: 'wd-other' } })] },
       400, 'invalid_annotation'],
     [{ device_id: STRAP, episodes: [episode({ annotation: { ...episode().annotation, exertion: 'max' } })] },
@@ -146,6 +150,25 @@ Deno.test('watchdog episodes POST: an invalid batch is refused whole with its fi
     assertEquals((await res.json()).error, code);
     assertEquals(calls.length, 0, `${code}: nothing reaches the database`);
   }
+});
+
+Deno.test('watchdog episodes POST: rule exercise-session-2 phases, confirmed true / false / null / absent', async () => {
+  const calls: Array<{ fn: string; args: any }> = [];
+  const exercise = (extra: Record<string, unknown>) =>
+    ({ rule: 'exercise-session-2', sessionStartUnix: 1791433200, sessionLastMovementUnix: 1791438600, ...extra });
+  const one = (id: string, x: Record<string, unknown>) => episode({ episode_id: id, annotation: null, exercise: x });
+  const res = await handleScoresRequest(post({ device_id: STRAP, episodes: [
+    one('wd-a', exercise({ phase: 'active', confirmed: false })),
+    one('wd-b', exercise({ phase: 'session', confirmed: null })),
+    one('wd-c', exercise({ phase: 'session' })),
+    one('wd-d', { rule: 'exercise-session-1', phase: 'recovery' }),
+    one('wd-e', exercise({ phase: 'none', confirmed: true })),
+  ] }), { rest: fakeRest(calls), cfg });
+  assertEquals(res.status, 200, await res.clone().text());
+  assertEquals(await res.json(), { accepted: 5, skipped_stale: 0 });
+  const sent = calls[0].args.p_episodes.map((e: any) => e.exercise);
+  assertEquals(sent.map((x: any) => x.phase), ['active', 'session', 'session', 'recovery', 'none']);
+  assertEquals(sent.map((x: any) => x.confirmed), [false, null, undefined, undefined, true], 'kept as sent');
 });
 
 Deno.test('watchdog episodes: validation keeps known members and drops unknown ones', () => {

@@ -98,13 +98,13 @@ Deno.test({
         event_label: 'abnormal_multi_direction', activity_label: 'exercise_session', contributing: ['HR'],
         signals: [{ name: 'HR', unit: 'bpm', observed: 108, usual: 88, reconstructed: null, energy: 2.4,
           trustPct: 90, rangeHalf: 6.5 }],
-        exercise: { rule: 'exercise-session-1', phase: 'recovery', sessionStartUnix: 1791433200,
+        exercise: { rule: 'exercise-session-2', phase: 'recovery', confirmed: true, sessionStartUnix: 1791433200,
           sessionLastMovementUnix: 1791438600, restReference: 66, restBasis: 'sleep_resting_hr', ceilingBpm: 185,
           ceilingBasis: 'age_formula', sessionReference: 'learning', recoveryReference: 'learning', routine: null },
         annotation: { episodeId: 'wd-1791438841', deviceId: 'my-whoop', eventUnix: 1791438900,
           enteredUnix: 1791439500, reporter: 'wearer', status: 'entered', exertion: 'hard', sensor: 'just_on' },
         quality_reasons: [{ code: 'context_not_comparable', subcode: 'recovery', certainty: 'inferred' }],
-        versions: { watchdog: 'v3.1', exercise_rule: 'exercise-session-1', reason_codes: 'data-reason-1' },
+        versions: { watchdog: 'v3.1', exercise_rule: 'exercise-session-2', reason_codes: 'data-reason-1' },
         client_updated_at: 1791441210,
       };
       const post = (episodes: unknown[]) => handleScoresRequest(new Request(
