@@ -37,15 +37,33 @@ public struct ActivitySitStandSecond: Equatable, Codable, Sendable {
     public var offWrist: Bool
     /// Asleep, or inside the night's in-bed window: no sit / stand claim, and a segment break.
     public var asleep: Bool
+    /// Stepping or otherwise in locomotion (the strap's walk / run class, step ticks, a decoded walk): no claim,
+    /// and a segment break. The strap's dynamic acceleration alone does not split a walk on this strap (see
+    /// `ActivitySitStandSmoothing.segmentActiveDynG`), so locomotion is a break of its own.
+    public var moving: Bool
 
-    public init(ts: Int, gravity: [Double]?, dynG: Double?, offWrist: Bool = false, asleep: Bool = false) {
+    public init(ts: Int, gravity: [Double]?, dynG: Double?, offWrist: Bool = false, asleep: Bool = false,
+                moving: Bool = false) {
         self.ts = ts; self.gravity = gravity; self.dynG = dynG; self.offWrist = offWrist; self.asleep = asleep
+        self.moving = moving
     }
 
-    /// The store's gravity row as one second (awake and on the wrist; set the flags when known).
-    public init(_ sample: GravitySample, offWrist: Bool = false, asleep: Bool = false) {
+    /// The store's gravity row as one second (awake, on the wrist and not stepping unless the flags say so).
+    public init(_ sample: GravitySample, offWrist: Bool = false, asleep: Bool = false, moving: Bool = false) {
         self.init(ts: sample.ts, gravity: [sample.x, sample.y, sample.z], dynG: sample.dynAccel,
-                  offWrist: offWrist, asleep: asleep)
+                  offWrist: offWrist, asleep: asleep, moving: moving)
+    }
+
+    /// The store's gravity rows as seconds, `moving` set where the strap's step counter ticked or its activity
+    /// class says walk / run (`StepSample.activityClass` ≥ 1), exactly as the decoder's observations read them.
+    public static func seconds(gravity: [GravitySample], steps: [StepSample] = []) -> [ActivitySitStandSecond] {
+        guard !steps.isEmpty, let lo = gravity.map(\.ts).min(), let hi = gravity.map(\.ts).max() else {
+            return gravity.map { ActivitySitStandSecond($0) }
+        }
+        let (ticks, classes) = ActivityContextTrackBuilder.stepTicksAndClasses(steps, lo: lo, hi: hi + 1)
+        return gravity.map { g in
+            ActivitySitStandSecond(g, moving: (ticks[g.ts] ?? 0) > 0 || (classes[g.ts] ?? 0) >= 1)
+        }
     }
 
     /// The gravity unit vector, or nil when there is none (missing, non-finite or near zero).
@@ -141,15 +159,19 @@ public struct ActivitySitStandSmoothedSecond: Equatable, Sendable {
 /// Still-segment smoothing (ssmodel.py `stream_segments` + `smooth_segments`, non-causal form).
 ///
 /// A second is ACTIVE when the centred 10-s mean of the dynamic acceleration (over the seconds that have one)
-/// exceeds `segmentActiveDynG`, or when no second in that window has one; off-wrist and asleep / in-bed seconds
-/// are active too. A segment is a maximal run of non-active seconds: on Capture-24 only ~2 % of standing seconds
+/// exceeds `segmentActiveDynG`, or when no second in that window has one; off-wrist, asleep / in-bed and moving
+/// (stepping) seconds are active too. A segment is a maximal run of non-active seconds: on Capture-24 only ~2 % of standing seconds
 /// fell in sitting-majority segments, i.e. posture changes are almost always bracketed by activity. Inside a
 /// segment, a STILL second (dynamic acceleration below `stillDynG`, gravity present) gets the segment's mean
 /// log-odds over its still seconds; every other second makes no posture claim.
 public enum ActivitySitStandSmoothing {
     /// Window of the dynamic-acceleration mean that splits segments (s).
     public static let segmentWindowS = 10
-    /// 10-s mean dynamic acceleration above which a second is active (g): ssmodel.py `dyn_thr`.
+    /// 10-s mean dynamic acceleration above which a second is active (g): ssmodel.py `dyn_thr`, chosen on
+    /// Capture-24 where `dyn` is the RMS of the 0.5 Hz high-passed raw signal. This strap's own dynamic
+    /// acceleration reads ordinary walking at about 0.135 g (`ActivitySim`'s measured distributions), under this
+    /// bar, so locomotion (`ActivitySitStandSecond.moving`; the decoder's moving / transition posterior) is a
+    /// segment break of its own. Not re-tuned on WHOOP data: there is none with posture labels yet.
     public static let segmentActiveDynG = 0.2
     /// Dynamic acceleration below which a second is still (g): the experiments' "still" seconds.
     public static let stillDynG = 0.05
@@ -177,9 +199,10 @@ public enum ActivitySitStandSmoothing {
         return out
     }
 
-    /// The store's gravity rows smoothed (awake and on the wrist assumed).
-    public static func smooth(_ gravity: [GravitySample], model: ActivitySitStandModel) -> [ActivitySitStandSmoothedSecond] {
-        smooth(gravity.map { ActivitySitStandSecond($0) }, model: model)
+    /// The store's gravity rows smoothed (awake and on the wrist assumed; `steps` mark locomotion).
+    public static func smooth(_ gravity: [GravitySample], steps: [StepSample] = [],
+                              model: ActivitySitStandModel) -> [ActivitySitStandSmoothedSecond] {
+        smooth(ActivitySitStandSecond.seconds(gravity: gravity, steps: steps), model: model)
     }
 
     struct Part {
@@ -212,7 +235,7 @@ public enum ActivitySitStandSmoothing {
             var sum = [Double](repeating: 0, count: n + 1), cnt = [Int](repeating: 0, count: n + 1)
             for i in 0..<n {
                 var v = 0.0, c = 0
-                if let s = present[i], !s.offWrist, !s.asleep, let d = s.dynG, d.isFinite { v = d; c = 1 }
+                if let s = present[i], !s.offWrist, !s.asleep, !s.moving, let d = s.dynG, d.isFinite { v = d; c = 1 }
                 sum[i + 1] = sum[i] + v; cnt[i + 1] = cnt[i] + c
             }
             segmentId += 1
@@ -220,7 +243,7 @@ public enum ActivitySitStandSmoothing {
             for i in 0..<n {
                 let a = max(0, i - half), b = min(n, i + half)
                 let c = cnt[b] - cnt[a]
-                let excluded = present[i].map { $0.offWrist || $0.asleep } ?? false
+                let excluded = present[i].map { $0.offWrist || $0.asleep || $0.moving } ?? false
                 let active = excluded || c == 0 || (sum[b] - sum[a]) / Double(c) > segmentActiveDynG
                 if active {
                     if inSegment { segmentId += 1; inSegment = false }
@@ -358,9 +381,9 @@ public enum ActivitySitStandFitter {
     /// Fit the head from `labels` (guided holds of seatedLikely / uprightStationary with no transition kind, and
     /// confirmation labels) over the 1 Hz `gravity` stream that covers them. Only still seconds count. Unsure,
     /// stretch-feedback and imported labels are ignored; a second two labels disagree on is dropped. Deterministic.
-    public static func fit(labels: [ActivityGroundTruthLabel], gravity: [GravitySample],
+    public static func fit(labels: [ActivityGroundTruthLabel], gravity: [GravitySample], steps: [StepSample] = [],
                            config: ActivitySitStandFitConfig = ActivitySitStandFitConfig()) -> ActivitySitStandFitResult {
-        fit(labels: labels, seconds: gravity.map { ActivitySitStandSecond($0) }, config: config)
+        fit(labels: labels, seconds: ActivitySitStandSecond.seconds(gravity: gravity, steps: steps), config: config)
     }
 
     /// `fit(labels:gravity:config:)` over prepared seconds.
@@ -654,8 +677,10 @@ public enum ActivitySitStandGate {
     /// `score` over the store's gravity rows (awake and on the wrist assumed; use the seconds overload to mark
     /// off-wrist or asleep seconds).
     public static func score(answer: ActivitySitStandAnswer, ts: Int, gravity: [GravitySample],
+                             steps: [StepSample] = [],
                              model: ActivitySitStandModel?) -> ActivitySitStandConfirmationScore {
-        score(answer: answer, ts: ts, seconds: gravity.map { ActivitySitStandSecond($0) }, model: model)
+        score(answer: answer, ts: ts, seconds: ActivitySitStandSecond.seconds(gravity: gravity, steps: steps),
+              model: model)
     }
 
     /// The gate over the persisted scores (any order). No model → `.needsCalibration`. Of the latest `window`

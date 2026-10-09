@@ -23,7 +23,9 @@ final class ActivityGroundTruthTests: XCTestCase {
         XCTAssertEqual(ActivityGroundTruthSource.guided.rawValue, "guided")
         XCTAssertEqual(ActivityGroundTruthSource.stretchFeedback.rawValue, "stretch_feedback")
         XCTAssertEqual(ActivityGroundTruthSource.imported.rawValue, "imported")
-        XCTAssertEqual(Set(ActivityGroundTruthSource.allCases.map(\.rawValue)), ["guided", "stretch_feedback", "imported"])
+        XCTAssertEqual(ActivityGroundTruthSource.confirmation.rawValue, "confirmation")
+        XCTAssertEqual(Set(ActivityGroundTruthSource.allCases.map(\.rawValue)),
+                       ["guided", "stretch_feedback", "imported", "confirmation"])
     }
 
     func testStrongVersusWeakLabels() {
@@ -267,7 +269,7 @@ final class ActivityGroundTruthTests: XCTestCase {
 
     func testTheCurrentProtocolIsShortAndWellFormed() {
         let p = ActivityCalibrationProtocols.current
-        XCTAssertEqual(p.version, "calibration-v3")
+        XCTAssertEqual(p.version, "calibration-v4")
         XCTAssertLessThanOrEqual(p.estimatedSeconds(), 330, "a run fits in five and a half minutes, start countdowns included")
         var ids = Set<String>()
         for task in p.tasks {
@@ -280,12 +282,14 @@ final class ActivityGroundTruthTests: XCTestCase {
             if task.isMove {
                 XCTAssertNil(task.posture, "\(task.id): a move's interval holds both postures")
                 XCTAssertNotNil(task.endPosture, task.id)
-                let cue = task.cueSeconds ?? -1
-                XCTAssertGreaterThanOrEqual(cue, task.guardSeconds, "\(task.id): the buzz lands inside the label")
-                XCTAssertGreaterThanOrEqual(task.durationSeconds - cue, 7, "\(task.id): room to move and settle")
+                let earliest = task.cueSecondsRange?.lowerBound ?? task.cueSeconds ?? -1
+                let latest = task.latestCueSeconds ?? .max
+                XCTAssertGreaterThanOrEqual(earliest, task.guardSeconds, "\(task.id): the buzz lands inside the label")
+                XCTAssertGreaterThanOrEqual(task.durationSeconds - latest, 7, "\(task.id): room to move and settle")
             } else {
                 XCTAssertNotNil(task.posture, task.id)
                 XCTAssertNil(task.cueSeconds, "\(task.id): holds never buzz")
+                XCTAssertNil(task.cueSecondsRange, "\(task.id): holds never buzz")
             }
         }
     }
