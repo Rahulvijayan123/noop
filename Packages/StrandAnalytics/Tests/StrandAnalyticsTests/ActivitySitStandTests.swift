@@ -213,9 +213,10 @@ final class ActivitySitStandTests: XCTestCase {
         // Disabled: confirmations add nothing.
         cfg.useConfirmations = false
         XCTAssertTrue(ActivitySitStandFitter.labelledStillSeconds(labels: [label], seconds: s.seconds, config: cfg).rows.isEmpty)
-        // A "neither" answer is stored without a posture and never fits.
+        // A "neither" answer is stored as posture `unknown` (the server's confirmation shape) and never fits.
         let neither = ActivitySitStandConfirmations.label(answer: .neither, ts: answerTs)
-        XCTAssertNil(neither.posture)
+        XCTAssertEqual(neither.posture, PostureClass.unknown.rawValue)
+        XCTAssertFalse(neither.userUnsure)
         XCTAssertNotNil(neither.validated())
         cfg.useConfirmations = true
         XCTAssertTrue(ActivitySitStandFitter.labelledStillSeconds(labels: [neither], seconds: s.seconds, config: cfg).rows.isEmpty)

@@ -267,12 +267,14 @@ public enum ActivitySitStandSmoothing {
 public enum ActivitySitStandAnswer: String, Codable, CaseIterable, Sendable {
     case sitting, standing, neither
 
-    /// The canonical posture code a confirmation label carries (nil for "neither").
+    /// The canonical posture code a confirmation label carries. "Neither" is `unknown` with `user_unsure` false:
+    /// the server's `activity_ground_truth_labels_confirmation_shape` (migration 20261008100500) requires one of the
+    /// three codes and reads `unknown` on a confirmation as "sure it was neither sitting nor standing still".
     public var posture: String? {
         switch self {
         case .sitting: return PostureClass.seatedLikely.rawValue
         case .standing: return PostureClass.uprightStationary.rawValue
-        case .neither: return nil
+        case .neither: return PostureClass.unknown.rawValue
         }
     }
 
@@ -303,7 +305,7 @@ public enum ActivitySitStandConfirmations {
     /// The answer time of a confirmation label built by `label(…)`.
     public static func answerTs(of label: ActivityGroundTruthLabel) -> Int { label.endTs - afterS }
 
-    /// A confirmation label for an answer at `ts`. "Neither" is stored too (no posture): it is a valid answer and
+    /// A confirmation label for an answer at `ts`. "Neither" is stored too (posture `unknown`): it is a valid answer and
     /// part of the record, but neither fits nor counts toward the gate.
     public static func label(answer: ActivitySitStandAnswer, ts: Int, id: UUID = UUID(), deviceId: String? = nil,
                              externalDeviceId: String? = nil,
