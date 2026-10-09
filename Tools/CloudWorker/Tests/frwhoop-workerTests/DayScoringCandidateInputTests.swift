@@ -91,6 +91,26 @@ final class DayScoringCandidateInputTests: XCTestCase {
         XCTAssertEqual(deduped.map(\.ts), [10, 11])
     }
 
+    // MARK: - HRV rows limited to the interval
+
+    func testHrvRowsKeepTheIntervalInclusiveAndDropTheRestOfTheNightWindow() {
+        let start = 1_772_006_400, end = 1_772_035_200
+        let rows = [beat(start - 30 * 3_600, 800, seq: 1), beat(start - 1, 800, seq: 2),
+                    beat(start, 800, seq: 3), beat(end, 800, seq: 4),
+                    beat(end + 1, 800, seq: 5), beat(start + 54 * 3_600 - 1, 800, seq: 6)]
+        XCTAssertEqual(DayScorer.hrvRows(rows, intervalStart: start, intervalEnd: end).map(\.seq), [3, 4])
+    }
+
+    func testDayWornOnlyOnTheNeighbouringNightsBuildsNoHrvRequest() {
+        // The night window still loads the evening before and the night after; the sidecar answers a
+        // payload with no beat inside the interval with 400 out_of_bounds_input.
+        let start = 1_772_006_400, end = start + 86_400
+        let rows = [beat(start - 6 * 3_600, 800, seq: 1), beat(end + 6 * 3_600, 810, seq: 2)]
+        let kept = DayScorer.hrvRows(rows, intervalStart: start, intervalEnd: end)
+        XCTAssertTrue(kept.isEmpty)
+        XCTAssertNil(inputs(kept).input(for: "hrv"))
+    }
+
     // MARK: - Beat ordering and timestamps
 
     func testBeatsAreOrderedBySecondThenSequenceThenOrdinal() {

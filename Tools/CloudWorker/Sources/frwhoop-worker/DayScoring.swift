@@ -688,7 +688,7 @@ struct DayScorer {
         let assembled: Bool
         /// Observation-identity-deduped beats, ordered by (ts, seq, ord).
         let hrvBeats: [CandidateBeat]
-        /// RR rows read before dedup (diagnostics only).
+        /// RR rows inside the interval before dedup (diagnostics only).
         let hrvInputRows: Int
         /// True when the beats' timestamps are whole seconds only.
         let hrvTimestampResolution: String
@@ -804,6 +804,14 @@ struct DayScorer {
             if seen.insert(key).inserted { out.append(beat) }
         }
         return out
+    }
+
+    /// The R-R rows the `hrv` candidate is sent: those inside the candidate interval, inclusive like
+    /// the provider's windows, which never read a beat outside it. The day's rows span the whole
+    /// night window, and the sidecar refuses a payload with no beat inside the interval
+    /// (`out_of_bounds_input`) or a body over 8 MiB, so the rest of the window must not be sent.
+    static func hrvRows(_ rr: [RRInterval], intervalStart: Int, intervalEnd: Int) -> [RRInterval] {
+        rr.filter { $0.ts >= intervalStart && $0.ts <= intervalEnd }
     }
 
     /// Map RR rows to provider beats, ordered by (ts, seq, ord) — the original
@@ -1107,8 +1115,10 @@ struct DayScorer {
 
         // HRV needs the observation-identity dedup + ordering.
         var hrvBeats: [CandidateBeat] = []
+        var intervalRR: [RRInterval] = []
         if enabled.contains("hrv") {
-            hrvBeats = Self.candidateBeats(Self.dedupByObservationIdentity(rr))
+            intervalRR = Self.hrvRows(rr, intervalStart: intervalStart, intervalEnd: intervalEnd)
+            hrvBeats = Self.candidateBeats(Self.dedupByObservationIdentity(intervalRR))
         }
         // sleep_stage consumes the SAME R-R rows (no dedup: the adapter does its
         // own run splitting and reports ts_suspect itself).
@@ -1161,7 +1171,7 @@ struct DayScorer {
             canonicalAvgHrv: canonicalAvgHrv, canonicalSdnn: canonicalSdnn,
             profileVersion: profileVersion, correctionsVersion: correctionsVersion,
             enabledMetrics: enabled, assembled: true,
-            hrvBeats: hrvBeats, hrvInputRows: rr.count,
+            hrvBeats: hrvBeats, hrvInputRows: intervalRR.count,
             hrvTimestampResolution: "whole_seconds",
             hrSamples: hrSamples, rrRows: rrRows,
             sleepWindowStart: sleepWindow?.start, sleepWindowEnd: sleepWindow?.end,
