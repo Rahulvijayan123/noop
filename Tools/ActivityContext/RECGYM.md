@@ -54,8 +54,8 @@ one channel differ by at most 8e-4 across time steps). `reproduce.py` refits it 
 
 ### 2.1 RecGym's units, measured from the data
 
-The dataset documentation says only "normalized". The data say (wrist, 1.63 M rows; `G-models` scripts in the build
-scratch):
+The dataset documentation says only "normalized". The data say (wrist, 1.63 M rows; the probes are
+`_build-scratch/ctxwd/recgym-head/scripts/units_probe*.py`, outside the repository):
 
 | Channel | Grid | Unclipped range | Reading |
 | --- | --- | --- | --- |
