@@ -52,3 +52,37 @@ final class DataReasonTests: XCTestCase {
         XCTAssertEqual(DataReason.from(vocabulary: "watchdog_quality", legacy: "wrist_off_event")?.certainty, .confirmed)
     }
 }
+
+/// Observed quality reasons from the strap's own record stream (audit 2026-10-09, B-quality).
+final class WatchdogRecordIndexQualityTests: XCTestCase {
+    func testRecordIndexGapSeparatesNotRecordingFromTransportLoss() {
+        let now = 1_790_000_000 - 1_790_000_000 % 60
+        let feed = Watchdog.syntheticFeed(now: now, hr: 70, hrv: 50, temp: 33.5, resp: 14, motion: 0.02)
+        guard case .success(var w) = WatchdogWindowBuilder.build(feed) else { return XCTFail("window") }
+        // HR missing for minutes 10–19 of the window.
+        for i in 10..<20 { w.hr[i] = nil }
+        var q = WatchdogQualityFeed.synthetic(for: w)
+        for i in 10..<20 { q.hrSecondsByMinute[w.startUnix + i * 60] = 0 }
+        // Records every second except a paused stretch (index +1 across 10 minutes) …
+        var idx = 1000
+        for t in stride(from: w.startUnix, to: w.startUnix + 10 * 60, by: 1) { q.v18RecordIndex[t] = idx; idx += 1 }
+        for t in stride(from: w.startUnix + 20 * 60, to: now, by: 1) { q.v18RecordIndex[t] = idx; idx += 1 }
+        w.quality = q
+        let paused = WatchdogSignalQuality.assess(window: w)
+        XCTAssertEqual(paused[14].onBody, .off)
+        XCTAssertTrue(paused[14].reasons.contains("strap_not_recording"))
+        XCTAssertEqual(DataReason.fromWatchdogQuality(paused[14].reasons).first?.code, "strap_not_recording")
+        // … versus records lost in transport (index jumps by the gap): wear stays unknown, the gap is named.
+        var q2 = q
+        q2.v18RecordIndex = [:]
+        idx = 1000
+        for t in stride(from: w.startUnix, to: now, by: 1) {
+            if t < w.startUnix + 10 * 60 || t >= w.startUnix + 20 * 60 { q2.v18RecordIndex[t] = idx }
+            idx += 1
+        }
+        w.quality = q2
+        let lost = WatchdogSignalQuality.assess(window: w)
+        XCTAssertNotEqual(lost[14].onBody, .off)
+        XCTAssertTrue(lost[14].reasons.contains("transport_gap"))
+    }
+}

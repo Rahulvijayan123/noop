@@ -55,6 +55,10 @@ public struct WatchdogQualityFeed: Equatable, Sendable {
     }
 
     public var v18: [V18Second] = []
+    /// Unix second → the strap's history record index, for every v18 record in the window (with or without optical
+    /// evidence). The 5/MG writes no records while off the body and the index then steps by exactly 1 across the
+    /// gap; records lost in transport leave the index stepping by the gap length (audit 2026-10-09). Empty = unknown.
+    public var v18RecordIndex: [Int: Int] = [:]
     /// WRIST_ON / WRIST_OFF events from the last 24 h (not just the 30-minute window), oldest first.
     public var wristEvents: [WristEvent] = []
     /// Live strap events since the app connected (a live WRIST_OFF / WRIST_ON).

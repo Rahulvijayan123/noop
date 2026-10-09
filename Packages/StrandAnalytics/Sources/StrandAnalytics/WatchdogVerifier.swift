@@ -28,6 +28,10 @@ public enum WatchdogSignalQuality {
     public static let movingDyn = 0.05
     public static let minHrSecondsOn = 30
     public static let wristOffLookback = 24 * 3600
+    /// A v18 record gap at least this long whose record index steps by exactly 1: the strap stopped recording.
+    public static let notRecordingGapSeconds = 30
+    /// Skin temperature takes ~20 minutes to settle after the strap goes back on (owner data, 3 episodes).
+    public static let settleAfterWristOnSeconds = 20 * 60
 
     public static func assess(window: WatchdogWindow) -> [WatchdogMinuteQuality] {
         let q = window.quality
@@ -39,6 +43,14 @@ public enum WatchdogSignalQuality {
             events.last { $0.ts <= t && t - $0.ts <= wristOffLookback }
         }
         let lastReset = q.resetEvents.max()
+        // Record-index continuity: gaps between consecutive v18 records, classified as "strap not recording"
+        // (index +1 across ≥ 30 s: the 5/MG writes nothing while off the body) or "lost in transport".
+        let indexed = q.v18RecordIndex.sorted { $0.key < $1.key }
+        var pausedSpans: [(Int, Int)] = [], lostSpans: [(Int, Int)] = []
+        for (a, b) in zip(indexed, indexed.dropFirst()) where b.key - a.key >= notRecordingGapSeconds {
+            if b.value - a.value == 1 { pausedSpans.append((a.key, b.key)) }
+            else if b.value - a.value > 1 { lostSpans.append((a.key, b.key)) }
+        }
         var out: [WatchdogMinuteQuality] = []
         out.reserveCapacity(n)
         for i in 0..<n {
@@ -52,8 +64,15 @@ public enum WatchdogSignalQuality {
             let baselineZero = v18.contains { $0.baselineZero }
             let temp = i < window.temp.count ? window.temp[i] : nil
             var onBody: WDOnBody = .unknown
+            let paused = pausedSpans.contains { $0.0 < m && $0.1 > mEnd }
+            if lostSpans.contains(where: { $0.0 < mEnd && $0.1 > m }) { reasons.append("transport_gap") }
+            if let ev = lastWristEvent(before: mEnd), ev.on, mEnd - ev.ts < settleAfterWristOnSeconds {
+                reasons.append("settling_after_wrist_on")
+            }
             if let ev = lastWristEvent(before: mEnd), !ev.on {
                 onBody = .off; reasons.append("wrist_off_event")
+            } else if paused && window.hr[i] == nil {
+                onBody = .off; reasons.append("strap_not_recording")
             } else if baselineZero && window.hr[i] == nil {
                 onBody = .off; reasons.append("optical_baseline_zero")
             } else if q.charging == true {
@@ -660,8 +679,12 @@ public enum WatchdogAlertVerifier {
             let on = Double(q.filter { $0.onBody == .on }.count) / nq
             let goodish = Double(q.filter { grade($0) == .good || grade($0) == .degraded }.count) / nq
             let tempNeedsPlacement = c.channels.contains("Temp") && q.first?.placement != "wrist"
+            let tempSettling = c.channels.contains("Temp") && q.contains { $0.reasons.contains("settling_after_wrist_on") }
             if off {
                 checks.append(.init(check: .sensorQuality, outcome: .fail, reason: "strap off the body"))
+            } else if tempSettling {
+                checks.append(.init(check: .sensorQuality, outcome: .fail,
+                                    reason: "skin temperature settling after the strap went back on"))
             } else if poor > maxPoorShare || artifact > maxPoorShare {
                 checks.append(.init(check: .sensorQuality, outcome: .fail,
                                     reason: String(format: "poor signal %.0f%%, artifact %.0f%%", poor * 100, artifact * 100)))

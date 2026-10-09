@@ -666,6 +666,11 @@ extension WhoopStore {
         // history banked before this migration cannot be backfilled (the strap already trimmed it), so an
         // absent channel must stay absent rather than become a fabricated 0.
         //
+        // UPDATE 2026-10-09: no longer instrumentation only. The Watchdog's per-minute signal-quality assessment reads
+        // the aux bytes (optical amplitude marker, baselines, record index; `WatchdogQualityFeedBuilder`) and cloud
+        // capture reads the SpO2 band; `gravitySample.dynAccel` feeds the Watchdog and the exercise-session rule.
+        // The note below records the original intent.
+        //
         // INSTRUMENTATION ONLY. Nothing reads these columns: no analytic, no score, no gate, no UI. That
         // is deliberate — see the "validate against the artifact, not one match" rule in CLAUDE.md. The
         // point of this migration is that the data starts accruing NOW so a validated consumer is possible

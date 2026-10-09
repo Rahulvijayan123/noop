@@ -50,6 +50,13 @@ public enum WatchdogQualityFeedBuilder {
         return byTs.values.sorted { $0.ts < $1.ts }
     }
 
+    /// Unix second → record index for every v18 record that carries one.
+    public static func v18RecordIndex(_ samples: [V18AuxSample]) -> [Int: Int] {
+        var out: [Int: Int] = [:]
+        for s in samples { if let i = s.recordIndex { out[s.ts] = i } }
+        return out
+    }
+
     // MARK: Events
 
     public static func wristEvents(_ events: [WhoopEvent]) -> [WatchdogQualityFeed.WristEvent] {
