@@ -3,7 +3,7 @@
 One rule, implemented twice: on the phone in `Packages/StrandAnalytics/Sources/StrandAnalytics/ExerciseSession.swift`
 (the Watchdog and the Layer 1 context strata) and on the server in the measurement-context minute builder
 (`supabase/migrations/2026100910xxxx_measurement_context_minutes.sql`). Both are pinned by the shared fixture
-`contracts/fixtures/exercise-session-1.json`.
+`contracts/reference/exercise-session-1.json`.
 
 ## Why
 
@@ -46,7 +46,8 @@ against rest.
 **Recovery**: starts at the session's last evidence minute. It ends at the first of
 
 - heart rate within the pre-session reference + 10 bpm for 5 consecutive minutes (the pre-session reference is the
-  median HR from 45 to 10 minutes before the session started, falling back to the rest reference), or
+  median HR from 45 to 10 minutes before the session started, skipping minutes inside an earlier session or its recovery, falling back to the
+  previous session's pre-session reference, then the rest reference), or
 - the cap: session duration clamped to [30, 120] minutes, or
 - a new session.
 
