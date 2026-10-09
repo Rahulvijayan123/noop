@@ -115,6 +115,10 @@ const SHARED_REFERENCE_POLICIES = [
  * function runs under the caller's row-level security.
  */
 const CLIENT_CALLABLE_FUNCTIONS = [
+  // Already shipped, missing from this list (INTEGRATION_HANDOFF.md): an invoker lookup under the caller's RLS
+  // (20261004150000_activity_context_canonical_class.sql) and the owner's own day values, keyed by auth.uid()
+  // (20261008000000_metric_insights.sql).
+  "activity_context_at",
   "continue_legacy_physiology_sleep_override",
   "daily_metrics_steps_recompute",
   "day_bounds",
@@ -132,6 +136,9 @@ const CLIENT_CALLABLE_FUNCTIONS = [
   "get_sync_revision",
   "hr_series_occupied_buckets",
   "local_calendar_date",
+  "metric_insight_day_values_v1",
+  // The caller's own sync health (20261009110000_account_sync_health.sql): keyed by auth.uid(), takes no owner.
+  "my_sync_health_v1",
   "noop_keep_device_owner",
   "physiology_feature_is_canonical",
   "physiology_owned_sleep_overrides",
@@ -201,6 +208,9 @@ const SERVICE_ONLY_FUNCTIONS = [
   "coach_thread_publish_v1",
   "coach_memory_apply_v1",
   "coach_consolidation_claim_v1",
+  // Account sync health (20261009110000_account_sync_health.sql): any account's upload recency, for the coach
+  // status route and operators.
+  "account_sync_health_v1",
 ];
 
 Deno.test({

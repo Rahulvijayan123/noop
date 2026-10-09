@@ -16,6 +16,7 @@ import { foldersRoute, messagesRoute, threadsRoute } from './coach_store.ts';
 import { memoriesRoute } from './coach_memory.ts';
 import { contextRoute } from './coach_context.ts';
 import { followupsRoute, maintainRoute, suggestionsRoute, titleRoute } from './coach_curator.ts';
+import { type SyncPolicy, syncPolicyBody, syncPolicyFromEnv } from './syncPolicy.ts';
 
 export type CoachMode = 'chat' | 'vision';
 
@@ -40,6 +41,11 @@ export interface CoachConfig {
    * retired rows hidden, forget tombstones) stays as it is. Redeploying an older function would not keep them.
    */
   threadsDisabled?: boolean;
+  /**
+   * NOOP_SYNC_REQUIRED / NOOP_SYNC_STALE_AFTER_HOURS (_shared/syncPolicy.ts). GET status reports it with the
+   * caller's own sync health; a config without it reports the defaults (required, 24 h).
+   */
+  syncPolicy?: SyncPolicy;
 }
 
 export function coachConfig(env: Record<string, string | undefined> = Deno.env.toObject()): CoachConfig {
@@ -65,6 +71,7 @@ export function coachConfig(env: Record<string, string | undefined> = Deno.env.t
     allowLegacyEnrollment: pick('NOOP_ALLOW_LEGACY_ENROLLMENT', '').toLowerCase() === 'true',
     jevKey: pick('TYPESAFE_API_KEY', ''),
     threadsDisabled: ['1', 'true'].includes(pick('COACH_THREADS_DISABLED', '').toLowerCase()),
+    syncPolicy: syncPolicyFromEnv(env),
   };
 }
 
@@ -437,6 +444,49 @@ async function visualRoute(req: Request, userId: string, { rest, cfg, fetchImpl 
   }
 }
 
+const HOUR_MS = 3_600_000;
+const SYNC_HEALTH_TIMEOUT_MS = 2_000;
+
+export interface SyncHealth {
+  required: boolean;
+  /** The newest upload the receiver accepted for this account (noop_upload_receipts), any installation. */
+  lastUploadAt: string | null;
+  /** required, and nothing accepted within staleAfterHours (never uploaded counts). */
+  stale: boolean;
+  staleAfterHours: number;
+}
+
+/**
+ * The caller's sync health for GET status, from account_sync_health_v1 (service role, this owner only). Best
+ * effort: an error, a slow database, a missing row (an unconfirmed or retired account) or a malformed timestamp
+ * returns null, and status answers without `sync` rather than failing.
+ */
+export async function syncHealth(userId: string, policy: SyncPolicy, { rest, now }: Pick<Deps, 'rest' | 'now'>,
+  timeoutMs = SYNC_HEALTH_TIMEOUT_MS): Promise<SyncHealth | null> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const lookup = Promise.resolve()
+      .then(() => rest.rpc('account_sync_health_v1', { p_stale_after_hours: policy.staleAfterHours, p_user_id: userId }))
+      .catch(() => null);
+    const timeout = new Promise<null>((resolve) => { timer = setTimeout(() => resolve(null), timeoutMs); });
+    const rows = await Promise.race([lookup, timeout]);
+    const row = Array.isArray(rows) ? rows.find((r: any) => r?.user_id === userId) : undefined;
+    if (!row) return null;
+    const at = row.last_upload_at == null ? null : Date.parse(String(row.last_upload_at));
+    if (at !== null && !Number.isFinite(at)) return null;
+    return {
+      required: policy.required,
+      lastUploadAt: at === null ? null : new Date(at).toISOString(),
+      stale: policy.required && (at === null || now() - at > policy.staleAfterHours * HOUR_MS),
+      staleAfterHours: policy.staleAfterHours,
+    };
+  } catch {
+    return null;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** `EdgeRuntime.waitUntil` when the platform provides it, so maintenance can finish after the 202. */
 function edgeWaitUntil(): ((work: Promise<unknown>) => void) | null {
   const runtime = (globalThis as any).EdgeRuntime;
@@ -469,10 +519,15 @@ export async function handleCoachRequest(req: Request, deps: CoachRequestDeps): 
     const [route, ...sub] = tail;
     if (route === 'status' && req.method === 'GET') {
       // `features` tells a thread-aware app it may use threads and the context tools; old servers never send it,
-      // and neither does this one while COACH_THREADS_DISABLED is set.
+      // and neither does this one while COACH_THREADS_DISABLED is set. `syncPolicy` is always sent (a signed-in
+      // account must keep syncing); `sync` is this account's own health and is left out when it cannot be read.
+      const policy = d.cfg.syncPolicy ?? syncPolicyFromEnv({});
+      const sync = await syncHealth(identity.id, policy, d);
       return Response.json({
         ok: true, configured: Boolean(d.cfg.fireworksKey), dailyCallLimit: d.cfg.dailyCallLimit,
         ...(d.cfg.threadsDisabled ? {} : { features: { threads: 1, context: 1 } }),
+        syncPolicy: syncPolicyBody(policy),
+        ...(sync ? { sync } : {}),
       });
     }
     if (route === 'chat' && req.method === 'POST') return await chat(req, identity.id, d);

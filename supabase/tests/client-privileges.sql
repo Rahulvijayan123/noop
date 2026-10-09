@@ -92,7 +92,8 @@ declare
   names text;
   allowed text[] := array[
     'continue_legacy_physiology_sleep_override', 'get_scoring_history_input_head_v3',
-    'get_scoring_history_input_v3', 'get_server_score_snapshot_v2', 'physiology_feature_is_canonical',
+    'get_scoring_history_input_v3', 'get_server_score_snapshot_v2', 'my_sync_health_v1',
+    'physiology_feature_is_canonical',
     'physiology_owned_sleep_overrides', 'physiology_processing_metadata', 'physiology_required_revision',
     'physiology_shadow_model_for_day', 'put_scoring_history_input_v3',
     'scoring_legacy_minimum_readable_revision', 'select_physiology_source', 'server_scoring_read_contract',

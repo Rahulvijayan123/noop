@@ -7,6 +7,7 @@ import { startLocalPostgres, USER_A, USER_B } from './local_postgres.ts';
 import { createInstallationProvisioning, CURRENT_INSTALLATION_TOKEN_HEADER } from '../_shared/provisioning.ts';
 import { createInstallationLifecycle } from '../_shared/installationLifecycle.ts';
 import { resolveUploadIdentity } from '../_shared/tokens.ts';
+import { syncPolicyFromEnv } from '../_shared/syncPolicy.ts';
 
 const SOURCE_A = 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa';
 const SOURCE_B = 'bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb';
@@ -112,6 +113,8 @@ Deno.test('Supabase-Auth installation provisioning: ownership, credentials, isol
     assert.equal(created.body.action, 'created');
     assert.equal(created.body.userId, USER_A, 'a client-supplied user id must be ignored');
     assert.equal(created.body.sourceId, SOURCE_A);
+    // A signed-in account must keep syncing: the reply says so, from the environment when not injected.
+    assert.deepEqual(created.body.syncPolicy, syncPolicyFromEnv());
     const tokenA1 = created.body.installationToken as string;
     assert.equal(tokenA1, minted[0]);
     assert.equal(await db.sql(`select user_id||'|'||provisioning_method||'|'||coalesce(enrollment_code_id::text,'null')
@@ -135,6 +138,7 @@ Deno.test('Supabase-Auth installation provisioning: ownership, credentials, isol
     assert.equal(reused.body.action, 'reused');
     assert.equal(reused.body.tokenId, created.body.tokenId);
     assert.equal(reused.body.installationToken, undefined, 'a reused credential must not be re-issued');
+    assert.deepEqual(reused.body.syncPolicy, syncPolicyFromEnv());
     assert.equal(await db.sql(`select app_version from noop_app_installations where source_id='${SOURCE_A}'`), '1.1 (2)');
     assert.equal((await upload(tokenA1)).id, USER_A);
 

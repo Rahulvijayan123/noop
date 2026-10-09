@@ -1,5 +1,5 @@
 import { assert, assertEquals } from 'jsr:@std/assert';
-import { ageOn, coachConfig, handleCoachRequest, normalizeSseChunk } from '../_shared/coach.ts';
+import { ageOn, coachConfig, handleCoachRequest, normalizeSseChunk, syncHealth } from '../_shared/coach.ts';
 import { hashIngestToken } from '../_shared/tokens.ts';
 import { makeMemRest } from './helpers.ts';
 
@@ -166,6 +166,86 @@ Deno.test('coach: every route needs the installation bearer plus the fleet crede
   }
   assertEquals(seen.length, 0);
   assertEquals((await handleCoachRequest(call('status'), { rest, cfg, fetchImpl })).status, 200);
+});
+
+Deno.test('coach status: always the sync policy, and the caller\'s own sync health from account_sync_health_v1', async () => {
+  const { rest } = await fixture();
+  const NOW = Date.UTC(2026, 9, 9, 12, 0, 0);
+  const calls: any[] = [];
+  let answer: (args: any) => unknown = () => [];
+  const health = { ...rest, async rpc(name: string, args: any) {
+    if (name !== 'account_sync_health_v1') return rest.rpc(name, args);
+    calls.push(args);
+    return answer(args);
+  } };
+  const status = async (config = cfg, token = 'noop_personal') => {
+    const res = await handleCoachRequest(call('status', { token }), { rest: health as any, cfg: config, now: () => NOW });
+    assertEquals(res.status, 200);
+    return await res.json();
+  };
+  const row = (user: string, at: string | null) =>
+    ({ user_id: user, live_installations: 1, last_upload_at: at, never_uploaded: at === null, stale: false, silent: false });
+  const env = { FIREWORKS_AI_API_KEY: 'fw-test-key', NOOP_ALLOW_LEGACY_ENROLLMENT: 'true' };
+
+  answer = (args) => [row(args.p_user_id, '2026-10-09T10:00:00.123456+00:00')];
+  const fresh = await status();
+  assertEquals(fresh.syncPolicy, { required: true, staleAfterHours: 24 });
+  assertEquals(fresh.sync, { required: true, lastUploadAt: '2026-10-09T10:00:00.123Z', stale: false, staleAfterHours: 24 });
+  assertEquals(calls.at(-1), { p_stale_after_hours: 24, p_user_id: USER });
+  assertEquals([fresh.ok, fresh.features], [true, { threads: 1, context: 1 }], 'the existing keys are unchanged');
+  // The account is the credential's, never the request's.
+  assertEquals((await status(cfg, 'noop_other')).sync.lastUploadAt, '2026-10-09T10:00:00.123Z');
+  assertEquals(calls.at(-1).p_user_id, OTHER);
+
+  // Stale strictly after the window; never uploaded is stale.
+  answer = (args) => [row(args.p_user_id, '2026-10-08T11:59:59Z')];
+  assertEquals((await status()).sync.stale, true);
+  answer = (args) => [row(args.p_user_id, '2026-10-08T12:00:00Z')];
+  assertEquals((await status()).sync.stale, false);
+  answer = (args) => [row(args.p_user_id, null)];
+  assertEquals((await status()).sync, { required: true, lastUploadAt: null, stale: true, staleAfterHours: 24 });
+
+  // The operator's window goes to the RPC and the reply; the off switch is never stale.
+  answer = (args) => [row(args.p_user_id, '2026-10-09T10:00:00Z')];
+  const tight = await status(coachConfig({ ...env, NOOP_SYNC_STALE_AFTER_HOURS: '1' }));
+  assertEquals([tight.syncPolicy, tight.sync.stale, calls.at(-1).p_stale_after_hours], [{ required: true, staleAfterHours: 1 }, true, 1]);
+  answer = (args) => [row(args.p_user_id, null)];
+  const off = await status(coachConfig({ ...env, NOOP_SYNC_REQUIRED: 'off' }));
+  assertEquals(off.syncPolicy, { required: false, staleAfterHours: 24 });
+  assertEquals(off.sync, { required: false, lastUploadAt: null, stale: false, staleAfterHours: 24 });
+  // Rolled-back threads and a config built without a policy still carry it (the defaults).
+  const bare = await status({ ...coachConfig({ ...env, COACH_THREADS_DISABLED: '1' }), syncPolicy: undefined });
+  assertEquals(['features' in bare, bare.syncPolicy, bare.sync.stale], [false, { required: true, staleAfterHours: 24 }, true]);
+
+  // Whatever goes wrong with the lookup, status answers 200 with the policy and without `sync`.
+  for (const [label, broken] of [
+    ['the RPC throws', () => { throw new Error('POST rpc/account_sync_health_v1 failed (404)'); }],
+    ['the RPC rejects', () => Promise.reject(new Error('lock timeout'))],
+    ['no row (unconfirmed or retired)', () => []],
+    ['another account\'s row', () => [row(OTHER, '2026-10-09T10:00:00Z')]],
+    ['not a list', () => ({ user_id: USER, last_upload_at: '2026-10-09T10:00:00Z' })],
+    ['a malformed timestamp', (args: any) => [row(args.p_user_id, 'yesterday-ish')]],
+    ['null', () => null],
+  ] as const) {
+    answer = broken as (args: any) => unknown;
+    const body = await status();
+    assertEquals(body.syncPolicy, { required: true, staleAfterHours: 24 }, label);
+    assertEquals('sync' in body, false, label);
+    assertEquals(body.ok, true, label);
+  }
+});
+
+Deno.test('coach status: a slow sync-health lookup is abandoned rather than holding status', async () => {
+  const hanging = { rpc: () => new Promise(() => {}) } as any;
+  const started = Date.now();
+  assertEquals(await syncHealth(USER, { required: true, staleAfterHours: 24 }, { rest: hanging, now: Date.now }, 20), null);
+  assert(Date.now() - started < 1000);
+  // A late rejection after the timeout is swallowed, never an unhandled rejection.
+  let reject!: (err: Error) => void;
+  const late = { rpc: () => new Promise((_, r) => { reject = r; }) } as any;
+  assertEquals(await syncHealth(USER, { required: true, staleAfterHours: 24 }, { rest: late, now: Date.now }, 5), null);
+  reject(new Error('late'));
+  await new Promise((resolve) => setTimeout(resolve, 10));
 });
 
 Deno.test('coach chat: model and limits come from the server; effort is allow-listed; client parameters are dropped', async () => {

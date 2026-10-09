@@ -326,6 +326,28 @@ retired-installation guard and was rejected. A retired installation still cannot
 receipt, and any new receipt, is still refused. `supabase/tests/account-deletion-retired-installation.sql`
 covers both halves in a rolled-back transaction (the command is at the top of the file).
 
+#### Mandatory sync and silent accounts
+
+A signed-in account must keep syncing. The server says so in an additive `syncPolicy: {required,
+staleAfterHours}` on the provisioning reply, the push capabilities (`GET /push`) and coach `GET status`
+(`_shared/syncPolicy.ts`; function secrets `NOOP_SYNC_REQUIRED`, on unless `0`/`false`/`no`/`off`, and
+`NOOP_SYNC_STALE_AFTER_HOURS`, default 24, 1..720). The app keeps the latest policy per account and treats an
+unknown one as required: while signed in it uploads and offers no switch, and only an explicit `required:
+false` brings the old opt-in switch back. Nothing on the server refuses uploads because of the policy.
+
+`20261009110000_account_sync_health.sql` adds two read-only functions over the newest
+`noop_upload_receipts.accepted_at` per account (through the existing `(user_id, accepted_at desc)` index):
+
+- `account_sync_health_v1(p_stale_after_hours, p_user_id)`, service role only: every confirmed account (or one),
+  its live installations, last upload, `never_uploaded`, `stale` and `silent` (no live installation, or stale).
+  `select * from public.account_sync_health_v1(24) where silent;` lists the accounts that have gone quiet.
+- `my_sync_health_v1(p_stale_after_hours)`, for a signed-in caller: their own row only.
+
+Coach `GET status` adds `sync: {required, lastUploadAt, stale, staleAfterHours}` for the calling account, read
+through `account_sync_health_v1`; the app shows "Not syncing since …" on the account screen when it is stale.
+Until the migration is applied, status answers as before without `sync`. Deploy order: migration, then the
+`coach` and `push` functions.
+
 #### Hosted project checklist
 
 Do these once per project, in the dashboard or with `supabase config push`. None of it is applied by
