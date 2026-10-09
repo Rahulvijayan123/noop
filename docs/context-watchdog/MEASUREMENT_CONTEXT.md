@@ -57,7 +57,7 @@ minute is `good` only when beat timing is present.
 | wear off_wrist from a wrist event | off_wrist 1.0 | off_wrist (confirmed) |
 | phone `record_gap = paused` | off_wrist 0.8 | strap_not_recording (confirmed) |
 | no HR, wear off_wrist from a classifier | off_wrist 0.6 | off_wrist (inferred) |
-| < 30 s of HR | unknown | strap_reset (confirmed, with a reset event), insufficient_coverage (measured), awaiting_upload (inferred, phone `record_gap = lost`) |
+| < 30 s of HR | unknown | strap_reset (confirmed, with a reset event), insufficient_coverage (measured), records_missing (measured, phone `record_gap = lost`) |
 | saturation event | poor 0.9 | optical_saturation (confirmed) |
 | phone `hr_grade = poor` | poor 0.8 | |
 | moving (dyn ≥ 0.05 g, or walk/run on ≥ half the step samples) | fair 0.6 | hr_in_motion_unverified (inferred): never good in motion |
@@ -72,8 +72,9 @@ in `phone_reasons` as sent and left out of `reasons`.
 ### Missing reasons
 
 For a minute without heart rate, the first that applies: charging (confirmed), off_wrist (confirmed from an
-event, else inferred), strap_not_recording (phone: paused), strap_link_down (confirmed by BLE events), awaiting_upload
-(inferred: phone says lost, or no HR has been uploaded at or after this minute; never in a backfill),
+event, else inferred), strap_not_recording (phone: paused), strap_link_down (confirmed by BLE events), records_missing (measured: the
+phone saw the strap's record index skip — lost in transfer, may never arrive), awaiting_upload (inferred: no HR has been
+uploaded at or after this minute; never in a backfill),
 sensor_dropout (inferred: believed worn), insufficient_coverage (measured). Plus context_unknown (unknown) when no
 activity lineage covers the minute or its session phase is unknown.
 

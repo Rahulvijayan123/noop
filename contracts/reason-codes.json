@@ -44,6 +44,8 @@
      "description": "The data arrived and is waiting to be processed."},
     {"code": "data_lost", "family": "pipeline", "default_certainty": "confirmed", "effect": "excluded",
      "description": "The data is known to be unrecoverable."},
+    {"code": "records_missing", "family": "pipeline", "default_certainty": "measured", "effect": "excluded",
+     "description": "Records for this time are missing from the strap's own numbered sequence (lost in transfer); they may never arrive."},
     {"code": "no_verified_input", "family": "pipeline", "default_certainty": "confirmed", "effect": "withheld",
      "description": "No verified input reached this calculation."},
     {"code": "stale", "family": "pipeline", "default_certainty": "confirmed", "effect": "display_only",
@@ -91,7 +93,7 @@
       "optical_sentinel_at_rest": {"code": "loose_fit", "certainty": "inferred"},
       "optical_baseline_high": {"code": "loose_fit", "certainty": "inferred"},
       "strap_not_recording": {"code": "strap_not_recording", "certainty": "confirmed"},
-      "transport_gap": {"code": "awaiting_upload", "certainty": "inferred"},
+      "transport_gap": {"code": "records_missing", "certainty": "measured"},
       "settling_after_wrist_on": {"code": "just_put_on", "certainty": "confirmed"},
       "no_signal_metadata": {"code": "context_unknown", "certainty": "unknown"},
       "no_motion_sample": {"code": "context_unknown", "certainty": "unknown"}

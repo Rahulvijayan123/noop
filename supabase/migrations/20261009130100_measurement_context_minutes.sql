@@ -421,7 +421,7 @@ begin
                      then '[{"code": "strap_reset", "certainty": "confirmed"}]'::jsonb else '[]'::jsonb end
              || '[{"code": "insufficient_coverage", "certainty": "measured"}]'::jsonb
              || case when p_record_gap = 'lost'
-                     then '[{"code": "awaiting_upload", "certainty": "inferred"}]'::jsonb else '[]'::jsonb end;
+                     then '[{"code": "records_missing", "certainty": "measured"}]'::jsonb else '[]'::jsonb end;
   elsif coalesce(p_saturation, false) then
     quality_class := 'poor'; quality_conf := 0.9;
     v_server := '[{"code": "optical_saturation", "certainty": "confirmed"}]';
@@ -876,7 +876,7 @@ begin
                     case when g.wear_basis = 'wrist_event' then 'confirmed' else 'inferred' end)
              when o.record_gap = 'paused' then '{"code": "strap_not_recording", "certainty": "confirmed"}'::jsonb
              when g.ble_link_down_s > 0 then '{"code": "strap_link_down", "certainty": "confirmed"}'::jsonb
-             when o.record_gap = 'lost' then '{"code": "awaiting_upload", "certainty": "inferred"}'::jsonb
+             when o.record_gap = 'lost' then '{"code": "records_missing", "certainty": "measured"}'::jsonb
              when not p_backfill and (v_through is null or g.m > v_through)
                then '{"code": "awaiting_upload", "certainty": "inferred"}'::jsonb
              when g.wear_state = 'on_wrist' then '{"code": "sensor_dropout", "certainty": "inferred"}'::jsonb

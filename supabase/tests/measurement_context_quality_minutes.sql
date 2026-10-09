@@ -91,8 +91,8 @@ begin
   assert r.missing_reasons -> 0 = '{"code": "strap_not_recording", "certainty": "confirmed"}', r.missing_reasons::text;
   r := pg_temp.mq('2026-09-16 12:35:00+00');
   assert r.hr_n = 0 and r.quality_class = 'unknown'
-     and r.missing_reasons -> 0 = '{"code": "awaiting_upload", "certainty": "inferred"}', r.missing_reasons::text;
-  assert r.reasons @> '[{"code": "awaiting_upload", "certainty": "inferred"}]';
+     and r.missing_reasons -> 0 = '{"code": "records_missing", "certainty": "measured"}', r.missing_reasons::text;
+  assert r.reasons @> '[{"code": "records_missing", "certainty": "measured"}]';
   r := pg_temp.mq('2026-09-16 12:45:00+00');
   assert r.hr_n = 60 and r.quality_class = 'good', 'a minute with no row was built, then graded';
 
