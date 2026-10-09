@@ -229,6 +229,8 @@ const SERVICE_ONLY_FUNCTIONS = [
   "watchdog_episodes_read_v1",
   // Strap placement resolution (20261009150100_placement_device_resolution.sql): the scores route's read.
   "placement_resolved_read_v1",
+  // The anomaly windows behind GET scores/anomaly-candidates (20261009150200_anomaly_windows_read.sql).
+  "anomaly_windows_read_v1",
 ];
 
 Deno.test({

@@ -10,6 +10,7 @@ import {
   submitExposureEvents,
 } from './physiologyContext.ts';
 import { GROUND_TRUTH_LABELS_MAX_BODY_BYTES, submitGroundTruthLabels } from './groundTruthLabels.ts';
+import { REASON_CODES_VERSION } from './reasonCodes.ts';
 import {
   parseContextMinutesQuery, QUALITY_MINUTES_MAX_BODY_BYTES, readContextMinutes, submitQualityMinutes,
 } from './measurementContext.ts';
@@ -255,13 +256,24 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
 }
 
 /**
- * `GET /anomaly-candidates?since=<result_revision>[&limit=<1..200>]`: anomaly windows published by the VPS model
- * service (TimesFM 3.0 forecast + UniTS reconstruction; supabase/migrations/20261007180000_anomaly_service.sql)
- * for the credential's owner and the resolved device, oldest change first, after the caller's cursor. A candidate
- * is NOT an alert: the phone's verification stage decides (WatchdogVerifier.swift). Retracted rows are returned so
- * the phone can drop them. `cursor` is the newest result_revision returned (or the caller's `since` when none).
+ * `GET /anomaly-candidates?since=<result_revision>[&limit=<1..200>][&windows_from=<unix>&windows_to=<unix>]`: anomaly
+ * windows published by the VPS model service (TimesFM 3.0 forecast + UniTS reconstruction;
+ * supabase/migrations/20261007180000_anomaly_service.sql) for the credential's owner and the resolved device, oldest
+ * change first, after the caller's cursor. A candidate is NOT an alert: the phone's verification stage decides
+ * (WatchdogVerifier.swift). Retracted rows are returned so the phone can drop them. `cursor` is the newest
+ * result_revision returned (or the caller's `since` when none).
+ *
+ * Opt-in (20261009150200): with `windows_from` / `windows_to` (both, at most 3 days) the response also carries
+ * `windows`, every half-hour window the service judged or withheld that starts in the range, oldest first:
+ * `{start_ts, end_ts, usable, reason, context: {kind, mix_basis, minutes, mix}, models: [{model, channel_group,
+ * score, p, usable, reason}]}`. `reason` is canonical (contracts/reason-codes.json data-reason-1:
+ * `{code, certainty, subcode?, legacy}`, `legacy` the service's own value), null for a scored window; `context.mix`
+ * the shares of the window's minutes in an exercise session / recovery / neither / unknown, asleep, off the wrist,
+ * per activity class and quality class (measurement_context_minutes; null with `mix_basis: none` when no minute row
+ * exists), and `reason_codes_version` names the vocabulary. Without the parameters the response is unchanged.
  */
 export const ANOMALY_CANDIDATES_MAX_ROWS = 200;
+const ANOMALY_WINDOWS_MAX_RANGE_SECONDS = 3 * 86_400;
 
 export function parseAnomalyCandidatesQuery(params: URLSearchParams) {
   const since = params.get('since') ?? '0';
@@ -270,11 +282,20 @@ export function parseAnomalyCandidatesQuery(params: URLSearchParams) {
   if (!/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > ANOMALY_CANDIDATES_MAX_ROWS) {
     throw fail('invalid_limit', 400);
   }
-  return { since: Number(since), limit: Number(limit) };
+  const from = params.get('windows_from');
+  const to = params.get('windows_to');
+  if (from == null && to == null) return { since: Number(since), limit: Number(limit) };
+  if (from == null || to == null || !/^\d{1,10}$/.test(from) || !/^\d{1,10}$/.test(to)
+      || Number(to) <= Number(from) || Number(to) - Number(from) > ANOMALY_WINDOWS_MAX_RANGE_SECONDS) {
+    throw fail('invalid_windows_range', 400);
+  }
+  return { since: Number(since), limit: Number(limit), windows: {
+    from: new Date(Number(from) * 1000).toISOString(), to: new Date(Number(to) * 1000).toISOString() } };
 }
 
-export async function readAnomalyCandidates({ rest, userId, deviceId, since, limit }: {
-  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; since: number; limit: number;
+export async function readAnomalyCandidates({ rest, userId, deviceId, since, limit, windows }: {
+  rest: Pick<SupabaseRest, 'select'> & Partial<Pick<SupabaseRest, 'rpc'>>; userId: string; deviceId: string;
+  since: number; limit: number; windows?: { from: string; to: string };
 }) {
   const rows = (await rest.select('anomaly_candidates',
     `user_id=eq.${userId}&device_id=eq.${deviceId}&result_revision=gt.${since}` +
@@ -283,7 +304,11 @@ export async function readAnomalyCandidates({ rest, userId, deviceId, since, lim
     `&order=result_revision.asc&limit=${limit}`)) ?? [];
   const list = rows as Array<Record<string, unknown>>;
   const cursor = list.reduce((m, r) => Math.max(m, Number(r.result_revision) || 0), since);
-  return { candidates: list, cursor };
+  if (!windows) return { candidates: list, cursor };
+  const read = await rest.rpc!('anomaly_windows_read_v1', {
+    p_user: userId, p_device: deviceId, p_from: windows.from, p_to: windows.to,
+  });
+  return { candidates: list, cursor, windows: Array.isArray(read) ? read : [], reason_codes_version: REASON_CODES_VERSION };
 }
 
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
