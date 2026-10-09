@@ -10,6 +10,9 @@ import {
   submitExposureEvents,
 } from './physiologyContext.ts';
 import { GROUND_TRUTH_LABELS_MAX_BODY_BYTES, submitGroundTruthLabels } from './groundTruthLabels.ts';
+import {
+  parseContextMinutesQuery, QUALITY_MINUTES_MAX_BODY_BYTES, readContextMinutes, submitQualityMinutes,
+} from './measurementContext.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -459,10 +462,14 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isAnomalyCandidates = req.method === 'GET' && route === '/anomaly-candidates';
   // Metric explanations (20261008000000_metric_insights.sql): account-level, no device.
   const isInsights = req.method === 'POST' && route === '/insights';
+  // Per-minute measurement context (20261009130100): one device (deviceId) or every device of the owner.
+  const isContextMinutes = req.method === 'GET' && route === '/context-minutes';
+  // The phone's per-minute optical evidence (20261009130200); device_id in the body, like /placement.
+  const isQualityMinutes = req.method === 'POST' && route === '/quality-minutes';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
-      && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights) {
+      && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -499,16 +506,17 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
-        || isAnomalyCandidates
+        || isAnomalyCandidates || isContextMinutes
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
-        : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
+        : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES
+        : isQualityMinutes ? QUALITY_MINUTES_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
-        || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates
+        || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates || isContextMinutes
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
         || isInsights) ? null
-      : isPlacementPost ? (requestBody?.device_id ?? null)
+      : (isPlacementPost || isQualityMinutes) ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
     // user-level declaration (the RPC's NULL device scope). Stretch feedback and ground-truth labels
@@ -516,6 +524,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     // request-level device.
     if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet && !isGroundTruthLabels
         && !isInsights && !(isPlacementPost && externalDeviceId == null)
+        && !(isContextMinutes && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
@@ -523,7 +532,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
       : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet
-        || isGroundTruthLabels || isInsights) ? null
+        || isGroundTruthLabels || isInsights || (isContextMinutes && externalDeviceId == null)) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -628,6 +637,20 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // every other score route, no new auth path.
       const outcome = await submitStretchFeedback({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
       return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isQualityMinutes) {
+      // Owner from the credential, device the caller's own (findNoopDevice; the RPC checks both again).
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const outcome = await submitQualityMinutes({ rest, userId: user.id, deviceId, body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isContextMinutes) {
+      // The owner's per-minute measurement context: the credential's owner, and the caller's own device when one
+      // is named (findNoopDevice; the RPC checks both again), else every device of the owner.
+      if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
+      const query = parseContextMinutesQuery(url.searchParams);
+      const minutes = await readContextMinutes({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...minutes, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isContext || isContextHistory) {
       // One device-day's context document, or the device's episodes/bouts/daily values over a range. The
