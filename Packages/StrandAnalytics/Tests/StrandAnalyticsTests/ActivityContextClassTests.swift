@@ -95,6 +95,8 @@ final class ActivityContextClassTests: XCTestCase {
             "Standing (likely)": .standing,
             "Still, sitting or standing": .stationary, "Hands busy, sitting or standing": .stationary,
             "Stationary": .stationary,
+            // Set by the decoder (not `derive`) when the wearer's verified personal sit / stand head backs the claim.
+            "Likely sitting": .sitting, "Likely standing": .standing,
         ]
         XCTAssertEqual(Set(expected.keys), Set(ActivityDisplay.allLabels),
                        "a new display label needs a deliberate class")

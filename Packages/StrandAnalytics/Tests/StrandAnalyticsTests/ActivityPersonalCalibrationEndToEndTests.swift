@@ -97,12 +97,14 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
 
     /// One guided run as the session runner records it: each activity opens with the start countdown, then
     /// its steps run back to back; label interval `[start + guard, start + duration - guard)`, moves buzzed at
-    /// `start + cueSeconds`. `skipping` leaves activities out, as the Skip button does.
+    /// `start + cue` (the step's jittered cue, drawn with a generator seeded from `seed`). `skipping` leaves activities out, as the Skip button does.
     static func session(_ w: Wearer, id: String, seed: UInt64, start: Int, leadIn: Int = 600,
                         skipping: Set<String> = []) -> Session {
         var p = Player(sim: ActivitySim(start: start, seed: seed), w: w)
         p.sim.forearm(Player.forearm(.seated))
         var labels: [ActivityGroundTruthLabel] = []
+        // calibration-v4 jitters each move's buzz: draw it as the runner does, from a generator seeded per run.
+        var cueRng = SitStandSplitMix64(seed: seed)
         p.hold(leadIn)
         for activity in ActivityCalibrationProtocols.current.activities where !skipping.contains(activity.id) {
             if p.state != .seated { p.move(to: .seated) }
@@ -111,7 +113,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
                 let stepStart = p.sim.ts
                 let target = state(for: task)
                 var transitionTs: Int?
-                if let cue = task.cueSeconds {
+                if let cue = task.resolvedCueSeconds(using: &cueRng) {
                     p.hold(cue)
                     transitionTs = p.sim.ts
                     p.move(to: target)
@@ -121,7 +123,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
                 p.hold(max(0, stepStart + task.durationSeconds - p.sim.ts))
                 labels.append(ActivityGroundTruthLabel(
                     labelKey: "guided:\(id):\(stepStart)", source: .guided, sessionId: id,
-                    protocolVersion: ActivityCalibrationProtocols.current.version, repetition: 1,
+                    protocolVersion: ActivityCalibrationProtocols.current.version, repetition: task.repetition ?? 1,
                     startTs: stepStart + task.guardSeconds, endTs: stepStart + task.durationSeconds - task.guardSeconds,
                     posture: task.posture, transitionKind: task.transitionKind, transitionTs: transitionTs,
                     labelConfidence: 1))

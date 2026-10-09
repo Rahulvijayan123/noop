@@ -399,15 +399,19 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
     /// does the transition expert. `ActivityClassifier` lets a posture claim above the wrist-only ceiling only
     /// when this AGREES with the posture claimed. Absent from the JSON when nil.
     public var learnedPosture: PostureClass?
+    /// The wearer's verified personal sit / stand head (`ActivityDecoderConfig.sitStandHead`) backs this second: it
+    /// has read the open still segment. `true` or absent (nil), so a decode without a head encodes as before.
+    public var personalSitStand: Bool?
 
     public init(imu: Bool, encoder: Bool, dynAccel: Bool, gravity: Bool, steps: Bool,
                 heartRate: Bool, sleep: Bool, coverage: Double,
                 hartFine: Bool? = nil, transitionExpert: Bool? = nil, gaitExpert: Bool? = nil,
-                learnedPosture: PostureClass? = nil) {
+                learnedPosture: PostureClass? = nil, personalSitStand: Bool? = nil) {
         self.imu = imu; self.encoder = encoder; self.dynAccel = dynAccel; self.gravity = gravity
         self.steps = steps; self.heartRate = heartRate; self.sleep = sleep; self.coverage = coverage
         self.hartFine = hartFine; self.transitionExpert = transitionExpert; self.gaitExpert = gaitExpert
         self.learnedPosture = learnedPosture
+        self.personalSitStand = personalSitStand
     }
 
     /// Names of the experts behind this evidence, in a fixed order (provenance for runs and consumers).
@@ -416,6 +420,7 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
         if encoder { out.append(hartFine == true ? "hart_fine" : "encoder") }
         if transitionExpert == true { out.append("transition") }
         if gaitExpert == true { out.append("eldernet") }
+        if personalSitStand == true { out.append("personal_sitstand") }
         return out
     }
 
@@ -424,6 +429,7 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
         case dynAccel = "dyn_accel", gravity, heartRate = "hr"
         case hartFine = "hart_fine", transitionExpert = "transition_expert", gaitExpert = "gait_expert"
         case learnedPosture = "learned_posture"
+        case personalSitStand = "personal_sitstand"
     }
 }
 

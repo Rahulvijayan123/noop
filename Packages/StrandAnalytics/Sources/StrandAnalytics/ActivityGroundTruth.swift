@@ -22,6 +22,11 @@ public enum ActivityGroundTruthSource: String, Codable, CaseIterable, Sendable {
     case stretchFeedback = "stretch_feedback"
     /// A label imported from an external tool/export.
     case imported
+    /// An in-the-moment answer to "Right now: sitting / standing / neither?" (`ActivitySitStand.swift`). It
+    /// covers a short window around the answer (`ActivitySitStandConfirmations.window`), is weak (`isStrong`
+    /// stays guided-only) and never feeds the HSMM personal-profile fitter (`staticMode` is guided-only); the
+    /// personal sit / stand head fits on it and its verification gate scores it.
+    case confirmation
 }
 
 // MARK: - Definitive transition kinds and semantic tags
@@ -562,13 +567,21 @@ public struct ActivityCalibrationTask: Equatable, Identifiable, Sendable {
     public var transitionKind: String?
     public var endPosture: String?
     public var durationSeconds: Int
-    /// Seconds after the step starts at which a move's "move now" buzz fires; nil for holds.
+    /// Seconds after the step starts at which a move's "move now" buzz fires; nil for holds. With
+    /// `cueSecondsRange` set this is the nominal cue (the range's lower bound), kept for runners that do not jitter.
     public var cueSeconds: Int?
+    /// When set (calibration-v4 moves), the buzz fires at a seconds offset drawn uniformly from this range each
+    /// time the step runs (`resolvedCueSeconds(using:)`), so the wearer cannot anticipate it and pre-move.
+    public var cueSecondsRange: ClosedRange<Int>?
+    /// Which repetition of its activity this step belongs to (1, 2 …): the saved label's `repetition`. nil for
+    /// protocols that do not number repetitions (calibration-v3).
+    public var repetition: Int?
     public var guardSeconds: Int
 
     public init(id: String, title: String, instructions: String, posture: String? = nil,
                 transitionKind: String? = nil, endPosture: String? = nil,
-                durationSeconds: Int, cueSeconds: Int? = nil, guardSeconds: Int = 2) {
+                durationSeconds: Int, cueSeconds: Int? = nil, cueSecondsRange: ClosedRange<Int>? = nil,
+                repetition: Int? = nil, guardSeconds: Int = 2) {
         self.id = id
         self.title = title
         self.instructions = instructions
@@ -576,11 +589,30 @@ public struct ActivityCalibrationTask: Equatable, Identifiable, Sendable {
         self.transitionKind = transitionKind
         self.endPosture = endPosture
         self.durationSeconds = durationSeconds
-        self.cueSeconds = cueSeconds
+        self.cueSeconds = cueSeconds ?? cueSecondsRange?.lowerBound
+        self.cueSecondsRange = cueSecondsRange
+        self.repetition = repetition
         self.guardSeconds = guardSeconds
     }
 
     public var isMove: Bool { transitionKind != nil }
+
+    /// The latest the buzz can fire: the range's upper bound, else `cueSeconds`; nil for holds.
+    public var latestCueSeconds: Int? { cueSecondsRange?.upperBound ?? cueSeconds }
+
+    /// The cue offset for one run of this step: a uniform draw from `cueSecondsRange` with the injected generator
+    /// (seed it in tests for a deterministic schedule), else the fixed `cueSeconds`; nil for holds. The runner
+    /// records the buzz time it actually used as the label's `cue_start_ts` / `transition_ts`.
+    public func resolvedCueSeconds<G: RandomNumberGenerator>(using generator: inout G) -> Int? {
+        if let range = cueSecondsRange { return Int.random(in: range, using: &generator) }
+        return cueSeconds
+    }
+
+    /// `resolvedCueSeconds(using:)` with the system generator.
+    public func resolvedCueSeconds() -> Int? {
+        var g = SystemRandomNumberGenerator()
+        return resolvedCueSeconds(using: &g)
+    }
 }
 
 /// A skippable block of steps that needs one setup (a chair, a bed or sofa). The wearer starts it with a
@@ -625,7 +657,16 @@ public struct ActivityCalibrationProtocolModel: Equatable, Sendable {
 /// carries its own heads, timestamps and `protocol_version`, so nothing reads an old definition back.
 public enum ActivityCalibrationProtocols {
     /// The protocol the guided session runs.
-    public static var current: ActivityCalibrationProtocolModel { v3 }
+    public static var current: ActivityCalibrationProtocolModel { v4 }
+
+    /// Every protocol a stored label may name in `protocol_version`, newest first. Labels carry their own heads
+    /// and timestamps, so an old version is listed only to read its definition back (e.g. for display).
+    public static var all: [ActivityCalibrationProtocolModel] { [v4, v3] }
+
+    /// The protocol a label's `protocol_version` names, if known.
+    public static func model(forVersion version: String?) -> ActivityCalibrationProtocolModel? {
+        all.first { $0.version == version }
+    }
 
     /// Seconds between tapping Start and an activity's first step: time to put the phone hand down and
     /// let the decoder's trailing windows clear the tap.
@@ -690,5 +731,52 @@ public enum ActivityCalibrationProtocols {
             ])
 
         return ActivityCalibrationProtocolModel(version: "calibration-v3", activities: [sitStand, lieDown])
+    }()
+
+    /// The range a calibration-v4 move's buzz is drawn from, seconds into the move step.
+    public static let v4CueSecondsRange: ClosedRange<Int> = 2...5
+
+    /// calibration-v4 (docs/sit-stand-calibration-findings.md): the sit / stand activity redesigned for the personal
+    /// sit / stand head (`ActivitySitStandModel`). Free-living accuracy comes from how the wearer NATURALLY holds
+    /// their arm, and cued "hold still" data is anti-predictive there, so the holds ask for hands busy as usual
+    /// (phone, gestures), not stillness. Two repetitions of sit 30 s → stand up → stand 30 s → sit down, each step
+    /// carrying its repetition number; each move's buzz fires at a random 2–5 s into the step (`cueSecondsRange`)
+    /// so it cannot be anticipated. Moves last 12 s, so even the latest buzz leaves 7 s to move and settle. The
+    /// lie-down activity is v3's, unchanged.
+    public static let v4: ActivityCalibrationProtocolModel = {
+        let seated = PostureClass.seatedLikely.rawValue
+        let upright = PostureClass.uprightStationary.rawValue
+
+        func hold(_ id: String, _ title: String, _ posture: String, rep: Int,
+                  _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, posture: posture,
+                                    durationSeconds: 30, repetition: rep)
+        }
+        func move(_ id: String, _ title: String, _ kind: ActivityGroundTruthTransitionKind, to end: String, rep: Int,
+                  _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, transitionKind: kind.rawValue,
+                                    endPosture: end, durationSeconds: 12, cueSecondsRange: v4CueSecondsRange,
+                                    repetition: rep)
+        }
+
+        var tasks: [ActivityCalibrationTask] = []
+        for rep in 1...2 {
+            tasks += [
+                hold("sit-stand.sit-\(rep)", "Sit", seated, rep: rep,
+                     "Sit the way you normally do. Keep your hands busy as usual: use your phone, gesture, rest them. No need to hold still."),
+                move("sit-stand.stand-up-\(rep)", "Stand up", .sitToStand, to: upright, rep: rep,
+                     "When it buzzes, stand up at your normal speed, then stay standing."),
+                hold("sit-stand.stand-\(rep)", "Stand", upright, rep: rep,
+                     "Stand the way you normally do, as if waiting or chatting. Use your phone or gesture as usual. No need to hold still."),
+                move("sit-stand.sit-down-\(rep)", "Sit down", .standToSit, to: seated, rep: rep,
+                     "When it buzzes, sit back down, then stay seated."),
+            ]
+        }
+        let sitStand = ActivityCalibrationActivity(
+            id: "sit-stand", title: "Sit and stand",
+            setup: "Sit on a chair, or on the edge of a bed or sofa. Keep the phone with you and use it as you normally would.",
+            tasks: tasks)
+        let lieDown = v3.activities.first { $0.id == "lie-down" }!
+        return ActivityCalibrationProtocolModel(version: "calibration-v4", activities: [sitStand, lieDown])
     }()
 }

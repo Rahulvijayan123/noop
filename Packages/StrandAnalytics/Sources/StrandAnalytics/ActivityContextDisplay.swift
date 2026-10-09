@@ -11,6 +11,10 @@ import Foundation
 public enum ActivityDisplay {
     public static let unclear = "Unclear"
     public static let offWrist = "Off wrist"
+    /// The wordings of a sitting / standing claim the wearer's verified personal sit / stand head backs
+    /// (`ActivityDecoderConfig.sitStandHead`): set by the decoder over a sitting / standing label, never by `derive`.
+    public static let likelySitting = "Likely sitting"
+    public static let likelyStanding = "Likely standing"
 
     /// Every label `derive` (and the decoder's off-wrist gate) can produce. UI code that styles labels
     /// should cover exactly these; a test fails if `derive` ever says something that is not listed.
@@ -23,6 +27,7 @@ public enum ActivityDisplay {
         "Standing quietly", "Standing, restless", "Standing, gesturing", "Standing, repetitive hand activity",
         "Standing, hands busy", "Standing (likely)",
         "Still, sitting or standing", "Hands busy, sitting or standing", "Stationary",
+        likelySitting, likelyStanding,
     ]
 
     /// Seconds a new label must lead before replacing the current one (0 = switch immediately).
@@ -45,6 +50,8 @@ public enum ActivityDisplay {
             return "moving"
         case "Asleep", "Resting in bed", "Lying down": return "lying"
         case "Changing position": return "transition"
+        case likelySitting: return "seated"
+        case likelyStanding: return "upright"
         default:
             if label.hasPrefix("Sitting") || label == "Desk sitting" { return "seated" }
             if label.hasPrefix("Standing") { return "upright" }
