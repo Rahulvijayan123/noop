@@ -403,8 +403,9 @@ private extension View {
 
 // MARK: - Memory
 
-/// "What Sana remembers": the saved facts (up to 200, newest ranking first), each with Forget, and Forget all.
-/// Forgetting touches memory only; the chats themselves stay in the history.
+/// "What Sana remembers": the saved facts (up to 200, newest ranking first), each with Edit and Forget, plus Add a
+/// memory and Forget all. An edit is stored on the server (the list, every cached context and the next chat follow);
+/// forgetting touches memory only, and the chats themselves stay in the history.
 ///
 /// It takes the memory state as values, not the view model: observing the view model would rebuild the sheet and
 /// its 200-row list on every streaming flush of a reply. The presenter re-creates it on each of its own redraws, so
@@ -415,8 +416,11 @@ struct CoachMemorySheet: View, Equatable {
     let refresh: () async -> Void
     let forget: (CoachMemory) async -> Void
     let forgetAll: () async -> Void
+    let edit: (CoachMemory, String, String) async -> CoachMemoryEditOutcome
+    let add: (String, String) async -> CoachMemoryEditOutcome
     @Environment(\.dismiss) private var dismiss
     @State private var confirmForgetAll = false
+    @State private var editing: CoachMemoryEditTarget?
 
     static func == (a: CoachMemorySheet, b: CoachMemorySheet) -> Bool {
         a.isLoading == b.isLoading && a.memories == b.memories
@@ -453,6 +457,9 @@ struct CoachMemorySheet: View, Equatable {
             } message: {
                 Text("Sana stops using these facts in its answers. Your chats stay in your history.")
             }
+            .sheet(item: $editing) { target in
+                editor(for: target)
+            }
             .task { await refresh() }
         }
     }
@@ -465,6 +472,13 @@ struct CoachMemorySheet: View, Equatable {
                 .font(StrandFont.subhead)
                 .foregroundStyle(StrandPalette.textSecondary)
                 .multilineTextAlignment(.center)
+            Button { editing = .add } label: {
+                Label("Add a memory", systemImage: "plus")
+                    .font(StrandFont.body)
+                    .foregroundStyle(StrandPalette.accent)
+            }
+            .padding(.top, 8)
+            .accessibilityIdentifier("coachAddMemory")
         }
         .padding(32)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -480,16 +494,32 @@ struct CoachMemorySheet: View, Equatable {
                             Button(role: .destructive) { Task { await forget(memory) } } label: {
                                 Label("Forget", systemImage: "trash")
                             }
+                            if memory.version != nil {
+                                Button { editing = .edit(memory.id) } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                                .tint(StrandPalette.accent)
+                            }
                         }
                         .contextMenu {
+                            if memory.version != nil {
+                                Button { editing = .edit(memory.id) } label: {
+                                    Label("Edit", systemImage: "pencil")
+                                }
+                            }
                             Button(role: .destructive) { Task { await forget(memory) } } label: {
                                 Label("Forget", systemImage: "trash")
                             }
                         }
-                        .accessibilityAction(named: "Forget") { Task { await forget(memory) } }
+                        .accessibilityActions {
+                            if memory.version != nil {
+                                Button("Edit") { editing = .edit(memory.id) }
+                            }
+                            Button("Forget") { Task { await forget(memory) } }
+                        }
                 }
             } header: {
-                Text("Sana keeps these facts between chats and uses the ones that matter for each question. Forgetting one takes it out of Sana's memory; your chats stay in your history.")
+                Text("Sana keeps these facts between chats and uses the ones that matter for each question. Edit one to correct it, or forget it to take it out of Sana's memory; your chats stay in your history.")
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .textCase(nil)
@@ -503,6 +533,13 @@ struct CoachMemorySheet: View, Equatable {
             }
 
             Section {
+                Button { editing = .add } label: {
+                    Label("Add a memory", systemImage: "plus")
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.accent)
+                }
+                .listRowBackground(StrandPalette.surfaceRaised)
+                .accessibilityIdentifier("coachAddMemory")
                 Button(role: .destructive) { confirmForgetAll = true } label: {
                     // One colour for the title and the icon: the role alone reddens only the title in a List and
                     // leaves the icon in the tint.
@@ -527,11 +564,163 @@ struct CoachMemorySheet: View, Equatable {
                     Label("Always considered", systemImage: "pin.fill")
                         .labelStyle(.titleAndIcon)
                 }
+                if memory.isUsersOwn {
+                    Label("Your words", systemImage: "pencil")
+                        .labelStyle(.titleAndIcon)
+                }
             }
             .font(StrandFont.caption)
             .foregroundStyle(StrandPalette.textTertiary)
         }
         .padding(.vertical, 2)
         .accessibilityElement(children: .combine)
+        .accessibilityIdentifier("coachMemoryRow.\(memory.id)")
+    }
+
+    /// The editor for one row (looked up again on every redraw, so after a conflict it edits the version the list
+    /// now holds) or for a new fact.
+    @ViewBuilder
+    private func editor(for target: CoachMemoryEditTarget) -> some View {
+        switch target {
+        case .add:
+            CoachMemoryEditor(isNew: true, memory: nil) { text, topic in await add(text, topic) }
+        case .edit(let id):
+            let latest = memories.first { $0.id == id }
+            CoachMemoryEditor(isNew: false, memory: latest) { text, topic in
+                guard let latest else { return .gone }
+                return await edit(latest, text, topic)
+            }
+            .id(id)
+        }
+    }
+}
+
+/// What the memory editor is open for.
+enum CoachMemoryEditTarget: Identifiable, Hashable {
+    case add
+    case edit(String)
+
+    var id: String {
+        switch self {
+        case .add: return "add"
+        case .edit(let id): return id
+        }
+    }
+}
+
+/// The memory editor: the fact in the user's own words and its topic. The text is checked as the phone checks any
+/// stored line before it reaches a prompt; Sana keeps an edited memory as the user wrote it.
+struct CoachMemoryEditor: View {
+    /// Adding a new fact rather than editing one.
+    let isNew: Bool
+    /// The row as the list holds it now: after a conflict, the version stored on the server; nil once it is gone.
+    let memory: CoachMemory?
+    let save: (String, String) async -> CoachMemoryEditOutcome
+    @Environment(\.dismiss) private var dismiss
+    @State private var text: String
+    @State private var topic: String
+    @State private var saving = false
+    @State private var notice: String?
+    @State private var conflict = false
+    @State private var gone = false
+    @FocusState private var focused: Bool
+
+    init(isNew: Bool, memory: CoachMemory?, save: @escaping (String, String) async -> CoachMemoryEditOutcome) {
+        self.isNew = isNew
+        self.memory = memory
+        self.save = save
+        _text = State(initialValue: memory?.content ?? "")
+        _topic = State(initialValue: memory?.topic ?? "general")
+    }
+
+    private var trimmed: String { CoachModelText.collapsed(text) }
+    private var problem: String? { trimmed.isEmpty ? nil : CoachChatViewModel.memoryProblem(trimmed) }
+    private var unchanged: Bool { memory.map { trimmed == $0.content && topic == $0.topic } ?? false }
+    private var canSave: Bool { !saving && !gone && (isNew || memory != nil) && !trimmed.isEmpty && problem == nil && !unchanged }
+
+    var body: some View {
+        NavigationStack {
+            Form {
+                Section {
+                    TextField("A fact about you, like \"I swim on Thursdays\"", text: $text, axis: .vertical)
+                        .lineLimit(3...8)
+                        .font(StrandFont.body)
+                        .foregroundStyle(StrandPalette.textPrimary)
+                        .focused($focused)
+                        .accessibilityIdentifier("coachMemoryEditorText")
+                        .listRowBackground(StrandPalette.surfaceRaised)
+                } footer: {
+                    VStack(alignment: .leading, spacing: 4) {
+                        if let problem {
+                            Text(problem).foregroundStyle(StrandPalette.statusCritical)
+                        } else if trimmed.utf16.count > CoachMemory.maxLength - 100 {
+                            Text("\(trimmed.utf16.count) of \(CoachMemory.maxLength) characters")
+                        }
+                        if conflict, let stored = memory?.content {
+                            Text("This memory changed on another device. Sana now has: \"\(stored)\". Save again to replace it with yours.")
+                                .foregroundStyle(StrandPalette.textSecondary)
+                        }
+                        if let notice {
+                            Text(notice).foregroundStyle(gone ? StrandPalette.statusCritical : StrandPalette.textSecondary)
+                        }
+                    }
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+                }
+                Section {
+                    Picker("Topic", selection: $topic) {
+                        ForEach(CoachMemory.topics, id: \.self) { Text($0.capitalized).tag($0) }
+                    }
+                    .pickerStyle(.menu)
+                    .tint(StrandPalette.accent)
+                    .listRowBackground(StrandPalette.surfaceRaised)
+                } footer: {
+                    Text("Sana keeps this in your words and uses it in your next chats.")
+                        .font(StrandFont.caption)
+                        .foregroundStyle(StrandPalette.textTertiary)
+                }
+            }
+            .scrollContentBackground(.hidden)
+            .background(StrandPalette.surfaceBase.ignoresSafeArea())
+            .navigationTitle(isNew ? "Add a memory" : "Edit memory")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Cancel") { dismiss() }
+                        .foregroundStyle(StrandPalette.accent)
+                }
+                ToolbarItem(placement: .confirmationAction) {
+                    if saving {
+                        ProgressView().tint(StrandPalette.accent)
+                    } else {
+                        Button("Save") { Task { await submit() } }
+                            .disabled(!canSave)
+                            .foregroundStyle(canSave ? StrandPalette.accent : StrandPalette.textTertiary)
+                            .accessibilityIdentifier("coachMemoryEditorSave")
+                    }
+                }
+            }
+            .onAppear { focused = true }
+        }
+        .presentationDetents([.medium, .large])
+    }
+
+    private func submit() async {
+        saving = true
+        defer { saving = false }
+        notice = nil
+        conflict = false
+        switch await save(trimmed, topic) {
+        case .saved:
+            dismiss()
+        case .changedElsewhere:
+            // The list now holds the stored version; the footer quotes it from `memory`, which follows the list.
+            conflict = true
+        case .gone:
+            gone = true
+            notice = "This memory was forgotten on another device, so there is nothing to edit."
+        case .failed(let message):
+            notice = message
+        }
     }
 }

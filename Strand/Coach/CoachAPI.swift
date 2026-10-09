@@ -76,16 +76,40 @@ struct CoachWireMessage: Sendable {
 
 struct CoachMemory: Codable, Identifiable, Equatable, Sendable {
     let id: String
-    let content: String
-    let topic: String
-    let importance: Int
+    /// What is stored. The user can change it (`PATCH memories/<id>`); the edited row replaces this one everywhere.
+    var content: String
+    var topic: String
+    var importance: Int
     var createdAt: String? = nil
     var updatedAt: String? = nil
-    /// `tool | curator | user | legacy`.
+    /// `tool | curator | user | legacy`. `user`: the user's own words (edited or added in the memory sheet), which
+    /// the server's curator and consolidation never reword.
     var source: String? = nil
     var confirmations: Int? = nil
     /// A safety-critical row the ranking always keeps (injury or health, importance 4 or more).
     var pinned: Bool? = nil
+    /// The row's version, which an edit is guarded by. Absent from servers before edits existed (no edit then).
+    var version: Int? = nil
+
+    /// The topics the server stores (`docs/COACH_MEMORY.md` §2); anything else is stored as `general`.
+    static let topics = ["goal", "injury", "health", "training", "achievement", "routine", "lifestyle", "preference",
+                         "nutrition", "sleep", "general"]
+    /// The server's bound on a memory's text.
+    static let maxLength = 500
+
+    /// The user's own words: edited or added in the memory sheet.
+    var isUsersOwn: Bool { source == "user" }
+
+    /// This row as an edit the server accepted left it: the stored text, topic, importance, version and source, with
+    /// what the edit's answer leaves out kept from before. The safety pin (injury or health, importance 4 or more)
+    /// stays only while the edited row still qualifies; the next ranked read says for sure.
+    func updated(from saved: CoachMemory) -> CoachMemory {
+        var copy = saved
+        copy.pinned = saved.pinned ?? pinned.map { $0 && ["injury", "health"].contains(saved.topic) && saved.importance >= 4 }
+        copy.createdAt = saved.createdAt ?? createdAt
+        copy.confirmations = saved.confirmations ?? confirmations
+        return copy
+    }
 }
 
 struct CoachMessageMeta: Codable, Equatable, Sendable {
@@ -598,6 +622,13 @@ struct CoachContextManifest: Codable, Equatable, Sendable {
             ?? c.first(String.self, "memoryRevision", "memory_revision").flatMap { Int($0) }
     }
 
+    /// Puts the user's edit of a memory in place, so a cached manifest never puts the old text back into a prompt.
+    func replacingMemory(_ saved: CoachMemory) -> CoachContextManifest {
+        var copy = self
+        copy.memories = memories.map { $0.id == saved.id ? $0.updated(from: saved) : $0 }
+        return copy
+    }
+
     /// Drops one forgotten memory so a cached manifest can never put it back into a prompt.
     func removingMemory(id: String) -> CoachContextManifest {
         var copy = self
@@ -977,11 +1008,33 @@ final class CoachAPI: @unchecked Sendable {
         return try JSONDecoder().decode(Reply.self, from: try await send(try request("memories", query: items))).memories
     }
 
-    func saveMemory(content: String, topic: String, importance: Int, threadId: String? = nil) async throws -> CoachMemory {
-        struct Reply: Decodable { let memory: CoachMemory }
+    /// `POST memories`. `auto`: a note nobody asked for (the "Ask Sana" handoff from a screen); the server skips it when
+    /// it repeats something the user forgot or reworded, and the answer is nil. `byUser`: a fact the user added in the
+    /// memory sheet, stored in their own words. Without either it is Sana's `save_memory` (the user asked).
+    @discardableResult
+    func saveMemory(content: String, topic: String, importance: Int, threadId: String? = nil,
+                    auto: Bool = false, byUser: Bool = false) async throws -> CoachMemory? {
+        struct Reply: Decodable { let memory: CoachMemory?; let skipped: String? }
         var body: [String: Any] = ["content": content, "topic": topic, "importance": importance]
         if let threadId { body["threadId"] = threadId }
-        return try JSONDecoder().decode(Reply.self, from: try await send(try request("memories", method: "POST", body: body))).memory
+        if auto { body["auto"] = true }
+        if byUser { body["source"] = "user" }
+        let reply = try JSONDecoder().decode(Reply.self, from: try await send(try request("memories", method: "POST", body: body)))
+        if reply.skipped != nil { return nil }
+        guard let memory = reply.memory else { throw CoachAPIError.unavailable }
+        return memory
+    }
+
+    /// `PATCH memories/<id>`: the user's edit, guarded by the `version` the list showed. Only the fields given are sent.
+    /// Throws `CoachRouteError` 409 when the memory changed elsewhere first, 404 when it was forgotten.
+    func updateMemory(id: String, content: String? = nil, topic: String? = nil, importance: Int? = nil,
+                      version: Int) async throws -> CoachMemory {
+        struct Reply: Decodable { let memory: CoachMemory }
+        var body: [String: Any] = ["version": version]
+        if let content { body["content"] = content }
+        if let topic { body["topic"] = topic }
+        if let importance { body["importance"] = importance }
+        return try await decode(Reply.self, try request("memories/\(id.lowercased())", method: "PATCH", body: body)).memory
     }
 
     func deleteMemory(id: String) async throws {

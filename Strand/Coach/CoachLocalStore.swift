@@ -148,6 +148,14 @@ struct CoachLocalStore: Sendable {
         }
     }
 
+    /// Deletes every cached manifest `stale` picks (one from before a memory change made on another phone, say).
+    func removeManifests(where stale: (CoachContextManifest) -> Bool) {
+        for url in newestFirst(in: manifestsDir) {
+            guard let manifest = read(CoachContextManifest.self, at: url), stale(manifest) else { continue }
+            try? FileManager.default.removeItem(at: url)
+        }
+    }
+
     func removeAllManifests() { try? FileManager.default.removeItem(at: manifestsDir) }
 
     // MARK: Messages

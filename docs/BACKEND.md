@@ -72,7 +72,7 @@ They are created by `supabase/migrations/20261007160000_coach_threads_memory.sql
 | `coach_threads` | One row per chat: title and its source, folder, pin, origin, live stats kept by the `coach_messages` triggers (`message_count`, `last_message_at`, `preview`), the rolling summary and the maintenance lease (with `maintenance_claimed_at`, which fences a pass against forgets that land while it runs). |
 | `coach_folders` | The owner's chat folders. A thread can only sit in its owner's folder: the composite key `coach_threads_folder_fkey (folder_id, user_id)`, so another owner's folder fails like a missing one (409). |
 | `coach_thread_tombstones` | Deleted thread ids. A later save for one is rejected with `thread_deleted`; kept 90 days. |
-| `coach_memory_events` | Audit trail of every memory change. `forget` rows are the tombstones the curator checks (tokens only, no content). |
+| `coach_memory_events` | Audit trail of every memory change. `forget` rows, and the user's edits that changed a text (reason `user_edit`), are the tombstones the curator and automatic saves check (tokens only, no content). |
 | `coach_user_state` | One row per owner: the starter-suggestion cache, recent searches, the consolidation lease, `memory_revision` and `memory_floor_at`. |
 
 The migration also adds `thread_id` (a composite key to the owner's thread), and the generated columns
@@ -98,7 +98,7 @@ installation credential:
 | `coach_memories_ranked_v1` | The active memories for one question: safety pins first, then lexical relevance, importance, recency and confirmations. |
 | `coach_context_manifest_v1` | What the context library holds for one turn (ranked memories, the thread summary, the earlier chats without the current one, recent and relevant chats, open loops), never message contents. |
 | `coach_thread_claim_v1`, `coach_thread_publish_v1` | The maintenance lease, and the summary patch and curator memory ops published together while it is held. When a forget or forget-all landed after the claim, publish keeps the summary but drops the ops (`memory_reset`), so a pass that started before a forget cannot bring the fact back. |
-| `coach_memory_apply_v1` | Memory ops (`add`, `update`, `confirm`, `retire`, `merge`, `forget`, `forget_all`) with the 200-memory cap, the audit events and the retention rules. Ops resolved from an earlier read carry version guards and are skipped as `stale` when a row moved meanwhile; forgetting a memory also deletes the rows merged into it. |
+| `coach_memory_apply_v1` | Memory ops (`add`, `update`, `confirm`, `retire`, `merge`, `forget`, `forget_all`) with the 200-memory cap, the audit events and the retention rules. Ops resolved from an earlier read carry version guards and are skipped as `stale` when a row moved meanwhile; forgetting a memory also deletes the rows merged into it. Since `20261009120000_coach_memory_user_edits.sql`: a user edit makes the row `source='user'` and leaves an edit tombstone; the curator and the consolidator may no longer reword, retire or merge such a row (`user_edited`); every user op moves `memory_revision`. |
 | `coach_consolidation_claim_v1` | Claims the owner's periodic memory consolidation when it is due. |
 | `coach_take_utility_quota`, `coach_add_utility_tokens` | The cheap-model budget, separate from the chat quota (`coach_take_quota`). |
 
@@ -119,6 +119,12 @@ To roll it out, apply the migration to production as described in Migrations bel
 psql "$DB_URL" -v ON_ERROR_STOP=1 -1 -f supabase/migrations/20261007160000_coach_threads_memory.sql
 supabase migration repair --status applied 20261007160000
 ```
+
+Editable memories (`PATCH memories/<id>`, `docs/COACH_MEMORY.md` §4) need
+`20261009120000_coach_memory_user_edits.sql` (it re-creates `coach_memory_apply_v1` and `coach_memories_ranked_v1`;
+safe to re-run) applied before the `coach` deploy that serves the route: the function sends tombstone tokens with
+user edits and reads `version` from the ranked rows. Re-applying `20261007160000` afterwards would put the older
+functions back, so re-apply this file after it whenever both are run.
 
 Then deploy `coach`, then ship the app. Messages the previous `coach` function writes between the
 migration and the deploy have no thread, so re-apply the migration once after the deploy (it is safe to
