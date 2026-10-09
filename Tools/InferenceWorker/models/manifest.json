@@ -473,6 +473,55 @@
       "required_for_readiness": false,
       "accuracy_label": "unverified_accuracy_shadow_only",
       "runtime_note": "optional shadow lane, disabled by default (FRWHOOP_SIAMAF_SHADOW_ENABLED); never user-facing; a missing artifact never gates process readiness"
+    },
+    {
+      "id": "recgym_cnn_transformer",
+      "kind": "model_checkpoint",
+      "name": "HAR_IMU_CNN-Transformer RecGym exercise classifier (wrist, IMU only)",
+      "revision": "e085ac0e116aa5997d5f593ac1d0dd0c801859b1",
+      "source_url": "https://github.com/MKorp7/HAR_IMU_CNN-Transformer",
+      "license": "MIT",
+      "license_evidence": "repository LICENSE at the pinned commit: MIT, Copyright (c) 2025 MKorp7 (code and the committed models.zip); training data RecGym is CC BY 4.0 (UCI 1128, doi:10.24432/C5PW4K)",
+      "rights_verdict": "clear",
+      "status": "shadow_eligible",
+      "status_reason": "real pinned checkpoint loaded strictly into the vendored architecture (Tools/ActivityContext/activity_context/recgym); with the scaler reproduced from the public dataset it gives upstream's reported test accuracy (0.9634 vs 0.963 on RecGym subjects 9-10); trained on a wrist, the owner's strap is on the upper arm, so the worker runs it SHADOW ONLY (activity_exercise_windows) and it shapes no decode or canonical value",
+      "provider_id": "activity.exercise.recgym.v1",
+      "wired": true,
+      "consumer": "frwhoop-worker activity lane (FRWHOOP_EXERCISE_WEIGHTS_PATH=/opt/frwhoop-models/current/recgym/e085ac0e/wrist_-_imu_only_best.pt); the sidecar only stages and verifies it",
+      "input_contract": "(batch, 6, 80) float32: 4 s at 20 Hz of A_x,A_y,A_z (gravity-free linear acceleration, clip(0.5 + a/80, 0, 1), m/s^2) and G_x,G_y,G_z (clip(0.5 + w/1600, 0, 1), deg/s), standardised per (time step, channel) with the reproduced scaler; 12 logits in sorted RecGym class order (Null at index 5)",
+      "artifacts": [
+        {
+          "name": "models.zip",
+          "path": "recgym/e085ac0e/models.zip",
+          "url": "https://raw.githubusercontent.com/MKorp7/HAR_IMU_CNN-Transformer/e085ac0e116aa5997d5f593ac1d0dd0c801859b1/models.zip",
+          "source": {
+            "kind": "url"
+          },
+          "size_bytes": 6321334,
+          "sha256": "eb779a1fbf5af2db76c8babbfd3e4d8162d9e677738215db5c03f5c2fe4cdfe8",
+          "verify_at_startup": true,
+          "required_for_readiness": false,
+          "note": "upstream's committed archive of nine state dicts; only the member below is loaded"
+        },
+        {
+          "name": "wrist_-_imu_only_best.pt",
+          "path": "recgym/e085ac0e/wrist_-_imu_only_best.pt",
+          "url": "inner entry of models.zip",
+          "source": {
+            "kind": "zip_member",
+            "artifact": "models.zip",
+            "member": "models/wrist_-_imu_only_best.pt"
+          },
+          "size_bytes": 774140,
+          "sha256": "7f0c4adf066bb842eeb0c114e765fd3cf1ca3a7ca6ef6cf5344f5f142651f5d9",
+          "verify_at_startup": true,
+          "required_for_readiness": false,
+          "note": "the checkpoint the exercise child verifies again (size + sha256) before torch.load(weights_only=True)"
+        }
+      ],
+      "required_for_readiness": false,
+      "accuracy_label": "unverified_accuracy_shadow_only",
+      "runtime_note": "optional shadow lane, disabled by default (FRWHOOP_EXERCISE_ENABLED); never user-facing; a missing artifact never gates process readiness"
     }
   ]
 }

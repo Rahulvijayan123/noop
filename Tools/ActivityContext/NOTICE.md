@@ -346,3 +346,23 @@ https://github.com/OxWearables/ssl-wearables (tag v1.0.0, `sslearning/models/acc
 converted from ssl-wearables `mtl_30_best.mdl` and ActiNet's `ssl-ukb-c24-mw-30s-20260128` classifier
 (https://github.com/OxWearables/actinet). Upstream licence: CC BY-NC 4.0 (non-commercial). Used for an internal,
 non-commercial project; the weights are not redistributed from this repository.
+
+## HAR_IMU_CNN-Transformer / RecGym (gym-exercise recognition, shadow)
+
+HAR_IMU_CNN-Transformer (MKorp7/HAR_IMU_CNN-Transformer)
+  https://github.com/MKorp7/HAR_IMU_CNN-Transformer
+  Pinned commit: e085ac0e116aa5997d5f593ac1d0dd0c801859b1
+  License: MIT, "Copyright (c) 2025 MKorp7" (full text in activity_context/recgym/vendor/__init__.py and in every
+  vendored file's header).
+  Used for: the IMUCNNTransformer architecture (vendor/imu_transformer.py <- src/models/imu_transformer.py, byte for
+  byte) and, offline only, upstream's RecGym windowing (vendor/recgym_data.py <- src/data/recgym.py, byte for byte)
+  to reproduce the scaler. The checkpoint models.zip:models/wrist_-_imu_only_best.pt (sha256 7f0c4adf…8f5d9) is
+  fetched by sha256 at install time and never committed.
+
+RecGym: Gym Workouts Recognition Dataset with IMU and Capacitive Sensor
+  Bian, S. & Lukowicz, P. (2025). UCI Machine Learning Repository. https://doi.org/10.24432/C5PW4K — CC BY 4.0.
+  Intro paper: Bian, S., Rey, V. F., Yuan, S. & Lukowicz, P., arXiv:2503.06311 (ABC 2025).
+  Used for: refitting upstream's StandardScaler (activity_context/recgym/recgym_wrist_imu_scaler.json; mean and
+  scale per time step and channel, provenance inside) and twelve test-subject windows in
+  fixtures/recgym/golden_upstream.json. Changes made (by Nara): wrist IMU windows only, upstream's windowing; values
+  unchanged. The raw CSV is a download-time artifact (Kaggle mirror v6, csv sha256 2031c077…40e9).
