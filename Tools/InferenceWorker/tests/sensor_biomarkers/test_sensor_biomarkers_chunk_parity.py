@@ -105,10 +105,13 @@ class TestChunkedVersusContiguousParity:
                     assert va == pytest.approx(vb, abs=1e-9), (family, key, va, vb)
 
     def test_ppg_families_parity_within_detector_edge_tolerance(self):
-        # The PPG cleaner/detector has edge effects at each chunk boundary, so
-        # chunked medians are asserted within a documented tolerance (quality
+        # Legacy chunks (no run_id) are separate runs, so each is cleaned and
+        # searched on its own: the cleaner has edge effects at each chunk
+        # boundary and MSPTDfast restarts its 6 s windowing at each run start.
+        # Chunked medians are asserted within a documented tolerance (quality
         # correlation within 0.01; pulse medians within one native sample
-        # period; accepted counts within the boundary pulses of one chunk).
+        # period; accepted counts within 1%). Chunks that share a run_id are
+        # joined and match exactly (test_ppg_runs.py).
         wave = _ppg_wave(0, SECONDS)
         contiguous = _stages(_body([_imu_segment(0, SECONDS)],
                                    [_ppg_segment(0, SECONDS, wave)], SECONDS))
@@ -125,9 +128,9 @@ class TestChunkedVersusContiguousParity:
                         ("pulse_width50_median_ms", 2 * 1000.0 / FS),
                         ("pulse_normalized_area_median", 0.02)):
             assert pb[key]["value"] == pytest.approx(pa[key]["value"], rel=tol), key
-        # accepted counts differ by at most the boundary pulses of one chunk
-        assert abs(pa["pulse_accepted_count"]["value"]
-                  - pb["pulse_accepted_count"]["value"]) <= 2
+        # accepted counts differ only by detector windowing near run edges
+        assert pb["pulse_accepted_count"]["value"] == pytest.approx(
+            pa["pulse_accepted_count"]["value"], rel=0.01)
 
     def test_no_duplicate_samples_at_chunk_seams(self):
         # The unit-level guarantee the lane relies on: adjacent chunks share

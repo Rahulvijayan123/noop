@@ -16,30 +16,10 @@ final class SensorBiomarkerInputsTests: XCTestCase {
 
     // MARK: - Fixture loading
 
-    private func sensorFixturePath(_ name: String) -> String? {
-        if let dir = ProcessInfo.processInfo.environment["FRWHOOP_SENSOR_FIXTURE_DIR"], !dir.isEmpty {
-            let p = dir + "/" + name
-            if FileManager.default.fileExists(atPath: p) { return p }
-        }
-        let candidates = [
-            "Tests/frwhoop-workerTests/Resources/sensor_biomarkers/" + name,
-            "Tests/frwhoop-workerTests/Resources/" + name,
-        ]
-        for c in candidates where FileManager.default.fileExists(atPath: c) {
-            return c
-        }
-        return nil
-    }
-
     private func sensorJSON(_ name: String) throws -> [String: Any] {
-        guard let path = sensorFixturePath(name) else {
-            throw XCTSkip("sensor-biomarker fixture \(name) not found; set FRWHOOP_SENSOR_FIXTURE_DIR")
-        }
-        let data = try Data(contentsOf: URL(fileURLWithPath: path))
-        guard let obj = (try JSONSerialization.jsonObject(with: data)) as? [String: Any] else {
-            throw XCTSkip("fixture \(name) is not a JSON object")
-        }
-        return obj
+        let data = try SensorFixturePaths.data(SensorFixturePaths.sensor(name))
+        return try XCTUnwrap((try JSONSerialization.jsonObject(with: data)) as? [String: Any],
+                             "fixture \(name) is not a JSON object")
     }
 
     private func hexData(_ hex: String) -> Data {
@@ -320,11 +300,11 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertThrowsError(try codec.unpack(badMagic)) { e in
             XCTAssertEqual(e as? SensorBiomarkerInputs.PpgCodec.CodecError, .notNpb1)
         }
-        // unsupported version
+        // unsupported version (formats 1-3 decode; 4 is unknown)
         var badVersion = bytes
-        badVersion[4] = 3
+        badVersion[4] = 4
         XCTAssertThrowsError(try codec.unpack(badVersion)) { e in
-            XCTAssertEqual(e as? SensorBiomarkerInputs.PpgCodec.CodecError, .unsupportedVersion(3))
+            XCTAssertEqual(e as? SensorBiomarkerInputs.PpgCodec.CodecError, .unsupportedVersion(4))
         }
         // wrong kind
         var badKind = bytes
@@ -481,21 +461,22 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertEqual(Set(expectedAbsolutes.keys), Set(reconstruction.seconds.filter { $0.withheldReason == nil }.map { String($0.ts) }))
         for second in reconstruction.seconds {
             guard let window = expectedAbsolutes[String(second.ts)] else { continue }
-            // The module emits exactly the first 24 of the 25-point window at
-            // ts + i/24; the 25th point (ts + 24/24) belongs to the next
-            // second's grid position.
-            XCTAssertEqual(second.samples.count, 24, "emitted second \(second.ts) must be 24 samples")
-            XCTAssertEqual(second.samples.map(Int.init), Array(window.prefix(24)),
+            // The anchor + 24 deltas are 25 distinct samples on the uniform 25 Hz grid; every one
+            // is emitted (ppg-transport.md, timing evidence).
+            XCTAssertEqual(second.samples.count, 25, "emitted second \(second.ts) must be 25 samples")
+            XCTAssertEqual(second.samples.map(Int.init), window,
                            "second \(second.ts) must equal the independently computed absolutes")
             XCTAssertEqual(second.samples[0], Int32(window[0]), "sample 0 is the baseCode")
         }
         // Cross-check the same window via the shared WhoopProtocol helper.
         let clean = reconstruction.seconds.first { $0.ts == 1000 }
-        XCTAssertEqual(clean?.samples.count, 24)
+        XCTAssertEqual(clean?.samples.count, 25)
         let whoopWindow = try XCTUnwrap(ppgWaveformAbsolute(
             baseCode: 378_307,
             deltas: Array(repeating: [10, -5], count: 12).flatMap { $0 }))
-        XCTAssertEqual(clean!.samples.map(Int.init), Array(whoopWindow.prefix(24)))
+        XCTAssertEqual(clean!.samples.map(Int.init), whoopWindow)
+        XCTAssertEqual(reconstruction.grid, .uniform25)
+        XCTAssertEqual(SensorBiomarkerInputs.ppgNativeRateHz, 25)
     }
 
     func testPpgMissingAnchorNeverEmitted() throws {
@@ -589,9 +570,12 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         let runs = reconstruction.runs
         XCTAssertEqual(runs.map(\.start), [1000, 1003, 1006])
         XCTAssertEqual(runs.map(\.end), [1002, 1004, 1007])
-        XCTAssertEqual(runs[0].configIdentity, "burst=1")
-        XCTAssertEqual(runs[1].configIdentity, "burst=1")
-        XCTAssertEqual(runs[2].configIdentity, "burst=2")
+        // The burst counter splits runs but never names a configuration: v26 reports no gain,
+        // drive or channel, so every run's configuration is "unknown" and not known.
+        XCTAssertEqual(runs.map(\.config.burstIndex), [1, 1, 2])
+        XCTAssertEqual(Set(runs.map(\.configIdentity)), ["unknown"])
+        XCTAssertTrue(runs.allSatisfy { !$0.config.known })
+        XCTAssertEqual(runs.map(\.runId), ["ppg-1000", "ppg-1003", "ppg-1006"])
         // Every emitted second lands in exactly one run.
         let covered = runs.flatMap { ($0.start..<$0.end).map { $0 } }
         XCTAssertEqual(covered, [1000, 1001, 1003, 1006])
@@ -624,11 +608,10 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertFalse(reconstruction.conflictingDuplicateSeconds.contains(1007))
     }
 
-    func testPpgAdjacentSecondsNoBoundaryDuplication() throws {
-        // Two adjacent anchored seconds: each emits exactly 24 samples at
-        // ts + i/24, i in 0..<24. The 25th reconstructed point of second N
-        // (at ts+1) is owned by second N+1's grid position, so a run of two
-        // seconds has exactly 48 samples with no duplicated endpoint.
+    func testLegacy24GridStillAvailableBehindTheEnum() throws {
+        // The pre-Spec-01 convention, kept for the record behind `PpgGrid.legacy24`: each second
+        // emits the first 24 points at ts + i/24 and hands the 25th to the next second, so a run of
+        // two seconds has exactly 48 samples with no duplicated endpoint.
         let a = SensorBiomarkerInputs.PpgWaveformInput(
             rowId: 1, ts: 200, samples: [10, -5, 10, -5, 10, -5, 10, -5, 10, -5, 10, -5,
                                          10, -5, 10, -5, 10, -5, 10, -5, 10, -5, 10, -5],
@@ -637,7 +620,8 @@ final class SensorBiomarkerInputsTests: XCTestCase {
             rowId: 2, ts: 201, samples: [3, -1, 3, -1, 3, -1, 3, -1, 3, -1, 3, -1,
                                          3, -1, 3, -1, 3, -1, 3, -1, 3, -1, 3, -1],
             burstIndex: 1, baseCode: 100_120)
-        let reconstruction = SensorBiomarkerInputs.reconstructPPG(records: [a, b])
+        let reconstruction = SensorBiomarkerInputs.reconstructPPG(records: [a, b], grid: .legacy24)
+        XCTAssertEqual(reconstruction.nativeRateHz, 24)
         let sa = try XCTUnwrap(reconstruction.seconds.first { $0.ts == 200 })
         let sb = try XCTUnwrap(reconstruction.seconds.first { $0.ts == 201 })
         XCTAssertEqual(sa.samples.count, 24)
@@ -652,14 +636,17 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         // The run spans both seconds and the segment carries exactly 48 samples.
         let runs = reconstruction.runs
         XCTAssertEqual(runs.count, 1)
-        XCTAssertEqual(runs[0], SensorBiomarkerInputs.PpgRun(start: 200, end: 202, configIdentity: "burst=1"))
+        XCTAssertEqual(runs[0].start, 200)
+        XCTAssertEqual(runs[0].end, 202)
+        XCTAssertEqual(runs[0].runId, "ppg-200")
         let byTs = Dictionary(uniqueKeysWithValues: reconstruction.seconds.map { ($0.ts, $0) })
-        let segments = SensorBiomarkerInputs.ppgSegments(run: runs[0], secondsByTs: byTs)
+        let segments = SensorBiomarkerInputs.ppgSegments(run: runs[0], secondsByTs: byTs, grid: .legacy24)
         XCTAssertEqual(segments.count, 1)
         XCTAssertEqual(segments[0].samples.count, 48)
+        XCTAssertEqual(segments[0].samplesPerSecond, 24)
         // Split at a 1-second cap: two endpoint-owned segments of 24, and the
         // boundary is clean (segment 1 ends at second 200, segment 2 starts at 201).
-        let split = SensorBiomarkerInputs.ppgSegments(run: runs[0], secondsByTs: byTs, maxDuration: 1)
+        let split = SensorBiomarkerInputs.ppgSegments(run: runs[0], secondsByTs: byTs, maxDuration: 1, grid: .legacy24)
         XCTAssertEqual(split.count, 2)
         XCTAssertEqual(split[0].startUnix, 200)
         XCTAssertEqual(split[1].startUnix, 201)
@@ -693,14 +680,15 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         let second = SensorBiomarkerInputs.reconstructSecond(input)
         XCTAssertEqual(second.withheldReason, nil)
         let window = try XCTUnwrap(frame["absolute_window"] as? [Int])
-        XCTAssertEqual(second.samples.map(Int.init), Array(window.prefix(24)))
+        XCTAssertEqual(second.samples.map(Int.init), window, "all 25 points of the real window are emitted")
         XCTAssertEqual(second.samples.first.map(Int.init), window[0])
         // The known final point of the full 25-sample window (base + all 24
-        // deltas) is 362532 on this real capture; the module emits the first
-        // 24, so the shared helper must still reconstruct it.
+        // deltas) is 362532 on this real capture.
         let full = try XCTUnwrap(ppgWaveformAbsolute(baseCode: sample.baseCode, deltas: sample.samples))
         XCTAssertEqual(full.count, 25)
         XCTAssertEqual(full.last, 362_532)
+        XCTAssertEqual(second.samples.last, 362_532)
+        XCTAssertEqual(second.clock.source, .strapRecordSecond)
     }
 
     func testRealV26FrameCorruptedCRCRejectedByWhoopProtocol() throws {
@@ -779,12 +767,25 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertEqual(imuSegments?.first?["duration_s"] as? Int, 2)
         XCTAssertEqual((imuSegments?.first?["accel_g"] as? [[Double]])?.count, 200)
         let ppg = json["ppg"] as? [String: Any]
-        XCTAssertEqual(ppg?["native_rate_hz"] as? Int, 24)
+        XCTAssertEqual(ppg?["native_rate_hz"] as? Int, 25)
         let ppgSegments = ppg?["segments"] as? [[String: Any]]
         XCTAssertEqual(ppgSegments?.count, 1)
-        XCTAssertEqual(ppgSegments?.first?["sample_count_per_second"] as? Int, 24)
-        XCTAssertEqual((ppgSegments?.first?["samples"] as? [Int32])?.count, 48)
-        XCTAssertEqual((ppgSegments?.first?["config"] as? [String: Any])?["stable"] as? Bool, true)
+        XCTAssertEqual(ppgSegments?.first?["sample_count_per_second"] as? Int, 25)
+        XCTAssertEqual((ppgSegments?.first?["samples"] as? [Int32])?.count, 50)
+        XCTAssertEqual(ppgSegments?.first?["run_id"] as? String, "ppg-100")
+        let config = ppgSegments?.first?["config"] as? [String: Any]
+        XCTAssertEqual(config?["stable"] as? Bool, true)
+        XCTAssertEqual(config?["identity"] as? String, "unknown")
+        XCTAssertEqual(config?["known"] as? Bool, false)
+        XCTAssertEqual(config?["burst_index"] as? Int, 1)
+        let clock = ppgSegments?.first?["clock"] as? [String: Any]
+        XCTAssertEqual(clock?["samples_per_second"] as? Int, 25)
+        XCTAssertEqual(clock?["packet_timing_verified"] as? Bool, false)
+        XCTAssertEqual(clock?["grid"] as? String, "uniform-25hz-v26-continuity")
+        let coverage = json["coverage"] as? [String: Any]
+        XCTAssertEqual((coverage?["ppg"] as? [String: Any])?["eligible_seconds"] as? Int, 2)
+        XCTAssertEqual((coverage?["imu"] as? [String: Any])?["expected_seconds"] as? Int, 2)
+        XCTAssertEqual((json["placement"] as? [String: Any])?["body_location"] as? String, "unknown")
     }
 
     func testBuildRequestsEndpointOwnershipAcrossChunkBoundary() throws {

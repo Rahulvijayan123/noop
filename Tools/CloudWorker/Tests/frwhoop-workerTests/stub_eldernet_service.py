@@ -12,6 +12,7 @@ Behaviour is fixed per process by argv, so the HART and Inertia stubs sharing th
   --model-version V               (model_version reported by ping and infer; default eldernet-437a38b)
   --infer-model-version V         (model_version reported by infer only; default: --model-version)
   --weights-seed S                (seeds the made-up per-head sha256 digests; default "stub")
+  --no-loaded                     (ping reports no measured `loaded` identity, like a serve older than loaded.py)
 Every other argument (--weights-dir, --upstream-dir, --timeout …) is accepted and ignored.
 
 ping also carries the newer serve's extra keys (`weights_digest`, `upstream_source` with non-string values), which
@@ -26,6 +27,11 @@ import hashlib
 import json
 import sys
 import time
+
+def loaded_digest(loaded):
+    text = "activity-loaded-1\n" + "".join("%s=%s\n" % (k, loaded[k]) for k in sorted(loaded))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
 
 HEADS = ["gait_detection", "gait_speed", "gait_length", "cadence", "regularity", "step_count"]
 COMMIT = "437a38bcc69f42717fe73c1f7dbea7e1f7a50d23"
@@ -64,6 +70,7 @@ def main():
     ap.add_argument("--model-version", default="eldernet-437a38b")
     ap.add_argument("--infer-model-version", default=None)
     ap.add_argument("--weights-seed", default="stub")
+    ap.add_argument("--no-loaded", action="store_true")
     args, _ = ap.parse_known_args()
     infers = 0
     unavailable = args.behaviour in ("model_missing", "weights_mismatch")
@@ -84,6 +91,13 @@ def main():
             resp.update(provenance(args.model_version, args.weights_seed))
             canonical = "eldernet-weights-1\n" + "".join("%s=%s\n" % (k, v) for k, v in sorted(resp["weights"].items()))
             resp["weights_digest"] = hashlib.sha256(canonical.encode()).hexdigest()
+            if not args.no_loaded and not unavailable:
+                # What the real serve measures (activity_context/loaded.py): flat strings and their digest.
+                loaded = {"schema": "activity-loaded-1", "code_sha256": hashlib.sha256(b"stub-eldernet-code").hexdigest(),
+                          "threads": "1", "weights_digest": resp["weights_digest"],
+                          "model_version": args.model_version}
+                resp["loaded"] = loaded
+                resp["loaded_digest"] = loaded_digest(loaded)
         elif op == "shutdown":
             sys.stdout.write(json.dumps({"id": rid, "ok": True}) + "\n")
             sys.stdout.flush()

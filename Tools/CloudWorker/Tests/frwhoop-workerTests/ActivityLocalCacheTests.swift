@@ -72,23 +72,51 @@ final class ActivityLocalCacheTests: XCTestCase {
     func testInferenceKeyChangesWithEveryInputItDependsOn() {
         let base = ActivityPythonService.RunRequest(startTs: 100, endTs: 104, columnsB64: ["AA", "BB"],
                                                     headB64: ["CC"], tailB64: [])
-        let key = ActivityLocalCache.inferenceKey(request: base, modelVersion: "m1", preprocessingVersion: "p1")
-        XCTAssertEqual(key, ActivityLocalCache.inferenceKey(request: base, modelVersion: "m1",
-                                                            preprocessingVersion: "p1"))
+        let identity = ["checkpoint_sha256": "c1", "code_sha256": "k1"]
+        let versions = ["model": "m1", "preprocessing": "p1"]
+        let key = ActivityLocalCache.inferenceKey(request: base, identity: identity, versions: versions)
+        XCTAssertNotNil(key)
+        XCTAssertEqual(key, ActivityLocalCache.inferenceKey(request: base, identity: identity, versions: versions))
         var later = base; later.startTs = 101; later.endTs = 105
         var grown = base; grown.columnsB64.append("DD")
         var tail = base; tail.tailB64 = ["EE"]
         // Moving a second from the head into the body must not collide with the original.
         var shifted = base; shifted.headB64 = []; shifted.columnsB64 = ["CC", "AA", "BB"]
         let variants = [
-            ActivityLocalCache.inferenceKey(request: base, modelVersion: "m2", preprocessingVersion: "p1"),
-            ActivityLocalCache.inferenceKey(request: base, modelVersion: "m1", preprocessingVersion: "p2"),
-            ActivityLocalCache.inferenceKey(request: later, modelVersion: "m1", preprocessingVersion: "p1"),
-            ActivityLocalCache.inferenceKey(request: grown, modelVersion: "m1", preprocessingVersion: "p1"),
-            ActivityLocalCache.inferenceKey(request: tail, modelVersion: "m1", preprocessingVersion: "p1"),
-            ActivityLocalCache.inferenceKey(request: shifted, modelVersion: "m1", preprocessingVersion: "p1"),
+            ActivityLocalCache.inferenceKey(request: base, identity: identity,
+                                            versions: ["model": "m2", "preprocessing": "p1"]),
+            ActivityLocalCache.inferenceKey(request: base, identity: identity,
+                                            versions: ["model": "m1", "preprocessing": "p2"]),
+            ActivityLocalCache.inferenceKey(request: base, identity: ["checkpoint_sha256": "c2", "code_sha256": "k1"],
+                                            versions: versions),
+            ActivityLocalCache.inferenceKey(request: base, identity: ["checkpoint_sha256": "c1", "code_sha256": "k2"],
+                                            versions: versions),
+            ActivityLocalCache.inferenceKey(request: later, identity: identity, versions: versions),
+            ActivityLocalCache.inferenceKey(request: grown, identity: identity, versions: versions),
+            ActivityLocalCache.inferenceKey(request: tail, identity: identity, versions: versions),
+            ActivityLocalCache.inferenceKey(request: shifted, identity: identity, versions: versions),
         ]
+        XCTAssertFalse(variants.contains(nil))
         XCTAssertEqual(Set(variants + [key]).count, variants.count + 1)
+    }
+
+    func testChangedWeightBytesUnderAReusedLabelAreANewKey() {
+        // The label a child reports stays "hart-v1" while the checkpoint bytes it measured change: the earlier
+        // answer must not be reused.
+        let req = ActivityPythonService.RunRequest(startTs: 1, endTs: 2, columnsB64: ["AA"], headB64: [], tailB64: [])
+        let versions = ["model": "hart-v1", "preprocessing": "1.0.0"]
+        let before = ActivityLocalCache.inferenceKey(request: req, identity: ["checkpoint_sha256": "aa"],
+                                                     versions: versions)
+        let after = ActivityLocalCache.inferenceKey(request: req, identity: ["checkpoint_sha256": "bb"],
+                                                    versions: versions)
+        XCTAssertNotNil(before)
+        XCTAssertNotEqual(before, after)
+    }
+
+    func testNoMeasuredIdentityMeansNoKey() {
+        // A child older than this worker reports no measured identity; its answers are not cached at all.
+        let req = ActivityPythonService.RunRequest(startTs: 1, endTs: 2, columnsB64: ["AA"], headB64: [], tailB64: [])
+        XCTAssertNil(ActivityLocalCache.inferenceKey(request: req, identity: [:], versions: ["model": "m"]))
     }
 
     func testInferenceRoundTripsWindowsAndFeatures() throws {
@@ -139,11 +167,14 @@ final class ActivityLocalCacheTests: XCTestCase {
 
     func testGaitVersionChangesTheInferenceKeyOnlyWhenPresent() {
         let req = ActivityPythonService.RunRequest(startTs: 1, endTs: 2, columnsB64: ["AA"], headB64: [], tailB64: [])
-        let plain = ActivityLocalCache.inferenceKey(request: req, modelVersion: "m", preprocessingVersion: "p")
-        XCTAssertEqual(plain, ActivityLocalCache.inferenceKey(request: req, modelVersion: "m", preprocessingVersion: "p",
-                                                              gaitVersion: nil))
-        XCTAssertNotEqual(plain, ActivityLocalCache.inferenceKey(request: req, modelVersion: "m",
-                                                                 preprocessingVersion: "p", gaitVersion: "en-1"))
+        let identity = ["checkpoint_sha256": "c"]
+        let plain = ActivityLocalCache.inferenceKey(request: req, identity: identity,
+                                                    versions: ["model": "m", "preprocessing": "p"])
+        XCTAssertEqual(plain, ActivityLocalCache.inferenceKey(request: req, identity: identity,
+                                                              versions: ["preprocessing": "p", "model": "m"]))
+        XCTAssertNotEqual(plain, ActivityLocalCache.inferenceKey(request: req, identity: identity,
+                                                                 versions: ["model": "m", "preprocessing": "p",
+                                                                            "gait": "en-1"]))
     }
 
     func testFailedAnswersAndUnsafeKeysAreNotStored() throws {

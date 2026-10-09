@@ -17,8 +17,16 @@ from pd_fixtures import FIXTURES_DIR, TESTS_DIR, venv_python
 
 PARITY_SCRIPT = TESTS_DIR / "upstream_parity.py"
 
+#: The vendored upstream reference predictions were never committed: the
+#: repository's ``Fixtures/`` ignore rule matches ``fixtures/`` on a
+#: case-insensitive filesystem. Without them there is nothing to compare with.
+REFERENCE_FIXTURES_PRESENT = (FIXTURES_DIR / "4.predictions__tremor__tremor_meta.json").is_file()
+
 
 @pytest.mark.skipif(venv_python() is None, reason="paradigma subprocess venv not available")
+@pytest.mark.skipif(not REFERENCE_FIXTURES_PRESENT,
+                    reason="upstream ParaDigMa reference fixtures (tests/sensor_biomarkers/paradigma/"
+                           "fixtures) are not in this checkout")
 def test_upstream_classifier_parity():
     proc = subprocess.run(
         [venv_python(), str(PARITY_SCRIPT), str(FIXTURES_DIR)],

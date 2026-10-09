@@ -6,16 +6,20 @@ counts at a native rate), a families list and placement metadata. The provider
 validates, dispatches each family independently, and returns one stage object
 per computed family. A failed optional family NEVER discards valid families.
 
-Heavy research/shadow families (tremor, arm_swing: ParaDigMa; rhythm_shadow:
-DeepBeat/SiamAF) are owned by their subpackages and are called through the
-documented hooks here; their absence keeps them out of the stages list
- entirely (the lane then records them as not-requested/not-ready) rather than
-breaking the descriptive families.
+This is the route the worker calls. The deterministic families are computed
+here (``imu.py``, ``ppg.py``); the research and shadow families (tremor,
+arm_swing: ParaDigMa; rhythm_shadow: DeepBeat/SiamAF) are reached through the
+optional-family seam (``optional.py``), which calls the same implementation the
+standalone providers use. Every requested family gets a stage: a disabled flag
+(``family_disabled``), missing weights or runtime (``artifact_unavailable`` /
+``runtime_unavailable``) and a broken adapter (``adapter_broken``) are told
+apart, never dropped silently.
 """
 
 from __future__ import annotations
 
-import math
+import os
+import time
 from typing import Any, Mapping
 
 from ..contract import InferRequest, ProviderResult
@@ -27,6 +31,13 @@ from . import (
     SCHEMA_VERSION,
 )
 from .contract import family_document
+from .optional import (
+    DEFAULT_ADAPTER_MODULES,
+    OPTIONAL_FAMILY_ADAPTERS,
+    compute_optional_families,
+    optional_family_capabilities,
+    optional_loaded_identity,
+)
 
 PROVIDER_ID = "sensor.biomarkers.v1"
 METRIC = "sensor_biomarkers"
@@ -36,26 +47,33 @@ REQUIRED_SIGNALS = ("imu", "ppg")
 ADAPTER_VERSION = "sensor-biomarkers.adapter/1.0.0"
 INPUT_SCHEMA_VERSION = 1
 
-#: Families this provider computes directly (deterministic, no artifacts).
+#: Families this provider computes directly (deterministic, no artifacts), and where.
 DETERMINISTIC_FAMILIES = (
     "movement", "oscillation", "ppg_quality", "pulse_shape", "perfusion_research",
 )
+DETERMINISTIC_IMPLEMENTATIONS = {
+    "movement": f"{__package__}.imu", "oscillation": f"{__package__}.imu",
+    "ppg_quality": f"{__package__}.ppg", "pulse_shape": f"{__package__}.ppg",
+    "perfusion_research": f"{__package__}.ppg",
+}
 
-#: Optional research/shadow families delegated to subpackages (W3/W4-owned).
-def _optional_family_hooks() -> dict[str, Any]:
-    hooks: dict[str, Any] = {}
+#: The order stages are returned in.
+FAMILY_ORDER = ("movement", "oscillation", "ppg_quality", "pulse_shape",
+                "perfusion_research", "tremor", "arm_swing", "rhythm_shadow")
+
+#: Share of the sidecar's request budget (``FRWHOOP_REQUEST_TIMEOUT_MS``) the
+#: optional families may use. The rest covers the descriptive families and the
+#: response, so a slow optional family is withheld ``timeout`` on its own
+#: instead of timing out the whole request.
+OPTIONAL_BUDGET_FRACTION = 0.6
+DEFAULT_REQUEST_BUDGET_S = 20.0
+
+
+def _request_budget_s() -> float:
     try:
-        from .paradigma import compute_tremor, compute_arm_swing  # type: ignore
-        hooks["tremor"] = compute_tremor
-        hooks["arm_swing"] = compute_arm_swing
-    except Exception:
-        pass
-    try:
-        from .rhythm import compute_rhythm_shadow  # type: ignore
-        hooks["rhythm_shadow"] = compute_rhythm_shadow
-    except Exception:
-        pass
-    return hooks
+        return max(1.0, float(os.environ.get("FRWHOOP_REQUEST_TIMEOUT_MS", "")) / 1000.0)
+    except ValueError:
+        return DEFAULT_REQUEST_BUDGET_S
 
 
 def _err(code: str, message: str, field: str | None = None) -> dict[str, Any]:
@@ -92,8 +110,12 @@ def parse_sensor_input(raw: Mapping[str, Any]) -> dict[str, Any]:
         "device_id": str(device["id"]),
         "device_family": str(device.get("family") or "unknown"),
         "families": [str(f) for f in families],
+        # Placement as stated by the request; anything outside the vocabulary is
+        # unknown, never guessed (ParaDigMa withholds arm_swing on unknown).
         "watch_side": raw.get("watch_side") if raw.get("watch_side") in ("left", "right") else None,
-        "device_orientation": raw.get("device_orientation") if isinstance(raw.get("device_orientation"), str) else None,
+        "device_orientation": (raw.get("device_orientation")
+                               if raw.get("device_orientation") in ("screen_up", "screen_down")
+                               else None),
     }
 
     imu = raw.get("imu")
@@ -143,7 +165,13 @@ def parse_sensor_input(raw: Mapping[str, Any]) -> dict[str, Any]:
 
 
 class SensorBiomarkersProvider:
-    """sensor.biomarkers.v1: tiered sensor-biomarker families (CONTRACTS.md)."""
+    """sensor.biomarkers.v1: tiered sensor-biomarker families (CONTRACTS.md).
+
+    ``optional_adapters`` maps an optional adapter name (``paradigma``,
+    ``rhythm``) to the module path or object implementing it; tests inject
+    doubles there and a later checkpoint can plug in the same way.
+    ``optional_budget_s`` overrides the optional families' time budget.
+    """
 
     provider_id = PROVIDER_ID
     metric = METRIC
@@ -152,6 +180,11 @@ class SensorBiomarkersProvider:
     required_signals = REQUIRED_SIGNALS
     eligibility_state = "eligible"
     eligibility_reason: str | None = None
+
+    def __init__(self, *, optional_adapters: Mapping[str, Any] | None = None,
+                 optional_budget_s: float | None = None):
+        self._adapters: dict[str, Any] = {**DEFAULT_ADAPTER_MODULES, **(optional_adapters or {})}
+        self._optional_budget_s = optional_budget_s
 
     def versions(self, request: InferRequest | None = None) -> dict[str, Any]:
         from . import PROVIDER_REVISIONS
@@ -171,6 +204,10 @@ class SensorBiomarkersProvider:
         }
 
     def readiness(self) -> tuple[bool, str | None]:
+        """Readiness of the descriptive core. An optional family's state is
+        reported per family in ``capability()["families"]`` and never gates the
+        route, so a missing optional artifact cannot take the descriptive
+        families down."""
         try:
             import neurokit2  # noqa: F401
         except Exception as exc:  # pragma: no cover - fail closed
@@ -198,6 +235,23 @@ class SensorBiomarkersProvider:
             if "charlton" not in src:
                 raise RuntimeError("ppg_findpeaks does not expose the charlton method")
 
+    def family_capabilities(self) -> dict[str, dict[str, Any]]:
+        """Per-family tier, implementation and readiness (``/v1/providers``)."""
+        families: dict[str, dict[str, Any]] = {}
+        for family in DETERMINISTIC_FAMILIES:
+            families[family] = {
+                "tier": FAMILY_TIERS[family],
+                "publishable": FAMILY_TIERS[family] == "descriptive",
+                "implementation": DETERMINISTIC_IMPLEMENTATIONS[family],
+                "ready": True, "state": "ready", "reason": None,
+            }
+        families.update(optional_family_capabilities(self._adapters))
+        return {family: families[family] for family in FAMILY_ORDER if family in families}
+
+    def loaded_identity(self) -> dict[str, str]:
+        """Checkpoint digests the optional families verified (the descriptive core loads none)."""
+        return optional_loaded_identity(self._adapters)
+
     def capability(self) -> dict[str, Any]:
         return {
             "provider_id": PROVIDER_ID,
@@ -206,11 +260,15 @@ class SensorBiomarkersProvider:
             "publishable": True,
             "accuracy_label": "engineering diagnostics; descriptive tier only",
             "tiers": dict(FAMILY_TIERS),
+            "canonical_route": PROVIDER_ID,
+            "families": self.family_capabilities(),
+            "reason_vocabulary": list(DETAIL_REASONS),
         }
 
     # -- dispatch ---------------------------------------------------------
 
     def infer(self, request: InferRequest) -> ProviderResult:
+        started = time.monotonic()
         try:
             parsed = parse_sensor_input(request.input)
         except ValueError as exc:
@@ -242,14 +300,11 @@ class SensorBiomarkersProvider:
 
         if needs_imu:
             if parsed["imu"] is None:
-                doc = family_document(
-                    family="movement", status="withheld", reason="artifact_unavailable",
-                    measurements={}, reason_counts={"no_verified_imu_objects": 1})
-                stages.append(doc)
-                if "oscillation" in families:
-                    stages.append(family_document(
-                        family="oscillation", status="withheld", reason="artifact_unavailable",
-                        measurements={}, reason_counts={"no_verified_imu_objects": 1}))
+                for fam in ("movement", "oscillation"):
+                    if fam in families:
+                        stages.append(family_document(
+                            family=fam, status="withheld", reason="artifact_unavailable",
+                            measurements={}, reason_counts={"no_verified_imu_objects": 1}))
                 imu_grid = None
             else:
                 try:
@@ -332,47 +387,19 @@ class SensorBiomarkersProvider:
                         extra={"detail": str(exc)[:200]})
                 stages.append(doc)
 
-        # Optional research/shadow families via their subpackage hooks. Missing
-        # hooks leave them uncomputed; a failing family yields its own withheld
-        # stage, never an error for the whole request.
-        hooks = _optional_family_hooks()
-        for fam in ("tremor", "arm_swing"):
-            if fam not in families:
-                continue
-            hook = hooks.get(fam)
-            if hook is None:
-                stages.append(family_document(
-                    family=fam, status="withheld", reason="artifact_unavailable",
-                    measurements={}, reason_counts={"optional_provider_missing": 1}))
-                continue
-            try:
-                stages.append(hook(
-                    parsed=parsed, imu=parsed["imu"], ppg=parsed["ppg"],
-                    interval_start=interval_start, interval_end=interval_end))
-            except Exception as exc:
-                stages.append(family_document(
-                    family=fam, status="error", reason="provider_error",
-                    measurements={}, reason_counts={"compute_error": 1},
-                    extra={"detail": str(exc)[:200]}))
-        if "rhythm_shadow" in families:
-            hook = hooks.get("rhythm_shadow")
-            if hook is None:
-                stages.append(family_document(
-                    family="rhythm_shadow", status="withheld", reason="artifact_unavailable",
-                    measurements={}, reason_counts={"optional_provider_missing": 1}))
-            else:
-                try:
-                    stages.append(hook(parsed=parsed, ppg=parsed["ppg"]))
-                except Exception as exc:
-                    stages.append(family_document(
-                        family="rhythm_shadow", status="error", reason="provider_error",
-                        measurements={}, reason_counts={"compute_error": 1},
-                        extra={"detail": str(exc)[:200]}))
+        # Research and shadow families: their own implementations, reached
+        # through the seam. Each adapter fails alone and every requested family
+        # comes back with a stage. They get what is left of their share of the
+        # request budget.
+        optional = [f for f in families if f in OPTIONAL_FAMILY_ADAPTERS]
+        if optional:
+            budget = (self._optional_budget_s if self._optional_budget_s is not None
+                      else OPTIONAL_BUDGET_FRACTION * _request_budget_s())
+            stages.extend(compute_optional_families(
+                request.input, optional, modules=self._adapters, deadline=started + budget))
 
         # Order stages by the canonical family order, dedupe by family name.
-        order = {name: i for i, name in enumerate(
-            ("movement", "oscillation", "ppg_quality", "pulse_shape",
-             "perfusion_research", "tremor", "arm_swing", "rhythm_shadow"))}
+        order = {name: i for i, name in enumerate(FAMILY_ORDER)}
         seen: dict[str, dict[str, Any]] = {}
         for doc in stages:
             fam = doc.get("family")
@@ -401,6 +428,10 @@ class SensorBiomarkersProvider:
                 "input_revision": parsed["input_revision"],
                 "reason_counts": reason_counts,
                 "requested_families": families,
+                "placement": {
+                    "watch_side": parsed["watch_side"] or "unknown",
+                    "device_orientation": parsed["device_orientation"] or "unknown",
+                },
             },
             versions=self.versions(request),
             publishable=True,

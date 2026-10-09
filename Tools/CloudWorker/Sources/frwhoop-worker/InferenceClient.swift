@@ -30,6 +30,10 @@ import FoundationNetworking
 //     the machine-readable withheld reasons the candidate contract accepts
 //     (`timeout`, `not_ready`, `provider_error`), so the scoring path always
 //     settles deterministically instead of retrying without bound.
+//   * Backpressure is not a failure. HTTP 429 with error code `busy` (the
+//     sidecar could not admit the request; docs/model-integration/README.md)
+//     becomes `.busy`, which no caller records as a result: the work stays
+//     pending and the caller comes back after `Retry-After`.
 
 /// Withheld reasons the candidate contract accepts (implementation plan,
 /// "Shared contracts" -> withheld reasons). The three `isClientFailure` cases are
@@ -69,6 +73,10 @@ enum InferenceClientError: Error, CustomStringConvertible {
     case timeout(String)
     /// HTTP 503: the sidecar is up but the provider is not ready.
     case notReady(String)
+    /// HTTP 429 `busy`: the sidecar did not admit the request (every worker busy, or
+    /// still warming up). Transient and never a result: nothing was computed, so the
+    /// caller leaves the work pending. The detail starts `retry_after_s=N`.
+    case busy(String)
     /// Any other non-200 status.
     case non200(Int, String)
     /// The body could not be decoded into the contract shape, or failed
@@ -78,13 +86,29 @@ enum InferenceClientError: Error, CustomStringConvertible {
     case transport(String)
 
     /// The machine-readable reason this failure settles as.
+    ///
+    /// `.busy` maps to `not_ready` only so the switch stays total: no caller ever
+    /// records a busy answer (CandidateStage keeps the work pending instead).
     var withheldReason: CandidateWithheldReason {
         switch self {
         case .timeout: return .timeout
-        case .notReady: return .notReady
+        case .notReady, .busy: return .notReady
         case .disabled, .nonLoopbackURL, .refused, .non200, .malformed, .transport:
             return .providerError
         }
+    }
+
+    /// True for the sidecar's backpressure answer.
+    var isBusy: Bool {
+        if case .busy = self { return true }
+        return false
+    }
+
+    /// The `Retry-After` a busy answer carried, in seconds.
+    var retryAfterSeconds: Int? {
+        guard case .busy(let detail) = self, detail.hasPrefix("retry_after_s=") else { return nil }
+        let digits = detail.dropFirst("retry_after_s=".count).prefix { $0.isNumber }
+        return Int(digits)
     }
 
     var description: String {
@@ -94,6 +118,7 @@ enum InferenceClientError: Error, CustomStringConvertible {
         case .refused(let d): return "inference_refused:\(d)"
         case .timeout(let d): return "inference_timeout:\(d)"
         case .notReady(let d): return "inference_not_ready:\(d)"
+        case .busy(let d): return "inference_busy:\(d)"
         case .non200(let code, let d): return "inference_http_\(code):\(d)"
         case .malformed(let d): return "inference_malformed:\(d)"
         case .transport(let d): return "inference_transport:\(d)"
@@ -118,7 +143,11 @@ indirect enum JSONValue: Codable, Equatable {
     init(any: Any) {
         switch any {
         case let v as JSONValue: self = v
-        case let v as Bool: self = .bool(v)
+        // A native Swift Bool (its dynamic type is exactly Bool; a JSONSerialization number never is).
+        case let v as Bool where type(of: any) == Bool.self: self = .bool(v)
+        // JSONSerialization numbers. On Darwin `as Bool` would also match NSNumber 0 and 1, so a
+        // histogram edge or a count of 0/1 used to become a boolean; classify the NSNumber itself.
+        case let n as NSNumber: self = JSONValue.number(n)
         case let v as Int: self = .int(v)
         case let v as Int64: self = .int(Int(v))
         case let v as Double: self = .double(v)
@@ -132,6 +161,32 @@ indirect enum JSONValue: Codable, Equatable {
         case is NSNull: self = .null
         default: self = .null
         }
+    }
+
+    /// An NSNumber as the JSON value it was parsed from: a boolean only when it really is one,
+    /// an integer when it is integral and fits, a double otherwise.
+    static func number(_ n: NSNumber) -> JSONValue {
+        if isBoolean(n) { return .bool(n.boolValue) }
+        let type = String(cString: n.objCType)
+        if ["q", "l", "i", "s", "c", "Q", "L", "I", "S", "C"].contains(type) {
+            if type == "Q" || type == "L", n.uint64Value > UInt64(Int.max) { return .double(n.doubleValue) }
+            return .int(n.intValue)
+        }
+        let d = n.doubleValue
+        // Integral doubles stay integers, as the `as Int` cast this replaces made them.
+        if d.isFinite, d == d.rounded(), abs(d) <= 9_007_199_254_740_992 { return .int(Int(d)) }
+        return .double(d)
+    }
+
+    private static func isBoolean(_ n: NSNumber) -> Bool {
+        #if canImport(Darwin)
+        return CFGetTypeID(n) == CFBooleanGetTypeID()
+        #else
+        // swift-corelibs-foundation: JSONSerialization makes true/false as NSNumber(value: Bool),
+        // whose objCType is "c" (JSON numbers never parse to a char); "B" is the C99 bool code.
+        let type = String(cString: n.objCType)
+        return type == "c" || type == "B"
+        #endif
     }
 
     /// The `Any` form, for JSONSerialization-based helpers and tests.
@@ -713,14 +768,37 @@ final class InferenceClient {
     }
 
     /// HTTP status policy: 200 is the only success; 503 is `not_ready` (the
-    /// sidecar is up, the provider is not); everything else is `provider_error`.
+    /// sidecar is up, the provider is not); 429 with error code `busy` is
+    /// backpressure (`.busy`); everything else is `provider_error`.
     static func checkStatus(_ http: HTTPURLResponse, data: Data) throws {
         if http.statusCode == 200 { return }
         let snippet = Self.bodySnippet(data)
         if http.statusCode == 503 {
             throw InferenceClientError.notReady(snippet)
         }
+        if http.statusCode == 429, Self.errorCode(data) == "busy" {
+            let retryAfter = Self.retryAfterSeconds(http) ?? Self.defaultBusyRetryAfterSeconds
+            throw InferenceClientError.busy("retry_after_s=\(retryAfter) \(snippet)")
+        }
         throw InferenceClientError.non200(http.statusCode, snippet)
+    }
+
+    /// Used when a busy answer carries no usable `Retry-After`.
+    static let defaultBusyRetryAfterSeconds = 5
+
+    /// `Retry-After` as whole seconds (the sidecar always sends delta-seconds),
+    /// clamped to 1...300 so a hostile header cannot park work for hours.
+    static func retryAfterSeconds(_ http: HTTPURLResponse) -> Int? {
+        guard let raw = http.value(forHTTPHeaderField: "Retry-After")?
+            .trimmingCharacters(in: .whitespaces), let seconds = Int(raw) else { return nil }
+        return min(300, max(1, seconds))
+    }
+
+    /// `error.code` of a JSON error body, or nil.
+    static func errorCode(_ data: Data) -> String? {
+        guard let obj = (try? JSONSerialization.jsonObject(with: data.prefix(64 << 10))) as? [String: Any],
+              let error = obj["error"] as? [String: Any] else { return nil }
+        return error["code"] as? String
     }
 
     static func decodeInferenceResponse(_ data: Data, http: HTTPURLResponse,

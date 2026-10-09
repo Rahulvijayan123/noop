@@ -60,6 +60,7 @@ def measurement(
     method: str | None = None,
     native_resolution: str | None = None,
     configuration: str | None = None,
+    configuration_known: bool | None = None,
 ) -> dict[str, Any]:
     """One measurement entry (CONTRACTS.md section 3 / spec section 8).
 
@@ -68,7 +69,8 @@ def measurement(
     the native resolution where relevant. ``value`` may be null ONLY for a
     structurally valid measurement whose quantity is genuinely undefined (e.g.
     a median over zero windows); a withheld family carries no measurements at
-    all instead of zero-valued ones.
+    all instead of zero-valued ones. ``configuration_known`` says whether the
+    transport identified gain, drive and channel for ``configuration``.
     """
     if value is not None:
         value = float(value)
@@ -85,6 +87,8 @@ def measurement(
         entry["native_resolution"] = native_resolution
     if configuration is not None:
         entry["configuration"] = configuration
+    if configuration_known is not None:
+        entry["configuration_known"] = bool(configuration_known)
     return entry
 
 #: Fixed, documented bin edges per quantile-bearing measurement distribution.
@@ -117,11 +121,14 @@ DISTRIBUTION_EDGES: dict[str, list[float]] = {
 }
 
 
-def distribution_block(key: str, values: "Sequence[float]", edges_key: str) -> dict[str, Any] | None:
+def distribution_block(key: str, values: "Sequence[float]", edges_key: str, *,
+                       configuration: str | None = None) -> dict[str, Any] | None:
     """One mergeable bounded-bin distribution for a quantile-bearing metric.
 
     ``edges_key`` names a fixed edge set in :data:`DISTRIBUTION_EDGES`. Returns
     None when there are no values (a withheld family carries no distribution).
+    ``configuration`` tags an amplitude distribution with its optical
+    configuration identity, so a merge can keep identities apart.
     """
     import math as _math
     from typing import Sequence as _Sequence  # noqa: F401
@@ -146,4 +153,7 @@ def distribution_block(key: str, values: "Sequence[float]", edges_key: str) -> d
                 counts[-1] += 1
             else:
                 counts[0] += 1
-    return {"key": key, "edges": edges, "counts": counts, "n": len(vals)}
+    block: dict[str, Any] = {"key": key, "edges": edges, "counts": counts, "n": len(vals)}
+    if configuration is not None:
+        block["configuration"] = configuration
+    return block

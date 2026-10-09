@@ -246,12 +246,19 @@ public struct PushPreparedSelection: Codable, Sendable {
 
     private enum Member: Codable, Sendable {
         case ppg(rowID: Int64, ts: Int64, burst: Int32?, record: Int64?, bytes: Data)
+        /// Format 3 members live in their own case so selections saved before 1.5 decode unchanged.
+        case ppgAnchored(rowID: Int64, ts: Int64, burst: Int32?, record: Int64?, anchor: UInt32?,
+                         clock: UInt8, subsec: UInt16?, flags: UInt8?, bytes: Data)
         case auxiliary(rowID: Int64, ts: Int64, record: Int64?, resource: String?, bytes: Data)
         case raw(rowID: Int64, batch: String, captured: Int64, deviceClock: Int64, wallClock: Int64,
                  start: Int64, end: Int64, frames: Int32, byteSize: Int32, bytes: Data)
         case imu(rowID: Int64, ts: Int64, bytes: Data)
         init(_ row: PushBinaryRow) {
             switch row {
+            case .ppgWaveform(let r) where r.carriesAnchorFormatMembers:
+                self = .ppgAnchored(rowID: r.rowId, ts: r.ts, burst: r.burstIndex, record: r.recordIndex,
+                                    anchor: r.anchor, clock: r.clockSource.rawValue, subsec: r.subsecQ15,
+                                    flags: r.frontEndFlags, bytes: r.samples)
             case .ppgWaveform(let r): self = .ppg(rowID: r.rowId, ts: r.ts, burst: r.burstIndex, record: r.recordIndex, bytes: r.samples)
             case .v18Aux(let r): self = .auxiliary(rowID: r.rowId, ts: r.ts, record: r.recordIndex, resource: r.resourceKey, bytes: r.fields)
             case .rawBatch(let r): self = .raw(rowID: r.rowId, batch: r.batchId, captured: r.capturedAt,
@@ -262,7 +269,8 @@ public struct PushPreparedSelection: Codable, Sendable {
         }
         var byteCount: Int {
             switch self {
-            case .ppg(_, _, _, _, let bytes), .auxiliary(_, _, _, _, let bytes),
+            case .ppg(_, _, _, _, let bytes), .ppgAnchored(_, _, _, _, _, _, _, _, let bytes),
+                 .auxiliary(_, _, _, _, let bytes),
                  .raw(_, _, _, _, _, _, _, _, _, let bytes), .imu(_, _, let bytes): return bytes.count
             }
         }
@@ -271,6 +279,11 @@ public struct PushPreparedSelection: Codable, Sendable {
             case let .ppg(id, ts, burst, record, bytes):
                 guard id > 0, bytes.count <= PushProtocolLimits.maxObjectDecodedBytes else { throw invalid() }
                 return .ppgWaveform(.init(rowId: id, ts: ts, burstIndex: burst, samples: bytes, recordIndex: record))
+            case let .ppgAnchored(id, ts, burst, record, anchor, clock, subsec, flags, bytes):
+                guard id > 0, bytes.count <= PushProtocolLimits.maxObjectDecodedBytes,
+                      let source = PushPpgClockSource(rawValue: clock) else { throw invalid() }
+                return .ppgWaveform(.init(rowId: id, ts: ts, burstIndex: burst, samples: bytes, recordIndex: record,
+                                          anchor: anchor, clockSource: source, subsecQ15: subsec, frontEndFlags: flags))
             case let .auxiliary(id, ts, record, resource, bytes):
                 guard id > 0, bytes.count <= PushProtocolLimits.maxObjectDecodedBytes,
                       resource.map({ !$0.isEmpty && $0.utf8.count <= 1024 }) ?? true else { throw invalid() }

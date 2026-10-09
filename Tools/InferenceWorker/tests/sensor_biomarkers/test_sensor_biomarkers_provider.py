@@ -153,30 +153,36 @@ class TestDispatch:
         assert by_family["oscillation"]["status"] == "ok"
         assert "template_similarity_median" not in by_family["ppg_quality"]["measurements"]
 
-    def test_optional_family_hook_failure_yields_withheld_stage(self):
-        # A raising optional research hook yields its own error stage, never an
-        # error for the whole request or the descriptive families.
-        body = _body(families=["movement", "tremor", "rhythm_shadow"])
-        provider = SensorBiomarkersProvider()
-        original = provider.__class__.infer
+    def test_optional_adapter_failure_yields_error_stage(self, monkeypatch):
+        # A raising optional adapter yields adapter_broken for its own families,
+        # never an error for the whole request or the descriptive families.
+        monkeypatch.delenv("FRWHOOP_DEEPBEAT_SHADOW_ENABLED", raising=False)
+        monkeypatch.delenv("FRWHOOP_SIAMAF_SHADOW_ENABLED", raising=False)
 
-        import frwhoop_inference.sensor_biomarkers.provider as prov_mod
-        def boom(**kwargs):
-            raise RuntimeError("paradigma exploded")
-        prov_mod._optional_family_hooks = lambda: {
-            "tremor": boom, "arm_swing": boom, "rhythm_shadow": boom}
-        try:
-            result = provider.infer(_request(body))
-        finally:
-            prov_mod._optional_family_hooks = original and prov_mod.__dict__.get("_optional_family_hooks")
-        # restore the real hook loader
-        import importlib
-        importlib.reload(prov_mod)
+        class Exploding:
+            FAMILIES = ("tremor", "arm_swing")
+
+            @staticmethod
+            def adapter_state():
+                return {"adapter": "paradigma", "state": "ready", "reason": None, "detail": None}
+
+            @staticmethod
+            def compute_family_documents(input_payload, families, *, deadline_s=None):
+                raise RuntimeError("paradigma exploded")
+
+        body = _body(families=["movement", "tremor", "rhythm_shadow"])
+        provider = SensorBiomarkersProvider(optional_adapters={"paradigma": Exploding})
+        result = provider.infer(_request(body))
         assert result.status == "ok"
         by_family = {s["family"]: s for s in result.stages}
         assert by_family["movement"]["status"] == "ok"
         assert by_family["tremor"]["status"] == "error"
-        assert by_family["rhythm_shadow"]["status"] == "error"
+        assert by_family["tremor"]["reason"] == "adapter_broken"
+        assert by_family["tremor"]["reason_counts"] == {"adapter_exception": 1}
+        assert "paradigma exploded" in by_family["tremor"]["adapter"]["detail"]
+        # rhythm_shadow still reaches its real implementation: disabled by flag.
+        assert by_family["rhythm_shadow"]["status"] == "withheld"
+        assert by_family["rhythm_shadow"]["reason"] == "family_disabled"
 
     def test_unrequested_families_absent(self):
         provider = SensorBiomarkersProvider()

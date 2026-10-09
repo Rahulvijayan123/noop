@@ -81,7 +81,15 @@ class RegistryShim:
 
     def readiness(self) -> tuple[bool, Optional[str]]:
         report = self._provider.readiness()
+        provenance = report.get("provenance") if report.get("ready") else None
+        self._loaded = ({str(k): str(v) for k, v in provenance.items()}
+                        if isinstance(provenance, dict) else {})
         return bool(report.get("ready")), report.get("reason")
+
+    def loaded_identity(self) -> dict:
+        """What the last readiness check measured it loaded (e.g. SleepECG's archive and model
+        sha256); empty before a successful check or for a provider that loads no checkpoint."""
+        return dict(getattr(self, "_loaded", {}))
 
     def capability(self) -> dict:
         capability = dict(self._provider.manifest())

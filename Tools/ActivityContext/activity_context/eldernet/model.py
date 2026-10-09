@@ -43,14 +43,7 @@ from . import BACKBONE_OUTPUT_SIZE, DETECTION_HEAD, FEATURE_VECTOR_SIZE, HEAD_NA
 from . import upstream
 from .weights import WeightsError
 
-def no_nnpack():
-    """``torch.backends.nnpack.flags(enabled=False)`` where this torch build has it, else a no-op."""
-    import contextlib
-    try:
-        import torch.backends.nnpack as nnpack
-    except ImportError:                    # pragma: no cover - older torch builds
-        return contextlib.nullcontext()
-    return nnpack.flags(enabled=False)
+from ..loaded import no_nnpack  # re-exported: bench and the tests import it from here
 
 
 KNOWN_UNUSED_KEYS = frozenset({"regressor.var.weight", "regressor.var.bias"})

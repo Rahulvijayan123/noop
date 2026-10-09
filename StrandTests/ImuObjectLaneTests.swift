@@ -470,7 +470,8 @@ final class ImuObjectLaneTests: XCTestCase {
         XCTAssertEqual(request.value(forHTTPHeaderField: "Authorization"), "Bearer noop-test-token")
         XCTAssertNil(request.value(forHTTPHeaderField: "x-noop-fleet-token"))
         XCTAssertEqual(request.value(forHTTPHeaderField: "Content-Type"), "application/json")
-        XCTAssertEqual(request.value(forHTTPHeaderField: "noop-push-accept-version"), PushProtocol.capabilitiesAcceptVersions)
+        // The default transport (anchored PPG upload off) offers exactly the pre-1.5 list.
+        XCTAssertEqual(request.value(forHTTPHeaderField: "noop-push-accept-version"), "1.4,1.3,1.2,1.1,1.0")
         XCTAssertEqual(body, try manifest.encode())
     }
 

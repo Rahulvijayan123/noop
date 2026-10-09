@@ -14,7 +14,10 @@ const LOCAL_DEVICE = 'whoop-MGB0214654';
 const cfg = { supabaseUrl: 'https://example.test', supabaseAnonKey: 'anon', allowLegacyEnrollment: true };
 
 const DOC = { format: 'hart-windows-1', t0: 1791158400, labels: ['stationary', 'unknown'], features: [],
-  feature_scale: [], s: [0], e: [4], l: [0], p: [[1000, 0]], b: [0], f: [null] };
+  feature_scale: [], s: [0], e: [4], l: [0], p: [[1000, 0]], b: [0], f: [null],
+  // HART-embedded ElderNet columns (no release of their own) and transition-expert columns.
+  g_schema: 'gait-expert-1', g_v: 'eldernet-437a38b', g_s: [0], g_e: [10], g_p: [970], g_f: [1], g_q: [null],
+  t_schema: 'transition-1', t_v: 'tr-1', t_pv: 'p-1', t: [[1000, 0, 0, 0, 0]] };
 
 function fakeRest(rows: Array<{ day: string; result_revision: number }>, reads: string[]) {
   const rest = makeMemRest() as any;
@@ -35,7 +38,8 @@ function fakeRest(rows: Array<{ day: string; result_revision: number }>, reads: 
         ? selected.map((r) => ({ day: r.day, result_revision: r.result_revision, windows: DOC }))
         : selected.map((r) => ({ day: r.day, encoder_id: 'hart', model_version: 'hart-wisdm-v0',
           preprocessing_version: '1.0.0', feature_schema: 'imu-feat-1', window_count: 1, first_ts: 1791158400,
-          last_ts: 1791158404, result_revision: r.result_revision, computed_at: '2026-10-05T12:00:00Z' }));
+          last_ts: 1791158404, input_revision: 5, result_revision: r.result_revision,
+          computed_at: '2026-10-05T12:00:00Z' }));
     }
     return [];
   };
@@ -87,4 +91,28 @@ Deno.test('activity windows: query parser', () => {
   const q = parseActivityWindowsQuery(new URLSearchParams('days=2026-10-04,2026-10-05&known=2026-10-05:99'));
   assertEquals(q.days, ['2026-10-04', '2026-10-05']);
   assertEquals(q.known.get('2026-10-05'), '99');
+});
+
+Deno.test('activity windows: every row says its input revision and release (HART production, embedded gait shadow)', async () => {
+  const rest = fakeRest([{ day: '2026-10-04', result_revision: 7 }, { day: '2026-10-05', result_revision: 12 }], []);
+  const res = await handleScoresRequest(get('days=2026-10-04,2026-10-05&known=2026-10-04:7'), { rest, cfg });
+  const byDay = Object.fromEntries((await res.json()).days.map((d: any) => [d.day, d]));
+  for (const day of ['2026-10-04', '2026-10-05']) {
+    assertEquals(byDay[day].input_revision, '5', day);
+    assertEquals(byDay[day].release_mode, 'production', day);
+    assertEquals(byDay[day].embedded_gait_release_mode, 'shadow', day);
+  }
+});
+
+Deno.test('activity windows: the embedded gait columns go only to a phone with the authority capability', async () => {
+  const rows = [{ day: '2026-10-05', result_revision: 12 }];
+  const legacy = await handleScoresRequest(get('days=2026-10-05'), { rest: fakeRest(rows, []), cfg });
+  const [old] = (await legacy.json()).days;
+  assertEquals(Object.keys(old.windows).filter((k) => k.startsWith('g_')), [], 'an older phone gets no embedded gait');
+  assertEquals(old.windows.t_schema, 'transition-1', 'everything else is unchanged');
+  assertEquals(old.windows.p, DOC.p);
+  const aware = await handleScoresRequest(get('days=2026-10-05&authority=1'), { rest: fakeRest(rows, []), cfg });
+  const [now] = (await aware.json()).days;
+  assertEquals(now.windows, DOC);
+  assertEquals(now.embedded_gait_release_mode, 'shadow');
 });

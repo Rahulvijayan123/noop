@@ -96,6 +96,11 @@ struct ScoringLane {
     /// Candidate runs per drain (`FRWHOOP_INFERENCE_BUDGET`, default 2).
     var candidateBudget: Int = 2
 
+    /// Re-assembles a pending item's inputs when its day is not the one being scored.
+    var candidateAssembler: ScoringCandidateAssembler {
+        ScoringCandidateAssembler(db: db, scorer: scorer)
+    }
+
     struct Stats {
         var claimed = 0
         var completed = 0
@@ -160,6 +165,8 @@ struct ScoringLane {
         // Reset the candidate lane's per-drain run budget. A no-op when the
         // candidate stage is off.
         candidate?.beginDrain(budget: candidateBudget)
+        // Queue depth for the heartbeat (throttled inside; no-op without the pending store).
+        defer { candidate?.refreshPendingStats() }
         for _ in 0..<max(1, budget) {
             // Reconnect only at this safe boundary: no transaction is open here.
             do {
@@ -172,6 +179,13 @@ struct ScoringLane {
                 switch try cycle() {
                 case .empty:
                     consecutiveFailures = 0
+                    // Nothing to score: spend the idle drain on pending candidate work, which
+                    // is how a metric the run budget skipped still runs for a day that is not
+                    // re-scored. No transaction is open here.
+                    if candidate != nil {
+                        let assembler = candidateAssembler
+                        candidate?.drainBacklog(assembler: assembler)
+                    }
                     return
                 case .completed:
                     consecutiveFailures = 0
@@ -443,7 +457,8 @@ struct ScoringLane {
     /// with no transaction open and the candidate write gets its own fresh one.
     private mutating func runCandidateStage(claim: DayScorer.Claim, inputs: DayScorer.CandidateInputs?) {
         guard let inputs, candidate != nil else { return }
-        candidate?.run(claim: claim, inputs: inputs)
+        let assembler = candidateAssembler
+        candidate?.run(claim: claim, inputs: inputs, assembler: assembler)
         // ACTIVE PROMOTION SEAM (parent-gated, unreachable while every metric is
         // `off`). An `active` ok result must republish the canonical snapshot to
         // become the canonical value; the transform is implemented and unit-tested
@@ -854,4 +869,30 @@ func jsonText(_ obj: Any) throws -> String {
         throw WorkerError.malformed("payload encoding failed")
     }
     return s
+}
+
+// MARK: - Candidate input re-assembly (pending work for a day not being scored)
+
+/// `CandidateInputAssembling` over `DayScorer`'s own assembly. The day is loaded and analysed
+/// read-only in its own REPEATABLE READ transaction, which is always rolled back: nothing is
+/// published, no series or attestation is built, and the sleep-feature sidecar is not called.
+/// It runs only with no scoring transaction open (after a publish committed, or on an idle
+/// drain), and at most `CandidateStage.reassemblyBudget` times per drain.
+struct ScoringCandidateAssembler: CandidateInputAssembling {
+    let db: PostgresClient
+    let scorer: DayScorer
+
+    func assemble(userId: String, deviceId: String, day: String,
+                  inputRevision: Int64) throws -> CandidateAssembly {
+        try db.beginTransaction(.repeatableRead)
+        defer { db.rollbackTransaction() }
+        let rows = try db.query(ScoringLane.resolveTimezoneSQL, [userId, deviceId, day])
+        let tz = (rows.first?["tz"]).flatMap { $0.isEmpty ? nil : $0 } ?? "UTC"
+        let claim = DayScorer.Claim(userId: userId, deviceId: deviceId, day: day, timezoneId: tz,
+                                    inputRevision: inputRevision, leaseToken: "", runId: "",
+                                    measurementRevision: 0)
+        let scored = try scorer.scoreAndBuildPayloads(claim: claim, buildSeries: false,
+                                                      candidateLane: true, enrichFeatures: false)
+        return CandidateAssembly(inputs: scored.candidates, timezoneId: tz)
+    }
 }

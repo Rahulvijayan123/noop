@@ -55,6 +55,8 @@ struct ElderNetSettings: Equatable {
     /// Wall-clock seconds ElderNet may spend in one job (its readiness check and every chunk call together)
     /// before it is stopped for the rest of that job (`job_time_budget`). FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS.
     var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
+    /// FRWHOOP_ELDERNET_THREADS: torch and numerical-library threads of the serve process (1…16, default 1).
+    var threads: Int = 1
 
     static let serveModule = ["-m", "activity_context.eldernet.serve"]
     static let defaultTimeoutSeconds = 60.0
@@ -118,6 +120,10 @@ struct ElderNetSettings: Equatable {
             if InertiaSettings.isHex64(sha) { settings.weightsSHA256 = sha }
             else { errors.append("FRWHOOP_ELDERNET_WEIGHTS_SHA256 must be 64 hex characters") }
         }
+        if let raw = value("FRWHOOP_ELDERNET_THREADS") {
+            if let n = Int(raw), (1...16).contains(n) { settings.threads = n }
+            else { errors.append("invalid FRWHOOP_ELDERNET_THREADS \(raw) (1…16)") }
+        }
         if let raw = value("FRWHOOP_ELDERNET_GAIT_PRIOR") {
             if let p = Double(raw), p.isFinite, GaitQualityEvidenceConfig.gaitPriorBounds.contains(p) { settings.gaitPrior = p }
             else { errors.append("FRWHOOP_ELDERNET_GAIT_PRIOR must be a number in [0.01, 0.99]") }
@@ -147,9 +153,11 @@ struct ElderNetSettings: Equatable {
         return bytes.allSatisfy { alnum($0) || $0 == 46 || $0 == 95 || $0 == 58 || $0 == 43 || $0 == 45 }
     }
 
-    static func serveArgs(weightsDir: String, upstreamDir: String, timeoutSeconds: Double? = nil) -> [String] {
+    static func serveArgs(weightsDir: String, upstreamDir: String, timeoutSeconds: Double? = nil,
+                          threads: Int? = nil) -> [String] {
         var args = serveModule + ["--weights-dir", weightsDir, "--upstream-dir", upstreamDir]
         if let timeoutSeconds { args += ["--timeout", InertiaSettings.formatSeconds(timeoutSeconds)] }
+        if let threads { args += ["--threads", String(threads)] }
         return args
     }
 
@@ -159,13 +167,15 @@ struct ElderNetSettings: Equatable {
         return ActivityPythonService.Config(
             pythonBin: python, activityHome: activityHome, modelDir: nil,
             serveArgs: Self.serveArgs(weightsDir: weightsDir, upstreamDir: upstreamDir,
-                                      timeoutSeconds: InertiaSettings.serveTimeoutSeconds(workerTimeout: timeoutSeconds)),
+                                      timeoutSeconds: InertiaSettings.serveTimeoutSeconds(workerTimeout: timeoutSeconds),
+                                      threads: threads),
             requestTimeoutSeconds: timeoutSeconds,
             maxRequestBytes: 64 * 1024 * 1024,
             maxResponseLineBytes: 16 * 1024 * 1024,
             restartCap: 4,
             restartCooldownSeconds: 120,
-            keepsRawLines: true)
+            keepsRawLines: true,
+            numericalThreads: threads)
     }
 }
 
@@ -228,11 +238,12 @@ struct ElderNetStage {
     /// upload, so without this every claim re-runs every chunk and a job outlives the revision it must publish.
     var responses = ElderNetResponseCache()
 
-    /// The key of `request`'s answer, or nil when the stage is not pinned (the answer could come from any model).
+    /// The key of `request`'s answer under what the running child measured it loaded (its ping `loaded` map: the
+    /// weights digest read from the files, the verified upstream source, the calibration, the code), or nil when
+    /// the child reported none (an older serve process): an answer whose bytes cannot be named is never reused.
     func cacheKey(_ request: ActivityPythonService.RunRequest) -> String? {
-        guard let version = expectedModelVersion, let digest = expectedWeightsDigest else { return nil }
-        return ActivityLocalCache.inferenceKey(request: request, modelVersion: "eldernet:\(version)",
-                                               preprocessingVersion: digest)
+        guard let identity = service.cacheIdentity else { return nil }
+        return ActivityLocalCache.inferenceKey(request: request, identity: identity, versions: ["route": "eldernet"])
     }
 
     enum Outcome: Equatable {
@@ -294,7 +305,9 @@ struct ElderNetStage {
             }
             if expectedModelVersion != nil || expectedWeightsDigest != nil {
                 let version = service.lastPingDetails["model_version"]
-                let digest = service.lastPingObjects["weights"].map { Self.weightsDigest(of: $0) }
+                // The digest measured from the weight files when the child reports one; the served map otherwise.
+                let digest = service.loadedIdentity["weights_digest"]
+                    ?? service.lastPingObjects["weights"].map { Self.weightsDigest(of: $0) }
                 if let why = pinRefusal(version: version, digest: digest) { return (Self.pinMismatchKind, why) }
             }
             return nil
@@ -448,6 +461,9 @@ enum ActivityGaitWindowsDays {
         /// How the windows met the day's observed seconds: the candidate decode's report in candidate mode, a dry-run
         /// attachment otherwise. nil when there was no decoder input to attach to (ActivityContext v2 off).
         var trackReport: GaitQualityTrackReport?
+        /// The shared policy's inputs and decision for this row (ActivityExpertAuthority); the migration's trigger
+        /// copies it into the row's `authority` column. Left out when the caller has no selection.
+        var authority: ActivityExpertAuthority? = nil
 
         enum CodingKeys: String, CodingKey {
             case nWindows = "n_windows", nGait = "n_gait", nPrefiltered = "n_prefiltered"
@@ -455,6 +471,7 @@ enum ActivityGaitWindowsDays {
             case failureKinds = "failure_kinds", stopped, weightsDigest = "weights_digest"
             case meanGaitProb = "mean_gait_prob", gait, windowsOmitted = "windows_omitted"
             case candidateStamp = "candidate_stamp", gaitPrior = "gait_prior", trackReport = "track_report"
+            case authority
         }
 
         func encode(to encoder: Encoder) throws {
@@ -472,6 +489,7 @@ enum ActivityGaitWindowsDays {
             if let s = candidateStamp { try c.encode(s, forKey: .candidateStamp) } else { try c.encodeNil(forKey: .candidateStamp) }
             if let p = gaitPrior { try c.encode(p, forKey: .gaitPrior) } else { try c.encodeNil(forKey: .gaitPrior) }
             if let r = trackReport { try c.encode(r, forKey: .trackReport) } else { try c.encodeNil(forKey: .trackReport) }
+            try c.encodeIfPresent(authority, forKey: .authority)
         }
     }
 
@@ -523,9 +541,12 @@ enum ActivityGaitWindowsDays {
     /// The candidate comparison for one day: the same input the published v2 document was decoded from, plus the
     /// ElderNet windows, decoded with the gait channel as candidate evidence. Withheld unless the deployment pinned
     /// the model version and weights digest and set the gait prior, and whenever the config refuses the model.
+    ///
+    /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
+    /// nil): HART plus the gait-quality channel exactly, with the config and release the policy built from the row.
     static func candidate(mode: ElderNetSettings.Mode, gait: GaitQualityTrackInput, input: ActivityContextTrackInput?,
                           generatedAt: Int, expectedModelVersion: String?, expectedWeightsDigest: String?,
-                          gaitPrior: Double?) -> Candidate {
+                          gaitPrior: Double?, selection: ActivityExpertSelection? = nil) -> Candidate {
         guard mode == .candidate else { return .notRequested }
         guard let expectedModelVersion, let expectedWeightsDigest else { return .withheld("model_not_pinned") }
         guard let gaitPrior else { return .withheld("gait_prior_not_set") }
@@ -533,11 +554,15 @@ enum ActivityGaitWindowsDays {
                                                  expectedModelVersion: expectedModelVersion,
                                                  expectedWeightsDigest: expectedWeightsDigest)
         if let why = evidence.evidenceRefusal { return .withheld(why) }
-        guard var input else { return .withheld("context_days_disabled") }
-        input.gaitQuality = gait
-        var config = ActivityDecoderConfig()
-        config.gaitQuality = evidence
-        let built = ActivityContextDays.dayDocumentAndGaitReport(input: input, generatedAt: generatedAt, config: config)
+        guard let input else { return .withheld("context_days_disabled") }
+        let selection = selection ?? ActivityExpertSelection.select(gaitQuality: [
+            GaitQualitySource(track: gait, releaseMode: .candidate, expectedModelVersion: expectedModelVersion,
+                              expectedWeightsDigest: expectedWeightsDigest, gaitPrior: gaitPrior)])
+        guard selection.use(of: .gaitQuality) != .none else {
+            return .withheld(selection.decision(for: .gaitQuality)?.reason ?? "gait_quality_not_admitted")
+        }
+        let d = selection.decode(input, base: ActivityDecoderConfig(), channels: [.gaitQuality])
+        let built = ActivityContextDays.dayDocumentAndGaitReport(input: d.input, generatedAt: generatedAt, config: d.config)
         // A comparison must name the evidence that shaped it; a decode the evidence never reached is withheld.
         guard built.document.versions.gaitQuality != nil else {
             return .withheld(built.report?.refusal ?? "gait_quality_not_accepted")
@@ -549,7 +574,7 @@ enum ActivityGaitWindowsDays {
     /// attachment report used when there is no candidate decode (see `Summary.trackReport`).
     static func payload(day: String, mode: ElderNetSettings.Mode, collector: GaitQualityCollector,
                         candidate: Candidate, attachment: GaitQualityTrackReport? = nil,
-                        gaitPrior: Double? = nil) throws -> String? {
+                        gaitPrior: Double? = nil, authority: ActivityExpertAuthority? = nil) throws -> String? {
         guard let gait = collector.trackInput else { return nil }
         let model = gait.model
         var probSum = 0.0
@@ -583,7 +608,7 @@ enum ActivityGaitWindowsDays {
             stopped: collector.stopped, weightsDigest: model.weightsDigest,
             meanGaitProb: gait.windows.isEmpty ? nil : rounded(probSum / Double(gait.windows.count)),
             gait: totals, windowsOmitted: windows == nil, candidateStamp: stamp,
-            gaitPrior: mode == .candidate ? gaitPrior : nil, trackReport: report)
+            gaitPrior: mode == .candidate ? gaitPrior : nil, trackReport: report, authority: authority)
         let payload = Payload(day: day, mode: mode.rawValue, model: model, weightsDigest: model.weightsDigest,
                               summary: summary, windows: windows, withheldReason: withheld, candidateDocument: document)
         let data = try encoder.encode(payload)

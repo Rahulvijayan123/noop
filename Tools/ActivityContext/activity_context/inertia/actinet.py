@@ -145,7 +145,9 @@ class ActiNetEncoder:
         from scipy.signal import resample_poly
         batch = validate_batch(batch, self._info.input_contract)
         out = np.empty((batch.shape[0], self._info.embedding_dim), dtype=np.float32)
-        with self._torch.inference_mode():
+        from ..loaded import no_nnpack
+        # NNPACK off, as ElderNet runs: ~24x faster on one CPU thread, embeddings within 5e-6 (activity-authority.md).
+        with self._torch.inference_mode(), no_nnpack():
             for i in range(0, batch.shape[0], self.max_batch):
                 x30 = resample_poly(batch[i:i + self.max_batch].astype(np.float64), UP, DOWN, axis=-1)
                 x = self._torch.from_numpy(np.ascontiguousarray(x30, dtype=np.float32)).to(self._device)

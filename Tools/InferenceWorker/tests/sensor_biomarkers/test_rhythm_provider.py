@@ -36,10 +36,13 @@ def clear_flags(monkeypatch):
 
 
 def test_flags_off_by_default(clear_flags):
+    # Disabled by flag has its own stable reason, distinct from missing
+    # weights (artifact_unavailable) and a broken adapter (adapter_broken).
     doc = compute_rhythm_shadow_document(family_request(ppg_payload(samples_per_segment=7200)))
     assert doc is not None
     assert doc["status"] == "withheld"
-    assert doc["reason"] == "not_ready"
+    assert doc["reason"] == "family_disabled"
+    assert doc["provider_revision"] == "rhythm-shadow/none"
 
 
 def test_not_requested_returns_none(clear_flags):
@@ -52,7 +55,7 @@ def test_flag_must_be_exactly_one(monkeypatch):
     for value in ("1 ", "true", "True", "yes", "01"):
         monkeypatch.setenv(ENABLE_DEEPBEAT, str(value))
         doc = compute_rhythm_shadow_document(request, model_root="/nonexistent")
-        assert doc["status"] == "withheld" and doc["reason"] == "not_ready"
+        assert doc["status"] == "withheld" and doc["reason"] == "family_disabled"
     monkeypatch.setenv(ENABLE_DEEPBEAT, "1")
     # env flag on but no artifact under the root -> artifact_unavailable
     doc = compute_rhythm_shadow_document(request, model_root="/nonexistent")

@@ -35,16 +35,40 @@ Test knobs (fields on any request):
 Argv:
   --ping-status S            -> ping reports model_status S (e.g. hart_unavailable, the real serve.py's
                                 answer for a HART manifest whose checkpoint does not load); default "loaded"
+  --no-loaded                -> ping reports no measured `loaded` identity (a serve.py older than loaded.py),
+                                so the worker must not cache its answers
+  --checkpoint-seed S        -> seeds the measured checkpoint digest (changed bytes under the same labels)
+  --infer-loaded-digest HEX  -> infer answers carry this `loaded_digest` instead of the ping's (an answer from a
+                                process that loaded something else)
 """
+import hashlib
 import json
 import sys
 import time
+
+
+def loaded_digest(loaded):
+    text = "activity-loaded-1\n" + "".join("%s=%s\n" % (k, loaded[k]) for k in sorted(loaded))
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
 def main():
     ping_status = "loaded"
     if "--ping-status" in sys.argv:
         ping_status = sys.argv[sys.argv.index("--ping-status") + 1]
+    checkpoint_seed = "stub"
+    if "--checkpoint-seed" in sys.argv:
+        checkpoint_seed = sys.argv[sys.argv.index("--checkpoint-seed") + 1]
+    infer_digest = None
+    if "--infer-loaded-digest" in sys.argv:
+        infer_digest = sys.argv[sys.argv.index("--infer-loaded-digest") + 1]
+    loaded = None
+    if "--no-loaded" not in sys.argv:
+        # What the real serve.py measures (activity_context/loaded.py): flat strings and their digest.
+        loaded = {"schema": "activity-loaded-1",
+                  "code_sha256": hashlib.sha256(b"stub-activity-code").hexdigest(),
+                  "checkpoint_sha256": hashlib.sha256(("stub-checkpoint-" + checkpoint_seed).encode()).hexdigest(),
+                  "threads": "1"}
     for line in sys.stdin:
         line = line.strip()
         if not line:
@@ -76,6 +100,9 @@ def main():
                 "calibrated": False,
                 "transition_version": "stub-transition",
             }
+            if loaded is not None:
+                resp["loaded"] = loaded
+                resp["loaded_digest"] = loaded_digest(loaded)
         elif op == "infer":
             run = req.get("run") or {}
             if req.get("respond_ok") is False:
@@ -173,6 +200,9 @@ def main():
             resp = {"id": rid, "ok": False, "kind": "malformed",
                     "error": "unknown op %s" % op}
 
+        # Like the real serve.py, every ok infer answer repeats the process's `loaded_digest`.
+        if op == "infer" and resp.get("ok") and loaded is not None:
+            resp["loaded_digest"] = infer_digest or loaded_digest(loaded)
         sys.stdout.write(json.dumps(resp) + "\n")
         sys.stdout.flush()
 

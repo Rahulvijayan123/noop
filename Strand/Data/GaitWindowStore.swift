@@ -7,26 +7,55 @@ import StrandAnalytics
 /// Same layout and scope as `ActivityEncoderWindowStore` (one file per UTC day under the account and strap), and
 /// it reads that store's scope, so the two can never describe different straps.
 ///
+/// Each day keeps the release the server recorded for it, with the pins, prior and input revision it was produced
+/// under. What the decoder may do with a day is decided by the shared policy (`ActivityExpertSelection`) from those
+/// stored fields alone (`sources(from:to:)`): the phone never builds an ElderNet config of its own, so a shadow or
+/// candidate row can never shape the decode the wearer sees.
+///
 /// Thread-safe: the decoder input is assembled off the main actor.
 final class GaitWindowStore: @unchecked Sendable {
     static let shared = GaitWindowStore()
 
-    /// The ElderNet build the decoder accepts evidence from. Windows from any other model or weights are refused by
-    /// the evidence config (`GaitQualityEvidenceConfig.evidenceRefusal`), so the day decodes exactly as without them.
-    enum Pins {
-        static let modelVersion = "eldernet-437a38b"
-        static let weightsDigest = "01b2f982a0a2664f455a529a8c483a10106a7ddcd89c326e3d15e24fa4cf4ca6"
-        /// Mean served gait probability over the windows the decoder sees (the server's `FRWHOOP_ELDERNET_GAIT_PRIOR`).
-        static let gaitPrior = 0.085
-    }
-
+    /// One stored UTC day. Every field after `windowsJSON` arrived with the release-authority route fields
+    /// (docs/model-integration/activity-authority.md); a record stored before them decodes with them nil, and so
+    /// reads as its recorded `mode` with no pins and no prior, which the policy treats as shadow.
     struct DayRecord: Codable, Equatable {
         var day: String
         var resultRevision: String
+        /// The worker mode the row was written under (`shadow` / `candidate`).
         var mode: String
         var model: GaitQualityModelInfo
         /// The `gait-windows-1` object, kept as the JSON text it arrived as.
         var windowsJSON: String
+        /// The row's release after the producer's own lowering (`release_mode`); nil from an older server.
+        var releaseMode: String? = nil
+        /// The raw-IMU input revision the windows were computed from.
+        var inputRevision: Int64? = nil
+        /// What the producer pinned and decoded with (the row's `authority` block); nil = not pinned / not set.
+        var pinnedModelVersion: String? = nil
+        var pinnedWeightsDigest: String? = nil
+        var gaitPrior: Double? = nil
+        /// The producer's own view of the row (`authority.use` / `authority.reason`), kept for inspection only:
+        /// the policy is always re-run here and only ever lowers.
+        var producerUse: String? = nil
+        var producerReason: String? = nil
+        /// The row's model identity as the route named it (`identity`).
+        var identity: [String: String]? = nil
+
+        /// The weakest release the stored fields record: `mode` and `release_mode` (the weaker of the route's and
+        /// the authority block's), a missing or unknown one reading as shadow. Never production unless both say so.
+        var recordedRelease: ActivityReleaseMode {
+            var release = ActivityReleaseMode(recorded: mode)
+            if let releaseMode { release = release.lowered(to: ActivityReleaseMode(recorded: releaseMode)) }
+            return release
+        }
+
+        /// Equal in everything but the windows' JSON text.
+        func sameStamp(as other: DayRecord) -> Bool {
+            var a = self, b = other
+            a.windowsJSON = ""; b.windowsJSON = ""
+            return a == b
+        }
     }
 
     private let lock = NSLock()
@@ -34,7 +63,6 @@ final class GaitWindowStore: @unchecked Sendable {
     private let scopeSource: () -> ActivityEncoderWindowStore.Scope?
     private var parsed: [String: (record: DayRecord, columns: GaitWindowColumns?)?] = [:]
     private var parsedScope: ActivityEncoderWindowStore.Scope?
-    private var newestModel: GaitQualityModelInfo??
 
     init(directory: URL? = nil,
          scope: @escaping () -> ActivityEncoderWindowStore.Scope? = { ActivityEncoderWindowStore.shared.currentScope }) {
@@ -61,31 +89,60 @@ final class GaitWindowStore: @unchecked Sendable {
     func save(_ record: DayRecord, scope expected: ActivityEncoderWindowStore.Scope) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard currentScope() == expected, let url = file(day: record.day, scope: expected) else { return false }
+        // The result revision names the windows (their JSON text can differ in key order); everything else the
+        // record holds is compared, so a demoted or newly pinned row is stored even at the same revision.
         if let existing = entry(day: record.day, scope: expected)?.record,
-           existing.resultRevision == record.resultRevision, existing.model == record.model { return false }
+           existing.sameStamp(as: record) { return false }
         try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
         guard let data = try? JSONEncoder().encode(record), (try? data.write(to: url, options: .atomic)) != nil else {
             return false
         }
         parsed[record.day] = nil
-        newestModel = nil
         return true
     }
 
-    /// The model of the newest stored day, which the decoder config is built around (nil until any day is stored).
-    var latestModel: GaitQualityModelInfo? {
+    /// A day the route answered `unchanged` with a lower release than the one stored (a row can be demoted
+    /// without new windows): lower the stored record to it. Never raises. Returns true when the record changed.
+    @discardableResult
+    func lowerRelease(day: String, to release: ActivityReleaseMode,
+                      scope expected: ActivityEncoderWindowStore.Scope) -> Bool {
         lock.lock(); defer { lock.unlock() }
-        guard let scope = currentScope() else { return nil }
-        if let cached = newestModel { return cached }
-        let days = (try? FileManager.default.contentsOfDirectory(atPath: scopeDirectory(scope)?.path ?? ""))?
-            .filter { $0.hasSuffix(".json") }.map { String($0.dropLast(5)) }.sorted() ?? []
-        let model = days.last.flatMap { entry(day: $0, scope: scope)?.record.model }
-        newestModel = .some(model)
-        return model
+        guard currentScope() == expected, let url = file(day: day, scope: expected),
+              var record = entry(day: day, scope: expected)?.record, release < record.recordedRelease else { return false }
+        record.releaseMode = release.rawValue
+        guard let data = try? JSONEncoder().encode(record), (try? data.write(to: url, options: .atomic)) != nil else {
+            return false
+        }
+        parsed[day] = nil
+        return true
+    }
+
+    /// The stored days overlapping `[from, to)` as the shared policy's sources: each day's windows ending inside the
+    /// span, with the release, pins, prior and input revision the row recorded. Days without windows in the span
+    /// are left out. `ActivityExpertSelection.select` decides what, if anything, they may shape.
+    func sources(from: Int, to: Int) -> [GaitQualitySource] {
+        guard to > from else { return [] }
+        lock.lock(); defer { lock.unlock() }
+        guard let scope = currentScope() else { return [] }
+        var out: [GaitQualitySource] = []
+        for day in ActivityEncoderWindowStore.utcDays(from: from, to: to) {
+            guard let hit = entry(day: day, scope: scope), let columns = hit.columns else { continue }
+            let windows = columns.trackWindows(from: from, to: to)
+                .sorted { ($0.endTs, $0.startTs) < ($1.endTs, $1.startTs) }
+            guard !windows.isEmpty else { continue }
+            let r = hit.record
+            out.append(GaitQualitySource(track: GaitQualityTrackInput(model: r.model, windows: windows),
+                                         releaseMode: r.recordedRelease, route: .standalone,
+                                         expectedModelVersion: r.pinnedModelVersion,
+                                         expectedWeightsDigest: r.pinnedWeightsDigest,
+                                         gaitPrior: r.gaitPrior, inputRevision: r.inputRevision, day: day))
+        }
+        return out
     }
 
     /// The windows ending inside `[from, to)` from `model`, across every stored UTC day overlapping it; nil when
-    /// there are none.
+    /// there are none. They carry no release (`releaseMode` nil), so only a candidate config accepts them; the
+    /// canonical decode reads `sources(from:to:)` through the policy instead.
     func trackInput(from: Int, to: Int, model: GaitQualityModelInfo) -> GaitQualityTrackInput? {
         guard to > from else { return nil }
         lock.lock(); defer { lock.unlock() }
@@ -101,17 +158,11 @@ final class GaitWindowStore: @unchecked Sendable {
         return GaitQualityTrackInput(model: model, windows: windows)
     }
 
-    /// The decoder's ElderNet evidence for `model`: production, pinned to `Pins`.
-    static func evidenceConfig(model: GaitQualityModelInfo) -> GaitQualityEvidenceConfig {
-        GaitQualityEvidenceConfig(mode: .production, model: model, gaitPrior: Pins.gaitPrior,
-                                  expectedModelVersion: Pins.modelVersion, expectedWeightsDigest: Pins.weightsDigest)
-    }
-
     // MARK: Private (lock held)
 
     private func currentScope() -> ActivityEncoderWindowStore.Scope? {
         let scope = scopeSource()
-        if scope != parsedScope { parsed = [:]; newestModel = nil; parsedScope = scope }
+        if scope != parsedScope { parsed = [:]; parsedScope = scope }
         return scope
     }
 
@@ -141,5 +192,17 @@ final class GaitWindowStore: @unchecked Sendable {
     private func file(day: String, scope: ActivityEncoderWindowStore.Scope) -> URL? {
         guard day.count == 10, day.allSatisfy({ $0.isNumber || $0 == "-" }) else { return nil }
         return scopeDirectory(scope)?.appendingPathComponent("\(day).json")
+    }
+}
+
+extension GaitWindowStore.DayRecord {
+    /// A full day the route sent; nil without a trusted model or windows (`unchanged` days carry neither).
+    init?(_ day: ServerScoreRepository.GaitWindowsDay) {
+        guard !day.unchanged, let model = day.model, let json = day.windowsJSON else { return nil }
+        self.init(day: day.day, resultRevision: day.resultRevision, mode: day.mode, model: model,
+                  windowsJSON: json, releaseMode: day.releaseMode, inputRevision: day.inputRevision,
+                  pinnedModelVersion: day.pinnedModelVersion, pinnedWeightsDigest: day.pinnedWeightsDigest,
+                  gaitPrior: day.gaitPrior, producerUse: day.producerUse, producerReason: day.producerReason,
+                  identity: day.identity)
     }
 }

@@ -24,6 +24,13 @@
 //     3000 ms compute budget. A timeout publishes the core snapshot with
 //     `sleep_features.status = "timeout"` — never an error, never a hang; the
 //     ordinary next eligible scoring pass retries.
+//   * Backpressure: a sidecar that cannot admit the request answers 429 `busy`
+//     at once. Busy is not a result: the core snapshot publishes as usual and
+//     carries the day's previously published `sleep_features` document over
+//     unchanged (the snapshot replaces the whole payload, so leaving the key
+//     out would erase it); a day with none publishes without the key, exactly
+//     as with the sidecar off. The next scoring pass of the day asks again
+//     (docs/model-integration/runtime-bounds.md).
 //   * One enrichment request per claimed day, inside the payload build (a
 //     plain loopback JSON call, not the waveform download / model inference
 //     the spec keeps out of the repeatable-read transaction).
@@ -59,9 +66,26 @@ enum SleepFeatureEnrichment {
 
     static let algorithmVersion = "nara-sleep-features-1"
     static let schemaVersion = 1
-    /// Transport budget around the sidecar's 3000 ms compute budget.
-    static let budgetMS = 3500
+    /// Transport budget around the sidecar's compute budget (3000 ms by default,
+    /// `FRWHOOP_SLEEP_FEATURES_BUDGET_MS` on the sidecar). Raising the sidecar's
+    /// budget means raising this one too (`FRWHOOP_SLEEP_FEATURES_TIMEOUT_MS`):
+    /// it must stay above the sidecar's so its `timeout` document arrives instead
+    /// of a client-side timeout. Bounded, because the v2 scoring transaction is
+    /// open while this call runs.
+    static let defaultBudgetMS = 3500
+    static let budgetMS = transportBudgetMS(ProcessInfo.processInfo.environment)
     static let maxResponseBytes = 8 << 20
+
+    static func transportBudgetMS(_ env: [String: String]) -> Int {
+        guard let raw = env["FRWHOOP_SLEEP_FEATURES_TIMEOUT_MS"], let value = Int(raw) else {
+            return defaultBudgetMS
+        }
+        return min(30_000, max(500, value))
+    }
+
+    /// The document status an earlier worker attached when the sidecar answered `busy`. Such a
+    /// document is never carried over: it says nothing about the night.
+    static let busyStatus = "busy"
 
     // MARK: - Request assembly (pure; unit-tested)
 
@@ -210,7 +234,11 @@ enum SleepFeatureEnrichment {
     /// caller then publishes the snapshot without the key — or, for a
     /// `timeout`/`error` status body, attaches the degraded status document
     /// so the client can say "unavailable right now" instead of nothing).
-    static func enrich(request: [String: Any], client: InferenceClient) -> [String: Any]? {
+    /// A `busy` answer is not a result: nothing was computed, so it returns
+    /// `previous()` (the day's already published document, or nil to publish
+    /// without the key) and the core publish never waits for the enrichment.
+    static func enrich(request: [String: Any], client: InferenceClient,
+                       previous: () -> [String: Any]? = { nil }) -> [String: Any]? {
         do {
             guard JSONSerialization.isValidJSONObject(request),
                   let body = try? JSONSerialization.data(withJSONObject: request) else {
@@ -218,9 +246,30 @@ enum SleepFeatureEnrichment {
             }
             let raw = try client.sleepFeatures(body: body, timeoutMSOverride: budgetMS)
             return validateResponse(raw)
+        } catch let error as InferenceClientError where error.isBusy {
+            guard let kept = previous(), (kept["status"] as? String) != busyStatus else { return nil }
+            return kept
         } catch {
             return nil
         }
+    }
+
+    /// The `daily.sleep_features` document of the day's newest published snapshot under the
+    /// claimed algorithm, or nil. One bounded query; on the v2 path it reads the same snapshot
+    /// the claim does.
+    static func loadPublishedDocument(db: PostgresClientProtocol, userId: String, deviceId: String,
+                                      day: String, algorithmVersion: String) throws -> [String: Any]? {
+        let rows = try db.query("""
+            select (payload->'daily'->'sleep_features')::text as doc
+              from public.scoring_snapshots_v2
+             where user_id = $1::uuid and device_id = $2::uuid and day = $3::date
+               and algorithm_version = $4::text
+             order by result_revision desc
+             limit 1
+            """, [userId, deviceId, day, algorithmVersion])
+        guard let text = rows.first?["doc"], !text.isEmpty, let data = text.data(using: .utf8),
+              let doc = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return nil }
+        return doc
     }
 
     // MARK: - History loader (DB; one bounded query)

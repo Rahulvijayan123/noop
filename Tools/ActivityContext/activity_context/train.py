@@ -449,8 +449,8 @@ def train_head(checkpoint_dir: str, out_dir: str, manifest: Manifest,
 
     _torch = _import_torch()
     _torch.manual_seed(seed)
-    model, torch = _load_model_and_verify(checkpoint_dir, len(manifest.class_map),
-                                          manifest.seed, manifest=manifest)
+    model, torch, _checkpoint_sha256 = _load_model_and_verify(checkpoint_dir, len(manifest.class_map),
+                                                              manifest.seed, manifest=manifest)
     counts = apply_freeze_policy(model, torch)
     # Deploy parity: HARTModel.predict_window applies the manifest scaler
     # before the model, so training must see the SAME standardized inputs

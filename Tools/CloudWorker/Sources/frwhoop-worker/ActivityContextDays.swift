@@ -33,6 +33,8 @@ enum ActivityContextDays {
         var runs: Int
         var events: Int
         var observedSeconds: Int
+        /// The decoded day document the payload carries (the joint candidate reuses it as its HART-alone arm).
+        var document: ActivityContextDayDocument? = nil
     }
 
     enum PublishOutcome: Equatable {
@@ -214,7 +216,7 @@ enum ActivityContextDays {
             throw WorkerError.malformed("activity day document encoding failed")
         }
         return Built(payloadText: text, runs: document.runs.count, events: document.events.count,
-                     observedSeconds: document.observedSeconds)
+                     observedSeconds: document.observedSeconds, document: document)
     }
 
     /// The day document for `input` (no snapshot), runs clipped to the day. Shared by the published v2
@@ -308,8 +310,14 @@ enum ActivityContextDays {
             input.transitionWindows = encoder.transitions
             input.gaitWindows = encoder.gaitWindows
         }
-        let built = try build(input: input, day: day, modelVersion: streamsModelVersion,
-                              preprocessingVersion: streamsPreprocessingVersion, generatedAt: now)
+        // A published document: only what the shared release policy lets shape the canonical decode. The stored
+        // HART-embedded ElderNet windows record no release of their own, so they are shadow and left out.
+        let canonical = ActivityExpertSelection.select(
+            embeddedGait: input.gaitWindows.isEmpty ? nil : EmbeddedGaitSource(windows: input.gaitWindows))
+            .canonical(input, base: ActivityDecoderConfig())
+        let built = try build(input: canonical.input, day: day, modelVersion: streamsModelVersion,
+                              preprocessingVersion: streamsPreprocessingVersion, generatedAt: now,
+                              config: canonical.config)
         return (built.runs > 0 || built.events > 0) ? built : nil
     }
 

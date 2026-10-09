@@ -28,6 +28,14 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         var modelVersion: String
         /// The `hart-windows-1` object, kept as the JSON text it arrived as.
         var windowsJSON: String
+        /// The raw-IMU input revision the windows were computed from (`input_revision`): the key the shared policy
+        /// matches expert rows against. nil from an older server or a record stored before the field.
+        var inputRevision: Int64? = nil
+        /// HART's release as the route names it (`release_mode`, "production"); kept for inspection.
+        var releaseMode: String? = nil
+        /// The release of the HART-embedded ElderNet windows inside `windowsJSON` (`embedded_gait_release_mode`).
+        /// nil (an older server or record) reads as shadow, as does anything the policy does not recognise.
+        var embeddedGaitReleaseMode: String? = nil
     }
 
     private let lock = NSLock()
@@ -43,10 +51,14 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         let resultRevision: String
         let encoderId: String
         let modelVersion: String
+        let inputRevision: Int64?
+        let embeddedGaitRelease: ActivityReleaseMode
         init(_ record: DayRecord) {
             resultRevision = record.resultRevision
             encoderId = record.encoderId
             modelVersion = record.modelVersion
+            inputRevision = record.inputRevision
+            embeddedGaitRelease = ActivityReleaseMode(recorded: record.embeddedGaitReleaseMode)
         }
     }
     private var stamps: [String: Stamp] = [:]
@@ -142,6 +154,29 @@ final class ActivityEncoderWindowStore: @unchecked Sendable {
         guard let merged = ActivityEncoderWindowSet.merged(sets)?.clipped(from: from, to: to),
               !merged.isEmpty else { return nil }
         return merged
+    }
+
+    /// The stored HART windows' input revision per UTC day overlapping `[from, to)` (days that do not record one
+    /// are absent): the shared policy's `revisions`, so an expert row computed from other uploads is not combined.
+    func inputRevisions(from: Int, to: Int) -> [String: Int64] {
+        guard to > from else { return [:] }
+        lock.lock(); defer { lock.unlock() }
+        guard let scope else { return [:] }
+        var out: [String: Int64] = [:]
+        for day in Self.utcDays(from: from, to: to) {
+            if let revision = stamp(day: day, scope: scope)?.inputRevision { out[day] = revision }
+        }
+        return out
+    }
+
+    /// The release the HART-embedded ElderNet windows of `[from, to)` carry: the weakest any overlapping stored day
+    /// records, shadow when none says.
+    func embeddedGaitRelease(from: Int, to: Int) -> ActivityReleaseMode {
+        guard to > from else { return .shadow }
+        lock.lock(); defer { lock.unlock() }
+        guard let scope else { return .shadow }
+        let releases = Self.utcDays(from: from, to: to).compactMap { stamp(day: $0, scope: scope)?.embeddedGaitRelease }
+        return releases.min() ?? .shadow
     }
 
     /// UTC calendar days ("yyyy-MM-dd") overlapping `[from, to)`.

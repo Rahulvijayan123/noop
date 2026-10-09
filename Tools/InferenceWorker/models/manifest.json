@@ -1,5 +1,5 @@
 {
-  "manifest_version": "1.0.0",
+  "manifest_version": "1.1.0",
   "generated_utc": "2026-10-01T00:00:00Z",
   "generated_by": "W-A impl-inference-hrv",
   "artifact_root": "/opt/frwhoop-models",
@@ -11,7 +11,8 @@
     "Conditional models (wav2sleep, no-eeg-sleep-staging, RR_Estimation) are recorded with eligibility states and are NOT wired as live providers.",
     "Hashes and sizes were measured from the pinned bytes (findings/conditional-models.md, findings/sleep-boundary-stager.md, findings/hrv-neurokit.md) and re-verified locally against /tmp/frwhoop-physiology/ckpt/.",
     "Sleep candidates (2026-10-01, W-D): sleepecg_wrn_gru_mesa is now wired as sleepecg.wrn-gru-mesa.v1 with its two artifacts required_for_readiness=true (a wired model artifact gates readiness); hypnospy is wired as hypnospy.hr-boundary.v1 from an in-repo vendored copy and therefore has no artifact and required_for_readiness=false.",
-    "Sensor biomarkers (2026-10-06): paradigma/deepbeat/siamaf entries are OPTIONAL research/shadow lanes (disabled by default). required_for_readiness=false: a missing or mismatched artifact never gates process readiness; sha256/size are verified at startup only when staged under the artifact root. Hashes measured from the actual downloaded bytes (W3/W4 reports); provisioning scripts: Tools/InferenceWorker/scripts/provision_{paradigma,deepbeat,siamaf}.py."
+    "Sensor biomarkers (2026-10-06): paradigma/deepbeat/siamaf entries are OPTIONAL research/shadow lanes (disabled by default). required_for_readiness=false: a missing or mismatched artifact never gates process readiness; sha256/size are verified at startup only when staged under the artifact root. Hashes measured from the actual downloaded bytes (W3/W4 reports); provisioning scripts: Tools/InferenceWorker/scripts/provision_{paradigma,deepbeat,siamaf}.py.",
+    "Artifact sources (2026-10-07, Spec 01): every artifact names a machine-readable source. url = fetch the artifact's url and verify its sha256 and size_bytes before installing; wheel_resource = a file inside an installed distribution (from uv.lock); zip_member = a member of another artifact of the same entry; installed_package = the distribution itself, installed from uv.lock (nothing is staged); none = no fetchable source, recorded only. Only wired entries with status eligible or shadow_eligible are staged, and only their verify_at_startup artifacts. scripts/materialize_model_root.py is the one provisioner (docs/model-integration/provisioning.md)."
   ],
   "entries": [
     {
@@ -34,6 +35,11 @@
           "name": "neurokit2-0.2.13-py3-none-any.whl",
           "path": "neurokit2/0.2.13/neurokit2-0.2.13-py3-none-any.whl",
           "url": "https://files.pythonhosted.org/packages/0f/ff/ae9c9be371b3a80b970be811a0bd223a28c6259d0530763aee09bf6a9219/neurokit2-0.2.13-py3-none-any.whl",
+          "source": {
+            "kind": "installed_package",
+            "package": "neurokit2",
+            "version": "0.2.13"
+          },
           "size_bytes": 688906,
           "sha256": "25f1414214e832341312b8f0deeaeeefb6d01e9b14d8723b71c67e99e0430c4c",
           "verify_at_startup": false,
@@ -43,6 +49,9 @@
           "name": "neurokit2-0.2.13.tar.gz",
           "path": "neurokit2/0.2.13/neurokit2-0.2.13.tar.gz",
           "url": "https://files.pythonhosted.org/packages/28/66/15d042e6100e07d52929ae8aeb04b4b9db6f943ed0dd554befac7da8cf01/neurokit2-0.2.13.tar.gz",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 92069588,
           "sha256": "e0a3831e939444855c8350f01322d3ecece1faf8a290c179d730697930f10046",
           "verify_at_startup": false,
@@ -111,6 +120,12 @@
           "name": "wrn-gru-mesa.zip",
           "path": "sleepecg/0.5.9/wrn-gru-mesa.zip",
           "url": "bundled in the sleepecg 0.5.9 wheel (sleepecg/classifiers/wrn-gru-mesa.zip)",
+          "source": {
+            "kind": "wheel_resource",
+            "package": "sleepecg",
+            "version": "0.5.9",
+            "resource": "classifiers/wrn-gru-mesa.zip"
+          },
           "size_bytes": 59765,
           "sha256": "5622a858c855b0090e1fbcbdc35334ea459707c830eae1a26a4375e33091e869",
           "verify_at_startup": true,
@@ -121,6 +136,11 @@
           "name": "classifier.keras",
           "path": "sleepecg/0.5.9/wrn-gru-mesa/classifier.keras",
           "url": "inner entry of wrn-gru-mesa.zip",
+          "source": {
+            "kind": "zip_member",
+            "artifact": "wrn-gru-mesa.zip",
+            "member": "classifier.keras"
+          },
           "size_bytes": 113583,
           "sha256": "0b392209aff8d72383de4d1fdb1e41e85ab060b65a3facb2835e262aa0f6ffd8",
           "verify_at_startup": true,
@@ -153,6 +173,9 @@
           "name": "state_dict.pth",
           "path": "wav2sleep/278e3046/state_dict.pth",
           "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/state_dict.pth",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 9666562,
           "sha256": "ea6fb4410315cf6cce406fe1ffd44cba83e8dc69be6a69101aff62cc2cbee0bc",
           "verify_at_startup": true
@@ -161,6 +184,9 @@
           "name": "config.yaml",
           "path": "wav2sleep/278e3046/config.yaml",
           "url": "https://huggingface.co/joncarter/wav2sleep/resolve/main/config.yaml",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 749,
           "sha256": "b92f4e26f3290f5207b53be343d82a4e338968b54782718f13429e800f114509",
           "verify_at_startup": true
@@ -188,6 +214,9 @@
           "name": "lgbm_stage4.txt",
           "path": "no_eeg/97d4ef19/lgbm_stage4.txt",
           "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/lgbm_stage4.txt",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 2855930,
           "sha256": "fe2f8f4c68a28a0a0c75b4f32f2bf2027f21b6e4527d7a2e0108fe7d75767700",
           "verify_at_startup": true
@@ -196,6 +225,9 @@
           "name": "lgbm_stage2.txt",
           "path": "no_eeg/97d4ef19/lgbm_stage2.txt",
           "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/lgbm_stage2.txt",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 716937,
           "sha256": "b13c96be3be99dd24f6ca339143b1e5166b53908c71d16cc160ee91a150bd323",
           "verify_at_startup": true
@@ -204,6 +236,9 @@
           "name": "meta.json",
           "path": "no_eeg/97d4ef19/meta.json",
           "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/model/meta.json",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 3154,
           "sha256": "d9394903d2a422e988289a4745d23a479bd1147aa786f40c3cc3d3893737e568",
           "verify_at_startup": true
@@ -212,6 +247,9 @@
           "name": "sample_night.csv",
           "path": "no_eeg/97d4ef19/sample_night.csv",
           "url": "https://raw.githubusercontent.com/akaneriya1/no-eeg-sleep-staging/97d4ef193f5d61abedc6d7726ce4067a59ee4f6a/deploy/sample_night.csv",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 820816,
           "sha256": "b6aba12579cfa03738aff224fdf414383a0d3f956ed3ea194b18c48f5a46f2bd",
           "verify_at_startup": false,
@@ -240,6 +278,9 @@
           "name": "RR_Estimation_Model.h5",
           "path": "rr_estimation/e429f1cc/RR_Estimation_Model.h5",
           "url": "https://raw.githubusercontent.com/kazemikianoosh/RR_Estimation/main/RR_Estimation_Model.h5",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 66191240,
           "sha256": "78fbddd1dbe23a23909c438fe33efa0fb45e2fd4044715705ef912d64b95d2af",
           "verify_at_startup": true
@@ -285,6 +326,10 @@
           "name": "best_model.013-0.28.h5",
           "path": "cnn_wrist/9ca77ea1/best_model.013-0.28.h5",
           "url": "https://github.com/razmik/cnn-wrist-model-freeliving/blob/master/pre-trained-models/regression/window-6000-overlap-3000/best_model.013-0.28.h5",
+          "source": {
+            "kind": "none",
+            "reason": "unlicensed: the bytes were never staged and no digest exists"
+          },
           "size_bytes": 17524696,
           "sha256": null,
           "verify_at_startup": false,
@@ -294,6 +339,10 @@
           "name": "best_model.007-0.36.h5",
           "path": "cnn_wrist/9ca77ea1/best_model.007-0.36.h5",
           "url": "https://github.com/razmik/cnn-wrist-model-freeliving/blob/master/pre-trained-models/regression/window-6000-overlap-3000/best_model.007-0.36.h5",
+          "source": {
+            "kind": "none",
+            "reason": "unlicensed: the bytes were never staged and no digest exists"
+          },
           "size_bytes": 17530824,
           "sha256": null,
           "verify_at_startup": false,
@@ -322,6 +371,9 @@
           "name": "tremor_detection_clf_package.pkl",
           "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/tremor_detection_clf_package.pkl",
           "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/tremor_detection_clf_package.pkl",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 1475,
           "sha256": "4be2ac2b511c501257ea8186068f06a94d0084d653840e907be72cd103dc5b0e",
           "verify_at_startup": true,
@@ -331,6 +383,9 @@
           "name": "gait_detection_clf_package.pkl",
           "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/gait_detection_clf_package.pkl",
           "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/gait_detection_clf_package.pkl",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 11497247,
           "sha256": "f2309bb8cff87648a54a338493db2cedb25b4a9a60cd77bbdb2d17e010a7cc25",
           "verify_at_startup": true,
@@ -340,6 +395,9 @@
           "name": "gait_filtering_clf_package.pkl",
           "path": "paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/gait_filtering_clf_package.pkl",
           "url": "https://raw.githubusercontent.com/biomarkersParkinson/paradigma/4735d6d21b2a62b764a0bc7e0f677577e6ce1668/src/paradigma/assets/gait_filtering_clf_package.pkl",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 3915,
           "sha256": "94068bca1997755e17fddae662dd0433ac06c12a3cd32869c6d9dc586ab845f4",
           "verify_at_startup": true,
@@ -370,6 +428,9 @@
           "name": "deepbeat.h5",
           "path": "deepbeat/f54004a80e/deepbeat.h5",
           "url": "https://github.com/AshleyLab/deepbeat/raw/f54004a80eaca99460d1e171c8ec203e182dacb9/deepbeat.h5",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 1502052,
           "sha256": "6df126f88855388f8706ea6e158b80902752a019b1f3c26d3ceab22991e4eee3",
           "verify_at_startup": true,
@@ -400,6 +461,9 @@
           "name": "final_model.pt",
           "path": "siamaf/c05be9e37d/final_model.pt",
           "url": "https://github.com/chengstark/SiamAF/raw/c05be9e37d2013d0817aafc5b2e72b2f7649e95e/proposed/saved_models/final_model.pt",
+          "source": {
+            "kind": "url"
+          },
           "size_bytes": 10915597,
           "sha256": "a141b91cf5a5ef8eb4a2a6142273852ee2810a36e6fba1642a4836b3402176be",
           "verify_at_startup": true,

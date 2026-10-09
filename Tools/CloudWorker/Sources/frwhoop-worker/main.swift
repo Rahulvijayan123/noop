@@ -94,8 +94,9 @@ import FoundationNetworking
 //                                without it the lane idles and reports sensor_tables_missing
 //   FRWHOOP_SENSOR_BIOMARKERS_BUDGET  sensor-biomarker jobs per wake (default 2)
 //   FRWHOOP_SENSOR_BIOMARKERS_LEASE_SECONDS  sensor-biomarker job lease length (default 300)
-//   FRWHOOP_SENSOR_PPG_ENABLED   "1" adds ppg_quality + pulse_shape (default OFF: the ppgWaveformSample upload
-//                                carries no optical anchor yet, so both would only ever be withheld)
+//   FRWHOOP_SENSOR_PPG_ENABLED   "1" adds ppg_quality + pulse_shape (default OFF: only push protocol 1.5
+//                                ppgWaveformSample objects carry the optical anchor; every older second is
+//                                withheld missing_ppg_anchor, see docs/model-integration/ppg-transport.md)
 //   FRWHOOP_PARADIGMA_ENABLED    "1" adds tremor + arm_swing to the sensor families (research)
 //   FRWHOOP_DEEPBEAT_SHADOW_ENABLED "1" adds rhythm_shadow to the sensor families (shadow, never user-facing)
 //   FRWHOOP_SIAMAF_SHADOW_ENABLED    "1" lets the sidecar attach the optional SiamAF shadow adapter to
@@ -126,6 +127,9 @@ import FoundationNetworking
 //                                sidecar's withheld/timeout verdict is the one that
 //                                arrives instead of a client-side timeout)
 //   FRWHOOP_INFERENCE_BUDGET     candidate runs per drain (default 2)
+//   FRWHOOP_CANDIDATE_SCHEDULER  persisted (default; needs 20261008110000) | memory
+//   FRWHOOP_CANDIDATE_MAX_ATTEMPTS / _REASSEMBLY_BUDGET / _LEASE_SECONDS  pending-queue
+//                                bounds (defaults 4 / 1 / 300; docs/model-integration/runtime-bounds.md)
 //   FRWHOOP_INFERENCE_ALLOW_NON_LOOPBACK  "1" allows a non-loopback host
 //                                (tests / an explicitly approved private network)
 //
@@ -137,6 +141,14 @@ import FoundationNetworking
 // queue item, and it distinguishes a blocked database from an empty poll.
 
 setvbuf(stdout, nil, _IOLBF, 0)
+
+// `--print-identity` prints what this executable measures about itself (RuntimeIdentity) and exits
+// before reading any configuration or opening a connection: deploy/release-host.sh checks a fresh
+// build with it before the release can be selected.
+if CommandLine.arguments.dropFirst().contains("--print-identity") {
+    print(RuntimeIdentity.measure(environment: ProcessInfo.processInfo.environment).jsonText())
+    exit(0)
+}
 
 struct WorkerConfig {
     let dbURL: String
@@ -394,6 +406,10 @@ struct LaneSnapshot {
     var lastActivityAt: Date?
     /// True when the lane could not reach the database on its last cycle.
     var dbBlocked = false
+    /// What the lane has actually loaded or is talking to (model and artifact digests, a child's
+    /// reported versions), as measured by the lane rather than claimed by configuration. Empty
+    /// until the lane has something to report. See docs/model-integration/README.md.
+    var identity: [String: String] = [:]
 }
 
 final class LaneState {
@@ -438,6 +454,11 @@ let sensorState = LaneState(LaneSnapshot(
 
 let startedAt = Date()
 let processInstanceID = UUID().uuidString.lowercased()
+// Measured once: the executable's digest and the release it belongs to (heartbeat meta.identity).
+let runtimeIdentity = RuntimeIdentity.measure(environment: env)
+FileHandle.standardOutput.write(("frwhoop-worker: identity executable_sha256=\(runtimeIdentity.executableSHA256 ?? "unmeasured") "
+    + "release=\(runtimeIdentity.release?.releaseID ?? "none") "
+    + "matches_release=\(runtimeIdentity.matchesRelease.map { String($0) } ?? "unknown")\n").data(using: .utf8)!)
 
 /// A stable per-worker UUID so a worker's health row is the same row across
 /// restarts, while `process_instance_id` distinguishes this process.
@@ -555,7 +576,8 @@ var activity = ActivityLane(
         maxRequestBytes: 64 * 1024 * 1024,
         maxResponseLineBytes: 16 * 1024 * 1024,
         restartCap: 8,
-        restartCooldownSeconds: 30)),
+        // Thread caps, and HART's in-process ElderNet off: ElderNet has one route, its own stage below.
+        restartCooldownSeconds: 30).hartChild(threads: ActivityPythonService.Config.hartThreads(env))),
     leaseSeconds: config.activityLeaseSeconds,
     imuJobsEnabled: config.activityImu,
     contextDaysEnabled: config.activityContextV2,
@@ -624,6 +646,10 @@ if let rawURL = config.inferenceURL {
 if let inferenceClient {
     scoring.candidate = CandidateStage(client: inferenceClient,
                                        store: PostgresCandidateStore(db: dbScoring))
+    // Persisted fair scheduling (20261008110000); in memory while the migration is absent.
+    scoring.candidate?.configurePending(PostgresCandidatePendingStore(db: dbScoring),
+                                        environment: ProcessInfo.processInfo.environment,
+                                        owner: config.workerName)
     scoring.candidateBudget = config.inferenceBudget
     // Sleep-phenotype enrichment lane: the SAME sidecar, its own dedicated
     // /v1/sleep-features endpoint, with its own bounded budget. A candidate
@@ -700,6 +726,7 @@ if laneEnabled("scoring") {
                     counters["candidate_skipped_budget"] = candidate.skippedBudget
                     counters["candidate_skipped_deadline"] = candidate.skippedDeadline
                     counters["active_promotions_deferred"] = scoring.stats.activePromotionsDeferred
+                    counters.merge(scoring.candidate?.heartbeatCounters() ?? [:]) { current, _ in current }
                 }
                 $0.counters = counters
                 $0.lastError = scoring.stats.lastError
@@ -821,6 +848,21 @@ if activityState.read().enabled {
                     $0.counters["eldernet_rows_pruned"] = activity.stats.eldernetRowsPruned
                     $0.counters["eldernet_prune_failures"] = activity.stats.eldernetPruneFailures
                 }
+                if activity.inertia != nil || activity.eldernet != nil {
+                    $0.counters["expert_selections"] = activity.stats.expertSelections
+                    $0.counters["expert_canonical_shaped"] = activity.stats.expertCanonicalShaped
+                }
+                // Only while an expert runs in candidate mode, so other heartbeats are unchanged.
+                if activity.storesCandidateDays {
+                    $0.counters["candidate_days_stored"] = activity.stats.candidateDaysStored
+                    $0.counters["candidate_days_fenced"] = activity.stats.candidateDaysFenced
+                    $0.counters["candidate_day_failures"] = activity.stats.candidateDayFailures
+                    $0.counters["candidate_joint_documents"] = activity.stats.candidateJointDocuments
+                    $0.counters["candidate_joint_withheld"] = activity.stats.candidateJointWithheld
+                    $0.counters["candidate_rows_pruned"] = activity.stats.candidateRowsPruned
+                    $0.counters["candidate_prune_failures"] = activity.stats.candidatePruneFailures
+                }
+                $0.identity = activity.identity
                 $0.lastError = activity.stats.lastError
                 $0.lastErrorKind = activity.stats.lastErrorKind
                 $0.lastActivityAt = activity.stats.lastActivityAt
@@ -883,6 +925,7 @@ if sensorState.read().enabled, let dbSensor, let inferenceClient {
                 $0.lastError = sensor.stats.lastError
                 $0.lastErrorKind = sensor.stats.lastErrorKind
                 $0.lastActivityAt = sensor.stats.lastActivityAt
+                $0.identity = SensorBiomarkerLane.identity
             }
             return settled() > before
         }, ensureConnected: { try dbSensor.ensureConnected() })
@@ -983,6 +1026,10 @@ func inferenceHeartbeatMeta() -> Any {
             "active_substitutions": stats.activeSubstitutions,
             "active_promotions_deferred": scoring.stats.activePromotionsDeferred,
         ] as [String: Any]
+        if var candidateEntry = entry["candidate"] as? [String: Any], let stage = scoring.candidate {
+            candidateEntry.merge(stage.heartbeatMeta()) { current, _ in current }
+            entry["candidate"] = candidateEntry
+        }
         if let lastError = stats.lastError { entry["candidate_last_error"] = String(lastError.prefix(300)) }
         if let provider = stats.lastProviderId { entry["candidate_last_provider"] = provider }
         if let reason = stats.lastWithheldReason { entry["candidate_last_withheld_reason"] = reason }
@@ -1157,6 +1204,7 @@ func heartbeat(final: Bool = false) {
         if let at = lane.lastActivityAt {
             entry["last_activity_at"] = ISO8601DateFormatter().string(from: at)
         }
+        if !lane.identity.isEmpty { entry["identity"] = lane.identity }
         return entry
     }
     let firstLaneError = lanes.compactMap { $0.lastError }.first
@@ -1193,6 +1241,8 @@ func heartbeat(final: Bool = false) {
         if let oldest = queue.oldestSeconds { meta["oldest_eligible_seconds"] = oldest }
     }
     if let dbError { meta["db_error"] = String(dbError.prefix(600)) }
+    // What this process measured about itself at startup; `source_revision` above is only the claim.
+    meta["identity"] = runtimeIdentity.wire
 
     let metaText: String
     if let data = try? JSONSerialization.data(withJSONObject: meta, options: [.sortedKeys]),
