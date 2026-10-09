@@ -930,6 +930,28 @@ final class BaselineStore: ObservableObject {
         vitalsCheck = BaselineVitalsCheck(night: night, vitals: vitals)
     }
 
+    /// Each listed day's verdict against its own usual for `series`: the call `refreshVitalsCheck` makes for the
+    /// last scored night, with the same observations, treatment events, freeze and day logs. The key-metric
+    /// screens draw the bands as the person's usual range. Each day is a Layer 1 replay, so the work runs off the
+    /// main actor and stops early when the caller's task is cancelled.
+    func usualVerdicts(series: LBSeries, days: [DailyMetric], on dayKeys: [String]) async -> [String: LBVitalVerdict] {
+        guard !dayKeys.isEmpty else { return [:] }
+        let observations = observations(from: days, series: series)
+        let trial = LBTrialRequest(events: events, freeze: loadFreeze(series: series),
+                                   confoundersByDay: confoundersByDay, dayLogsByDay: dayLogsByDay)
+        let work = Task.detached(priority: .userInitiated) { () -> [String: LBVitalVerdict] in
+            var out: [String: LBVitalVerdict] = [:]
+            for day in dayKeys {
+                if Task.isCancelled { break }
+                let ev = LongitudinalBaseline.evaluate(asOf: day, series: series, observations: observations,
+                                                       trial: trial)
+                out[day] = LongitudinalBaseline.vitalVerdict(ev)
+            }
+            return out
+        }
+        return await withTaskCancellationHandler { await work.value } onCancel: { work.cancel() }
+    }
+
     static func yesterdayKey(now: Date = Date()) -> String {
         let cal = Calendar.current
         let y = cal.date(byAdding: .day, value: -1, to: now) ?? now

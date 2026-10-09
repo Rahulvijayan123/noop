@@ -748,7 +748,7 @@ struct MetricDetailView: View {
         let showsInsight = side != nil && insightState?.phase != .hidden
         return AboutDisclosure("About", initiallyExpanded: showsInsight) {
             if let side, showsInsight {
-                MetricInsightCard(state: insightState, tint: nil, latestMeasuredDay: series.last?.day,
+                MetricInsightCard(state: insightState, latestMeasuredDay: series.last?.day,
                                   period: side.period, embedded: true)
             }
             AboutParagraphs(shown)

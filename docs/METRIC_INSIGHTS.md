@@ -1,9 +1,29 @@
 # Key metric drill-downs and their explanations
 
-Every key metric opens the same simple screen: the current value, one interactive history chart, and an
-explanation written server-side by Prime Agent (`Tools/MetricInsight`). The screen and chart are drawn from the
-app's own data and work without the explanation; the explanation is fetched with `POST /scores/insights
-{"metric": <id>}` and is optional.
+Every key metric opens the same screen (`KeyMetricDetailView`, styled by `KeyMetricStyle` after the owner-approved
+HRV concept): the period's value and how it compares, one interactive chart of dots over a shaded range, the data
+and method behind it, and an explanation written server-side by Prime Agent (`Tools/MetricInsight`). The screen and
+chart are drawn from the app's own data and work without the explanation; the explanation is fetched with `POST
+/scores/insights {"metric": <id>}` and is optional.
+
+## The screen
+
+* **Periods.** 7 / 30 / 90 nights or days and a year (the #943 unlock rule applies). HRV (both sides) and stable
+  awake heart rate also have **24 hours**: the server's 5-minute window estimates (physiology context layer), with
+  All / Sleep / Stable awake chips and an estimated activity lane. A night metric's 24 hours run noon to noon around
+  the night; a day metric's are the local day. Only windows that passed the quality checks are drawn.
+* **Shaded range.** The metrics with a usual in the table below get the person's **usual range**: each day's
+  Layer 1 band from `LongitudinalBaseline.vitalVerdict`, the same call as the Monitor list, the Home ring and the
+  server's explanations (`BaselineStore.usualVerdicts`). The others (SDNN, blood oxygen, stable awake heart rate,
+  calories) get a **recent range**: the middle 80% of the previous 30 measured periods, never called "usual". In the
+  24-hour view only the stable awake chip has a reference (a dashed line at the usual stable-awake median); single
+  windows have no usual range. Neither range is a safety range, and the screen says so.
+* **Value.** The median of the shown period's readings; the selected reading (the latest on arrival) says where it
+  sits against the range in words, never by colour alone.
+* **Ask Sana.** The explanation card's button opens a new Sana chat: a question in the person's voice, what the
+  screen showed as hidden context (`CoachHandoff.screenContext`, kept for every turn of that chat), and a memory that
+  they want to understand this metric (`docs/COACH_MEMORY.md`, "Screen handoff"). The memory feeds later chats and
+  these explanations (the worker reads `coach_memory_items`).
 
 ## The metrics (one id everywhere: app, edge function, database, worker)
 

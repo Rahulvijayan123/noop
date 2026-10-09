@@ -103,6 +103,10 @@ public struct LBVitalVerdict: Equatable, Sendable {
     public var bandHi: Double?
     /// Which copy the band came from: the week usual when it is trusted, else the longer one.
     public var fromWeek: Bool
+
+    public init(state: State, value: Double?, bandLo: Double?, bandHi: Double?, fromWeek: Bool) {
+        self.state = state; self.value = value; self.bandLo = bandLo; self.bandHi = bandHi; self.fromWeek = fromWeek
+    }
 }
 
 extension LongitudinalBaseline {

@@ -106,6 +106,18 @@ struct CoachChatView: View {
             chrome.drawerOpen = false
             if vm.queuePrompt(prompt) { coachEngine.pendingPrompt = nil }
         }
+        // A question asked from another screen ("Ask Sana" on a metric page), with what that screen showed. Same
+        // rules as a pending prompt; the screen's context rides on the question for every turn of the new chat.
+        .task(id: coachEngine.pendingHandoff) {
+            guard let handoff = coachEngine.pendingHandoff else { return }
+            guard !handoff.prompt.isEmpty else {
+                coachEngine.pendingHandoff = nil
+                return
+            }
+            vm.attach(repo: repo, engine: coachEngine, profile: profile)
+            chrome.drawerOpen = false
+            if vm.queueHandoff(handoff) { coachEngine.pendingHandoff = nil }
+        }
         .onChange(of: sizeClass) { _, new in
             // The drawer belongs to the compact layout; leaving it must not leave the tab swipe paused.
             if new == .regular { chrome.drawerOpen = false }

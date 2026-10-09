@@ -38,6 +38,14 @@ enum MetricInsightCopy {
     static var related: String { String(localized: "Related signals") }
     static var estimated: String { String(localized: "Estimated") }
     static var sources: String { String(localized: "Sources") }
+    /// The disclosure that holds the related signals and the sources.
+    static func more(related: Bool, sources: Bool) -> String {
+        switch (related, sources) {
+        case (true, true): return String(localized: "Related signals and sources")
+        case (true, false): return String(localized: "Related signals")
+        default: return String(localized: "Sources")
+        }
+    }
     static func writtenBy(_ period: MetricInsightPeriod) -> String {
         switch period {
         case .night: return String(localized: "Written by AI from your measured nights.")
@@ -91,7 +99,8 @@ enum MetricInsightCopy {
 
     /// Every fixed string above, for both periods (for the copy checks).
     static var allFixedText: [String] {
-        [title, unavailable, updating, earlier, observed, interpretation, uncertainty, related, estimated, sources]
+        [title, unavailable, updating, earlier, observed, interpretation, uncertainty, related, estimated, sources,
+         more(related: true, sources: true)]
             + MetricInsightPeriod.allCases.flatMap { [preparing($0), notEnoughData($0), signedOut($0), writtenBy($0)] }
     }
 }
@@ -114,20 +123,24 @@ extension MetricInsightStore.State {
     }
 }
 
-/// Renders one `MetricInsightStore.State`. The screen owns the request (its `.task`) and hides the card entirely in
-/// local-only mode (`.hidden`).
+/// Renders one `MetricInsightStore.State` in the key-metric screens' panel style. The screen owns the request (its
+/// `.task`) and hides the card entirely in local-only mode (`.hidden`).
+///
+/// Built to be read: the headline at 19 pt, each section's sentences at 16 pt with loose leading under a plain
+/// label, and the supporting material (related signals, sources) one tap away so the explanation itself stays short.
 struct MetricInsightCard: View {
     /// Nil before the first request has started: shown as the quiet placeholder.
     let state: MetricInsightStore.State?
-    var tint: Color? = nil
     /// The latest night or day the screen's own series has measured (`yyyy-MM-dd`). An explanation through an earlier
     /// day is marked as not current.
     var latestMeasuredDay: String? = nil
     /// The screen metric's period, for the lines shown while there is no explanation to read one from. A shown
     /// explanation speaks of its own period (`MetricInsight.period`).
     var period: MetricInsightPeriod = .night
-    /// Drawn bare, without its own card, for a host that already is one (the detail page's About section).
+    /// Drawn bare, without its own panel, for a host that already is one (the detail page's About section).
     var embedded = false
+    /// Opens Sana about this screen; nil hides the button.
+    var onAskSana: (() -> Void)? = nil
 
     /// The period the card speaks of.
     private var shownPeriod: MetricInsightPeriod { state?.insight?.period ?? period }
@@ -136,12 +149,12 @@ struct MetricInsightCard: View {
         if embedded {
             content
         } else {
-            NoopCard(tint: tint) { content }
+            KeyMetricPanel(padding: EdgeInsets(top: 14, leading: 16, bottom: 16, trailing: 16)) { content }
         }
     }
 
     private var content: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
+        VStack(alignment: .leading, spacing: 14) {
             header
             if let insight = state?.insight {
                 if let message = statusLine { status(message) }
@@ -182,33 +195,37 @@ struct MetricInsightCard: View {
     }
 
     private var header: some View {
-        HStack(alignment: .center, spacing: NoopMetrics.space2) {
-            Text(MetricInsightCopy.title).strandOverline()
-            Spacer(minLength: NoopMetrics.space2)
+        HStack(alignment: .center, spacing: 8) {
+            Text(MetricInsightCopy.title)
+                .font(KeyMetricStyle.labelStrong)
+                .foregroundStyle(KeyMetricStyle.secondary)
+                .accessibilityAddTraits(.isHeader)
             marker
+            Spacer(minLength: 8)
+            if let onAskSana { KeyMetricAskSanaButton(action: onAskSana) }
         }
     }
 
     private func status(_ text: String) -> some View {
         Text(text)
-            .font(StrandFont.subhead)
-            .foregroundStyle(StrandPalette.textSecondary)
+            .font(KeyMetricStyle.range)
+            .foregroundStyle(KeyMetricStyle.secondary)
             .fixedSize(horizontal: false, vertical: true)
     }
 
     /// A quiet skeleton while the first explanation is prepared.
     private var placeholder: some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-            HStack(spacing: NoopMetrics.space2) {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack(spacing: 8) {
                 ProgressView().controlSize(.small)
                 Text(MetricInsightCopy.preparing(shownPeriod))
-                    .font(StrandFont.subhead)
-                    .foregroundStyle(StrandPalette.textSecondary)
+                    .font(KeyMetricStyle.range)
+                    .foregroundStyle(KeyMetricStyle.secondary)
             }
             ForEach([0.92, 0.78, 0.6], id: \.self) { fraction in
                 GeometryReader { geo in
                     RoundedRectangle(cornerRadius: 4, style: .continuous)
-                        .fill(StrandPalette.surfaceInset)
+                        .fill(KeyMetricStyle.band)
                         .frame(width: geo.size.width * fraction)
                 }
                 .frame(height: 10)
@@ -221,53 +238,60 @@ struct MetricInsightCard: View {
     // MARK: Explanation
 
     private func explanation(_ insight: MetricInsight) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space3) {
-            // The card's most prominent text on both platforms: `title2` is 20 pt on iOS and 15 pt on macOS, above
-            // the 14 pt sentences (InsightCard's headline token).
+        VStack(alignment: .leading, spacing: 16) {
             Text(insight.headline)
-                .font(StrandFont.title2)
-                .foregroundStyle(StrandPalette.textPrimary)
+                .font(KeyMetricStyle.headline)
+                .foregroundStyle(KeyMetricStyle.text)
+                .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
             section(MetricInsightCopy.observed, insight.observed)
             section(MetricInsightCopy.interpretation, insight.interpretation)
             section(MetricInsightCopy.uncertainty, insight.uncertainty)
-            if !insight.related.isEmpty { related(insight.related) }
-            if !insight.citations.isEmpty { sources(insight.citations) }
+            if !insight.related.isEmpty || !insight.citations.isEmpty {
+                KeyMetricDisclosure(title: MetricInsightCopy.more(related: !insight.related.isEmpty,
+                                                                  sources: !insight.citations.isEmpty)) {
+                    VStack(alignment: .leading, spacing: 16) {
+                        if !insight.related.isEmpty { related(insight.related) }
+                        if !insight.citations.isEmpty { sources(insight.citations) }
+                    }
+                }
+            }
         }
     }
 
-    /// A section label in the hero's overline style ("Latest measured night", "Latest full day").
+    /// A section's plain label above its sentences.
     private func label(_ text: String) -> some View {
         Text(text)
-            .strandOverline()
+            .font(KeyMetricStyle.labelStrong)
+            .foregroundStyle(KeyMetricStyle.secondary)
             .accessibilityAddTraits(.isHeader)
     }
 
     @ViewBuilder
     private func section(_ title: String, _ sentences: [String]) -> some View {
         if !sentences.isEmpty {
-            VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+            VStack(alignment: .leading, spacing: 6) {
                 label(title)
-                ForEach(Array(sentences.enumerated()), id: \.offset) { _, sentence in
-                    Text(sentence)
-                        .font(StrandFont.subhead)
-                        .foregroundStyle(StrandPalette.textPrimary)
-                        .fixedSize(horizontal: false, vertical: true)
-                }
+                // One paragraph rather than a line per sentence: it reads as prose, not a list.
+                Text(sentences.joined(separator: " "))
+                    .font(KeyMetricStyle.body)
+                    .foregroundStyle(KeyMetricStyle.text)
+                    .lineSpacing(5)
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }
 
     private func related(_ items: [MetricInsight.Related]) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space2) {
+        VStack(alignment: .leading, spacing: 10) {
             label(MetricInsightCopy.related)
             ForEach(Array(items.enumerated()), id: \.offset) { _, item in
-                HStack(alignment: .firstTextBaseline, spacing: NoopMetrics.space2) {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Group {
                         if let symbol = Self.symbol(item.direction) {
                             Image(systemName: symbol)
                                 .font(.system(size: 11, weight: .semibold))
-                                .foregroundStyle(StrandPalette.textTertiary)
+                                .foregroundStyle(KeyMetricStyle.secondary)
                         } else {
                             Color.clear
                         }
@@ -275,18 +299,24 @@ struct MetricInsightCard: View {
                     .frame(width: 14)
                     .accessibilityHidden(true)
                     VStack(alignment: .leading, spacing: 2) {
-                        HStack(spacing: NoopMetrics.space2) {
+                        HStack(spacing: 8) {
                             Text(item.label)
-                                .font(StrandFont.subhead)
+                                .font(KeyMetricStyle.control)
                                 .fontWeight(.medium)
-                                .foregroundStyle(StrandPalette.textPrimary)
+                                .foregroundStyle(KeyMetricStyle.text)
                             if item.estimated {
-                                StatePill("\(MetricInsightCopy.estimated)", tone: .warning, showsDot: false)
+                                Text(MetricInsightCopy.estimated)
+                                    .font(KeyMetricStyle.small)
+                                    .foregroundStyle(KeyMetricStyle.secondary)
+                                    .padding(.horizontal, 6)
+                                    .padding(.vertical, 1)
+                                    .overlay(Capsule().strokeBorder(KeyMetricStyle.border, lineWidth: 1))
                             }
                         }
                         Text(item.summary)
-                            .font(StrandFont.footnote)
-                            .foregroundStyle(StrandPalette.textSecondary)
+                            .font(KeyMetricStyle.label)
+                            .foregroundStyle(KeyMetricStyle.secondary)
+                            .lineSpacing(2)
                             .fixedSize(horizontal: false, vertical: true)
                     }
                 }
@@ -296,14 +326,14 @@ struct MetricInsightCard: View {
     }
 
     private func sources(_ citations: [MetricInsight.Citation]) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+        VStack(alignment: .leading, spacing: 6) {
             label(MetricInsightCopy.sources)
             ForEach(Array(citations.enumerated()), id: \.offset) { _, citation in
                 if let url = citation.url {
-                    Link(destination: url) { citationLabel(citation, color: StrandPalette.accent) }
+                    Link(destination: url) { citationLabel(citation, color: KeyMetricStyle.accent) }
                         .accessibilityLabel(Text(MetricInsightCopy.citation(citation)))
                 } else {
-                    citationLabel(citation, color: StrandPalette.textSecondary)
+                    citationLabel(citation, color: KeyMetricStyle.secondary)
                         .accessibilityElement(children: .ignore)
                         .accessibilityLabel(Text(MetricInsightCopy.citation(citation)))
                 }
@@ -325,7 +355,7 @@ struct MetricInsightCard: View {
                     .fixedSize()
             }
         }
-        .font(StrandFont.footnote)
+        .font(KeyMetricStyle.small)
         .foregroundStyle(color)
         .frame(maxWidth: .infinity, alignment: .leading)
         .contentShape(Rectangle())
@@ -333,12 +363,12 @@ struct MetricInsightCard: View {
 
     /// What the explanation covered and when it was written (a line each), then where it came from.
     private func notes(_ insight: MetricInsight) -> some View {
-        VStack(alignment: .leading, spacing: NoopMetrics.space1) {
+        VStack(alignment: .leading, spacing: 3) {
             ForEach(MetricInsightCopy.footerLines(insight), id: \.self) { Text($0) }
             Text(MetricInsightCopy.writtenBy(insight.period))
         }
-        .font(StrandFont.footnote)
-        .foregroundStyle(StrandPalette.textTertiary)
+        .font(KeyMetricStyle.small)
+        .foregroundStyle(KeyMetricStyle.secondary)
         .fixedSize(horizontal: false, vertical: true)
     }
 

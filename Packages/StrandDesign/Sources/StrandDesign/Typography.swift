@@ -70,7 +70,7 @@ public enum StrandFont {
 
     /// SF Pro at an exact point size that still follows Dynamic Type, relative to `style`. Hero sizes
     /// are held to a smaller growth ceiling so ring and gauge centres keep their geometry.
-    static func scaled(_ size: CGFloat, weight: Font.Weight, relativeTo style: Font.TextStyle) -> Font {
+    public static func scaled(_ size: CGFloat, weight: Font.Weight, relativeTo style: Font.TextStyle) -> Font {
         #if canImport(UIKit)
         let metrics = UIFontMetrics(forTextStyle: uiTextStyle(style))
         let (w, wKey) = uiWeight(weight)

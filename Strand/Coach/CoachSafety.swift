@@ -322,6 +322,7 @@ enum CoachSafety {
         "my system prompt is", "my instructions are:", "my initial instructions",
         "context library (queryable", "earlier in this conversation (summary",
         "interactive cards: besides prose", "## component signatures",
+        "opened this chat from a screen in the app",
     ]
 
     private static let medicalAuthorityClaims = [

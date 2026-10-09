@@ -157,6 +157,31 @@ enum AICoachError: LocalizedError {
     }
 }
 
+// MARK: - Handoff
+
+/// A question asked from another screen, with what that screen showed (docs/COACH_MEMORY.md, "Screen handoff").
+struct CoachHandoff: Equatable, Sendable {
+    /// The most of `screenContext` that is kept.
+    static let contextCap = 2_400
+    /// The most of `memory` that is kept (the server refuses a longer memory).
+    static let memoryCap = 500
+
+    /// The first message, sent in a new chat (visible, in the user's voice).
+    let prompt: String
+    /// What the screen showed, for the model only (system prompt of every turn in that chat). Trimmed to
+    /// `contextCap` characters.
+    let screenContext: String
+    /// Saved as a memory when the prompt is sent (topic "health", importance 3); nil saves nothing.
+    let memory: String?
+
+    init(prompt: String, screenContext: String, memory: String?) {
+        self.prompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        self.screenContext = String(screenContext.trimmingCharacters(in: .whitespacesAndNewlines).prefix(Self.contextCap))
+        let note = memory?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        self.memory = note.isEmpty ? nil : String(note.prefix(Self.memoryCap))
+    }
+}
+
 // MARK: - Engine
 
 /// Drives the AI Coach: holds the chat, the chosen provider/model, the secure key, and performs the
@@ -195,6 +220,9 @@ final class AICoachEngine: ObservableObject {
     /// which already has all of that, consumes it exactly once and clears it. Nil is the normal state, and
     /// setting it performs NO network work by itself.
     @Published var pendingPrompt: String?
+    /// A question asked from another screen ("Ask Sana" on a metric page) with what that screen showed. Consumed
+    /// once by the Coach screen exactly like `pendingPrompt`; setting it performs no network work by itself.
+    @Published var pendingHandoff: CoachHandoff?
     @Published var provider: AIProvider {
         didSet {
             guard provider != oldValue else { return }
