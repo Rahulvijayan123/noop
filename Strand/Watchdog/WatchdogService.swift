@@ -37,6 +37,8 @@ final class WatchdogService {
     private var lastWindowFamily: DeviceFamily?
     /// WRIST_OFF seconds already closed by sustained HR recovery.
     private var recoveredOffs: Set<Int> = []
+    /// Per-minute movement evidence (4 h) for the exercise-session context.
+    private let exerciseEvidence = WatchdogExerciseEvidence()
 
     /// Live ring retention: the window plus a margin for a tick that runs late.
     private static let ringSeconds = WatchdogConfig.contextSeconds + 5 * 60
@@ -113,11 +115,26 @@ final class WatchdogService {
         if Task.isCancelled { return false }
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
-        let window: Result<WatchdogWindow, WatchdogUnavailable>
+        var window: Result<WatchdogWindow, WatchdogUnavailable>
         if inject == nil {
             window = await loadWindow(model: model, now: now)
         } else {
             window = .failure(.empty)
+        }
+        if Task.isCancelled { return false }
+        // Exercise-session context (rule exercise-session-1) from 4 h of movement evidence: a session that began
+        // before this window, or before a relaunch, is still known. Selects references; never mutes a check.
+        if inject == nil, case .success(var built) = window, let store = await model.repo.storeHandle() {
+            let ids = model.repo.rawPhysiologyReadIds(store: store)
+            let repo = model.repo
+            let history = await exerciseEvidence.history(store: store, readIds: ids, key: key, now: now) { from, to in
+                await repo.storedActivityContext(from: from - 600, to: to).intervals.map(\.storeRow)
+            }
+            built.exercise = WatchdogExerciseContext.build(
+                minutes: history, windowStart: built.startUnix, seqLen: built.hr.count, nowUnix: now,
+                evaluations: promptEvals, hrMax: Double(model.profile.hrMax),
+                hrMaxFromFormula: model.profile.hrMaxOverride <= 0, routine: model.baseline.exerciseRoutine)
+            window = .success(built)
         }
         if Task.isCancelled { return false }
         let sessions = await model.repo.watchdogSleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
