@@ -393,7 +393,7 @@ enum ContextInputs {
             try db.query(ContextSQL.activityTransitions, documents).compactMap(parseTransition)
         } ?? []
         out.placements = try optional("placement_unavailable") {
-            try db.query(ContextSQL.placements, read).compactMap(parsePlacement)
+            try readPlacements(db: db, read: read)
         } ?? []
         var skipped = 0
         out.exposures = try optional("exposures_unavailable") {
@@ -554,6 +554,17 @@ enum ContextInputs {
     /// as the app's `PlacementStore` does; revision order only decides within one scope.
     static let devicePlacementScope = "device"
     static let accountPlacementScope = "account"
+
+    /// The strap's placement records: resolved for the strap where the database has the resolver
+    /// (`ContextSQL.placementsResolved`), else the device's own and the owner's device-less rows.
+    static func readPlacements(db: PostgresClient, read: [String]) throws -> [PC.PlacementInput] {
+        do {
+            return try db.isolatingFailures { try db.query(ContextSQL.placementsResolved, read) }
+                .compactMap(parsePlacement)
+        } catch where isMissingSchemaObject(error) {
+            return try db.query(ContextSQL.placements, read).compactMap(parsePlacement)
+        }
+    }
 
     static func parsePlacement(_ r: [String: String]) -> PC.PlacementInput? {
         guard let s = Int(r["s"] ?? ""), let placement = nonEmpty(r["placement"]),

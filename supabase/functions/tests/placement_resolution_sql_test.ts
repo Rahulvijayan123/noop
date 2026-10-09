@@ -132,3 +132,73 @@ Deno.test({
     }
   },
 });
+
+Deno.test({
+  name: 'placement resolution: deploy/placement-rescope-strap.sql dry run, apply, copy',
+  ignore: !container,
+  sanitizeOps: false,
+  sanitizeResources: false,
+  fn: async () => {
+    const user = crypto.randomUUID();
+    const strap = crypto.randomUUID();
+    const first = crypto.randomUUID();
+    const second = crypto.randomUUID();
+    const s1 = crypto.randomUUID();
+    const s2 = crypto.randomUUID();
+    const today = new Date().toISOString().slice(0, 10);
+    const dayBefore = new Date(Date.now() - 2 * 86_400_000).toISOString().slice(0, 10);
+    // The owner's shape: bicep declared on two installation devices, data (and derived jobs) on the strap.
+    await psql(`
+      insert into auth.users (id) values ('${user}');
+      insert into public.devices (id, user_id, source_kind, external_device_id) values
+        ('${strap}', '${user}', 'noop_push', 'whoop-MGB0000005'),
+        ('${first}', '${user}', 'noop_push', 'installation:${s1}:my-whoop'),
+        ('${second}', '${user}', 'noop_push', 'installation:${s2}:my-whoop');
+      insert into public.noop_upload_receipts (id, user_id, source_id, device_id, auth_mode, lane, stream, batch_id,
+                                               body_sha256, accepted_status, accepted_at)
+      values (gen_random_uuid(), '${user}', '${s1}', '${strap}', 'installation', 'inline', 'hr', gen_random_uuid(),
+              repeat('e', 64), 'accepted', '${dayBefore} 01:00:00+00'),
+             (gen_random_uuid(), '${user}', '${s2}', '${strap}', 'installation', 'inline', 'hr', gen_random_uuid(),
+              repeat('e', 64), 'accepted', '${today} 00:30:00+00');
+      insert into public.placement_intervals (owner, device_id, placement, effective_start, source, revision) values
+        ('${user}', '${first}', 'bicep', '${dayBefore} 00:00:00+00', 'user', 1),
+        ('${user}', '${second}', 'bicep', '${today} 00:10:00+00', 'user', 2);
+      select internal.physiology_context_touch('${user}', '${strap}', '${dayBefore}', 'retrospective', 'scoring', null);
+      insert into public.sensor_biomarker_jobs (user_id, device_id, day, fingerprint, input_revision, completed_revision)
+        values ('${user}', '${strap}', '${dayBefore}', repeat('f', 64), 1, 1);`);
+    const script = await Deno.readFile(new URL('../../../deploy/placement-rescope-strap.sql', import.meta.url));
+    const run = (vars: string[]) => docker(['exec', '-i', container!, 'psql', '-U', 'postgres', '-d', 'postgres', '-X',
+      '-v', 'ON_ERROR_STOP=1', '-v', `owner=${user}`, ...vars.flatMap((v) => ['-v', v])], script);
+    const state = () => psql(`
+      select (select input_revision from public.physiology_context_jobs where user_id = '${user}'
+                and device_id = '${strap}' and day = '${dayBefore}' and mode = 'retrospective') || ':' ||
+             (select input_revision from public.sensor_biomarker_jobs where user_id = '${user}'
+                and device_id = '${strap}' and day = '${dayBefore}') || ':' ||
+             (select count(*) from public.placement_intervals where owner = '${user}' and device_id = '${strap}');`);
+    try {
+      const before = await state();
+      assert.equal(before, '1:1:0');
+      let out = await run([]);
+      assert.equal(out.code, 0, out.stderr);
+      assert.match(out.stdout, /installation/);
+      assert.match(out.stdout, /dry run: nothing written/);
+      assert.equal(await state(), before, 'a dry run writes nothing');
+      out = await run(['apply=1']);
+      assert.equal(out.code, 0, out.stderr);
+      assert.match(out.stdout, /applied/);
+      assert.equal(await state(), '2:2:0', 'apply re-queues the strap\'s derived days and writes no placement row');
+      out = await run(['apply=1', 'copy=1']);
+      assert.equal(out.code, 0, out.stderr);
+      const [ctx, sensor, rows] = (await state()).split(':');
+      assert.ok(Number(ctx) >= 3 && sensor === '3' && rows === '2', `copy re-declares both pieces on the strap: ${ctx}:${sensor}:${rows}`);
+      // The originals are untouched and the resolved placement is the same.
+      assert.equal(await psql(`select count(*) from public.placement_intervals where owner = '${user}'
+                                  and device_id in ('${first}', '${second}')`), '2');
+      assert.equal(await psql(`select string_agg(placement, ',' order by effective_start) from
+                                  internal.placement_intervals_for_device_v1('${user}', '${strap}', null, null)`),
+        'bicep,bicep');
+    } finally {
+      await psql(`delete from auth.users where id = '${user}';`);
+    }
+  },
+});
