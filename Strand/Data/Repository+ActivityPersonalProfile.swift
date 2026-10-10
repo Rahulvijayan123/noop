@@ -48,8 +48,9 @@ extension Repository {
         let base = activityBaseDecoderConfig
         let labels = ActivityGroundTruthStore.shared.all()
         let sessions = Self.calibrationSessions(labels)
+        let hrLabels = ActivityPostureHeartRateFitter.labels(from: labels)
         let fingerprint = await Task.detached(priority: .utility) {
-            Self.personalProfileFingerprint(sessions, config: base)
+            Self.personalProfileFingerprint(sessions, config: base) + "-" + Self.postureHeartRateFingerprint(hrLabels)
         }.value
         if !force, let stored = store.record(), stored.fingerprint == fingerprint { return stored }
 
@@ -68,9 +69,40 @@ extension Repository {
             }
             return ActivityPersonalProfileFitter.fit(runs: runs, config: base, now: now)
         }.value
-        let record = ActivityPersonalProfileStore.Record(fingerprint: fingerprint, result: result)
+        let postureHR = await fitPostureHeartRate(hrLabels)
+        let record = ActivityPersonalProfileStore.Record(fingerprint: fingerprint, result: result,
+                                                         postureHeartRate: postureHR)
         store.save(record, scope: scope)
         return record
+    }
+
+    /// Fit the wearer's heart-rate-by-posture model (hsmm-2.0) from their labelled sitting / standing stretches and
+    /// the strap's heart rate over them, each run against the resting reference its day decodes with.
+    private func fitPostureHeartRate(_ labels: [ActivityPostureHeartRateLabel]) async -> ActivityPostureHeartRateFitResult {
+        var hr: [(ts: Int, bpm: Double)] = []
+        var resting: [String: Double] = [:]
+        for l in labels {
+            if let signals = await stretchSignals(from: l.start, to: l.end) {
+                hr += signals.hr.filter { $0.ts >= l.start && $0.ts < l.end }.map { (ts: $0.ts, bpm: Double($0.bpm)) }
+            }
+            if resting[l.run] == nil {
+                let dayStart = Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(l.start)))
+                    .timeIntervalSince1970)
+                resting[l.run] = activityBaseDecoderConfig(forDayStart: dayStart).restingHeartRate
+            }
+        }
+        let samples = hr, rest = resting
+        return await Task.detached(priority: .utility) {
+            ActivityPostureHeartRateFitter.fit(labels: labels, hr: samples, restingBpm: rest)
+        }.value
+    }
+
+    nonisolated static func postureHeartRateFingerprint(_ labels: [ActivityPostureHeartRateLabel]) -> String {
+        var text = ActivityPostureHeartRateModel.version
+        for l in labels { text += "|\(l.run):\(l.start)-\(l.end):\(l.seated ? "s" : "u")" }
+        var h: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
+        return String(h, radix: 16)
     }
 
     /// The strap's streams over one calibration run (with lead-in) in decoder-input form, with the HART windows the

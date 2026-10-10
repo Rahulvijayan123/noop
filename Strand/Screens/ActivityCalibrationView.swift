@@ -144,6 +144,11 @@ private struct ActivityCalibrationPage: View {
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
+                if let hr = postureHeartRateLine {
+                    Text(hr)
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
                 if refitting {
                     Text("Checking your runs…")
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textTertiary)
@@ -168,6 +173,22 @@ private struct ActivityCalibrationPage: View {
             return "Active since \(since): \(label) \(Self.pct(before)) -> \(Self.pct(after)) on your held-out runs."
         case .notBetter:
             return "Tried, not better; keeping the defaults."
+        }
+    }
+
+    /// The heart-rate-by-posture fit (hsmm-2.0): whether the rate is used as posture evidence for this wearer, and why
+    /// not when it is not.
+    private var postureHeartRateLine: String? {
+        guard personalScoped, let fit = personalRecord?.postureHeartRate else { return nil }
+        switch fit.status {
+        case .adopted:
+            return String(format: "Heart rate: in use as a light hint. Standing runs %.0f bpm above sitting for you (held-out check %.0f%%).",
+                          fit.gapBpm ?? 0, (fit.heldOutAUC ?? 0) * 100)
+        case .notSeparable:
+            return String(format: "Heart rate: not used. Your standing and sitting rates differ by %.0f bpm, too little to tell them apart reliably.",
+                          fit.gapBpm ?? 0)
+        case .needsMoreData:
+            return "Heart rate: not used yet. It needs settled sitting and standing from at least \(ActivityPostureHeartRateFitter.minRuns) runs."
         }
     }
 

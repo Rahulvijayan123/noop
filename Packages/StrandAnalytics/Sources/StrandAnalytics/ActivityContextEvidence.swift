@@ -281,6 +281,9 @@ public struct ActivityObservation: Equatable, Sendable {
     /// model's hop). Its own channel, never `encoder` and never `motionHeads`; ignored unless
     /// `ActivityDecoderConfig.gaitQuality` accepts its model. It never creates an observation second of its own.
     public var gaitQuality: GaitQualityWindow?
+    /// A measured stand-up / sit-down that completed at this second (`ActivityVerticalShift`, hsmm-2.0). Optional
+    /// and set on its completion second only; absent means none was measured.
+    public var verticalShift: ActivityVerticalShiftEvidence?
 
     public init(ts: Int, dynAccelG: Double? = nil, gravity: [Double]? = nil, stepTicks: Int? = nil,
                 strapClass: Int? = nil, hrBpm: Int? = nil, imu: ImuWindowFeatures? = nil,
@@ -289,12 +292,13 @@ public struct ActivityObservation: Equatable, Sendable {
                 wear: WearEvidence = .unknown,
                 sleep: SleepEvidence = .unknown, inBed: Bool = false, loggedWorkout: Bool = false,
                 workoutKind: WorkoutKind = .unspecified, motionHeads: MotionHeadsWindow? = nil,
-                gaitQuality: GaitQualityWindow? = nil) {
+                gaitQuality: GaitQualityWindow? = nil, verticalShift: ActivityVerticalShiftEvidence? = nil) {
         self.ts = ts; self.dynAccelG = dynAccelG; self.gravity = gravity; self.stepTicks = stepTicks
         self.strapClass = strapClass; self.hrBpm = hrBpm; self.imu = imu; self.encoder = encoder
         self.transition = transition; self.gait = gait
         self.wear = wear; self.sleep = sleep; self.inBed = inBed; self.loggedWorkout = loggedWorkout
         self.workoutKind = workoutKind; self.motionHeads = motionHeads; self.gaitQuality = gaitQuality
+        self.verticalShift = verticalShift
     }
 }
 
@@ -398,6 +402,10 @@ struct ActivityFeatures: Equatable {
     /// uncalibrated strap is read sign-agnostically (|x|), because a strap worn the other way round turns a
     /// hanging arm into "hand above the elbow".
     var forearmSign: Double? = nil
+    /// Whether the wrist-geometry posture cues may speak about sitting versus standing this second (the strap is
+    /// on a wrist, or nobody declared where it is). Set by the decoder from `ActivityDecoderConfig.placements`;
+    /// false on the upper arm or elsewhere (`ActivityWearPlacement`, hsmm-2.0).
+    var wristPostureCues = true
 }
 
 /// Causal ring of recent seconds. Codable so a decoder restart resumes with its context intact.

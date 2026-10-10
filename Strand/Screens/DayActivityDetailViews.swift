@@ -600,6 +600,8 @@ enum GaitDayLoader {
 struct ActivityCalibrationEntry: View {
     @AppStorage("selectedWhoopModel") private var selectedWhoopModelRaw = WhoopModel.whoop5mg.rawValue
     @State private var labelledCount = 0
+    /// What the last personal fit said (nil before any run): the subtitle says plainly whether calibration is on.
+    @State private var fit: ActivityPersonalProfileStore.Record?
 
     var body: some View {
         if selectedWhoopModelRaw == WhoopModel.whoop5mg.rawValue {
@@ -637,14 +639,29 @@ struct ActivityCalibrationEntry: View {
                 labelledCount = await Task.detached(priority: .utility) {
                     ActivityGroundTruthStore.shared.all().count
                 }.value
+                fit = ActivityPersonalProfileStore.shared.record()
             }
         }
     }
 
     private var subtitle: String {
         let n = labelledCount
-        return n == 0
-            ? String(localized: "Five guided minutes of sitting, standing and lying down so Nara learns how you change position.")
-            : String(localized: "\(n) labelled examples so far. Add more to sharpen sitting, standing and position changes.")
+        guard n > 0 else {
+            return String(localized: "About eight guided minutes of sitting, standing and lying down so Nara learns how you sit and stand. Needs \(ActivityCalibrationProtocols.runsToPersonalise) runs on different days.")
+        }
+        // Say whether calibration is actually in use: a run that is not yet enough changes nothing, and the
+        // wearer should know that rather than assume it worked (2026-10-09: one run done, silently unused).
+        switch fit?.result.status {
+        case .needsMoreRuns?:
+            let have = fit?.result.runs ?? 0, need = fit?.result.runsNeeded ?? ActivityCalibrationProtocols.runsToPersonalise
+            let more = max(1, need - have)
+            return String(localized: "Not in use yet: \(have) of \(need) runs done. Do \(more) more on another day so sitting and standing can be personalised.")
+        case .adopted?:
+            return String(localized: "In use: your sitting and standing are personalised. Another run keeps it current.")
+        case .notBetter?:
+            return String(localized: "Tried: your runs did not beat the defaults, so they are not in use. Another run on a different day may help.")
+        case nil:
+            return String(localized: "\(n) labelled examples so far. Add more to sharpen sitting, standing and position changes.")
+        }
     }
 }

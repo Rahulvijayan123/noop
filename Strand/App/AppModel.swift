@@ -412,12 +412,21 @@ final class AppModel: ObservableObject {
     /// copy back. Runs when the cloud path comes up and after each placement change, so a change made
     /// offline is retried instead of waiting for the next one (a pending change also blocks every pull).
     func syncPlacement() async {
+        defer { Task { await refreshActivityPlacements() } }
         guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil,
               let store = await repo.storeHandle(),
               let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
         let sync = placementSync(placementStore)
         _ = try? await sync.pushPending()
         _ = try? await sync.reconcile()
+    }
+
+    /// Reload the declared placement the activity decoder reads (hsmm-2.0). A change alters the decoder's cache tag,
+    /// so the activity pages are re-materialised with it.
+    func refreshActivityPlacements() async {
+        guard await repo.refreshActivityPlacements() else { return }
+        activityContext.requestMaterialization()
+        await repo.refresh()
     }
 
     /// The placement sync for this phone's strap, translating between its local id and the one the cloud
@@ -691,9 +700,13 @@ final class AppModel: ObservableObject {
     /// pages are re-materialised with it.
     @discardableResult
     func refitActivityPersonalProfile(force: Bool = false) async -> ActivityPersonalProfileStore.Record? {
-        let before = ActivityPersonalProfileStore.shared.adoptedProfile?.tag
+        func tags() -> [String?] {
+            [ActivityPersonalProfileStore.shared.adoptedProfile?.tag,
+             ActivityPersonalProfileStore.shared.adoptedPostureHeartRate?.tag]
+        }
+        let before = tags()
         let record = await repo.refitActivityPersonalProfileIfNeeded(force: force)
-        if ActivityPersonalProfileStore.shared.adoptedProfile?.tag != before {
+        if tags() != before {
             activityContext.requestMaterialization()
             await repo.refresh()
         }

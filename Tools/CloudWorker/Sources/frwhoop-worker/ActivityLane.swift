@@ -728,7 +728,8 @@ struct ActivityLane {
             dayStart: dayBounds.start, dayEnd: dayBounds.end, lookback: true)
         let encoder = try ActivityEncoderWindowsStore.load(db: db, userId: job.userId, deviceId: job.deviceId,
                                                            day: job.day)
-        let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day)
+        let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day,
+                                                                    deviceId: job.deviceId)
         let built = try ActivityContextDays.buildStreamDay(
             day: job.day, dayBounds: dayBounds, streams: streams,
             sleep: ActivityContextDays.asleepSpans(nights), inBed: nights.map { (start: $0.start, end: $0.end) },
@@ -1765,7 +1766,8 @@ struct ActivityLane {
                 gaitWindows: gaitWindows)
             // The wearer's heart-rate reference as of the day, the way the phone personalizes its decode
             // (audit D1-01 / D5-12), recorded in the document.
-            let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day)
+            let reference = ActivityContextDays.loadDecoderReference(db: db, userId: job.userId, day: job.day,
+                                                                    deviceId: job.deviceId)
             builtInput = input
             generatedAt = now
             let canonical = selection.canonical(input, base: reference.config)

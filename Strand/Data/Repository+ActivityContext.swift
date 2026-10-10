@@ -24,25 +24,43 @@ extension Repository {
     /// therefore does not depend on later nights, and its config tag — which the persisted ledger compares —
     /// stays put as new nights arrive, so a moving reference re-derives only the days it actually applies to.
     func activityDecoderConfig(forDayStart dayStart: Int) -> ActivityDecoderConfig {
-        activityDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))))
+        activityDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))),
+                              window: Self.placementWindow(dayStart: dayStart))
     }
 
-    private func activityDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
-        var config = activityBaseDecoderConfig(beforeDay: beforeDay)
+    private func activityDecoderConfig(beforeDay: String?, window: Range<Int>? = nil) -> ActivityDecoderConfig {
+        var config = activityBaseDecoderConfig(beforeDay: beforeDay, window: window)
         config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
+        config.postureHeartRate = ActivityPersonalProfileStore.shared.adoptedPostureHeartRate
         return config
     }
+
+    /// The seconds a day's decode reads placement over: its warm-up before the day (`ActivityContextTrackBuilder`
+    /// reads up to 30 min) through a day after it (a local day can run past 24 h at a clock change).
+    static func placementWindow(dayStart: Int) -> Range<Int> { (dayStart - 3_600)..<(dayStart + 2 * 86_400) }
 
     /// `activityDecoderConfig` without the personal profile: what a personal fit is replayed with and has to beat.
     var activityBaseDecoderConfig: ActivityDecoderConfig { activityBaseDecoderConfig(beforeDay: nil) }
 
+    /// The base config for the local day starting at `dayStart` (its resting reference and placement).
+    func activityBaseDecoderConfig(forDayStart dayStart: Int) -> ActivityDecoderConfig {
+        activityBaseDecoderConfig(beforeDay: Self.dayString(Date(timeIntervalSince1970: TimeInterval(dayStart))),
+                                  window: Self.placementWindow(dayStart: dayStart))
+    }
+
     /// `beforeDay` (`yyyy-MM-dd`) limits the resting reference to the nights keyed strictly before it; nil uses
     /// every night.
-    private func activityBaseDecoderConfig(beforeDay: String?) -> ActivityDecoderConfig {
+    private func activityBaseDecoderConfig(beforeDay: String?, window: Range<Int>? = nil) -> ActivityDecoderConfig {
         let nights = beforeDay.map { key in days.filter { $0.day < key } } ?? days
-        return ActivityDecoderConfig.personalized(
+        var config = ActivityDecoderConfig.personalized(
             restingHeartRate: ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: nights.map(\.restingHr)),
             maxHeartRate: activityMaxHeartRate)
+        // Where the strap is worn (hsmm-2.0): off the wrist the forearm rules stop picking sitting or standing.
+        // Only the stretches that change the decode are kept, so a wrist-only day keeps its tag.
+        let span = window ?? 0..<Int.max
+        config.placements = ActivityDecoderConfig.decodingPlacements(
+            ActivityPlacementCache.shared.spans(deviceId: deviceId), from: span.lowerBound, to: span.upperBound)
+        return config
     }
 
     /// The config the canonical decode of the day starting at `dayStart` runs with: that day's reference plus the

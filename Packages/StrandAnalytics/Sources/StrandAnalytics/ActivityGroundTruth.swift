@@ -657,11 +657,11 @@ public struct ActivityCalibrationProtocolModel: Equatable, Sendable {
 /// carries its own heads, timestamps and `protocol_version`, so nothing reads an old definition back.
 public enum ActivityCalibrationProtocols {
     /// The protocol the guided session runs.
-    public static var current: ActivityCalibrationProtocolModel { v4 }
+    public static var current: ActivityCalibrationProtocolModel { v5 }
 
     /// Every protocol a stored label may name in `protocol_version`, newest first. Labels carry their own heads
     /// and timestamps, so an old version is listed only to read its definition back (e.g. for display).
-    public static var all: [ActivityCalibrationProtocolModel] { [v4, v3] }
+    public static var all: [ActivityCalibrationProtocolModel] { [v5, v4, v3] }
 
     /// The protocol a label's `protocol_version` names, if known.
     public static func model(forVersion version: String?) -> ActivityCalibrationProtocolModel? {
@@ -674,7 +674,9 @@ public enum ActivityCalibrationProtocols {
 
     /// Short runs it takes before a personal profile can be fit and tested: leave-one-run-out trains on
     /// all runs but one, so each posture needs `ActivityPersonalProfileFitter.minModeSeconds` across two runs.
-    public static let runsToPersonalise = 3
+    /// calibration-v5's 75 s holds leave 67 s per hold after the guards and trims, 134 s per posture per run, so two
+    /// runs clear it (v3 / v4's 30 s holds needed three).
+    public static let runsToPersonalise = 2
 
     /// About 5 minutes, posture and posture changes only: the distinctions the decoder gets wrong (sitting vs
     /// standing vs lying) and the moves between them. Walking, desk work, typing and fidgeting are gone:
@@ -778,5 +780,59 @@ public enum ActivityCalibrationProtocols {
             tasks: tasks)
         let lieDown = v3.activities.first { $0.id == "lie-down" }!
         return ActivityCalibrationProtocolModel(version: "calibration-v4", activities: [sitStand, lieDown])
+    }()
+
+    /// Hold length in calibration-v5 (s): long enough for the heart rate to settle after a change of posture
+    /// (orthostatic response, ~45 s) and leave one 30 s block (`ActivityPostureHeartRateFitter`).
+    public static let v5HoldSeconds = 75
+
+    /// calibration-v5 (hsmm-2.0): v4's sit / stand activity with
+    ///   • 75 s holds, so each hold gives the heart-rate-by-posture fit a settled block and the profile fit 134 s per
+    ///     posture per run (two runs personalise instead of three);
+    ///   • the second repetition held the way an upper-arm strap cannot tell apart: seated with the arms hanging at the
+    ///     sides or resting on the lap, and standing with the arms hanging. The owner sat for 90 minutes on 2026-10-09
+    ///     with their upper arm hanging and was read as standing; a run that never shows that pose cannot teach it.
+    /// The stand-ups and sit-downs carry `transition_ts`, so they also check the measured change of height
+    /// (`ActivityVerticalShift`). The lie-down activity is v3's, unchanged.
+    public static let v5: ActivityCalibrationProtocolModel = {
+        let seated = PostureClass.seatedLikely.rawValue
+        let upright = PostureClass.uprightStationary.rawValue
+
+        func hold(_ id: String, _ title: String, _ posture: String, rep: Int,
+                  _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, posture: posture,
+                                    durationSeconds: v5HoldSeconds, repetition: rep)
+        }
+        func move(_ id: String, _ title: String, _ kind: ActivityGroundTruthTransitionKind, to end: String, rep: Int,
+                  _ instructions: String) -> ActivityCalibrationTask {
+            ActivityCalibrationTask(id: id, title: title, instructions: instructions, transitionKind: kind.rawValue,
+                                    endPosture: end, durationSeconds: 12, cueSecondsRange: v4CueSecondsRange,
+                                    repetition: rep)
+        }
+
+        let tasks: [ActivityCalibrationTask] = [
+            hold("sit-stand.sit-1", "Sit", seated, rep: 1,
+                 "Sit the way you normally do. Keep your hands busy as usual: use your phone, gesture, rest them. No need to hold still."),
+            move("sit-stand.stand-up-1", "Stand up", .sitToStand, to: upright, rep: 1,
+                 "When it buzzes, stand up at your normal speed, then stay standing."),
+            hold("sit-stand.stand-1", "Stand", upright, rep: 1,
+                 "Stand the way you normally do, as if waiting or chatting. Use your phone or gesture as usual."),
+            move("sit-stand.sit-down-1", "Sit down", .standToSit, to: seated, rep: 1,
+                 "When it buzzes, sit back down, then stay seated."),
+            hold("sit-stand.sit-2", "Sit, arms down", seated, rep: 2,
+                 "Stay seated with your arms hanging at your sides or resting on your lap, not on a desk. Relax."),
+            move("sit-stand.stand-up-2", "Stand up", .sitToStand, to: upright, rep: 2,
+                 "When it buzzes, stand up at your normal speed, then stay standing."),
+            hold("sit-stand.stand-2", "Stand, arms down", upright, rep: 2,
+                 "Stand with your arms hanging relaxed at your sides."),
+            move("sit-stand.sit-down-2", "Sit down", .standToSit, to: seated, rep: 2,
+                 "When it buzzes, sit back down. That's the end of this part."),
+        ]
+        let sitStand = ActivityCalibrationActivity(
+            id: "sit-stand", title: "Sit and stand",
+            setup: "Sit on a chair, or on the edge of a bed or sofa. Keep the phone with you; the screen tells you each step.",
+            tasks: tasks)
+        let lieDown = v3.activities.first { $0.id == "lie-down" }!
+        return ActivityCalibrationProtocolModel(version: "calibration-v5", activities: [sitStand, lieDown])
     }()
 }

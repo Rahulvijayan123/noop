@@ -15,6 +15,9 @@ final class ActivityPersonalProfileStore: @unchecked Sendable {
         /// What the fit saw (`Repository.activityPersonalFingerprint`); equal means a refit would repeat it.
         var fingerprint: String
         var result: ActivityPersonalFitResult
+        /// The heart-rate-by-posture fit from the same labels (`ActivityPostureHeartRateFitter`, hsmm-2.0); nil in
+        /// records written before it existed, and then refit on the next pass.
+        var postureHeartRate: ActivityPostureHeartRateFitResult? = nil
     }
 
     private let lock = NSLock()
@@ -46,6 +49,14 @@ final class ActivityPersonalProfileStore: @unchecked Sendable {
     var adoptedProfile: ActivityPersonalProfile? {
         guard let record = record(), record.result.status == .adopted else { return nil }
         return record.result.profile
+    }
+
+    /// The heart-rate-by-posture model the decoder may read: only an adopted fit's (no model stands in before then).
+    var adoptedPostureHeartRate: ActivityPostureHeartRateModel? {
+        guard let fit = record()?.postureHeartRate, fit.status == .adopted, let model = fit.model, model.isUsable else {
+            return nil
+        }
+        return model
     }
 
     /// Store a fit made under `expected`. Refused when the scope changed meanwhile (the fit read another

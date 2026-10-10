@@ -328,7 +328,10 @@ enum ActivityContextDays {
     /// Tanaka maximum for the wearer's age on the day (the phone's `effortHRmax` without its manual override,
     /// which the server does not store); each missing input keeps the decoder default (rest 60, max 190).
     /// The phone's adopted personal profile and its ElderNet gait pin are not on the server and are not used.
-    static let decoderConfigRecipe = "srv-cfg-1"
+    /// srv-cfg-2 (hsmm-2.0): plus the wearer's declared strap placement over the day and its warm-up
+    /// (`placement_intervals`, resolved for the strap), so an upper-arm strap is not read with wrist rules. The
+    /// phone's heart-rate-by-posture model is personal and phone-only, like its profile.
+    static let decoderConfigRecipe = "srv-cfg-2"
 
     /// Nights of resting heart rate the reference reads (the phone reads its latest 14) and how far back.
     static let referenceNights = 14
@@ -341,11 +344,18 @@ enum ActivityContextDays {
         var restingNights: [Int] = []
         /// The wearer's age on the day, when the profile has a date of birth.
         var ageYears: Int? = nil
+        /// Declared placement over the day and its warm-up, reduced to the stretches that change the decode
+        /// (`ActivityDecoderConfig.decodingPlacements`); nil = read as a wrist.
+        var placements: [ActivityPlacementSpan]? = nil
+        /// Whether the placement read succeeded ("placement_intervals", "none" when nothing was declared, "error").
+        var placementSource = "none"
 
         var restingHeartRate: Double? { ActivityDecoderConfig.typicalRestingHeartRate(fromNightly: restingNights) }
         var maxHeartRate: Double? { ageYears.flatMap { $0 > 0 ? StrainScorer.tanakaHRmax(age: Double($0)) : nil } }
         var config: ActivityDecoderConfig {
-            .personalized(restingHeartRate: restingHeartRate, maxHeartRate: maxHeartRate)
+            var c = ActivityDecoderConfig.personalized(restingHeartRate: restingHeartRate, maxHeartRate: maxHeartRate)
+            c.placements = placements
+            return c
         }
 
         /// The provenance the document records.
@@ -362,7 +372,9 @@ enum ActivityContextDays {
                 restingHeartRateNights: restingNights.count,
                 maxHeartRate: c.maxHeartRate,
                 maxHeartRateSource: usedMax ? "tanaka_age" : "default",
-                gaitWindows: gaitWindows)
+                gaitWindows: gaitWindows,
+                placement: Set((placements ?? []).map(\.placement.rawValue)).sorted().joined(separator: ","),
+                placementSource: placementSource)
         }
     }
 
@@ -379,6 +391,9 @@ enum ActivityContextDays {
         /// In-process HART ElderNet gait windows the decode read (channel 4c). The standalone ElderNet stage
         /// (shadow / candidate) never reaches the published decode.
         var gaitWindows: Int
+        /// The non-wrist placements the decode read ("" = every second read as a wrist), and where they came from.
+        var placement: String = ""
+        var placementSource: String = "none"
 
         enum CodingKeys: String, CodingKey {
             case tag, recipe
@@ -386,6 +401,7 @@ enum ActivityContextDays {
             case restingHeartRateNights = "resting_hr_nights"
             case maxHeartRate = "max_hr", maxHeartRateSource = "max_hr_source"
             case gaitWindows = "gait_windows"
+            case placement, placementSource = "placement_source"
         }
     }
 
@@ -406,8 +422,19 @@ enum ActivityContextDays {
 
     /// The reference for `day` (a UTC job day): the nights scored before it, and the profile's date of birth.
     /// Never throws: an unreadable table leaves the decoder defaults, recorded as such.
-    static func loadDecoderReference(db: PostgresClient, userId: String, day: String) -> DecoderReference {
+    static func loadDecoderReference(db: PostgresClient, userId: String, day: String,
+                                     deviceId: String? = nil) -> DecoderReference {
         var reference = DecoderReference()
+        if let deviceId, let bounds = ActivityLane.utcDayBounds(day) {
+            let from = bounds.start - lookbackSeconds, to = bounds.end
+            do {
+                let rows = try ContextInputs.readPlacements(db: db, read: [userId, deviceId, String(from), String(to)])
+                reference.placements = ActivityDecoderConfig.decodingPlacements(placementSpans(rows), from: from, to: to)
+                reference.placementSource = rows.isEmpty ? "none" : "placement_intervals"
+            } catch {
+                reference.placementSource = "error"
+            }
+        }
         if let rows = try? db.isolatingFailures({ try db.query("""
             select round(resting_hr_bpm)::int::text as r from public.server_daily_scores
              where user_id = $1::uuid and algorithm_version = 'frwhoop-server-1'
@@ -422,6 +449,15 @@ enum ActivityContextDays {
             reference.ageYears = ageYears(dateOfBirth: dob, on: day)
         }
         return reference
+    }
+
+    /// Resolved placement rows as decoder spans: the strap's own pieces when it has any, else the owner's
+    /// device-less declarations (the phone reads its placement the same way, `ActivityPlacementCache`).
+    static func placementSpans(_ rows: [PhysiologyContext.PlacementInput]) -> [ActivityPlacementSpan] {
+        let device = rows.filter { $0.scope != ContextInputs.accountPlacementScope }
+        let chosen = device.isEmpty ? rows : device
+        return chosen.map { ActivityPlacementSpan(start: $0.start, end: $0.end,
+                                                  placement: ActivityWearPlacement(declared: $0.placement)) }
     }
 
     /// What this worker build runs for a lane, as `reconcile_activity_context_versions` takes it: the decoder,
@@ -454,8 +490,8 @@ enum ActivityContextDays {
     /// Increases whenever a build changes anything the versions tag names (decoder, ontology, feature schema,
     /// document schema, taxonomy, interval version, publish interval, decoder-config recipe, lookback). Not part
     /// of the tag: equal builds with different ordinals would otherwise fingerprint differently.
-    /// 2: hsmm-1.9, and the tag names the taxonomy and interval versions.
-    static let versionsOrdinal = 2
+    /// 2: hsmm-1.9, and the tag names the taxonomy and interval versions. 3: hsmm-2.0 and srv-cfg-2.
+    static let versionsOrdinal = 3
 
     /// `parts` joined with ';', every character outside the registry's tag alphabet replaced, at most 256.
     static func versionsTag(_ parts: [String]) -> String {

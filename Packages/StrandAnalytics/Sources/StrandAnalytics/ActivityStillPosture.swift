@@ -1,0 +1,86 @@
+import Foundation
+
+// ActivityStillPosture.swift — what the length of a still stretch, and the change of height that began it, say about
+// sitting versus standing (hsmm-2.0).
+//
+// The decoder's dwell priors (seated 900 s, upright 100 s) set how long a posture lasts once known, but since
+// hsmm-1.8 the seated / upright split is clamped to posture EVIDENCE, and nothing counted elapsed stillness as
+// evidence. So ninety motionless minutes read the same as ninety seconds: "Standing quietly" all afternoon if a weak
+// cue leaned that way (the owner, 2026-10-09 16:45–18:30). People rarely stand still for long: in free living
+// (Capture-24, 151 participants, camera-labelled) the share of still time spent standing falls steeply with the
+// time since the person last moved (`durationTable`, measured in
+// _build-scratch/bicep-posture/A-duration/REPORT.md). This file turns that into a bounded lean toward sitting.
+//
+// A measured change of height (`ActivityVerticalShift`: the shoulder rises ~0.3–0.5 m when standing up) anchors
+// the posture it ended in for as long as the stillness after it lasts.
+
+public enum ActivityStillPosture {
+    // Still-stretch bookkeeping (decoder side).
+    /// Moving (gait, vehicle, exercise) posterior mass that ends a still stretch.
+    public static let breakMovingMass = 0.5
+    /// Postural-transition mass that ends one (a change of position starts a new stretch).
+    public static let breakTransitionMass = 0.2
+    /// Gait presence (step counter or IMU rhythm) that ends one.
+    public static let breakGaitPresence = 0.4
+    /// Stationary mass at which a stretch may begin.
+    public static let startStationaryMass = 0.6
+    /// Seconds after a measured stand-up / sit-down during which a break is the event itself, not a new movement.
+    public static let anchorEventSlackS = 30
+
+    /// The most all still-stretch priors together may lean either way (log-odds of seated over upright).
+    public static let maxPriorLean = log(8.0)
+
+    /// Extra log-odds toward seated after `stillForS` seconds of uninterrupted stillness, relative to the first
+    /// minute of a stretch: piecewise-linear in log time over `durationTable`, 0 before its first knot, flat after
+    /// its last, never negative, capped at `maxDurationLean`.
+    public static func durationLean(stillForS: Int) -> Double {
+        let t = Double(stillForS)
+        let knots = durationTable
+        guard let first = knots.first, t > first.s else { return 0 }
+        if let last = knots.last, t >= last.s { return min(maxDurationLean, max(0, last.lean)) }
+        for i in 1..<knots.count where t < knots[i].s {
+            let a = knots[i - 1], b = knots[i]
+            let x = (log(t) - log(a.s)) / (log(b.s) - log(a.s))
+            return min(maxDurationLean, max(0, a.lean + x * (b.lean - a.lean)))
+        }
+        return 0
+    }
+
+    /// (seconds still, extra log-odds toward seated). See `durationLean`.
+    ///
+    /// Capture-24 (151 free-living participants, camera labels, `A-duration/results.json`): within uninterrupted
+    /// sitting-or-standing stretches, the log-odds of sitting rise over the first minute's by
+    ///   elapsed      2 m   3 m   5 m   7.5 m  10 m  15 m  20 m  30 m  45 m
+    ///   V1 (strict)  0.21  0.46  0.77  1.18   1.58  2.04  2.52  2.74  3.08
+    ///   V2 (chores)  0.12  0.27  0.44  0.68   0.92  1.15  1.37  1.50  1.64
+    /// (V2 counts household chores and manual work as not sitting: the conservative bound). The knots are their
+    /// midpoint at each bin's start. Per participant the effect is no artefact of pooling: the within-participant
+    /// median change is as large (V1 10–15 m: +6.3). Standing bouts are short (median 2.2 min, p90 7 min, 5 % past
+    /// 10 min); sitting bouts long (median 5.2 min, 15 % past 20 min). Only the duration-specific part is used, never
+    /// the 78 % base rate of sitting, so the first minute of a stretch stays even.
+    public static let durationTable: [(s: Double, lean: Double)] = [
+        (60, 0), (120, 0.16), (180, 0.36), (300, 0.6), (450, 0.93), (600, 1.25), (900, 1.6), (1200, 1.94),
+        (1800, 2.12), (2700, 2.36),
+    ]
+    /// The duration prior alone. ln 8 lets a long stillness commit a hedged "Sitting" label (the commit bar is about
+    /// ln 1.9 over neutral, reached after ~5 minutes) while the class confidence caps still apply.
+    public static let maxDurationLean = log(8.0)
+
+    // Measured change of height.
+    /// |displacement| (m) at which a shift counts as a stand-up or sit-down, and the lean it then anchors.
+    public static let anchorMinDisplacementM = 0.15
+    /// A rise anchors standing at ln 3: with the duration prior it commits "Standing" for about the first three still
+    /// minutes and fades to unresolved by about ten, matching standing bouts (median 2.2 min, p90 7 min). A drop
+    /// anchors sitting at ln 4 (sitting bouts are long, and the duration prior only adds to it).
+    public static let anchorLeanSeated = log(4.0)
+    public static let anchorLeanUpright = log(3.0)
+    public static let anchorMinQuality = 0.5
+
+    /// The anchor a measured shift sets: > 0 (seated) after a drop, < 0 (upright) after a rise, nil when the shift is
+    /// too small or too poorly measured to say.
+    public static func anchorLean(_ shift: ActivityVerticalShiftEvidence) -> Double? {
+        guard shift.quality >= anchorMinQuality, shift.displacementM.isFinite,
+              abs(shift.displacementM) >= anchorMinDisplacementM else { return nil }
+        return shift.displacementM < 0 ? anchorLeanSeated : -anchorLeanUpright
+    }
+}

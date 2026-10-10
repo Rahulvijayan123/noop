@@ -65,6 +65,9 @@ extension ActivityDecoderConfig {
         if let head = sitStandHead, head.isUsable {
             tag += "-ss\(head.modelVersion.filter { $0.isLetter || $0.isNumber })\(head.tag)"
         }
+        // A non-wrist placement (`-pl<hash>`) and an adopted heart-rate-by-posture model (`-ph<tag>`), hsmm-2.0.
+        if let placement = placementTag { tag += "-pl\(placement)" }
+        if let hr = postureHeartRate, hr.isUsable { tag += "-ph\(hr.tag)" }
         return tag
     }
 }

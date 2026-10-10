@@ -43,7 +43,11 @@ public enum ActivityContextVersions {
     /// and then at a softer ceiling, never lifted; "Sitting, restless" / "Standing, restless" carry the mass of
     /// the posture they name rather than seated + upright; the four postural-transition modes share one
     /// heart-rate level (lying down was 0.15 against 0.20), so the rate cannot pick the path into a posture.
-    public static let decoder = "hsmm-1.9"
+    /// 2.0: placement and still-stretch priors. Off the wrist (`ActivityWearPlacement`) the wrist-geometry cues no
+    /// longer pick sitting or standing; a still stretch's length leans toward sitting (`ActivityStillPosture`); a
+    /// measured stand-up / sit-down (`ActivityVerticalShift`) anchors the posture after it; a wearer's verified
+    /// heart-rate-by-posture model (`ActivityPostureHeartRate`) may tip a settled, even split.
+    public static let decoder = "hsmm-2.0"
     /// Per-window IMU feature vector layout (`ImuWindowFeatures`).
     /// imu-feat-2 (2026): gyro is true RMS (not mean), jerk is per-second g/s (`jerk_rms_gps`),
     /// cadence band is 0.8–3.5 Hz. Stored imu-feat-1 output is invalidated by this bump
