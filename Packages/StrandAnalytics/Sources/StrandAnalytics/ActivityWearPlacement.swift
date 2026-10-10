@@ -28,6 +28,15 @@ public enum ActivityWearPlacement: String, Codable, CaseIterable, Sendable, Hash
     /// placement nobody declared (the pre-hsmm-2.0 reading), keeps them.
     public var wristPostureCues: Bool { self == .wrist || self == .unknown }
 
+    /// Which calibration a second worn here uses: an undeclared placement reads as the wrist (as the decoder does).
+    public var calibrationKey: String {
+        switch self {
+        case .wrist, .unknown: return "wrist"
+        case .bicep: return "bicep"
+        case .other: return "other"
+        }
+    }
+
     /// A declared placement string as stored (case-insensitive); anything unrecognised is `unknown`.
     public init(declared: String?) {
         self = declared.flatMap { ActivityWearPlacement(rawValue: $0.lowercased()) } ?? .unknown

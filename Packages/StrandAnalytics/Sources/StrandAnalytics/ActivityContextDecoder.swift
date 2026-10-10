@@ -75,6 +75,23 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// it off for a wearer whose long stillness is often standing (a standing desk, a standing job), whom the
     /// population prior would read as sitting.
     public var stillDurationPrior: Bool? = nil
+    /// Per-placement calibration (hsmm-2.0): the wearer's adopted profile and heart-rate model for each place they
+    /// wear the strap, keyed by `ActivityWearPlacement.calibrationKey` ("wrist", "bicep", "other"). A second is
+    /// scored with the entry for the placement it was worn at (`placements`), falling back to `personalProfile` /
+    /// `postureHeartRate`; a calibration made on the bicep therefore never shapes a wrist second, and switching
+    /// placement switches calibration. nil (the default) decodes exactly as before.
+    public var placementProfiles: [String: ActivityPersonalProfile]? = nil
+    public var placementPostureHeartRate: [String: ActivityPostureHeartRateModel]? = nil
+
+    /// The personal profile that applies at placement `key`.
+    public func personalProfile(forCalibration key: String) -> ActivityPersonalProfile? {
+        placementProfiles?[key] ?? personalProfile
+    }
+
+    /// The heart-rate-by-posture model that applies at placement `key`.
+    public func postureHeartRate(forCalibration key: String) -> ActivityPostureHeartRateModel? {
+        placementPostureHeartRate?[key] ?? postureHeartRate
+    }
 
     public init() {}
 }
@@ -289,8 +306,14 @@ public struct ActivityContextDecoder: Sendable {
     public let gaitQualityRefusal: String?
     /// What ElderNet did in this decoder's lifetime (nil without a gait config). Not part of the snapshot.
     public private(set) var gaitQualityReport: GaitQualityTrackReport?
-    /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy.
-    private let observationProfiles: [ModeProfile]
+    /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy, per
+    /// calibration key (the placement the second was worn at); `defaultProfiles` for a key without its own entry.
+    private let defaultProfiles: [ModeProfile]
+    private let placementTables: [String: [ModeProfile]]
+    /// The calibration key of the second being ingested (set at the top of `ingest`).
+    private var activeCalibrationKey = ActivityWearPlacement.wrist.calibrationKey
+    private var observationProfiles: [ModeProfile] { placementTables[activeCalibrationKey] ?? defaultProfiles }
+    private var activeProfile: ActivityPersonalProfile? { config.personalProfile(forCalibration: activeCalibrationKey) }
     /// The personal sit / stand head when `config.sitStandHead` is set and usable; nil keeps every path as it was.
     private let sitStandHead: ActivitySitStandModel?
     /// When set, `ingest` keeps the scored second's features and body posterior in `lastScored` (the
@@ -316,7 +339,8 @@ public struct ActivityContextDecoder: Sendable {
 
     public init(config: ActivityDecoderConfig = ActivityDecoderConfig()) {
         self.config = config
-        self.observationProfiles = ActivityContextModel.profiles(for: config.personalProfile)
+        self.defaultProfiles = ActivityContextModel.profiles(for: config.personalProfile)
+        self.placementTables = (config.placementProfiles ?? [:]).mapValues { ActivityContextModel.profiles(for: $0) }
         self.body = bodyLayout.expand(ActivityContextModel.prior)
         self.arm = ActivityContextModel.armPrior
         let prepared = PreparedMotionHeads.prepare(config.motionHeads)
@@ -453,7 +477,9 @@ public struct ActivityContextDecoder: Sendable {
             tracking.anchor = nil
         }
         f.forearmSign = calibrateForearmSign(f)
-        f.wristPostureCues = config.placement(at: obs.ts).wristPostureCues
+        let placement = config.placement(at: obs.ts)
+        f.wristPostureCues = placement.wristPostureCues
+        activeCalibrationKey = placement.calibrationKey
         // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05). Never on the staged night
         // or in its in-bed window: a sleeper is very still, and sleep staging already says someone is there.
         if obs.wear == .unknown, f.hr == nil, obs.sleep != .asleep, !obs.inBed, ActivityContextModel.implausiblyStill(f) {
@@ -692,7 +718,7 @@ public struct ActivityContextDecoder: Sendable {
                 let recShare = min(1, rec / ActivityContextModel.PostureEvidence.caps[ActivityContextModel.PostureEvidence.recumbentOrientationIndex])
                 lean += ActivityStillPosture.durationLean(stillForS: stillFor) * (1 - recShare)
             }
-            if let model = config.postureHeartRate {
+            if let model = config.postureHeartRate(forCalibration: activeCalibrationKey) {
                 lean += ActivityPostureHeartRateGate.lean(
                     model: model, averageBpm: tracking.hrAverage, restingBpm: config.restingHeartRate,
                     stillForS: stillFor, sinceExertionS: tracking.lastExertionTs.map { ts - $0 }, slope: f.hrSlope)
@@ -711,7 +737,7 @@ public struct ActivityContextDecoder: Sendable {
     /// Seated-vs-upright evidence cap: an adopted personal profile that adapts a stationary mode was validated on
     /// the wearer's own held-out runs, so it may carry more.
     private var postureCapSU: Double {
-        let personal = config.personalProfile?.modes.keys.contains { ["bedRest", "seated", "upright"].contains($0) } ?? false
+        let personal = activeProfile?.modes.keys.contains { ["bedRest", "seated", "upright"].contains($0) } ?? false
         return personal ? ActivityContextModel.postureEvidenceCapSUPersonal : ActivityContextModel.postureEvidenceCapSU
     }
 

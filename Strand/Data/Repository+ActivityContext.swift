@@ -30,8 +30,11 @@ extension Repository {
 
     private func activityDecoderConfig(beforeDay: String?, window: Range<Int>? = nil) -> ActivityDecoderConfig {
         var config = activityBaseDecoderConfig(beforeDay: beforeDay, window: window)
-        config.personalProfile = ActivityPersonalProfileStore.shared.adoptedProfile
-        config.postureHeartRate = ActivityPersonalProfileStore.shared.adoptedPostureHeartRate
+        // Each placement's own calibration; a second is scored with the one for where the strap was worn then.
+        let profiles = ActivityPersonalProfileStore.shared.adoptedProfiles
+        let heartRates = ActivityPersonalProfileStore.shared.adoptedPostureHeartRates
+        config.placementProfiles = profiles.isEmpty ? nil : profiles
+        config.placementPostureHeartRate = heartRates.isEmpty ? nil : heartRates
         return config
     }
 

@@ -47,31 +47,55 @@ extension Repository {
         guard let scope = store.currentScope else { return nil }
         let base = activityBaseDecoderConfig
         let labels = ActivityGroundTruthStore.shared.all()
+        // Calibration is per placement (hsmm-2.0): a run made on the bicep fits the bicep's profile and nothing else.
+        let cache = ActivityPlacementCache.shared
+        let keyOf: (ActivityGroundTruthLabel) -> String = { cache.calibrationKey(for: $0) }
+        let current = cache.placement(at: Int(Date().timeIntervalSince1970), deviceId: deviceId).calibrationKey
         let sessions = Self.calibrationSessions(labels)
-        let hrLabels = ActivityPostureHeartRateFitter.labels(from: labels)
+        let sessionsByKey = Dictionary(grouping: sessions) { s in s.labels.first.map(keyOf) ?? current }
+        let labelsByKey = Dictionary(grouping: labels, by: keyOf)
+        let keys = Set(sessionsByKey.keys).union(labelsByKey.keys).union([current]).sorted()
+        let hrLabelsByKey = labelsByKey.mapValues { ActivityPostureHeartRateFitter.labels(from: $0) }
         let fingerprint = await Task.detached(priority: .utility) {
-            Self.personalProfileFingerprint(sessions, config: base) + "-" + Self.postureHeartRateFingerprint(hrLabels)
+            var text = "placement-cal-1|\(current)"
+            for key in keys {
+                text += "|\(key):" + Self.personalProfileFingerprint(sessionsByKey[key] ?? [], config: base)
+                    + "-" + Self.postureHeartRateFingerprint(hrLabelsByKey[key] ?? [])
+            }
+            var h: UInt64 = 0xcbf29ce484222325
+            for byte in text.utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
+            return String(h, radix: 16)
         }.value
         if !force, let stored = store.record(), stored.fingerprint == fingerprint { return stored }
 
-        var inputs: [(session: CalibrationSessionSpan, input: ActivityContextTrackInput)] = []
-        for session in sessions {
-            guard let input = await calibrationTrackInput(session, config: base) else { continue }
-            inputs.append((session, input))
-        }
         let now = Int(Date().timeIntervalSince1970)
-        let result = await Task.detached(priority: .utility) {
-            let runs = inputs.map { entry in
-                ActivityCalibrationRun(
-                    sessionId: entry.session.id,
-                    observations: ActivityContextTrackBuilder.observations(for: entry.input, config: base).observations,
-                    labels: entry.session.labels)
+        var fits: [String: ActivityPersonalProfileStore.PlacementFit] = [:]
+        for key in keys {
+            let keySessions = sessionsByKey[key] ?? []
+            var inputs: [(session: CalibrationSessionSpan, input: ActivityContextTrackInput)] = []
+            for session in keySessions {
+                guard let input = await calibrationTrackInput(session, config: base) else { continue }
+                inputs.append((session, input))
             }
-            return ActivityPersonalProfileFitter.fit(runs: runs, config: base, now: now)
-        }.value
-        let postureHR = await fitPostureHeartRate(hrLabels)
-        let record = ActivityPersonalProfileStore.Record(fingerprint: fingerprint, result: result,
-                                                         postureHeartRate: postureHR)
+            let result = await Task.detached(priority: .utility) {
+                let runs = inputs.map { entry in
+                    ActivityCalibrationRun(
+                        sessionId: entry.session.id,
+                        observations: ActivityContextTrackBuilder.observations(for: entry.input, config: base).observations,
+                        labels: entry.session.labels)
+                }
+                return ActivityPersonalProfileFitter.fit(runs: runs, config: base, now: now)
+            }.value
+            let hr = await fitPostureHeartRate(hrLabelsByKey[key] ?? [])
+            fits[key] = ActivityPersonalProfileStore.PlacementFit(result: result, postureHeartRate: hr,
+                                                                  runs: keySessions.count,
+                                                                  labels: hrLabelsByKey[key]?.count ?? 0)
+        }
+        let worn = fits[current]
+        let record = ActivityPersonalProfileStore.Record(
+            fingerprint: fingerprint,
+            result: worn?.result ?? ActivityPersonalProfileFitter.fit(runs: [], config: base, now: now),
+            postureHeartRate: worn?.postureHeartRate, placements: fits, currentPlacement: current)
         store.save(record, scope: scope)
         return record
     }

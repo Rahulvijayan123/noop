@@ -35,6 +35,38 @@ final class ActivityPlacementCache: @unchecked Sendable {
         return own.isEmpty ? (byDevice[""] ?? []) : own
     }
 
+    func setPrimary(_ deviceId: String) { primaryDeviceId = deviceId }
+
+    /// `modelContextAtLabelTime` key a ground-truth label records its placement under.
+    static let labelContextKey = "placement"
+
+    /// The declared placement at `ts` for `deviceId` (the strap's own declarations, else the user-level ones);
+    /// `unknown` when nothing covers it.
+    func placement(at ts: Int, deviceId: String?) -> ActivityWearPlacement {
+        var probe = ActivityDecoderConfig()
+        var own = spans(deviceId: deviceId ?? "")
+        // A label may carry another id for the same strap (BLE vs repository): fall back to the strap the
+        // repository last refreshed placements for.
+        if own.isEmpty, let primary = primaryDeviceId { own = spans(deviceId: primary) }
+        probe.placements = own
+        return probe.placement(at: ts)
+    }
+
+    /// The strap the repository last refreshed placements for.
+    private(set) var primaryDeviceId: String? {
+        get { lock.lock(); defer { lock.unlock() }; return primary }
+        set { lock.lock(); primary = newValue; lock.unlock() }
+    }
+    private var primary: String?
+
+    /// The calibration key a label belongs to: the placement it recorded, else the one declared at its start.
+    func calibrationKey(for label: ActivityGroundTruthLabel) -> String {
+        if let recorded = label.modelContextAtLabelTime?[Self.labelContextKey] {
+            return ActivityWearPlacement(declared: recorded).calibrationKey
+        }
+        return placement(at: label.startTs, deviceId: label.deviceId).calibrationKey
+    }
+
     /// Replace the spans for `deviceId` (nil = user-level). Returns true when they changed.
     @discardableResult
     func set(_ intervals: [PlacementInterval], deviceId: String?) -> Bool {
@@ -62,6 +94,7 @@ extension Repository {
         }
         let device = (try? placements.intervals(deviceId: deviceId)) ?? []
         let user = (try? placements.intervals(deviceId: nil)) ?? []
+        ActivityPlacementCache.shared.setPrimary(deviceId)
         let a = ActivityPlacementCache.shared.set(device, deviceId: deviceId)
         let b = ActivityPlacementCache.shared.set(user, deviceId: nil)
         return a || b

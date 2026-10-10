@@ -700,10 +700,7 @@ final class AppModel: ObservableObject {
     /// pages are re-materialised with it.
     @discardableResult
     func refitActivityPersonalProfile(force: Bool = false) async -> ActivityPersonalProfileStore.Record? {
-        func tags() -> [String?] {
-            [ActivityPersonalProfileStore.shared.adoptedProfile?.tag,
-             ActivityPersonalProfileStore.shared.adoptedPostureHeartRate?.tag]
-        }
+        func tags() -> String { ActivityPersonalProfileStore.shared.adoptedSummary }
         let before = tags()
         let record = await repo.refitActivityPersonalProfileIfNeeded(force: force)
         if tags() != before {

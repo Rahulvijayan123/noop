@@ -651,15 +651,18 @@ struct ActivityCalibrationEntry: View {
         }
         // Say whether calibration is actually in use: a run that is not yet enough changes nothing, and the
         // wearer should know that rather than assume it worked (2026-10-09: one run done, silently unused).
+        // Calibration is per placement: say which one this is about.
+        let place = fit?.currentPlacement == "bicep" ? String(localized: "bicep")
+            : fit?.currentPlacement == "other" ? String(localized: "current placement") : String(localized: "wrist")
         switch fit?.result.status {
         case .needsMoreRuns?:
             let have = fit?.result.runs ?? 0, need = fit?.result.runsNeeded ?? ActivityCalibrationProtocols.runsToPersonalise
             let more = max(1, need - have)
-            return String(localized: "Not in use yet: \(have) of \(need) runs done. Do \(more) more on another day so sitting and standing can be personalised.")
+            return String(localized: "Not in use yet on your \(place): \(have) of \(need) runs done. Do \(more) more on another day so sitting and standing can be personalised.")
         case .adopted?:
-            return String(localized: "In use: your sitting and standing are personalised. Another run keeps it current.")
+            return String(localized: "In use on your \(place): your sitting and standing are personalised. Another run keeps it current.")
         case .notBetter?:
-            return String(localized: "Tried: your runs did not beat the defaults, so they are not in use. Another run on a different day may help.")
+            return String(localized: "Tried on your \(place): your runs did not beat the defaults, so they are not in use. Another run on a different day may help.")
         case nil:
             return String(localized: "\(n) labelled examples so far. Add more to sharpen sitting, standing and position changes.")
         }

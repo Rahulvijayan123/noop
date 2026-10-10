@@ -69,6 +69,13 @@ extension ActivityDecoderConfig {
         if let placement = placementTag { tag += "-pl\(placement)" }
         if let hr = postureHeartRate, hr.isUsable { tag += "-ph\(hr.tag)" }
         if stillDurationPrior == false { tag += "-nd" }
+        // Per-placement calibration, in key order so the tag is stable.
+        for (key, profile) in (placementProfiles ?? [:]).sorted(by: { $0.key < $1.key }) where !profile.modes.isEmpty {
+            tag += "-pp\(key.prefix(1))\(profile.tag)"
+        }
+        for (key, model) in (placementPostureHeartRate ?? [:]).sorted(by: { $0.key < $1.key }) where model.isUsable {
+            tag += "-ph\(key.prefix(1))\(model.tag)"
+        }
         return tag
     }
 }

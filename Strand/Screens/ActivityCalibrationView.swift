@@ -155,7 +155,7 @@ private struct ActivityCalibrationPage: View {
     private var personalCard: some View {
         NoopCard {
             VStack(alignment: .leading, spacing: NoopMetrics.space2) {
-                Text("Personal calibration").font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
+                Text(personalTitle).font(StrandFont.headline).foregroundStyle(StrandPalette.textPrimary)
                 Text(personalHeadline)
                     .font(StrandFont.subhead)
                     .foregroundStyle(personalRecord?.result.status == .adopted
@@ -163,6 +163,11 @@ private struct ActivityCalibrationPage: View {
                     .fixedSize(horizontal: false, vertical: true)
                 if let detail = personalDetail {
                     Text(detail)
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if let other = otherPlacementsLine {
+                    Text(other)
                         .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
                         .fixedSize(horizontal: false, vertical: true)
                 }
@@ -196,6 +201,39 @@ private struct ActivityCalibrationPage: View {
         case .notBetter:
             return "Tried, not better; keeping the defaults."
         }
+    }
+
+    /// Calibration is per placement (hsmm-2.0): the card speaks for where the strap is worn now.
+    private static func placementName(_ key: String) -> String {
+        switch key {
+        case "bicep": return "bicep"
+        case "other": return "other placement"
+        default: return "wrist"
+        }
+    }
+
+    private var personalTitle: String {
+        guard let key = personalRecord?.currentPlacement else { return "Personal calibration" }
+        return "Personal calibration (\(Self.placementName(key)))"
+    }
+
+    /// The other placements' state in one line: runs recorded there apply only while the strap is worn there.
+    private var otherPlacementsLine: String? {
+        guard let record = personalRecord, let placements = record.placements else { return nil }
+        let others = placements.filter { $0.key != record.currentPlacement && ($0.value.runs > 0 || $0.value.labels > 0) }
+        guard !others.isEmpty else {
+            return "Runs count only for where the strap is worn: switching placement in Settings switches to that placement's calibration."
+        }
+        let parts = others.sorted { $0.key < $1.key }.map { key, fit -> String in
+            let state: String
+            switch fit.result.status {
+            case .adopted: state = "in use there"
+            case .needsMoreRuns: state = "\(fit.result.runs) of \(fit.result.runsNeeded) runs"
+            case .notBetter: state = "tried, not better"
+            }
+            return "\(Self.placementName(key)): \(state)"
+        }
+        return "Other placements: " + parts.joined(separator: "; ") + ". Each applies only while the strap is worn there."
     }
 
     /// The heart-rate-by-posture fit (hsmm-2.0): whether the rate is used as posture evidence for this wearer, and why

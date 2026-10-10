@@ -70,7 +70,15 @@ final class ActivityGroundTruthStore: @unchecked Sendable {
     /// only on the label and the reader, never on store state, so computing it before locking is safe.
     @discardableResult
     func upsert(_ label: ActivityGroundTruthLabel) -> ActivityGroundTruthLabel {
-        let enriched = enrich(label)
+        var enriched = enrich(label)
+        // Where the strap was worn when this was labelled (hsmm-2.0): calibration is fitted per placement, and a label
+        // keeps the placement it was made at even if the wearer later edits the placement history.
+        if enriched.modelContextAtLabelTime?[ActivityPlacementCache.labelContextKey] == nil {
+            var context = enriched.modelContextAtLabelTime ?? [:]
+            context[ActivityPlacementCache.labelContextKey] =
+                ActivityPlacementCache.shared.placement(at: enriched.startTs, deviceId: enriched.deviceId).rawValue
+            enriched.modelContextAtLabelTime = context
+        }
         lock.lock(); defer { lock.unlock() }
         var rows = loadLocked()
         if let i = rows.firstIndex(where: { $0.labelKey == enriched.labelKey }) {

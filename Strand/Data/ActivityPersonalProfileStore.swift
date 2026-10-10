@@ -18,6 +18,22 @@ final class ActivityPersonalProfileStore: @unchecked Sendable {
         /// The heart-rate-by-posture fit from the same labels (`ActivityPostureHeartRateFitter`, hsmm-2.0); nil in
         /// records written before it existed, and then refit on the next pass.
         var postureHeartRate: ActivityPostureHeartRateFitResult? = nil
+        /// Per-placement fits (hsmm-2.0), keyed by `ActivityWearPlacement.calibrationKey`: runs and labels made on the
+        /// wrist fit the wrist's profile, those made on the bicep the bicep's. `result` / `postureHeartRate` above
+        /// mirror the placement worn at fit time (what the summary card shows). nil in records written before
+        /// placement-scoped calibration; such a record applies to no placement until the next fit.
+        var placements: [String: PlacementFit]? = nil
+        /// The calibration key worn when this record was fitted.
+        var currentPlacement: String? = nil
+    }
+
+    /// One placement's calibration: the activity profile fit and the heart-rate-by-posture fit from its labels.
+    struct PlacementFit: Codable, Equatable {
+        var result: ActivityPersonalFitResult
+        var postureHeartRate: ActivityPostureHeartRateFitResult?
+        /// Guided runs and posture-labelled stretches recorded at this placement.
+        var runs: Int
+        var labels: Int
     }
 
     private let lock = NSLock()
@@ -45,18 +61,29 @@ final class ActivityPersonalProfileStore: @unchecked Sendable {
         return recordLocked(scope)
     }
 
-    /// The profile the decoder should score with: the stored fit's, only when it was adopted.
-    var adoptedProfile: ActivityPersonalProfile? {
-        guard let record = record(), record.result.status == .adopted else { return nil }
-        return record.result.profile
+    /// The profiles the decoder scores with, per placement: each placement's own fit, only when it was adopted. A
+    /// record from before placement-scoped calibration contributes nothing (it does not say where its runs were worn).
+    var adoptedProfiles: [String: ActivityPersonalProfile] {
+        guard let placements = record()?.placements else { return [:] }
+        return placements.compactMapValues { $0.result.status == .adopted ? $0.result.profile : nil }
     }
 
-    /// The heart-rate-by-posture model the decoder may read: only an adopted fit's (no model stands in before then).
-    var adoptedPostureHeartRate: ActivityPostureHeartRateModel? {
-        guard let fit = record()?.postureHeartRate, fit.status == .adopted, let model = fit.model, model.isUsable else {
-            return nil
+    /// The heart-rate-by-posture models the decoder may read, per placement: only adopted fits (no model stands in
+    /// before then).
+    var adoptedPostureHeartRates: [String: ActivityPostureHeartRateModel] {
+        guard let placements = record()?.placements else { return [:] }
+        return placements.compactMapValues { fit in
+            guard let hr = fit.postureHeartRate, hr.status == .adopted, let model = hr.model, model.isUsable else { return nil }
+            return model
         }
-        return model
+    }
+
+    /// A stable summary of what is adopted where (for change detection and logs), e.g. "bicep:pp-a1b2,wrist:none".
+    var adoptedSummary: String {
+        let p = adoptedProfiles, h = adoptedPostureHeartRates
+        return Set(p.keys).union(h.keys).sorted().map { key in
+            "\(key):\(p[key].map { "pp-" + $0.tag } ?? "none")/\(h[key].map { "ph-" + $0.tag } ?? "none")"
+        }.joined(separator: ",")
     }
 
     /// Store a fit made under `expected`. Refused when the scope changed meanwhile (the fit read another
