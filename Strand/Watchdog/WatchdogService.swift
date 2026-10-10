@@ -237,6 +237,10 @@ final class WatchdogService {
                 await sync.syncQualityMinutes(store: store, readIds: ids, localDeviceId: key,
                                               serverDeviceId: serverDevice, now: now)
             }
+            let repo = model.repo
+            Task { @MainActor in
+                await sync.syncContextIntervals(repo: repo, localDeviceId: key, serverDeviceId: serverDevice, now: now)
+            }
         }
         return true
     }

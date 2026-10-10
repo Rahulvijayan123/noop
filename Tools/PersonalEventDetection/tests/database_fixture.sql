@@ -30,3 +30,9 @@ create table noop_events(user_id uuid,device_id uuid,ts bigint,kind text,"payloa
 create table activity_context_runs(user_id uuid,device_id uuid,day date,start_ts bigint,end_ts bigint,
   activity_class text,class_confidence real,sleep_state text,wear_state text,posture jsonb,source_rank integer);
 create table server_sleep_nights(user_id uuid,device_id uuid,start_at timestamptz,end_at timestamptz);
+-- The phone's activity-context intervals (20261009190000), the columns the Layer 1 loader reads.
+create table phone_context_intervals(user_id uuid,device_id uuid,start_ts bigint,end_ts bigint,activity_class text,
+  confidence float8 default 0,evidence_quality float8 default 0,posture text,locomotion text,sleep_state text,
+  wear_state text,intensity float8,hr_samples integer default 0,hr_mean float8,rmssd float8,rr_beats integer default 0,
+  rr_diff_sq_sum_ms2 float8 default 0,rr_diff_count integer default 0,detail text,arm_behavior text,
+  primary key(user_id,device_id,start_ts));

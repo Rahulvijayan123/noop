@@ -38,7 +38,8 @@ class DatabaseTests(unittest.TestCase):
 
   def tearDown(self):
     for t in ('noop_rr_intervals', 'noop_gravity_samples', 'noop_step_samples', 'noop_sleep_state_samples', 'noop_events',
-              'activity_context_runs', 'server_sleep_nights', 'noop_hr_samples', 'noop_skin_temp_samples', 'server_metric_series'):
+              'activity_context_runs', 'server_sleep_nights', 'noop_hr_samples', 'noop_skin_temp_samples', 'server_metric_series',
+              'phone_context_intervals'):
       self.db.execute(f'delete from {t} where user_id in (%s,%s)', (self.owner, self.other))
     self.db.execute('delete from auth.users where id in (%s,%s)', (self.owner, self.other)); self.db.conn.close()
 
@@ -105,6 +106,27 @@ class DatabaseTests(unittest.TestCase):
     self.assertEqual(len(r['heartRate']), 2); self.assertEqual(r['hrv'][0]['support'], 300)
     r = self.db.row('select event_physiology(%s,%s,0,600) r', (self.other, self.device))['r']
     self.assertEqual(r['heartRate'], []); self.assertEqual(r['hrv'], [])
+
+  def test_layer1_reads_the_phones_uploaded_intervals_with_history(self):
+    from personal_events import layer1_context as L
+    from personal_events.timeline import load_postgres
+    lo = 1_790_000_000 - 1_790_000_000 % DAY
+    tl = load_postgres(self.db, self.owner, self.device, lo, lo + 3600)
+    self.assertIsNone(tl.meta['context_intervals'])
+    self.assertEqual(tl.meta['layer1_unavailable'], L.UNAVAILABLE_SERVER)
+    other_device = uuid.uuid4()
+    for dev, start in ((self.device, lo - 30 * DAY), (self.device, lo), (other_device, lo), (self.device, lo + 7200)):
+      self.db.execute("""insert into phone_context_intervals(user_id,device_id,start_ts,end_ts,activity_class,confidence,
+          evidence_quality,posture,locomotion,sleep_state,wear_state,intensity,hr_samples,hr_mean,rmssd,rr_beats,
+          rr_diff_sq_sum_ms2,rr_diff_count,detail,arm_behavior) values(%s,%s,%s,%s,'sitting',0.9,0.8,'seated_likely',
+          'stationary','awake','on_wrist',0.1,590,70.5,40,700,1120000,700,'in_vehicle','exercise_motion')""",
+          (self.owner, dev, start, start + 600))
+    tl = load_postgres(self.db, self.owner, self.device, lo, lo + 3600)
+    rows = tl.meta['context_intervals']
+    self.assertIsNone(tl.meta['layer1_unavailable'])
+    self.assertEqual([r.start for r in rows], [lo - 30 * DAY, lo])   # history before the timeline, one strap only
+    self.assertEqual((rows[1].posture, rows[1].hr_mean, rows[1].rr_diff_count, rows[1].detail, rows[1].arm_behavior),
+                     ('seated_likely', 70.5, 700, 'in_vehicle', 'exercise_motion'))
 
   # ------------------------------------------------------------------------------- signature job
   def seed_sensors(self, lo, hi, events):

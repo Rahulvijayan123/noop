@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import re
 import sqlite3
 
 import numpy as np
@@ -563,9 +564,19 @@ def load_postgres(db, owner, device, lo, hi, tz_offset_s=0) -> Timeline:
   tl = assemble(minutes, tz_offset_s, device=str(device), hr=hr, rr=(sumsq, pairs), motion=motion, steps=steps,
                 temp_raw=temp_raw, sleep_frac=sleep_frac, wrist=wrist, activity=activity, resp=resp,
                 sleep_sessions=[(r["s"], r["e"]) for r in nights])
-  # No server table carries the phone's per-interval HR / R-R components, decoded posture, class confidence and
-  # evidence quality (activity_context_runs has the server decoder's runs without them), so the Layer 1 context
-  # references cannot be built here and the `layer1` normalisation abstains on the server. Never approximated.
-  from .layer1_context import UNAVAILABLE_SERVER
-  tl.meta.update(source="postgres", rr=counters, context_intervals=None, layer1_unavailable=UNAVAILABLE_SERVER)
+  # Layer 1 context references from the phone's own intervals (POST scores/context-intervals, 20261009190000): the
+  # server decoder's activity_context_runs lack the per-interval HR / R-R components, decoded posture, confidence and
+  # evidence quality the materializer reads, so they are never substituted. No uploaded rows: `layer1` abstains.
+  from .layer1_context import ROW_COLUMNS, UNAVAILABLE_SERVER, rows_from_tuples
+  cols = ", ".join(_snake(c) for c in ROW_COLUMNS)
+  l1_rows = db.rows(f"""select {cols} from phone_context_intervals
+      where user_id=%s and device_id=%s and end_ts > %s and start_ts < %s order by start_ts""",
+                    (owner, device, lo - LAYER1_HISTORY_S, hi))
+  layer1_rows = rows_from_tuples([tuple(r[_snake(c)] for c in ROW_COLUMNS) for r in l1_rows]) if l1_rows else None
+  tl.meta.update(source="postgres", rr=counters, context_intervals=layer1_rows,
+                 layer1_unavailable=None if layer1_rows else UNAVAILABLE_SERVER)
   return tl
+
+
+def _snake(name):
+  return re.sub(r"(?<!^)(?=[A-Z])", "_", name).lower()
