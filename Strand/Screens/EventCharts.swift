@@ -61,7 +61,7 @@ struct EventWindowChart: View {
         let references = before.map {
             [ChartReference($0, label: String(localized: "Before \(EventFormat.value($0)) \(metric.unit)"))]
         } ?? []
-        IntradayChart(samples: Self.samples(metric), bucketSeconds: Self.cadenceSeconds(metric.points),
+        IntradayChart(samples: Self.samples(metric), bucketSeconds: metric.points.compactMap(\.supportSeconds).min().map(Int.init) ?? Self.cadenceSeconds(metric.points),
                       color: EventFormat.color(for: metric), interpolation: .monotone,
                       bands: band, markers: markers, references: references, compact: compact,
                       legend: hasBand && !compact ? [ChartLegendItem(.band(neutral), String(localized: "During"))] : [],

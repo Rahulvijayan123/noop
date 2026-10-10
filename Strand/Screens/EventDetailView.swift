@@ -13,13 +13,53 @@ struct EventDetailView: View {
     let event: HealthEvent
     var history: [HealthEvent] = []
 
+    @ObservedObject var detection: EventDetectionCenter = .shared
+    @ObservedObject var manual: ManualEventCenter = .shared
     @State private var metricIndex = EventDetailView.initialMetricIndex
     @State private var selected: Date?
+    @State private var showingContext = false
+    @State private var review: DetectedEvent?
+    @State private var signatureType: ManualEventEntry?
+
+    /// The logged event behind this page, when it is one, for its full strap context.
+    private var loggedEntry: ManualEventEntry? {
+        guard event.ownerId != nil, event.ownerId == manual.owner else { return nil }
+        return manual.entries.first { $0.kind == .event && $0.id.uuidString == event.id }
+    }
+    /// The page follows the logged event as its context arrives or changes; other events stay as passed.
+    private var latest: HealthEvent {
+        guard loggedEntry != nil else { return event }
+        return ManualEventPresentation.events(manual).first { $0.id == event.id } ?? event
+    }
+    private var currentPhysiology: EventPhysiology? { latest.physiology ?? detection.physiology[event.id] }
 
     var body: some View {
-        ScreenScaffold(title: verbatimKey(event.title), titleDisplay: .navigationBar) {
-            EventHeader(event: event)
-            if let physiology = event.physiology, !physiology.metrics.isEmpty {
+        ScreenScaffold(title: verbatimKey(event.ownerId == nil || event.ownerId == detection.owner ? event.title : "Event"), titleDisplay: .navigationBar) {
+            if event.ownerId == nil || event.ownerId == detection.owner {
+            EventHeader(event: latest)
+            if let entry = loggedEntry {
+                Button { showingContext = true } label: {
+                    Label("Strap context: activity, baselines and data", systemImage: "waveform.path.ecg")
+                        .font(StrandFont.subhead)
+                }
+                .buttonStyle(.bordered).tint(StrandPalette.metricPurple)
+                .sheet(isPresented: $showingContext) { ManualEventDetailView(entry: entry, center: manual) }
+                if let type = manual.types.first(where: { $0.id == entry.typeId }) {
+                    Button { signatureType = type } label: {
+                        Label("What Nara has learned about \(type.label)", systemImage: "chart.line.uptrend.xyaxis")
+                            .font(StrandFont.subhead)
+                    }
+                    .buttonStyle(.bordered).tint(StrandPalette.metricPurple)
+                    .sheet(item: $signatureType) { type in
+                        DetectorDetailSheet(type: type, owner: manual.owner, detection: detection, manual: manual)
+                    }
+                }
+            }
+            if let detected = detection.detections.first(where: { $0.id.uuidString == event.id }) {
+                Button("Review this event") { review = detected }
+                    .buttonStyle(.borderedProminent).tint(StrandPalette.accent)
+            }
+            if let physiology = currentPhysiology, !physiology.metrics.isEmpty {
                 physiologySection(physiology)
             } else {
                 NoopCard {
@@ -31,9 +71,24 @@ struct EventDetailView: View {
                 recoverySection(recovery)
             }
             relatedSection
+            Text("Curves show available cloud readings. Gaps mean data is missing. Movement is accelerometer variation in g; HRV uses measured time windows.")
+                .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
             AboutDisclosure(paragraphs: aboutParagraphs)
+            }
         }
+        .task(id: event.id) {
+            while !Task.isCancelled {
+                await detection.loadPhysiology(for: latest)
+                try? await Task.sleep(nanoseconds: 30_000_000_000)
+            }
+        }
+        .sheet(item: $review) { item in
+            DetectionReviewSheet(item: item, owner: event.ownerId, manual: manual, detection: detection)
+        }
+        .onChange(of: detection.owner) { _ in review = nil }
         .onChangeCompat(of: metricIndex) { _ in selected = nil }
+        // A logged event's context may still be filling in: ask once when the page opens.
+        .task(id: event.id) { if loggedEntry != nil { await manual.syncNow() } }
     }
 
     /// The metric the page opens on: the first. DEBUG builds take `--demo-event-metric N` for screenshots.
@@ -66,7 +121,7 @@ struct EventDetailView: View {
         }
         StatGrid(EventPhase.allCases.map { phase in
             StatItem(phase.title, value: stats.mean(phase).map(EventFormat.value), unit: metric.unit,
-                     detail: phase == .before ? nil : stats.change(phase).map(EventFormat.percentChange))
+                     detail: phase == .before ? nil : stats.changeText(phase))
         }, columns: 3)
     }
 
@@ -99,9 +154,7 @@ struct EventDetailView: View {
         let samples = EventWindowChart.samples(stats.metric)
         let unit = stats.metric.unit
         if let selected, let sample = ChartSelection.sample(for: selected, in: samples) {
-            let context = stats.change(of: sample.value).map {
-                String(localized: "\(EventFormat.percentChange($0)) vs before")
-            }
+            let context = stats.changeText(of: sample.value).map { String(localized: "\($0) vs before") }
             return ReadoutContent(dateLine: ReadoutContent.dateLine(sample.time, period: .time),
                                   value: EventFormat.value(sample.value), unit: unit, context: context)
         }
@@ -118,16 +171,14 @@ struct EventDetailView: View {
         case (false, .during): line = String(localized: "Highest during, \(time)")
         case (false, _): line = String(localized: "Highest after, \(time)")
         }
-        let context = stats.change(of: point.value).map {
-            String(localized: "\(EventFormat.percentChange($0)) vs before")
-        }
+        let context = stats.changeText(of: point.value).map { String(localized: "\($0) vs before") }
         return ReadoutContent(dateLine: line, value: EventFormat.value(point.value), unit: unit, context: context)
     }
 
     // MARK: Recovery
 
     private var sameKind: [HealthEvent] {
-        history.filter { $0.title == event.title && $0.id != event.id }
+        history.filter { $0.hasSameType(as: event) && $0.id != event.id }
     }
 
     @ViewBuilder
@@ -160,9 +211,9 @@ struct EventDetailView: View {
 
     /// This event's after-window against the other events of the same kind with the same metric.
     private var recoveryCurves: EventRecoveryCurves? {
-        guard let physiology = event.physiology, !physiology.metrics.isEmpty else { return nil }
+        guard let physiology = currentPhysiology, !physiology.metrics.isEmpty else { return nil }
         let metric = metric(in: physiology)
-        guard let current = EventRecoveryCurves.curve(for: event, metricName: metric.name) else { return nil }
+        guard let current = EventRecoveryCurves.curve(for: latest, metricName: metric.name) else { return nil }
         let others = sameKind.compactMap { EventRecoveryCurves.curve(for: $0, metricName: metric.name) }
         guard !others.isEmpty else { return nil }
         return EventRecoveryCurves(title: event.title, current: current, others: others,
@@ -174,7 +225,7 @@ struct EventDetailView: View {
     /// The metric pages behind this event's readings.
     @ViewBuilder
     private var relatedSection: some View {
-        let units = Set(event.physiology?.metrics.map { $0.unit.lowercased() } ?? [])
+        let units = Set(currentPhysiology?.metrics.map { $0.unit.lowercased() } ?? [])
         if units.contains("ms") || units.contains("bpm") {
             NoopListSection("Related") {
                 if units.contains("ms") {

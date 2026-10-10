@@ -9,7 +9,7 @@ This module owns:
 
       - ``strength``: ``strong`` only when ``source == "guided"`` AND the
         user was not unsure; everything else (stretch feedback, imported,
-        guided-but-unsure) is ``weak``. Strong and weak are never mixed in
+        manual events logged in the app, guided-but-unsure) is ``weak``. Strong and weak are never mixed in
         the default evaluation (spec 13 "separate strong guided labels from
         weak feedback labels").
 
@@ -286,7 +286,8 @@ def _label_from_wire(raw: Any) -> Optional[LabelRecord]:
     if start_ts is None or end_ts is None or end_ts <= start_ts:
         return None
     source = str(raw.get("source") or "guided")
-    if source not in ("guided", "stretch_feedback", "imported"):
+    # manual_event: an event the wearer logged in the app (20261008100000), a weak label like feedback.
+    if source not in ("guided", "stretch_feedback", "imported", "manual_event"):
         source = "guided"
     try:
         return LabelRecord(

@@ -141,7 +141,16 @@ struct EventPhaseStats {
 
     func mean(_ phase: EventPhase) -> Double? {
         let window = physiology.range(phase)
-        let values = metric.points.filter { window.contains($0.time) }.map(\.value)
+        let supported = metric.points.compactMap { point -> (Double, Double)? in
+            guard let support = point.supportSeconds else { return nil }
+            let end = point.time.addingTimeInterval(support)
+            let overlap = min(end, window.upperBound).timeIntervalSince(max(point.time, window.lowerBound))
+            return overlap > 0 ? (point.value, overlap) : nil
+        }
+        if !supported.isEmpty {
+            return supported.reduce(0) { $0 + $1.0 * $1.1 } / supported.reduce(0) { $0 + $1.1 }
+        }
+        let values = metric.points.filter { $0.supportSeconds == nil && window.contains($0.time) }.map(\.value)
         return values.isEmpty ? nil : values.reduce(0, +) / Double(values.count)
     }
 
@@ -155,6 +164,26 @@ struct EventPhaseStats {
     func change(of value: Double) -> Double? {
         guard let base = mean(.before), base > 0 else { return nil }
         return (value - base) / base * 100
+    }
+
+    /// Whether changes read in the metric's own unit: wrist movement rests near zero, where a percentage
+    /// explodes ("+1400 %"), so it shows the difference in milli-g instead.
+    var changesInUnits: Bool { metric.unit.lowercased() == "mg" }
+
+    /// The change of a phase or a reading against the "before" mean, as shown: a percentage, or a signed
+    /// difference in the metric's unit for movement.
+    func changeText(_ phase: EventPhase) -> String? {
+        guard let value = mean(phase) else { return nil }
+        return changeText(of: value)
+    }
+
+    func changeText(of value: Double) -> String? {
+        if changesInUnits {
+            guard let base = mean(.before) else { return nil }
+            let delta = Int((value - base).rounded())
+            return "\(delta > 0 ? "+" : delta < 0 ? "−" : "")\(abs(delta)) \(metric.unit)"
+        }
+        return change(of: value).map(EventFormat.percentChange)
     }
 
     /// The reading furthest in the unhealthy direction during the event (the lowest HRV, the highest heart

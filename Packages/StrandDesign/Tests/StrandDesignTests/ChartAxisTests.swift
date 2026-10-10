@@ -42,6 +42,27 @@ final class ChartAxisTests: XCTestCase {
         }
     }
 
+    func testAShortClockWindowDropsAnEdgeLabelThatWouldOverlapItsNeighbour() {
+        // An event page: 30 minutes either side of a 30-minute event, starting 3 minutes before 8:00 PM.
+        let cal = calendar("America/Los_Angeles")
+        let start = cal.date(from: DateComponents(year: 2026, month: 10, day: 8, hour: 19, minute: 57))!
+        let window = start...start.addingTimeInterval(90 * 60)
+        let layout = ChartAxis.layout(window, style: .hours, calendar: cal)
+        XCTAssertEqual(layout.grid.count, 6, "every 15-minute tick keeps its grid line")
+        let span = window.upperBound.timeIntervalSince(window.lowerBound)
+        let extents = layout.marks.indices.map { i -> ClosedRange<Double> in
+            let at = layout.marks[i].timeIntervalSince(window.lowerBound) / span
+            let width = ChartAxis.estimatedWidth(layout.labels[i]) / ChartAxis.assumedPlotWidth
+            switch layout.anchors[i] {
+            case .leading: return at...(at + width)
+            case .trailing: return (at - width)...at
+            case .center: return (at - width / 2)...(at + width / 2)
+            }
+        }
+        for (a, b) in zip(extents, extents.dropFirst()) { XCTAssertLessThan(a.upperBound, b.lowerBound) }
+        XCTAssertEqual(layout.marks.last, layout.grid.last, "the newest label always stays")
+    }
+
     func testAllStartsAtTheFirstDataDayAndIsNeverShorterThanAWeek() {
         let cal = calendar("America/Los_Angeles")
         let now = noon("2026-10-07", cal)

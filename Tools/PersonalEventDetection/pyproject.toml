@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "nara-personal-events"
+version = "0.2.0"
+description = "Personal physiological signatures of caregiver-logged event types (signature engine sig-1)."
+requires-python = ">=3.11"
+dependencies = ["numpy==2.5.3", "scipy==1.18.1", "scikit-learn==1.9.1", "psycopg[binary]==3.2.9"]
+
+[project.optional-dependencies]
+dev = []
+
+[project.scripts]
+nara-event-worker = "personal_events.worker:main"
+nara-signatures = "personal_events.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["personal_events*"]

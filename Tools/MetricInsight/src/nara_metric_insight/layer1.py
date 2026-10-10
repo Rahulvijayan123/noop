@@ -189,6 +189,10 @@ class Evaluation:
     z_pred_long: float | None = None
     calibration_factor: float = 1.0
     holding_copy: bool = False      # the 60-day copy is the held pre-change copy
+    # The reference copy behind copy_long (the held pre-change copy, the live window copy, or None while only the
+    # carried centre and spread are held): its predictive scale is the Swift copyLong.predictiveSpread and its n_eff
+    # copyLong.nEff. Read by Tools/PersonalEventDetection (layer1_context.py) for the context strata.
+    ref_copy: WindowCopy | None = None
 
 
 @dataclass(frozen=True)
@@ -858,7 +862,7 @@ def _score_one_day(t: int, series: Series, by_day: dict[int, Observation], train
                       established_long=established_long, stale=stale, trust7=trust7, trust_long=trust_long,
                       slope_usable=slope_usable, expected_long=center_long, k_used=k_used, p_change=p_change,
                       regime_shift=regime_shift, carry=new_carry, k7=k7, z_pred_long=z_pred_long,
-                      calibration_factor=cal_factor, holding_copy=holding_for_change)
+                      calibration_factor=cal_factor, holding_copy=holding_for_change, ref_copy=ref_copy)
 
 
 def _empty(as_of: date, series: Series) -> Evaluation:

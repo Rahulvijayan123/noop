@@ -24,12 +24,12 @@ struct RecoveryDetailsView: View {
 
     /// `past`, or only the events of this kind when the filter asks for them.
     private var scoped: [HealthEvent] {
-        scope == .all ? past : past.filter { $0.title == event.title }
+        scope == .all ? past : past.filter { $0.hasSameType(as: event) }
     }
 
     /// Whether a same-kind filter would show something different from all events.
     private var offersKindFilter: Bool {
-        let kind = past.filter { $0.title == event.title }.count
+        let kind = past.filter { $0.hasSameType(as: event) }.count
         return kind >= 2 && kind < past.count
     }
 

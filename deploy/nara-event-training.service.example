@@ -1,0 +1,26 @@
+[Unit]
+Description=Nara personal event model selection
+After=network-online.target
+
+[Service]
+Type=simple
+User=frwhoop
+Group=frwhoop
+EnvironmentFile=/etc/frwhoop/event-worker.env
+WorkingDirectory=/opt/noop/Tools/PersonalEventDetection
+ExecStart=/opt/noop/Tools/PersonalEventDetection/.venv/bin/nara-event-worker --lane train
+Restart=on-failure
+RestartSec=30
+Nice=15
+CPUQuota=100%
+MemoryMax=3G
+TasksMax=64
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/nara-events
+
+[Install]
+WantedBy=multi-user.target

@@ -23,6 +23,10 @@ import {
 import {
   USER_WORKOUTS_MAX_BODY_BYTES, parseUserWorkoutsQuery, readUserWorkouts, submitUserWorkouts,
 } from './userWorkouts.ts';
+import {
+  MANUAL_EVENTS_MAX_BODY_BYTES, submitManualEvents, readManualEvents, readManualEventContexts,
+} from './manualEvents.ts';
+import { personalEvents } from './personalEvents.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -534,6 +538,11 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
 }): Promise<Response> {
   const url = new URL(req.url);
   const route = url.pathname.replace(/^\/functions\/v1/, '').replace(/^\/scores/, '') || '/';
+  const isManualEvents = route === '/manual-events' && ['GET', 'POST'].includes(req.method);
+  const isManualEventContext = route === '/manual-events/context' && req.method === 'GET';
+  const isPersonalEvents = (route === '/event-detection' && ['GET', 'POST'].includes(req.method))
+    || (route === '/event-detection/physiology' && req.method === 'GET')
+    || (route === '/event-detection/signature' && req.method === 'GET');
   const isRead = req.method === 'GET' && route === '/';
   const isDays = req.method === 'GET' && route === '/days';
   const isSeries = req.method === 'GET' && route === '/series';
@@ -576,7 +585,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
       && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes
-      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows && !isWorkoutsPost && !isWorkoutsGet) {
+      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows && !isWorkoutsPost && !isWorkoutsGet
+      && !isManualEvents && !isManualEventContext && !isPersonalEvents) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -610,6 +620,22 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         allowLegacyEnrollment:_cfg.allowLegacyEnrollment===true});
       if (installation.authMode!=='installation' || !installation.sourceId) throw new IdentityError('installation required');
       user={id:installation.id,sourceId:installation.sourceId};
+    }
+    if (isPersonalEvents) {
+      const result = await personalEvents(rest, user, route, url.searchParams,
+        req.method === 'POST' ? await boundedBody(req, 8192) : undefined);
+      return Response.json({ ...result, identity: { userId: user.id, sourceId: user.sourceId } },
+        { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isManualEvents || isManualEventContext) {
+      const result = isManualEventContext
+        ? await readManualEventContexts(rest, user.id, url.searchParams)
+        : req.method === 'GET'
+        ? await readManualEvents(rest, user.id, url.searchParams)
+        : await submitManualEvents(rest, user.id, user.sourceId,
+            await boundedBody(req, MANUAL_EVENTS_MAX_BODY_BYTES));
+      return Response.json({ ...result, identity: { userId: user.id, sourceId: user.sourceId } },
+        { headers: { 'cache-control': 'no-store' } });
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers

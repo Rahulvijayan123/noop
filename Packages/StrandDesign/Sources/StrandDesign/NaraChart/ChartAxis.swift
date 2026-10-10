@@ -318,8 +318,17 @@ public enum ChartAxis {
                 let step = Int((Double(ticks.count) / Double(goal)).rounded(.up))
                 ticks = ticks.enumerated().filter { $0.offset % step == 0 }.map(\.element)
             }
-            let text = labels(for: ticks, style: .hours, calendar: calendar)
-            return (ticks, text, zip(ticks, text).map { anchor(for: $0, label: $1, in: window) }, ticks)
+            // Every tick keeps its grid line; a label that would overlap its neighbour goes, as on the other
+            // styles (a short window, like an event's 90 minutes, steps every 15 minutes).
+            let grid = ticks
+            var text = labels(for: ticks, style: .hours, calendar: calendar)
+            let kept = droppingOverlaps(ticks, labels: text,
+                                        anchors: zip(ticks, text).map { anchor(for: $0, label: $1, in: window) }, in: window)
+            if kept.count != ticks.count {
+                ticks = kept.map { ticks[$0] }
+                text = labels(for: ticks, style: .hours, calendar: calendar)
+            }
+            return (ticks, text, zip(ticks, text).map { anchor(for: $0, label: $1, in: window) }, grid)
         }
     }
 
