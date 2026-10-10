@@ -438,8 +438,11 @@ async function visualRoute(req: Request, userId: string, { rest, cfg, fetchImpl 
   if (request.routeOnly) return Response.json({ visual: null, outcome: 'routed', route });
   try {
     const { viz, audit, stats } = await produceVisual(deps, { question: request.question, answer: request.answer, evidence: request.evidence, route });
+    // Outcome and counts only, never the question, answer or figures.
+    console.log(JSON.stringify({ event: 'coach_visual', outcome: viz ? 'visual' : audit, kind: route.kind, type: viz?.type ?? null, ...stats }));
     return Response.json({ visual: viz, outcome: viz ? 'visual' : audit, kind: route.kind, audit, stats });
-  } catch {
+  } catch (error) {
+    console.log(JSON.stringify({ event: 'coach_visual', outcome: 'error', kind: route.kind, error: String((error as Error)?.message ?? error).slice(0, 120) }));
     return Response.json({ visual: null, outcome: 'error' });
   }
 }

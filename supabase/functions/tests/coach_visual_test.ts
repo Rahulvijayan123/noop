@@ -82,7 +82,7 @@ Deno.test('visual pipeline: design, fact-check and ship', async () => {
   assert(model.calls[1].messages[1].content.includes('"Mar 17"'));
 });
 
-Deno.test('visual pipeline: bad designs go back to the model, a failed fact-check redesigns once, and the check is fail-closed', async () => {
+Deno.test('visual pipeline: bad designs go back to the model, a failed fact-check redesigns, and the check is fail-closed', async () => {
   const unitless = script(toolReply(line({ yLabel: 'HRV' })), toolReply(line()), verdict(true));
   const fixed = await produceVisual(unitless, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
   assertEquals(fixed.audit, 'passed');
@@ -92,9 +92,21 @@ Deno.test('visual pipeline: bad designs go back to the model, a failed fact-chec
   const second = await produceVisual(redesigned, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
   assertEquals([second.audit, second.stats.redesigns], ['passed', 1]);
 
-  const unreadable = script(toolReply(line()), { choices: [{ message: { content: 'not json' } }] }, toolReply(line()), new Error('boom'));
+  const twice = script(toolReply(line()), verdict(false, ['wrong']), toolReply(line()), verdict(false, ['still wrong']), toolReply(line()), verdict(true));
+  const third = await produceVisual(twice, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
+  assertEquals([third.audit, third.stats.redesigns, third.stats.design_calls], ['passed', 2, 3]);
+
+  const refused = script(toolReply(line()), verdict(false, ['a']), toolReply(line()), verdict(false, ['b']), toolReply(line()), verdict(false, ['c']));
+  const out = await produceVisual(refused, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
+  assertEquals([out.viz, out.audit, out.stats.redesigns], [null, 'rejected', 2]);
+
+  const flaky = script(toolReply(line()), new Error('timeout'), verdict(true));
+  const recovered = await produceVisual(flaky, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
+  assertEquals([recovered.audit, recovered.stats.redesigns], ['passed', 0]);
+
+  const unreadable = script(toolReply(line()), { choices: [{ message: { content: 'not json' } }] }, new Error('boom'));
   const dropped = await produceVisual(unreadable, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
-  assertEquals([dropped.viz, dropped.audit], [null, 'rejected']);
+  assertEquals([dropped.viz, dropped.audit, unreadable.calls.length], [null, 'unavailable', 3]);
 });
 
 Deno.test('visual pipeline: pure text cards skip the fact-check call', async () => {

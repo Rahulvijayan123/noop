@@ -90,12 +90,12 @@ private struct ImageFXUniforms {
             u.fillOpacity = 0.44
             u.edgeFade = 24
         } else {
-            // The dark tuning mirrored in greys down to black: the card colour is the empty cell, and the three ink
-            // stops are to a white card what 4a4949 / b9b9b9 / d8d8d8 are to a dark one. Pale or tinted stops
-            // left most cells (and their dissolve) hard to see on white.
-            u.c1 = surface; u.c2 = hex(0x9a9a9a); u.c3 = hex(0x262626); u.c4 = surface; u.c5 = hex(0x000000)
+            // The dark tuning mirrored in greys down to black: the card colour is the empty cell. Two of the five
+            // palette slots are the card itself, so the blend leans toward white; the ink stops sit darker and the
+            // intensity higher than a straight mirror so the cells (and their dissolve) hold contrast on white.
+            u.c1 = surface; u.c2 = hex(0x5c5c5c); u.c3 = hex(0x1c1c1c); u.c4 = surface; u.c5 = hex(0x000000)
             u.direction = 0
-            u.intensity = 1
+            u.intensity = 1.35
             u.highlight = 0.2
             u.vignette = 0.26
             u.vigOpacity = 1

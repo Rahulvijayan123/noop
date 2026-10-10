@@ -318,23 +318,23 @@ struct CoachChatView: View {
     private var messageList: some View {
         // The pills under the newest answer; their arrival (or the keyword fallback's) scrolls them into view.
         let lastFollowUps = vm.messages.last.map { vm.followUps(for: $0) } ?? []
+        let split = max(0, vm.messages.count - Self.eagerTail)
         return ScrollViewReader { proxy in
             ScrollView(showsIndicators: false) {
-                LazyVStack(spacing: 14) {
-                    if vm.hasEarlier { loadEarlierRow(proxy) }
-                    ForEach(vm.messages) { message in
+                // Older rows are lazy; the newest turns and the bottom marker are measured for real. A lazy stack
+                // only estimates the heights of rows it has not built, and while a reply streams (the steps fold
+                // away, the answer grows, a visual mounts) a scroll aimed at those estimates can come to rest over
+                // rows it never builds: a blank screen, white in light mode, until a touch forces a layout.
+                VStack(spacing: 14) {
+                    if vm.hasEarlier || split > 0 {
+                        LazyVStack(spacing: 14) {
+                            if vm.hasEarlier { loadEarlierRow(proxy) }
+                            ForEach(vm.messages[..<split]) { bubble($0, followUps: []) }
+                        }
+                    }
+                    ForEach(vm.messages[split...]) { message in
                         let isLast = message.id == vm.messages.last?.id
-                        CoachBubble(message: message,
-                                    phase: message.isStreaming ? vm.phase : .idle,
-                                    phaseLabel: message.isStreaming ? vm.phase.label : "",
-                                    onRetry: message.didStall ? { vm.retryStalled() } : nil,
-                                    followUps: isLast && !vm.isGenerating ? lastFollowUps : [],
-                                    onFollowUp: { vm.send($0) },
-                                    onCardSend: { text, state, submitted in
-                                        vm.sendFromCard(text, messageId: message.id, state: state, submitted: submitted)
-                                    },
-                                    onCardState: { vm.cardStateChanged($0, messageId: message.id) })
-                            .id(message.id)
+                        bubble(message, followUps: isLast && !vm.isGenerating ? lastFollowUps : [])
                     }
                     Color.clear.frame(height: 1).id("bottom")
                         .onAppear { following = true }
@@ -392,33 +392,36 @@ struct CoachChatView: View {
         .id(vm.threadId)
     }
 
-    /// Scrolls to the end of the newest message, without animation, then again as the lazy rows above it measure.
-    /// Aimed at the message itself (its own height is known once it is on screen) rather than at a one point
-    /// marker below it, which a lazy stack can only estimate.
+    /// How many of the newest messages are laid out eagerly: the last three turns, so a send, the reply it streams
+    /// and anything the reader is likely to be looking at never rest on estimated heights.
+    private static let eagerTail = 6
+
+    private func bubble(_ message: CoachChatMessage, followUps: [String]) -> some View {
+        CoachBubble(message: message,
+                    phase: message.isStreaming ? vm.phase : .idle,
+                    phaseLabel: message.isStreaming ? vm.phase.label : "",
+                    onRetry: message.didStall ? { vm.retryStalled() } : nil,
+                    followUps: followUps,
+                    onFollowUp: { vm.send($0) },
+                    onCardSend: { text, state, submitted in
+                        vm.sendFromCard(text, messageId: message.id, state: state, submitted: submitted)
+                    },
+                    onCardState: { vm.cardStateChanged($0, messageId: message.id) })
+            .id(message.id)
+    }
+
+    /// Scrolls to the end of the conversation without animation, then again as a reopened chat's rows measure.
     private func settleAtNewest(_ proxy: ScrollViewProxy) {
         for delay in [0.0, 0.08, 0.3] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                 guard following else { return }
-                if let last = vm.messages.last?.id {
-                    proxy.scrollTo(last, anchor: .bottom)
-                } else {
-                    proxy.scrollTo("bottom", anchor: .bottom)
-                }
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
         }
     }
 
-    /// Scrolls to the end of the newest message. Aimed at the message rather than the one point marker below it:
-    /// the lazy stack only estimates where that marker is, and a jump past the real end leaves a blank screen
-    /// (white in light mode) until a touch makes it lay out again.
     private func scrollToNewest(_ proxy: ScrollViewProxy, duration: Double) {
-        withAnimation(reduceMotion ? nil : .easeOut(duration: duration)) {
-            if let last = vm.messages.last?.id {
-                proxy.scrollTo(last, anchor: .bottom)
-            } else {
-                proxy.scrollTo("bottom", anchor: .bottom)
-            }
-        }
+        withAnimation(reduceMotion ? nil : .easeOut(duration: duration)) { proxy.scrollTo("bottom", anchor: .bottom) }
     }
 
     /// Pages in the previous messages and puts the one that was on top back on top, so the reader stays put.

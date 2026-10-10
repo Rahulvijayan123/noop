@@ -627,7 +627,8 @@ const MAX_NONE_PROBABILITY = 0.35;
 const MIN_TYPE_PROBABILITY = 0.12;
 const EXACT_TYPE_PROBABILITY = 0.5;
 const MAX_DESIGN_STEPS = 2;
-const MAX_REDESIGNS = 1;
+const MAX_REDESIGNS = 2;
+const AUDIT_ATTEMPTS = 2;
 const MAX_VISUAL_WALL_MS = 60_000;
 const MAX_DISTILLED_EVIDENCE = 4_000;
 const JEV_TIMEOUT_MS = 5000;
@@ -967,29 +968,31 @@ export function parseAuditReply(content: unknown): { ok: boolean; issues: string
   return { ok: parsed.ok, issues: Array.isArray(parsed.issues) ? parsed.issues.map(String).slice(0, 5) : [] };
 }
 
-type Review = { status: 'deterministic_pass' | 'passed' | 'rejected'; issues: string[] };
+type Review = { status: 'deterministic_pass' | 'passed' | 'rejected' | 'unavailable'; issues: string[] };
 
 /**
- * Data visuals and figure-bearing cards get the one fact-check call. A transport failure or an
- * unreadable verdict rejects: no visual beats a wrong one, so nothing ships unvalidated.
+ * Data visuals and figure-bearing cards get the fact-check call. A transport failure or an unreadable
+ * verdict is asked once more, then rejects: no visual beats a wrong one, so nothing ships unvalidated.
  */
 export async function reviewVisual(deps: VisualDeps, a: { question: string; answer: string; evidence: string; viz: any }): Promise<Review> {
   if (!auditRequired(a.viz)) return { status: 'deterministic_pass', issues: [] };
-  try {
-    const data = await deps.callModel({
-      messages: [
-        { role: 'system', content: AUDITOR_INSTRUCTIONS },
-        { role: 'user', content: `SOURCE\nQuestion: ${a.question}\n\nAnswer: ${a.answer}\n\n${a.evidence ? `Logged data:\n${a.evidence}\n\n` : ''}VISUAL\n${JSON.stringify(a.viz).slice(0, 8000)}` },
-      ],
-      response_format: { type: 'json_object' },
-      temperature: 0, max_tokens: 500, reasoning_effort: 'none',
-    }, AUDIT_TIMEOUT_MS);
-    const verdict = parseAuditReply(data?.choices?.[0]?.message?.content);
-    if (verdict) return { status: verdict.ok ? 'passed' : 'rejected', issues: verdict.issues };
-  } catch {
-    // fall through to fail-closed
+  for (let attempt = 0; attempt < AUDIT_ATTEMPTS; attempt += 1) {
+    try {
+      const data = await deps.callModel({
+        messages: [
+          { role: 'system', content: AUDITOR_INSTRUCTIONS },
+          { role: 'user', content: `SOURCE\nQuestion: ${a.question}\n\nAnswer: ${a.answer}\n\n${a.evidence ? `Logged data:\n${a.evidence}\n\n` : ''}VISUAL\n${JSON.stringify(a.viz).slice(0, 8000)}` },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0, max_tokens: 500, reasoning_effort: 'none',
+      }, AUDIT_TIMEOUT_MS);
+      const verdict = parseAuditReply(data?.choices?.[0]?.message?.content);
+      if (verdict) return { status: verdict.ok ? 'passed' : 'rejected', issues: verdict.issues };
+    } catch {
+      // asked again, then fail-closed
+    }
   }
-  return { status: 'rejected', issues: ['the fact-check could not run; no visual beats a wrong one'] };
+  return { status: 'unavailable', issues: ['the fact-check could not run; no visual beats a wrong one'] };
 }
 
 export interface VisualResult {
@@ -998,7 +1001,10 @@ export interface VisualResult {
   stats: { design_calls: number; redesigns: number; audit_status: string; distilled_evidence_chars: number };
 }
 
-/** Design, then one fact-check, then at most one corrective redesign within the wall-clock budget. */
+/**
+ * Design, then the fact-check, then corrective redesigns within the wall-clock budget. A fact-check that could not
+ * run ends with `unavailable` rather than `rejected`, so the app may ask again.
+ */
 export async function produceVisual(deps: VisualDeps, a: { question: string; answer: string; evidence: string; route: VisualRoute }): Promise<VisualResult> {
   const startedAt = Date.now();
   const distilled = distillEvidence(a.evidence);
@@ -1018,6 +1024,7 @@ export async function produceVisual(deps: VisualDeps, a: { question: string; ans
     if (!viz) break;
     review = await reviewVisual(deps, { question: a.question, answer: a.answer, evidence: distilled, viz });
   }
+  if (review.status === 'unavailable') return { viz: null, audit: 'unavailable', stats: stats(review.status, redesigns) };
   if (!viz || review.status === 'rejected') return { viz: null, audit: 'rejected', stats: stats(review.status, redesigns) };
   return { viz, audit: review.status, stats: stats(review.status, redesigns) };
 }
