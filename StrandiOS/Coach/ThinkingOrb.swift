@@ -266,11 +266,13 @@ enum OrbEngine {
         }
     }
 
+    /// On a light background every dot and line is solid black: the engine's grey levels are tuned for a dark
+    /// background, and on white most of them were too pale to see. Depth still reads through each dot's alpha.
     static func paint(_ frame: Frame, dark: Bool, in ctx: CGContext) {
         ctx.setLineCap(.round)
         ctx.setLineJoin(.round)
         for line in frame.lines {
-            let ink = dark ? 1 - line.white : line.white
+            let ink = dark ? 1 - line.white : 0
             ctx.setStrokeColor(gray: CGFloat(clamp01(ink)), alpha: CGFloat(line.a))
             ctx.setLineWidth(CGFloat(max(line.w, 0.6)))
             ctx.move(to: CGPoint(x: line.x1, y: line.y1))
@@ -278,7 +280,7 @@ enum OrbEngine {
             ctx.strokePath()
         }
         for dot in frame.dots {
-            let ink = dark ? 1 - dot.white : dot.white
+            let ink = dark ? 1 - dot.white : 0
             ctx.setFillColor(gray: CGFloat(clamp01(ink)), alpha: CGFloat(dot.a))
             let r = max(dot.r, 0.6)
             ctx.fillEllipse(in: CGRect(x: dot.x - r, y: dot.y - r, width: r * 2, height: r * 2))

@@ -352,21 +352,22 @@ struct CoachChatView: View {
                 // Streaming flushes at ~25Hz; an animated scroll per flush is wasteful, so follow at ~10Hz.
                 guard following, Date.timeIntervalSinceReferenceDate - throttle.last >= 0.1 else { return }
                 throttle.last = Date.timeIntervalSinceReferenceDate
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                scrollToNewest(proxy, duration: 0.15)
             }
             .onChange(of: vm.messages.last?.vizPhase) { _, _ in
                 // A placeholder or finished visual grows the list under the reader; keep the end of the answer in view.
                 guard following else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                scrollToNewest(proxy, duration: 0.2)
             }
-            // Keyed on the newest message, not the count: "Load earlier" adds rows above and must not jump.
+            // Keyed on the newest message, not the count: "Load earlier" adds rows above and must not jump. A send
+            // adds two rows the lazy stack has not measured yet, so this re-aims as they lay out, like a reopened chat.
             .onChange(of: vm.messages.last?.id) { _, _ in
                 following = true
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                settleAtNewest(proxy)
             }
             .onChange(of: lastFollowUps) { _, pills in
                 guard following, !pills.isEmpty else { return }
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                scrollToNewest(proxy, duration: 0.2)
             }
             .onChange(of: vm.isGenerating) { _, generating in
                 guard !generating else { return }
@@ -374,15 +375,13 @@ struct CoachChatView: View {
                 for delay in [0.0, 0.35] {
                     DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
                         guard following else { return }
-                        withAnimation(reduceMotion ? nil : .easeOut(duration: 0.15)) { proxy.scrollTo("bottom", anchor: .bottom) }
+                        scrollToNewest(proxy, duration: 0.15)
                     }
                 }
             }
             .onChange(of: inputFocused) { _, focused in
                 guard focused else { return }
-                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) {
-                    withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { proxy.scrollTo("bottom", anchor: .bottom) }
-                }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.35) { scrollToNewest(proxy, duration: 0.2) }
             }
             .onAppear { settleAtNewest(proxy) }
             // A reopened chat lays out its rows lazily, so a jump made before the heights are known lands short or
@@ -405,6 +404,19 @@ struct CoachChatView: View {
                 } else {
                     proxy.scrollTo("bottom", anchor: .bottom)
                 }
+            }
+        }
+    }
+
+    /// Scrolls to the end of the newest message. Aimed at the message rather than the one point marker below it:
+    /// the lazy stack only estimates where that marker is, and a jump past the real end leaves a blank screen
+    /// (white in light mode) until a touch makes it lay out again.
+    private func scrollToNewest(_ proxy: ScrollViewProxy, duration: Double) {
+        withAnimation(reduceMotion ? nil : .easeOut(duration: duration)) {
+            if let last = vm.messages.last?.id {
+                proxy.scrollTo(last, anchor: .bottom)
+            } else {
+                proxy.scrollTo("bottom", anchor: .bottom)
             }
         }
     }
