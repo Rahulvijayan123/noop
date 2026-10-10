@@ -237,13 +237,14 @@ struct ActivityLane {
         var exercisePruneFailures = 0
         var lastExercisePruneError: String?
         /// The shared release policy (ActivityExpertSelection) per raw-IMU job: jobs it decided for, and jobs whose
-        /// published decode some expert channel shaped (only a production-released expert can; none is today).
+        /// published decode some expert channel shaped (only a production-released expert can).
         var expertSelections = 0
         /// Measured stand-ups / sit-downs found in raw IMU (hsmm-2.0).
         var verticalShifts = 0
         var expertCanonicalShaped = 0
         var lastSelectionDigest: String?
-        /// The joint candidate rows (`activity_candidate_days`), written only while an expert runs in candidate mode.
+        /// The joint candidate rows (`activity_candidate_days`), written only while an expert runs in candidate or
+        /// production mode.
         var candidateDaysStored = 0
         var candidateDaysFenced = 0
         var candidateDayFailures = 0
@@ -367,10 +368,12 @@ struct ActivityLane {
         pruneCandidateDaysIfDue()
     }
 
-    /// True while some expert runs in candidate mode: only then is a joint candidate decoded and stored.
-    var storesCandidateDays: Bool { inertia?.mode == .candidate || eldernet?.mode == .candidate }
+    /// True while some expert runs in candidate or production mode: only then is a joint candidate decoded and stored.
+    var storesCandidateDays: Bool {
+        (inertia.map { $0.mode != .shadow } ?? false) || (eldernet.map { $0.mode != .shadow } ?? false)
+    }
 
-    /// Joint candidate retention, while some expert runs in candidate mode. Best effort, like the others.
+    /// Joint candidate retention, while some expert runs in candidate or production mode. Best effort, like the others.
     mutating func pruneCandidateDaysIfDue(now: Date = Date()) {
         guard storesCandidateDays else { return }
         if let last = lastCandidateDaysPruneAt, now.timeIntervalSince(last) < Self.gaitWindowsPruneIntervalSeconds { return }
@@ -916,8 +919,8 @@ struct ActivityLane {
         let expertGaitWindows = inferred.expertGaitWindows
 
         // 5b. The shared release policy over this job's own expert results (ActivityExpertSelection): every decode
-        //     below reads it. Only a production-released source may shape the published decode; no expert stage
-        //     can produce one (their modes are shadow / candidate), so the published documents are HART's alone.
+        //     below reads it. Only a production-released source shapes the published v2 decode (step 6b,
+        //     `selection.canonical`); shadow and candidate sources never do. The v1 epochs are HART's alone.
         let selection = ActivityCandidateDays.selection(
             day: job.day, inputRevision: job.inputRevision,
             gait: eldernet == nil ? nil : inferred.gaitQuality.trackInput, eldernet: eldernet,
@@ -1404,6 +1407,8 @@ struct ActivityLane {
             stats.eldernetCandidateDocuments += 1
             report = r
         }
+        // Production windows were decoded by the published document itself.
+        if report == nil, eldernet.mode == .production { report = context.built?.gaitQuality }
         // Without a candidate decode, a dry-run attachment still says how the windows meet the observed seconds.
         if report == nil, let input = context.input {
             report = ActivityGaitWindowsDays.dryRunAttachment(input: input, gait: gait)
@@ -1476,6 +1481,8 @@ struct ActivityLane {
             stats.inertiaCandidateDocuments += 1
             report = r
         }
+        // Production windows were decoded by the published document itself.
+        if report == nil, inertia.mode == .production { report = context.built?.motionHeads }
         // Without a candidate decode, a dry-run attachment still says how the windows meet the observed seconds.
         if report == nil, let input = context.input {
             report = ActivityContextTrackBuilder.attachmentReport(for: input, windows: heads.windows)
@@ -1499,17 +1506,20 @@ struct ActivityLane {
     }
 
     /// The joint candidate payload for this job: every candidate arm of the job's selection decoded over the published
-    /// decode's own input (the HART-alone arm is the published document while no channel is production, and each
-    /// single-expert arm is that row's candidate document, so nothing is decoded twice), or nil when there is no
-    /// decoder input or no selection. Never throws: a failure is counted and skipped.
+    /// decode's own input, config and lookback (the arm of exactly the production channels is the published document
+    /// — HART alone while no channel is production — and each single-expert arm is that row's candidate document, so
+    /// nothing is decoded twice), or nil when there is no decoder input or no selection. Never throws: a failure is
+    /// counted and skipped.
     static func candidateDayPayload(day: String, inputRevision: Int64, context: ContextDayBuild,
                                     motionCandidate: ActivityMotionHeadsDays.Candidate?,
                                     gaitCandidate: ActivityGaitWindowsDays.Candidate?,
                                     stats: inout Stats) -> String? {
         guard let selection = context.selection else { return nil }
         var reuse: [String: ActivityCandidateDays.Reused] = [:]
-        if selection.canonicalChannels.isEmpty, let published = context.built?.document {
-            reuse["hart"] = ActivityCandidateDays.Reused(document: published)
+        if let built = context.built, let published = built.document,
+           let arm = selection.candidateArms.first(where: { $0.channels == selection.canonicalChannels }) {
+            reuse[arm.name] = ActivityCandidateDays.Reused(document: published, gaitQuality: built.gaitQuality,
+                                                           motionHeads: built.motionHeads)
         }
         if case .document(let d, let r)? = motionCandidate {
             reuse["hart+\(ActivityExpertSelection.Channel.motionHeads.rawValue)"] =
@@ -1520,7 +1530,8 @@ struct ActivityLane {
                 ActivityCandidateDays.Reused(document: d, gaitQuality: r)
         }
         let decoded = ActivityCandidateDays.decode(selection: selection, input: context.input,
-                                                   generatedAt: context.generatedAt, reuse: reuse)
+                                                   generatedAt: context.generatedAt, base: context.config,
+                                                   lookback: context.lookback, reuse: reuse)
         if decoded.joint != nil { stats.candidateJointDocuments += 1 } else {
             stats.candidateJointWithheld += 1
             stats.lastCandidateWithheldReason = decoded.withheldReason

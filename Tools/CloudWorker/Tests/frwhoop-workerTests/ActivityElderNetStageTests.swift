@@ -74,9 +74,9 @@ final class ActivityElderNetStageTests: XCTestCase {
         config.serveArgs = [path, "--behaviour", behaviour, "--sleep", "30"] + extraArgs
         let s = ActivityPythonService(config: config)
         services.append(s)
-        // Candidate mode is always pinned (the settings refuse it otherwise); shadow only when asked.
-        let v: String? = pinVersion ?? (mode == .candidate ? version : nil)
-        let d: String? = try pinDigest ?? (mode == .candidate ? digest() : nil)
+        // Candidate and production mode are always pinned (the settings refuse them otherwise); shadow only when asked.
+        let v: String? = pinVersion ?? (mode != .shadow ? version : nil)
+        let d: String? = try pinDigest ?? (mode != .shadow ? digest() : nil)
         return ElderNetStage(service: s, mode: mode, expectedModelVersion: v, expectedWeightsDigest: d, gaitPrior: prior,
                              jobBudgetSeconds: jobBudget)
     }
@@ -170,9 +170,9 @@ final class ActivityElderNetStageTests: XCTestCase {
         XCTAssertNil(noUpstream.serviceConfig(activityHome: "/x"))
         let badMode = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
                                                         "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u",
-                                                        "FRWHOOP_ELDERNET_MODE": "production"])
-        XCTAssertFalse(badMode.enabled, "production evidence needs a code and config change, not an env flag")
-        XCTAssertEqual(badMode.configurationError, "unknown FRWHOOP_ELDERNET_MODE production")
+                                                        "FRWHOOP_ELDERNET_MODE": "live"])
+        XCTAssertFalse(badMode.enabled)
+        XCTAssertEqual(badMode.configurationError, "unknown FRWHOOP_ELDERNET_MODE live")
         let on = ElderNetSettings.fromEnvironment(["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
                                                    "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u"],
                                                   activityPython: "/usr/bin/python3")
@@ -256,6 +256,77 @@ final class ActivityElderNetStageTests: XCTestCase {
                                                              "FRWHOOP_ELDERNET_MODEL_VERSION": version])
         XCTAssertTrue(shadowPinned.enabled)
         XCTAssertEqual(shadowPinned.modelVersion, version)
+    }
+
+    func testProductionModeNeedsBothPinsAndTheGaitPrior() throws {
+        let env = ["FRWHOOP_ELDERNET_ENABLED": "1", "FRWHOOP_ELDERNET_WEIGHTS_DIR": "/w",
+                   "FRWHOOP_ELDERNET_UPSTREAM_DIR": "/u", "FRWHOOP_ELDERNET_MODE": "PRODUCTION"]
+        let sha = String(repeating: "ab", count: 32)
+        let unpinned = ElderNetSettings.fromEnvironment(env)
+        XCTAssertFalse(unpinned.enabled)
+        XCTAssertEqual(unpinned.configurationError,
+                       "FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 are required in production mode")
+        let noPrior = ElderNetSettings.fromEnvironment(env.merging([
+            "FRWHOOP_ELDERNET_MODEL_VERSION": version, "FRWHOOP_ELDERNET_WEIGHTS_SHA256": sha]) { $1 })
+        XCTAssertFalse(noPrior.enabled)
+        XCTAssertEqual(noPrior.configurationError, "FRWHOOP_ELDERNET_GAIT_PRIOR is required in production mode")
+        let ok = ElderNetSettings.fromEnvironment(env.merging([
+            "FRWHOOP_ELDERNET_MODEL_VERSION": version, "FRWHOOP_ELDERNET_WEIGHTS_SHA256": sha,
+            "FRWHOOP_ELDERNET_GAIT_PRIOR": "0.18"]) { $1 })
+        XCTAssertTrue(ok.enabled)
+        XCTAssertNil(ok.configurationError)
+        XCTAssertEqual(ok.mode, .production)
+        XCTAssertEqual(ok.mode.release, .production)
+        XCTAssertEqual(ok.weightsSHA256, sha)
+        XCTAssertEqual(ok.gaitPrior, 0.18)
+    }
+
+    /// A production row carries neither a comparison document nor a withheld reason (the table allows them only in
+    /// candidate mode), keeps π, and reports how the published decode used its windows.
+    func testProductionRowCarriesNoComparisonDocumentOrWithheldReason() throws {
+        var stats = ActivityLane.Stats()
+        let stage = try eldernet(mode: .production)
+        let inferred = try infer(stage, stats: &stats)
+        let gait = try XCTUnwrap(inferred.gaitQuality.trackInput)
+        let input = contextInput()
+        guard case .notRequested = ActivityGaitWindowsDays.candidate(
+            mode: .production, gait: gait, input: input, generatedAt: 1_789_500_000,
+            expectedModelVersion: version, expectedWeightsDigest: try digest(), gaitPrior: 0.2)
+        else { return XCTFail("production asks for no comparison decode") }
+        let selection = ActivityCandidateDays.selection(day: day, inputRevision: 3, gait: gait, eldernet: stage,
+                                                        heads: nil, inertia: nil)
+        XCTAssertEqual(selection.canonicalChannels, [.gaitQuality])
+        let canonical = selection.canonical(input, base: ActivityDecoderConfig())
+        let built = try ActivityContextDays.build(input: canonical.input, day: day, modelVersion: "m",
+                                                  preprocessingVersion: "p", generatedAt: 1_789_500_000,
+                                                  config: canonical.config)
+        XCTAssertNotNil(built.document?.versions.gaitQuality, "the published decode names the gait evidence")
+        let published = try XCTUnwrap(built.gaitQuality)
+        let context = ActivityLane.ContextDayBuild(built: built, input: input, generatedAt: 1_789_500_000,
+                                                   selection: selection, inputRevision: 3)
+        let row = ActivityLane.gaitWindowsRow(day: day, eldernet: stage, collector: inferred.gaitQuality,
+                                              context: context, stats: &stats)
+        guard case .notRequested? = row.candidate else { return XCTFail("production made a comparison decode") }
+        XCTAssertEqual(stats.eldernetCandidateDocuments, 0)
+        XCTAssertEqual(stats.eldernetCandidateWithheld, 0)
+        let p = try payloadObject(row.payload)
+        XCTAssertEqual(p["mode"] as? String, "production")
+        XCTAssertTrue(p["candidate_document"] is NSNull)
+        XCTAssertTrue(p["withheld_reason"] is NSNull)
+        let summary = try XCTUnwrap(p["summary"] as? [String: Any])
+        XCTAssertEqual(summary["gait_prior"] as? Double, 0.2)
+        XCTAssertTrue(summary["candidate_stamp"] is NSNull)
+        let report = try JSONSerialization.data(withJSONObject: try XCTUnwrap(summary["track_report"]))
+        XCTAssertEqual(try JSONDecoder().decode(GaitQualityTrackReport.self, from: report), published,
+                       "the published decode's own report")
+        XCTAssertNotNil(published.stamp)
+        let authority = try XCTUnwrap(summary["authority"] as? [String: Any])
+        XCTAssertEqual(authority["release_mode"] as? String, "production")
+        XCTAssertEqual(authority["use"] as? String, "canonical")
+        // A candidate decode handed to a production payload is still left out.
+        let forced = try ActivityGaitWindowsDays.payload(day: day, mode: .production, collector: inferred.gaitQuality,
+                                                         candidate: .withheld("x"))
+        XCTAssertTrue(try payloadObject(forced)["withheld_reason"] is NSNull)
     }
 
     func testTheElderNetChildIsItsOwnProcessAndItsTimeoutFitsTheLease() throws {

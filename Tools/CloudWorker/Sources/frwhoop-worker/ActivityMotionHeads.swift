@@ -20,14 +20,27 @@ import StrandAnalytics
 //     migration never reaches the v1 / v2 publishes in the same transaction;
 //   • candidate mode additionally decodes the day a second time with Inertia as decoder evidence — only for a
 //     pinned `inertia1` / `actinet` encoder whose bundle tier is at least `candidate`, otherwise the withheld reason is
-//     stored — and keeps that comparison document beside the shadow row. It is never written to
-//     `activity_context_days` / `activity_context_epochs`: the published HART documents are byte-identical
-//     whether Inertia is enabled or not.
+//     stored — and keeps that comparison document beside the shadow row. In shadow and candidate mode nothing is
+//     written to `activity_context_days` / `activity_context_epochs`: the published HART documents are
+//     byte-identical whether Inertia is enabled or not;
+//   • production mode has candidate mode's requirements, but its windows shape the published v2 day document
+//     through the shared release policy (`ActivityExpertSelection.canonical`; a bundle whose `evidence_tier_max` is
+//     only `candidate` is lowered to candidate use), and its row carries no comparison document and no withheld
+//     reason. The v1 epochs stay HART's alone.
 
 /// FRWHOOP_INERTIA_* settings. Off unless `FRWHOOP_INERTIA_ENABLED` is on and a bundle directory is configured.
 struct InertiaSettings: Equatable {
     enum Mode: String, Equatable {
-        case shadow, candidate
+        case shadow, candidate, production
+
+        /// The release the shared policy is asked for.
+        var release: ActivityReleaseMode {
+            switch self {
+            case .shadow: return .shadow
+            case .candidate: return .candidate
+            case .production: return .production
+            }
+        }
     }
 
     var enabled: Bool
@@ -37,8 +50,8 @@ struct InertiaSettings: Equatable {
     var python: String
     /// Worker-side per-request timeout, already clamped to at most a third of the job lease.
     var timeoutSeconds: Double
-    /// The bundle digest the deployment pins (FRWHOOP_INERTIA_BUNDLE_SHA256). Required in candidate mode;
-    /// enforced in shadow mode when set. A served bundle with another digest turns Inertia off for the job.
+    /// The bundle digest the deployment pins (FRWHOOP_INERTIA_BUNDLE_SHA256). Required in candidate and production
+    /// mode; enforced in shadow mode when set. A served bundle with another digest turns Inertia off for the job.
     var bundleSHA256: String? = nil
     /// FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW: let the serve process load a stand-in encoder (shadow mode only).
     /// Its rows are stored with `encoder_kind = standin` and can never feed the decoder.
@@ -82,9 +95,9 @@ struct InertiaSettings: Equatable {
         return t / 2
     }
 
-    /// FRWHOOP_INERTIA_ENABLED (1/true/yes/on, default off), FRWHOOP_INERTIA_MODE (shadow | candidate, default
-    /// shadow), FRWHOOP_INERTIA_BUNDLE_DIR (required when on), FRWHOOP_INERTIA_BUNDLE_SHA256 (the pinned
-    /// bundle digest; required in candidate mode), FRWHOOP_INERTIA_CHECKPOINT (passed as --checkpoint and
+    /// FRWHOOP_INERTIA_ENABLED (1/true/yes/on, default off), FRWHOOP_INERTIA_MODE (shadow | candidate | production,
+    /// default shadow), FRWHOOP_INERTIA_BUNDLE_DIR (required when on), FRWHOOP_INERTIA_BUNDLE_SHA256 (the pinned
+    /// bundle digest; required in candidate and production mode), FRWHOOP_INERTIA_CHECKPOINT (passed as --checkpoint and
     /// INERTIA1_CKPT_PATH), FRWHOOP_INERTIA_PYTHON (default: the activity python), FRWHOOP_INERTIA_TIMEOUT_SECONDS
     /// (default 60, clamped to at most `leaseSeconds / 3`), FRWHOOP_INERTIA_JOB_BUDGET_SECONDS (default 600),
     /// FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW (1/true/yes/on, default off; shadow mode only), FRWHOOP_INERTIA_THREADS
@@ -147,9 +160,9 @@ struct InertiaSettings: Equatable {
         if asked, errors.isEmpty {
             if settings.bundleDir == nil {
                 errors.append("FRWHOOP_INERTIA_BUNDLE_DIR is required")
-            } else if settings.mode == .candidate, settings.bundleSHA256 == nil {
-                errors.append("FRWHOOP_INERTIA_BUNDLE_SHA256 is required in candidate mode")
-            } else if settings.mode == .candidate, settings.allowStandInShadow {
+            } else if settings.mode != .shadow, settings.bundleSHA256 == nil {
+                errors.append("FRWHOOP_INERTIA_BUNDLE_SHA256 is required in \(settings.mode.rawValue) mode")
+            } else if settings.mode != .shadow, settings.allowStandInShadow {
                 errors.append("FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW is for shadow mode only")
             }
         }
@@ -339,7 +352,7 @@ enum ActivityMotionHeadsDays {
     static let pruneSQL = "SELECT public.prune_activity_motion_heads_days($1::integer, $2::integer)::text"
 
     enum Candidate {
-        /// Shadow mode: no second decode.
+        /// Shadow or production mode: no comparison decode.
         case notRequested
         case withheld(String)
         /// The comparison document, and how its decode attached and used the windows.
@@ -438,9 +451,10 @@ enum ActivityMotionHeadsDays {
         var transitionEvents: [String: Int]
         var windowsOmitted: Bool
         var candidateStamp: String?
-        /// How the windows met the day's observed seconds: the candidate decode's report in candidate mode, a
-        /// dry-run attachment otherwise (attached / dropped counts; the decoder-side counters stay 0). nil when
-        /// there was no decoder input to attach to (ActivityContext v2 off).
+        /// How the windows met the day's observed seconds: the candidate decode's report in candidate mode, the
+        /// published decode's in production mode when the channel shaped it, a dry-run attachment otherwise
+        /// (attached / dropped counts; the decoder-side counters stay 0). nil when there was no decoder input to
+        /// attach to (ActivityContext v2 off).
         var trackReport: MotionHeadsTrackReport?
         /// The shared policy's inputs and decision for this row (ActivityExpertAuthority); the migration's trigger
         /// copies it into the row's `authority` column. Left out when the caller has no selection.
@@ -506,7 +520,8 @@ enum ActivityMotionHeadsDays {
 
     /// The candidate comparison for one day: the same input the published v2 document was decoded from, plus
     /// the Inertia windows, decoded with Inertia as candidate evidence. Refused bundles are withheld, and so is
-    /// everything when the deployment has not pinned the bundle digest (candidate mode requires the pin).
+    /// everything when the deployment has not pinned the bundle digest (candidate mode requires the pin). Only
+    /// candidate mode asks for one: production windows shape the published decode itself.
     ///
     /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
     /// nil): HART plus the motion-heads channel exactly, with the config and release the policy built from the row.
@@ -539,8 +554,9 @@ enum ActivityMotionHeadsDays {
         return .document(built.document, built.report)
     }
 
-    /// The RPC payload (sorted keys), or nil when no chunk produced a valid response. `attachment` is the
-    /// dry-run attachment report used when there is no candidate decode (see `Summary.trackReport`).
+    /// The RPC payload (sorted keys), or nil when no chunk produced a valid response. `attachment` is the report
+    /// used when there is no candidate decode (see `Summary.trackReport`). Only a candidate-mode row carries a
+    /// comparison document or a withheld reason; `candidate` is ignored in every other mode.
     static func payload(day: String, mode: InertiaSettings.Mode, collector: MotionHeadsCollector,
                         candidate: Candidate, attachment: MotionHeadsTrackReport? = nil,
                         authority: ActivityExpertAuthority? = nil) throws -> String? {
@@ -571,7 +587,7 @@ enum ActivityMotionHeadsDays {
 
         var withheld: String?, document: ActivityContextDayDocument?, stamp: String?
         var report = attachment
-        switch candidate {
+        switch mode == .candidate ? candidate : .notRequested {
         case .notRequested: break
         case .withheld(let why): withheld = why
         case .document(let d, let r): document = d; stamp = d.versions.motionHeads; report = r ?? attachment

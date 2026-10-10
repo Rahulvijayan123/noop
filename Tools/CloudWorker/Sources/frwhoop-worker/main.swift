@@ -53,10 +53,11 @@ import FoundationNetworking
 //                                and the HART path continues
 //   FRWHOOP_INERTIA_MODE         shadow (default: store the heads in activity_motion_heads_days) | candidate
 //                                (also store a second, Inertia-evidence decode of the day beside them; never
-//                                published)
+//                                published) | production (the heads shape the published v2 day document, as far
+//                                as the bundle's evidence_tier_max allows; no second decode is stored)
 //   FRWHOOP_INERTIA_BUNDLE_DIR   head bundle directory (required when enabled)
-//   FRWHOOP_INERTIA_BUNDLE_SHA256 the pinned bundle_sha256 (required in candidate mode; enforced in shadow mode
-//                                when set): a child serving any other bundle is refused for the job, and it is
+//   FRWHOOP_INERTIA_BUNDLE_SHA256 the pinned bundle_sha256 (required in candidate and production mode; enforced in
+//                                shadow mode when set): a child serving any other bundle is refused for the job, and it is
 //                                passed to the child as --expect-bundle-sha256
 //   FRWHOOP_INERTIA_CHECKPOINT   encoder checkpoint, passed as --checkpoint and INERTIA1_CKPT_PATH (optional)
 //   FRWHOOP_INERTIA_PYTHON       interpreter for the Inertia child (default: FRWHOOP_ACTIVITY_PYTHON)
@@ -73,16 +74,17 @@ import FoundationNetworking
 //                                and the HART path continues (Tools/ActivityContext/ELDERNET.md §6)
 //   FRWHOOP_ELDERNET_MODE        shadow (default: store the gait windows in activity_gait_windows_days) |
 //                                candidate (also store a second decode of the day with the gait channel beside
-//                                them; never published)
+//                                them; never published) | production (the gait channel shapes the published v2 day
+//                                document; no second decode is stored)
 //   FRWHOOP_ELDERNET_WEIGHTS_DIR fetched ElderNet weights, passed as --weights-dir (required when enabled)
 //   FRWHOOP_ELDERNET_UPSTREAM_DIR the sha-verified upstream ElderNet source checkout (`python -m
 //                                activity_context.eldernet.upstream fetch --dest DIR`), passed as --upstream-dir
 //                                (required when enabled; without it the child reports model_missing)
 //   FRWHOOP_ELDERNET_MODEL_VERSION / FRWHOOP_ELDERNET_WEIGHTS_SHA256 the pinned model_version and weights digest
-//                                (required in candidate mode; enforced in shadow mode when set): a child serving
-//                                any other model is refused for the job
+//                                (required in candidate and production mode; enforced in shadow mode when set): a
+//                                child serving any other model is refused for the job
 //   FRWHOOP_ELDERNET_GAIT_PRIOR  π, the mean served gait_prob over the VAL windows the decoder sees (required in
-//                                candidate mode; 0.085 for the served defaults, GaitQualityEvidenceConfig.defaultGaitPrior)
+//                                candidate and production mode; 0.085 for the served defaults, GaitQualityEvidenceConfig.defaultGaitPrior)
 //   FRWHOOP_ELDERNET_PYTHON      interpreter for the ElderNet child (default: FRWHOOP_ACTIVITY_PYTHON)
 //   FRWHOOP_ELDERNET_TIMEOUT_SECONDS per-request timeout of the ElderNet child (default 60, clamped to a third of
 //                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it

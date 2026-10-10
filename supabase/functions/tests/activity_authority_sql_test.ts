@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { startLocalPostgres, USER_A } from './local_postgres.ts';
-import { readActivityWindows, readExerciseWindows, readGaitWindows } from '../_shared/serverScores.ts';
+import { readActivityWindows, readExerciseWindows, readGaitWindows, readMotionHeads } from '../_shared/serverScores.ts';
 
 // Activity DB contracts on the whole migration chain (docs/model-integration/activity-authority.md), in the
 // throwaway harness only: every activity *_contract.sql (each rolls back), then the /gait-windows and
@@ -37,9 +37,14 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
       });
     }
 
-    await t.step('the migration is idempotent: applied again, its contract still holds', async () => {
+    await t.step('the release migrations are idempotent: applied again in order, their contracts still hold', async () => {
       await psqlFile(db.base, new URL('../../migrations/20261008100600_activity_release_authority.sql', import.meta.url));
+      await psqlFile(db.base, new URL('../../migrations/20261010130000_activity_expert_production.sql', import.meta.url));
+      for (const name of ['activity_gait_windows_contract.sql', 'activity_motion_heads_contract.sql']) {
+        assert.match(await psqlFile(db.base, new URL(name, import.meta.url)), /PASS/, name);
+      }
       const notices = await psqlFile(db.base, new URL('activity_release_authority_contract.sql', import.meta.url));
+      assert.match(notices, /PASS 1 expert release modes/);
       assert.match(notices, /PASS 4 privileges/);
     });
 
@@ -101,6 +106,53 @@ Deno.test('activity contracts and release-aware routes on the full migration cha
       // The candidate table is the worker's alone: an owner token cannot read it through PostgREST.
       const owner = await db.request('activity_candidate_days?select=day');
       assert.notEqual(owner.status, 200, 'no owner read of the candidate table');
+    });
+
+    await t.step('the motion heads route reads production rows and their bundle through PostgREST', async () => {
+      const device = 'e0000000-0000-4000-8000-000000000013';
+      const day = '2026-12-07';
+      await db.sql(`
+        insert into public.devices(id,user_id,source_kind) values ('${device}','${USER_A}','noop_push');
+        do $$
+        declare fp text; lo bigint := extract(epoch from ('${day}'::date::timestamp at time zone 'UTC'))::bigint;
+          j record;
+        begin
+          fp := public.activity_context_fingerprint(array[repeat('9',64)],lo,lo+86399,'hart-activity-1',
+            'hart-activity-v1','hart-activity-preprocess-v1','v1');
+          perform public.enqueue_activity_context('${USER_A}','${device}','${day}',array[gen_random_uuid()],
+            array[repeat('9',64)],fp);
+          select * into j from public.claim_activity_context_v2(300);
+          perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision, jsonb_build_object(
+            'day','${day}','mode','production','schema','motion-heads-1',
+            'bundle',jsonb_build_object('encoder_id','actinet/harnet30','encoder_kind','actinet',
+              'encoder_version','harnet30','checkpoint_sha256',repeat('c',64),'heads_version','actinet-heads-1',
+              'bundle_sha256',repeat('a',64),'preprocessing_version','inertia-prep-1','evidence_tier_max','production',
+              'window_s',30,'hop_s',5,'bundle',jsonb_build_object('heads','{}'::jsonb,'ood',jsonb_build_object('method','knn'))),
+            'summary',jsonb_build_object('n_windows',0,'n_ood',0,'n_dropped_nonfinite',0,
+              'authority',jsonb_build_object('policy','expert-authority-1','release_mode','production','use','canonical',
+                'input_revision',j.input_revision::text)),
+            'windows',null,'withheld_reason',null,'candidate_document',null));
+        end $$;`);
+      const rows = await readMotionHeads({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
+        known: new Map(), authorityAware: true });
+      assert.equal(rows.length, 1);
+      const row: any = rows[0];
+      assert.equal(row.mode, 'production');
+      assert.equal(row.release_mode, 'production');
+      assert.equal(row.authority.release_mode, 'production');
+      assert.equal(row.bundle.encoder_kind, 'actinet');
+      assert.equal(row.bundle.bundle.ood.method, 'knn');
+      assert.equal(row.summary.authority, undefined);
+      assert.equal(row.candidate_document, undefined);
+      assert.match(row.result_revision, /^[0-9]+$/);
+      const legacy = await readMotionHeads({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
+        known: new Map() });
+      assert.equal((legacy[0] as any).release_mode, 'shadow', 'a phone without the capability never sees production');
+      assert.equal((legacy[0] as any).bundle, undefined);
+      const unchanged = await readMotionHeads({ rest: db.rest, userId: USER_A, deviceId: device, days: [day],
+        known: new Map([[day, row.result_revision]]), authorityAware: true });
+      assert.equal((unchanged[0] as any).unchanged, true);
+      assert.equal((unchanged[0] as any).release_mode, 'production');
     });
 
     await t.step('the exercise route reads the windows the real publish function wrote, through PostgREST', async () => {

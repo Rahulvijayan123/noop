@@ -198,7 +198,7 @@ begin
   assert pg_temp.gw_rejects(tok,rev,jsonb_set(p,'{day}','"garbage"'),'invalid_gait_windows_payload'), 'unparseable day';
   assert pg_temp.gw_rejects(tok,rev,jsonb_set(p,'{schema}','"gait-quality-2"'),'invalid_gait_windows_schema'), 'schema';
   assert pg_temp.gw_rejects(tok,rev,p - 'schema','invalid_gait_windows_schema'), 'missing schema';
-  assert pg_temp.gw_rejects(tok,rev,jsonb_set(p,'{mode}','"production"'),'invalid_gait_windows_payload'), 'mode';
+  assert pg_temp.gw_rejects(tok,rev,jsonb_set(p,'{mode}','"released"'),'invalid_gait_windows_payload'), 'mode';
   assert pg_temp.gw_rejects(tok,rev,p || jsonb_build_object('pad', repeat('x', 17000000)),'invalid_gait_windows_size'),
     'oversized payload';
   -- Model provenance.

@@ -3,11 +3,13 @@ import StrandAnalytics
 @testable import frwhoop_worker
 
 /// The worker side of the release authority (docs/model-integration/activity-authority.md), as a deterministic replay
-/// through the stub children (no torch, no model, no database): one day inferred with the experts off, in shadow and in
-/// candidate mode, then every decode the lane makes from that job's selection.
+/// through the stub children (no torch, no model, no database): one day inferred with the experts off, in shadow, in
+/// candidate and in production mode, then every decode the lane makes from that job's selection.
 ///
 /// - Shadow and candidate expert rows never change what is published (v1 epochs and the v2 day document are
 ///   byte-identical with the experts off, shadow or candidate, and equal to HART alone as decoded before the policy).
+/// - Production experts shape the published v2 day document (the v1 epochs stay HART's), their rows carry no
+///   comparison document, and the joint candidate's arm of exactly the production channels is the published document.
 /// - The joint candidate: all off == HART alone == the published document; disabling an expert reproduces its
 ///   ablation exactly; reused documents equal fresh decodes; the joint decode is one decode with both channels.
 /// - ElderNet has one route: the HART-embedded windows never shape a published or candidate decode while the
@@ -75,8 +77,8 @@ final class ActivityAuthorityReplayTests: XCTestCase {
         let s = ActivityPythonService(config: config)
         services.append(s)
         return ElderNetStage(service: s, mode: mode,
-                             expectedModelVersion: mode == .candidate ? eldernetVersion : nil,
-                             expectedWeightsDigest: mode == .candidate ? try eldernetDigest() : nil,
+                             expectedModelVersion: mode != .shadow ? eldernetVersion : nil,
+                             expectedWeightsDigest: mode != .shadow ? try eldernetDigest() : nil,
                              gaitPrior: 0.2)
     }
 
@@ -89,7 +91,7 @@ final class ActivityAuthorityReplayTests: XCTestCase {
         config.serveArgs = [path, "--behaviour", "ok", "--kind", kind, "--tier", tier]
         let s = ActivityPythonService(config: config)
         services.append(s)
-        return InertiaStage(service: s, mode: mode, expectedBundleSHA256: mode == .candidate ? bundleSha : nil)
+        return InertiaStage(service: s, mode: mode, expectedBundleSHA256: mode != .shadow ? bundleSha : nil)
     }
 
     /// Three 2-minute chunks inside the day (column payloads are not inspected by the stubs).
@@ -177,7 +179,7 @@ final class ActivityAuthorityReplayTests: XCTestCase {
         XCTAssertEqual(candidate.selection.use(of: .gaitQuality), .candidate)
         XCTAssertEqual(candidate.selection.use(of: .motionHeads), .candidate)
         XCTAssertEqual(shadow.selection.candidateChannels, [])
-        for j in [off, shadow, candidate] { XCTAssertEqual(j.selection.canonicalChannels, [], "no expert is production") }
+        for j in [off, shadow, candidate] { XCTAssertEqual(j.selection.canonicalChannels, [], "no expert here is production") }
 
         let input = contextInput()
         let reference = try published(off, input: input)
@@ -224,6 +226,85 @@ final class ActivityAuthorityReplayTests: XCTestCase {
         let sa = try XCTUnwrap((sp["summary"] as? [String: Any])?["authority"] as? [String: Any])
         XCTAssertEqual(sa["release_mode"] as? String, "shadow")
         XCTAssertEqual(sa["use"] as? String, "none")
+    }
+
+    func testProductionExpertsShapeThePublishedDecode() throws {
+        let off = try job(eldernet: nil, inertia: nil)
+        let production = try job(eldernet: try eldernet(.production),
+                                 inertia: try inertia(.production, kind: "inertia1", tier: "production"))
+        XCTAssertEqual(production.selection.canonicalChannels, [.gaitQuality, .motionHeads])
+        XCTAssertEqual(production.selection.candidateChannels, [.gaitQuality, .motionHeads])
+
+        let input = contextInput()
+        let reference = try published(off, input: input)
+        let p = try published(production, input: input)
+        XCTAssertEqual(p.v1, reference.v1, "the v1 epochs stay HART's alone")
+        XCTAssertNotEqual(p.v2, reference.v2, "production evidence reaches the published day document")
+        let canonical = production.selection.canonical(input, base: ActivityDecoderConfig())
+        let publishedDoc = ActivityContextDays.dayDocument(input: canonical.input, generatedAt: generatedAt,
+                                                           config: canonical.config)
+        XCTAssertNotNil(publishedDoc.versions.gaitQuality)
+        XCTAssertNotNil(publishedDoc.versions.motionHeads)
+        // The canonical decode is exactly the selection's decode of its production channels.
+        let both = production.selection.decode(input, base: ActivityDecoderConfig(), channels: [.gaitQuality, .motionHeads])
+        XCTAssertEqual(ActivityCandidateDays.documentDigest(publishedDoc),
+                       ActivityCandidateDays.documentDigest(ActivityContextDays.dayDocument(
+                        input: both.input, generatedAt: generatedAt, config: both.config)))
+
+        // The rows: no comparison decode, no withheld reason, released as production and used canonically.
+        let built = try ActivityContextDays.build(input: canonical.input, day: day, modelVersion: "m",
+                                                  preprocessingVersion: "p", generatedAt: generatedAt,
+                                                  config: canonical.config)
+        let context = ActivityLane.ContextDayBuild(built: built, input: input, generatedAt: generatedAt,
+                                                   selection: production.selection, inputRevision: revision)
+        var stats = ActivityLane.Stats()
+        let gaitRow = ActivityLane.gaitWindowsRow(day: day, eldernet: try XCTUnwrap(production.eldernet),
+                                                  collector: production.inferred.gaitQuality, context: context,
+                                                  stats: &stats)
+        let motionRow = ActivityLane.motionHeadsRow(day: day, inertia: try XCTUnwrap(production.inertia),
+                                                    collector: production.inferred.motionHeads, context: context,
+                                                    stats: &stats)
+        guard case .notRequested? = gaitRow.candidate, case .notRequested? = motionRow.candidate else {
+            return XCTFail("production rows make no comparison decode")
+        }
+        for (text, channel) in [(gaitRow.payload, "gait_quality"), (motionRow.payload, "motion_heads")] {
+            let row = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(try XCTUnwrap(text).utf8)) as? [String: Any])
+            XCTAssertEqual(row["mode"] as? String, "production", channel)
+            XCTAssertTrue(row["candidate_document"] is NSNull, channel)
+            XCTAssertTrue(row["withheld_reason"] is NSNull, channel)
+            let authority = try XCTUnwrap((row["summary"] as? [String: Any])?["authority"] as? [String: Any])
+            XCTAssertEqual(authority["channel"] as? String, channel)
+            XCTAssertEqual(authority["release_mode"] as? String, "production")
+            XCTAssertEqual(authority["use"] as? String, "canonical")
+        }
+
+        // The joint candidate still runs: its arm of exactly the production channels is the published document, and
+        // reusing that document decodes to the same bytes as a fresh decode of every arm.
+        let text = try XCTUnwrap(ActivityLane.candidateDayPayload(
+            day: day, inputRevision: revision, context: context,
+            motionCandidate: motionRow.candidate, gaitCandidate: gaitRow.candidate, stats: &stats))
+        let decoded = ActivityCandidateDays.decode(selection: production.selection, input: input, generatedAt: generatedAt)
+        XCTAssertEqual(Set(decoded.arms.keys), ["hart", "hart+gait_quality", "hart+motion_heads", "joint"])
+        XCTAssertEqual(decoded.arms["joint"]?.documentSha256, ActivityCandidateDays.documentDigest(publishedDoc))
+        XCTAssertEqual(decoded.arms["hart"]?.documentSha256,
+                       ActivityCandidateDays.documentDigest(ActivityContextDays.dayDocument(input: input,
+                                                                                            generatedAt: generatedAt)))
+        XCTAssertEqual(text, try ActivityCandidateDays.payload(day: day, inputRevision: revision,
+                                                               selection: production.selection, decoded: decoded))
+        let row = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(text.utf8)) as? [String: Any])
+        let decisions = try XCTUnwrap(row["decisions"] as? [[String: Any]])
+        XCTAssertEqual(Set(decisions.compactMap { $0["use"] as? String }), ["canonical"])
+
+        // One production channel beside a candidate one: only the production channel is published.
+        let mixed = try job(eldernet: try eldernet(.candidate),
+                            inertia: try inertia(.production, kind: "inertia1", tier: "production"))
+        XCTAssertEqual(mixed.selection.canonicalChannels, [.motionHeads])
+        XCTAssertEqual(mixed.selection.use(of: .gaitQuality), .candidate)
+        let mixedCanonical = mixed.selection.canonical(input, base: ActivityDecoderConfig())
+        let mixedDoc = ActivityContextDays.dayDocument(input: mixedCanonical.input, generatedAt: generatedAt,
+                                                       config: mixedCanonical.config)
+        XCTAssertNil(mixedDoc.versions.gaitQuality, "a candidate channel never reaches the published decode")
+        XCTAssertNotNil(mixedDoc.versions.motionHeads)
     }
 
     // MARK: - Joint candidate

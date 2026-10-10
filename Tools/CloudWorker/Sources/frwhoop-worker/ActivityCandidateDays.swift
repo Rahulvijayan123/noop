@@ -9,8 +9,9 @@ import StrandAnalytics
 // average of output vectors. Beside it, the ablations a regression is located with: HART alone and HART with each
 // admitted expert alone (the single-expert documents themselves stay in their own rows' `candidate_document`), each
 // with its final-output summary and its comparison against HART alone (`ActivityOutputComparison`). Stored in
-// `activity_candidate_days` through its own fenced RPC under a savepoint, only while some expert runs in candidate
-// mode; never published, never read by scoring or the app.
+// `activity_candidate_days` through its own fenced RPC under a savepoint, only while some expert runs in candidate or
+// production mode (a production channel appears in the arms too, so its effect on the published decode stays
+// measurable against HART alone); never published, never read by scoring or the app.
 
 enum ActivityCandidateDays {
 
@@ -108,14 +109,14 @@ enum ActivityCandidateDays {
         var gaitSources: [GaitQualitySource] = []
         if let gait, let eldernet {
             gaitSources.append(GaitQualitySource(
-                track: gait, releaseMode: eldernet.mode == .candidate ? .candidate : .shadow, route: .standalone,
+                track: gait, releaseMode: eldernet.mode.release, route: .standalone,
                 expectedModelVersion: eldernet.expectedModelVersion, expectedWeightsDigest: eldernet.expectedWeightsDigest,
                 gaitPrior: eldernet.gaitPrior, inputRevision: inputRevision, day: day))
         }
         var motionSources: [MotionHeadsSource] = []
         if let heads, let inertia {
             motionSources.append(MotionHeadsSource(
-                track: heads, mode: inertia.mode == .candidate ? .candidate : .shadow,
+                track: heads, mode: inertia.mode.release,
                 expectedBundleSHA256: inertia.expectedBundleSHA256, inputRevision: inputRevision, day: day))
         }
         return ActivityExpertSelection.select(
@@ -127,7 +128,7 @@ enum ActivityCandidateDays {
     /// channel and the pins the stage ran with. nil when the selection has no source for the channel.
     static func authority(_ selection: ActivityExpertSelection, gait eldernet: ElderNetStage) -> ActivityExpertAuthority? {
         selection.decision(for: .gaitQuality).map {
-            ActivityExpertAuthority(decision: $0, mode: eldernet.mode == .candidate ? .candidate : .shadow,
+            ActivityExpertAuthority(decision: $0, mode: eldernet.mode.release,
                                     pinnedModelVersion: eldernet.expectedModelVersion,
                                     pinnedWeightsDigest: eldernet.expectedWeightsDigest, gaitPrior: eldernet.gaitPrior)
         }
@@ -135,7 +136,7 @@ enum ActivityCandidateDays {
 
     static func authority(_ selection: ActivityExpertSelection, motion inertia: InertiaStage) -> ActivityExpertAuthority? {
         selection.decision(for: .motionHeads).map {
-            ActivityExpertAuthority(decision: $0, mode: inertia.mode == .candidate ? .candidate : .shadow,
+            ActivityExpertAuthority(decision: $0, mode: inertia.mode.release,
                                     pinnedBundleSHA256: inertia.expectedBundleSHA256)
         }
     }
@@ -153,10 +154,13 @@ enum ActivityCandidateDays {
         var motionHeads: MotionHeadsTrackReport? = nil
     }
 
-    /// Decode every candidate arm of `selection` over `input` (the published decode's own input). `reuse` holds
-    /// decodes already made for an arm name (HART alone is the canonical document when no channel is production;
-    /// the single-expert arms are the rows' candidate documents with their reports), so no arm is decoded twice.
+    /// Decode every candidate arm of `selection` over `input` (the published decode's own input), with the published
+    /// decode's `base` config and warm-up `lookback`. `reuse` holds decodes already made for an arm name (the
+    /// canonical document is the arm of exactly the production channels, HART alone when there are none; the
+    /// single-expert arms are the rows' candidate documents with their reports), so no arm is decoded twice.
     static func decode(selection: ActivityExpertSelection, input: ActivityContextTrackInput?, generatedAt: Int,
+                       base: ActivityDecoderConfig = ActivityDecoderConfig(),
+                       lookback: ActivityContextTrackInput? = nil,
                        reuse: [String: Reused] = [:]) -> Decoded {
         let arms = selection.candidateArms
         guard !arms.isEmpty else {
@@ -173,8 +177,10 @@ enum ActivityCandidateDays {
                 reports[arm.name] = (cached.gaitQuality, cached.motionHeads)
                 continue
             }
-            let d = selection.decode(input, base: ActivityDecoderConfig(), channels: arm.channels)
-            let built = ActivityContextDays.dayDocumentAndTrack(input: d.input, generatedAt: generatedAt, config: d.config)
+            let d = selection.decode(input, base: base, channels: arm.channels)
+            let warm = lookback.map { selection.decode($0, base: base, channels: arm.channels).input }
+            let built = ActivityContextDays.dayDocumentAndTrack(input: d.input, generatedAt: generatedAt, config: d.config,
+                                                                lookback: warm)
             documents[arm.name] = built.document
             reports[arm.name] = (built.track.gaitQuality, built.track.motionHeads)
         }

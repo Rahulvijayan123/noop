@@ -37,6 +37,10 @@ enum ActivityContextDays {
         var document: ActivityContextDayDocument? = nil
         /// The decoder-config tag recorded in the document (`decoder_config.tag`), nil without provenance.
         var decoderConfigTag: String? = nil
+        /// How the decode attached and used each expert channel it was given (nil for a channel it was not given:
+        /// only production channels reach a published decode).
+        var gaitQuality: GaitQualityTrackReport? = nil
+        var motionHeads: MotionHeadsTrackReport? = nil
     }
 
     enum PublishOutcome: Equatable {
@@ -233,8 +237,8 @@ enum ActivityContextDays {
                       config: ActivityDecoderConfig = ActivityDecoderConfig(),
                       provenance: DecoderConfigProvenance? = nil,
                       lookback: ActivityContextTrackInput? = nil) throws -> Built {
-        let document = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config,
-                                           lookback: lookback).document
+        let (document, track) = dayDocumentAndTrack(input: input, generatedAt: generatedAt, config: config,
+                                                    lookback: lookback)
         let envelope = Envelope(day: day, modelVersion: modelVersion,
                                 preprocessingVersion: preprocessingVersion,
                                 document: ProvenancedDocument(document: document, decoderConfig: provenance))
@@ -246,7 +250,8 @@ enum ActivityContextDays {
         }
         return Built(payloadText: text, runs: document.runs.count, events: document.events.count,
                      observedSeconds: document.observedSeconds, document: document,
-                     decoderConfigTag: provenance?.tag)
+                     decoderConfigTag: provenance?.tag, gaitQuality: track.gaitQuality,
+                     motionHeads: track.motionHeads)
     }
 
     /// The day document for `input` (no snapshot), runs clipped to the day. Shared by the published v2

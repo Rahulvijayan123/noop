@@ -28,6 +28,9 @@ SEAL_KEYS = ("evaluated_bundle_sha256", "test_gate_sha256", "test_sha256")
 # Optional seal key: a shadow bundle of a pinned encoder (inertia1 / actinet) built from a clean tree is promoted
 # to ``candidate`` when sealed; ``promoted_from`` records the tier the evaluated (pre-seal) manifest carried.
 SEAL_PROMOTED_FROM = "promoted_from"
+# Optional seal key: an operator's release of a sealed candidate bundle to ``production`` (:func:`bundle.release_to_
+# production`): {"from": "candidate", "reason": text, "released_at": ISO-8601}. Required on, and only on, production.
+SEAL_RELEASE = "release"
 HEAD_ARCHS = ("linear", "mlp")
 CLASS_STATUSES = ("strong", "weak", "abstain")
 _ARCH_KEYS = {"linear": ("W", "b"), "mlp": ("ln_g", "ln_b", "W1", "b1", "W2", "b2")}
@@ -108,9 +111,16 @@ def validate_manifest(m: Mapping[str, Any]) -> None:
              "manifest.seal and files['test_gate.json'] must be present together")
     if seal is not None:
         promoted = isinstance(seal, Mapping) and SEAL_PROMOTED_FROM in seal
-        _require(not promoted or (seal[SEAL_PROMOTED_FROM] == "shadow" and tier == "candidate"),
-                 "manifest.seal.promoted_from must be 'shadow' on a candidate bundle")
-        _require(isinstance(seal, Mapping) and set(seal) - {SEAL_PROMOTED_FROM} == set(SEAL_KEYS)
+        _require(not promoted or (seal[SEAL_PROMOTED_FROM] == "shadow" and tier in ("candidate", "production")),
+                 "manifest.seal.promoted_from must be 'shadow' on a candidate or production bundle")
+        release = seal.get(SEAL_RELEASE) if isinstance(seal, Mapping) else None
+        _require((release is not None) == (tier == "production"),
+                 "manifest.seal.release is required on, and only on, a production bundle")
+        _require(release is None or (isinstance(release, Mapping) and release.get("from") == "candidate"
+                                     and isinstance(release.get("reason"), str) and release["reason"].strip()
+                                     and isinstance(release.get("released_at"), str)),
+                 "manifest.seal.release must be {from: 'candidate', reason, released_at}")
+        _require(isinstance(seal, Mapping) and set(seal) - {SEAL_PROMOTED_FROM, SEAL_RELEASE} == set(SEAL_KEYS)
                  and all(is_sha256_hex(seal[k]) for k in SEAL_KEYS)
                  and seal["test_gate_sha256"] == files[TEST_GATE_FILE],
                  f"manifest.seal must be {{{', '.join(SEAL_KEYS)}}} (sha256 hex) matching files['test_gate.json']")
@@ -401,6 +411,6 @@ def validate_all(manifest: Mapping[str, Any], heads: Mapping[str, np.ndarray], c
     validate_ood(manifest, ood_meta, ood_arrays)
 
 
-__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "TEST_GATE_FILE", "SEAL_KEYS", "SEAL_PROMOTED_FROM", "HEAD_ARCHS",
+__all__ = ["BundleError", "REQUIRED_FILES", "PROVENANCE_FILES", "TEST_GATE_FILE", "SEAL_KEYS", "SEAL_PROMOTED_FROM", "SEAL_RELEASE", "HEAD_ARCHS",
            "CLASS_STATUSES", "supported_classes", "head_array_keys", "validate_manifest", "validate_heads_arrays",
            "validate_calibration", "validate_ood", "validate_merge", "validate_test_gate", "validate_all"]

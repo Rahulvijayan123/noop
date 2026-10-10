@@ -20,15 +20,27 @@ import StrandAnalytics
 //     migration never reaches the v1 / v2 publishes in the same transaction;
 //   • candidate mode additionally decodes the day a second time with the ElderNet channel as decoder evidence —
 //     only for the pinned model version and weights digest and with the configured gait prior, otherwise the
-//     withheld reason is stored — and keeps that comparison document beside the shadow row. It is never written to
-//     `activity_context_days` / `activity_context_epochs`: the published HART documents are byte-identical whether
-//     ElderNet is enabled or not.
+//     withheld reason is stored — and keeps that comparison document beside the shadow row. In shadow and candidate
+//     mode nothing is written to `activity_context_days` / `activity_context_epochs`: the published HART documents
+//     are byte-identical whether ElderNet is enabled or not;
+//   • production mode has candidate mode's requirements, but its windows shape the published v2 day document
+//     through the shared release policy (`ActivityExpertSelection.canonical`), and its row carries no comparison
+//     document and no withheld reason. The v1 epochs stay HART's alone.
 
 /// FRWHOOP_ELDERNET_* settings. Off unless `FRWHOOP_ELDERNET_ENABLED` is on and both the weights directory and the
 /// upstream source directory are configured.
 struct ElderNetSettings: Equatable {
     enum Mode: String, Equatable {
-        case shadow, candidate
+        case shadow, candidate, production
+
+        /// The release the shared policy is asked for.
+        var release: ActivityReleaseMode {
+            switch self {
+            case .shadow: return .shadow
+            case .candidate: return .candidate
+            case .production: return .production
+            }
+        }
     }
 
     var enabled: Bool
@@ -45,7 +57,7 @@ struct ElderNetSettings: Equatable {
     var modelVersion: String? = nil
     /// The weights digest the deployment pins (FRWHOOP_ELDERNET_WEIGHTS_SHA256; `GaitQualityModelInfo.weightsDigest`).
     var weightsSHA256: String? = nil
-    /// π for the candidate decode (FRWHOOP_ELDERNET_GAIT_PRIOR): the mean served `gait_prob` over all windows the
+    /// π for the candidate and production decodes (FRWHOOP_ELDERNET_GAIT_PRIOR): the mean served `gait_prob` over all windows the
     /// decoder sees (ELDERNET.md §5; 0.0849 on Capture-24 VAL at hop 5 with the served defaults).
     var gaitPrior: Double? = nil
     /// Why ElderNet stays off although it was asked for (a missing weights dir, an unknown mode or value …).
@@ -65,14 +77,14 @@ struct ElderNetSettings: Equatable {
     static let defaultJobBudgetSeconds = 600.0
 
     /// FRWHOOP_ELDERNET_ENABLED (1/true/yes/on, default off; anything unrecognised is a configuration error),
-    /// FRWHOOP_ELDERNET_MODE (shadow | candidate, default shadow), FRWHOOP_ELDERNET_WEIGHTS_DIR and
+    /// FRWHOOP_ELDERNET_MODE (shadow | candidate | production, default shadow), FRWHOOP_ELDERNET_WEIGHTS_DIR and
     /// FRWHOOP_ELDERNET_UPSTREAM_DIR (both required when on),
     /// FRWHOOP_ELDERNET_PYTHON (default: the activity python), FRWHOOP_ELDERNET_TIMEOUT_SECONDS (default 60, clamped
     /// to at most `leaseSeconds / 3`), FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS (default 600),
-    /// FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 (the pins;
-    /// required in candidate mode, enforced in shadow mode when set), FRWHOOP_ELDERNET_GAIT_PRIOR (π in [0.01, 0.99];
-    /// required in candidate mode). A setting that cannot be honoured switches ElderNet off with a reason; it never
-    /// stops the worker.
+    /// FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 (the pins; required in candidate and
+    /// production mode, enforced in shadow mode when set), FRWHOOP_ELDERNET_GAIT_PRIOR (π in [0.01, 0.99]; required
+    /// in candidate and production mode). A setting that cannot be honoured switches ElderNet off with a reason; it
+    /// never stops the worker.
     static func fromEnvironment(_ env: [String: String], activityPython: String = "python3",
                                 leaseSeconds: Int = 300) -> ElderNetSettings {
         func value(_ key: String) -> String? {
@@ -133,10 +145,10 @@ struct ElderNetSettings: Equatable {
                 errors.append("FRWHOOP_ELDERNET_WEIGHTS_DIR is required")
             } else if settings.upstreamDir == nil {
                 errors.append("FRWHOOP_ELDERNET_UPSTREAM_DIR is required (the sha-verified upstream source checkout)")
-            } else if settings.mode == .candidate, settings.modelVersion == nil || settings.weightsSHA256 == nil {
-                errors.append("FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 are required in candidate mode")
-            } else if settings.mode == .candidate, settings.gaitPrior == nil {
-                errors.append("FRWHOOP_ELDERNET_GAIT_PRIOR is required in candidate mode")
+            } else if settings.mode != .shadow, settings.modelVersion == nil || settings.weightsSHA256 == nil {
+                errors.append("FRWHOOP_ELDERNET_MODEL_VERSION and FRWHOOP_ELDERNET_WEIGHTS_SHA256 are required in \(settings.mode.rawValue) mode")
+            } else if settings.mode != .shadow, settings.gaitPrior == nil {
+                errors.append("FRWHOOP_ELDERNET_GAIT_PRIOR is required in \(settings.mode.rawValue) mode")
             }
         }
         settings.configurationError = errors.first
@@ -230,7 +242,7 @@ struct ElderNetStage {
     /// The pins (FRWHOOP_ELDERNET_MODEL_VERSION / _WEIGHTS_SHA256), or nil when not pinned (shadow only).
     var expectedModelVersion: String? = nil
     var expectedWeightsDigest: String? = nil
-    /// π for the candidate decode (FRWHOOP_ELDERNET_GAIT_PRIOR).
+    /// π for the candidate and production decodes (FRWHOOP_ELDERNET_GAIT_PRIOR).
     var gaitPrior: Double? = nil
     /// Wall-clock seconds this stage may spend per job (`ElderNetSettings.jobBudgetSeconds`).
     var jobBudgetSeconds: Double = ElderNetSettings.defaultJobBudgetSeconds
@@ -369,7 +381,7 @@ enum ActivityGaitWindowsDays {
     static let pruneSQL = "SELECT public.prune_activity_gait_windows_days($1::integer, $2::integer)::text"
 
     enum Candidate {
-        /// Shadow mode: no second decode.
+        /// Shadow or production mode: no comparison decode.
         case notRequested
         case withheld(String)
         /// The comparison document, and how its decode attached and used the windows.
@@ -458,8 +470,9 @@ enum ActivityGaitWindowsDays {
         var windowsOmitted: Bool
         var candidateStamp: String?
         var gaitPrior: Double?
-        /// How the windows met the day's observed seconds: the candidate decode's report in candidate mode, a dry-run
-        /// attachment otherwise. nil when there was no decoder input to attach to (ActivityContext v2 off).
+        /// How the windows met the day's observed seconds: the candidate decode's report in candidate mode, the
+        /// published decode's in production mode when the channel shaped it, a dry-run attachment otherwise. nil when
+        /// there was no decoder input to attach to (ActivityContext v2 off).
         var trackReport: GaitQualityTrackReport?
         /// The shared policy's inputs and decision for this row (ActivityExpertAuthority); the migration's trigger
         /// copies it into the row's `authority` column. Left out when the caller has no selection.
@@ -544,7 +557,8 @@ enum ActivityGaitWindowsDays {
 
     /// The candidate comparison for one day: the same input the published v2 document was decoded from, plus the
     /// ElderNet windows, decoded with the gait channel as candidate evidence. Withheld unless the deployment pinned
-    /// the model version and weights digest and set the gait prior, and whenever the config refuses the model.
+    /// the model version and weights digest and set the gait prior, and whenever the config refuses the model. Only
+    /// candidate mode asks for one: production windows shape the published decode itself.
     ///
     /// The decode itself is the shared policy's (`selection`, the job's own; built here from these windows alone when
     /// nil): HART plus the gait-quality channel exactly, with the config and release the policy built from the row.
@@ -579,8 +593,9 @@ enum ActivityGaitWindowsDays {
         return .document(built.document, built.report)
     }
 
-    /// The RPC payload (sorted keys), or nil when no chunk produced a valid response. `attachment` is the dry-run
-    /// attachment report used when there is no candidate decode (see `Summary.trackReport`).
+    /// The RPC payload (sorted keys), or nil when no chunk produced a valid response. `attachment` is the report
+    /// used when there is no candidate decode (see `Summary.trackReport`). Only a candidate-mode row carries a
+    /// comparison document or a withheld reason; `candidate` is ignored in every other mode.
     static func payload(day: String, mode: ElderNetSettings.Mode, collector: GaitQualityCollector,
                         candidate: Candidate, attachment: GaitQualityTrackReport? = nil,
                         gaitPrior: Double? = nil, authority: ActivityExpertAuthority? = nil,
@@ -605,7 +620,7 @@ enum ActivityGaitWindowsDays {
 
         var withheld: String?, document: ActivityContextDayDocument?, stamp: String?
         var report = attachment
-        switch candidate {
+        switch mode == .candidate ? candidate : .notRequested {
         case .notRequested: break
         case .withheld(let why): withheld = why
         case .document(let d, let r): document = d; stamp = d.versions.gaitQuality; report = r ?? attachment
@@ -618,7 +633,7 @@ enum ActivityGaitWindowsDays {
             stopped: collector.stopped, weightsDigest: model.weightsDigest,
             meanGaitProb: gait.windows.isEmpty ? nil : rounded(probSum / Double(gait.windows.count)),
             gait: totals, windowsOmitted: windows == nil, candidateStamp: stamp,
-            gaitPrior: mode == .candidate ? gaitPrior : nil, trackReport: report, authority: authority,
+            gaitPrior: mode != .shadow ? gaitPrior : nil, trackReport: report, authority: authority,
             workouts: workouts)
         let payload = Payload(day: day, mode: mode.rawValue, model: model, weightsDigest: model.weightsDigest,
                               summary: summary, windows: windows, withheldReason: withheld, candidateDocument: document)

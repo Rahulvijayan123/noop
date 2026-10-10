@@ -51,8 +51,8 @@ final class ActivityInertiaStageTests: XCTestCase {
         config.serveArgs = [path, "--behaviour", behaviour, "--kind", kind, "--tier", tier, "--sleep", "30"] + extraArgs
         let s = ActivityPythonService(config: config)
         services.append(s)
-        // Candidate mode is always pinned (the settings refuse it otherwise); shadow only when asked.
-        let expected: String? = pin ?? (mode == .candidate ? stubSha : nil)
+        // Candidate and production mode are always pinned (the settings refuse them otherwise); shadow only when asked.
+        let expected: String? = pin ?? (mode != .shadow ? stubSha : nil)
         return InertiaStage(service: s, mode: mode, expectedBundleSHA256: expected, jobBudgetSeconds: jobBudget)
     }
 
@@ -119,9 +119,9 @@ final class ActivityInertiaStageTests: XCTestCase {
         XCTAssertFalse(noBundle.enabled)
         XCTAssertEqual(noBundle.configurationError, "FRWHOOP_INERTIA_BUNDLE_DIR is required")
         let badMode = InertiaSettings.fromEnvironment(["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b",
-                                                       "FRWHOOP_INERTIA_MODE": "production"])
-        XCTAssertFalse(badMode.enabled, "production evidence needs a code and config change, not an env flag")
-        XCTAssertNotNil(badMode.configurationError)
+                                                       "FRWHOOP_INERTIA_MODE": "live"])
+        XCTAssertFalse(badMode.enabled)
+        XCTAssertEqual(badMode.configurationError, "unknown FRWHOOP_INERTIA_MODE live")
         let on = InertiaSettings.fromEnvironment(["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b"],
                                                  activityPython: "/usr/bin/python3")
         XCTAssertTrue(on.enabled)
@@ -523,6 +523,76 @@ final class ActivityInertiaStageTests: XCTestCase {
             "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW": "1"]) { $1 })
         XCTAssertFalse(candidateStandIn.enabled)
         XCTAssertEqual(candidateStandIn.configurationError, "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW is for shadow mode only")
+    }
+
+    func testProductionModeNeedsAPinnedBundleAndNoStandIn() throws {
+        let env = ["FRWHOOP_INERTIA_ENABLED": "1", "FRWHOOP_INERTIA_BUNDLE_DIR": "/b", "FRWHOOP_INERTIA_MODE": "production"]
+        let unpinned = InertiaSettings.fromEnvironment(env)
+        XCTAssertFalse(unpinned.enabled)
+        XCTAssertEqual(unpinned.configurationError, "FRWHOOP_INERTIA_BUNDLE_SHA256 is required in production mode")
+        let standIn = InertiaSettings.fromEnvironment(env.merging([
+            "FRWHOOP_INERTIA_BUNDLE_SHA256": stubSha, "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW": "1"]) { $1 })
+        XCTAssertFalse(standIn.enabled)
+        XCTAssertEqual(standIn.configurationError, "FRWHOOP_INERTIA_ALLOW_STANDIN_SHADOW is for shadow mode only")
+        let ok = InertiaSettings.fromEnvironment(env.merging(["FRWHOOP_INERTIA_BUNDLE_SHA256": stubSha]) { $1 })
+        XCTAssertTrue(ok.enabled)
+        XCTAssertNil(ok.configurationError)
+        XCTAssertEqual(ok.mode, .production)
+        XCTAssertEqual(ok.mode.release, .production)
+        let args = try XCTUnwrap(ok.serviceConfig(activityHome: "/h")).serveArgs
+        XCTAssertEqual(Array(args.suffix(2)), ["--expect-bundle-sha256", stubSha])
+        XCTAssertFalse(args.contains("--allow-standin-shadow"))
+    }
+
+    /// A production row carries neither a comparison document nor a withheld reason (the table allows them only in
+    /// candidate mode) and reports how the published decode used its windows; a bundle evaluated only to the
+    /// candidate tier is lowered to candidate use and never shapes the published decode.
+    func testProductionRowCarriesNoComparisonDocumentOrWithheldReason() throws {
+        var stats = ActivityLane.Stats()
+        let stage = try inertia("ok", kind: "inertia1", tier: "production", mode: .production)
+        let inferred = try infer(stage, stats: &stats)
+        let heads = try XCTUnwrap(inferred.motionHeads.trackInput)
+        let input = contextInput()
+        guard case .notRequested = ActivityMotionHeadsDays.candidate(
+            mode: .production, heads: heads, input: input, generatedAt: 1_789_500_000, expectedBundleSHA256: stubSha)
+        else { return XCTFail("production asks for no comparison decode") }
+        let selection = ActivityCandidateDays.selection(day: day, inputRevision: 3, gait: nil, eldernet: nil,
+                                                        heads: heads, inertia: stage)
+        XCTAssertEqual(selection.canonicalChannels, [.motionHeads])
+        let canonical = selection.canonical(input, base: ActivityDecoderConfig())
+        let built = try ActivityContextDays.build(input: canonical.input, day: day, modelVersion: "m",
+                                                  preprocessingVersion: "p", generatedAt: 1_789_500_000,
+                                                  config: canonical.config)
+        XCTAssertNotNil(built.document?.versions.motionHeads, "the published decode names the motion evidence")
+        let published = try XCTUnwrap(built.motionHeads)
+        let context = ActivityLane.ContextDayBuild(built: built, input: input, generatedAt: 1_789_500_000,
+                                                   selection: selection, inputRevision: 3)
+        let row = ActivityLane.motionHeadsRow(day: day, inertia: stage, collector: inferred.motionHeads,
+                                              context: context, stats: &stats)
+        guard case .notRequested? = row.candidate else { return XCTFail("production made a comparison decode") }
+        XCTAssertEqual(stats.inertiaCandidateDocuments, 0)
+        XCTAssertEqual(stats.inertiaCandidateWithheld, 0)
+        let p = try payloadObject(row.payload)
+        XCTAssertEqual(p["mode"] as? String, "production")
+        XCTAssertTrue(p["candidate_document"] is NSNull)
+        XCTAssertTrue(p["withheld_reason"] is NSNull)
+        let summary = try XCTUnwrap(p["summary"] as? [String: Any])
+        XCTAssertTrue(summary["candidate_stamp"] is NSNull)
+        let report = try JSONSerialization.data(withJSONObject: try XCTUnwrap(summary["track_report"]))
+        XCTAssertEqual(try JSONDecoder().decode(MotionHeadsTrackReport.self, from: report), published,
+                       "the published decode's own report")
+        let authority = try XCTUnwrap(summary["authority"] as? [String: Any])
+        XCTAssertEqual(authority["release_mode"] as? String, "production")
+        XCTAssertEqual(authority["use"] as? String, "canonical")
+
+        // The bundle's evidence tier caps the release: a candidate-tier bundle in production mode is candidate only.
+        var lowStats = ActivityLane.Stats()
+        let low = try inertia("ok", kind: "inertia1", tier: "candidate", mode: .production)
+        let lowHeads = try XCTUnwrap(try infer(low, stats: &lowStats).motionHeads.trackInput)
+        let lowSelection = ActivityCandidateDays.selection(day: day, inputRevision: 3, gait: nil, eldernet: nil,
+                                                           heads: lowHeads, inertia: low)
+        XCTAssertEqual(lowSelection.canonicalChannels, [])
+        XCTAssertEqual(lowSelection.use(of: .motionHeads), .candidate)
     }
 
     func testTheInertiaTimeoutFitsInsideTheLeaseAndTheChildTimesOutFirst() throws {

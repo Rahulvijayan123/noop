@@ -99,7 +99,7 @@ Deno.test('gait windows: malformed queries are rejected before the database is a
   }
 });
 
-Deno.test('gait windows: every row carries its release and input revision, never production', async () => {
+Deno.test('gait windows: every shadow / candidate row carries its release and input revision, never production', async () => {
   const pinned = { policy: 'expert-authority-1', channel: 'gait_quality', route: 'standalone', mode: 'candidate',
     release_mode: 'candidate', use: 'candidate', reason: null, input_revision: '7',
     pinned_model_version: 'eldernet-437a38b', pinned_weights_digest: 'b'.repeat(64), gait_prior: 0.2 };
@@ -138,6 +138,48 @@ Deno.test('gait windows: every row carries its release and input revision, never
   assertEquals(unchanged.unchanged, true);
   assertEquals(unchanged.release_mode, 'candidate');
   assertEquals(unchanged.input_revision, '7');
+});
+
+Deno.test('gait windows: a production row reads as production only to a caller with the authority capability', async () => {
+  const released = { policy: 'expert-authority-1', channel: 'gait_quality', route: 'standalone', mode: 'production',
+    release_mode: 'production', use: 'canonical', reason: null, input_revision: '7' };
+  const rows: Row[] = [
+    { day: '2026-10-03', mode: 'production', model_version: 'eldernet-437a38b', result_revision: 2,
+      computed_at: '2026-10-03T23:00:00Z', release_mode: 'production', input_revision: 7, authority: released },
+    // A production row its producer lowered to candidate.
+    { day: '2026-10-04', mode: 'production', model_version: 'eldernet-437a38b', result_revision: 3,
+      computed_at: '2026-10-04T23:00:00Z', release_mode: 'candidate',
+      authority: { ...released, release_mode: 'candidate', use: 'candidate' } },
+    // A production row lowered to shadow.
+    { day: '2026-10-05', mode: 'production', model_version: 'eldernet-437a38b', result_revision: 4,
+      computed_at: '2026-10-05T23:00:00Z', release_mode: 'shadow', authority: { ...released, release_mode: 'shadow' } },
+  ];
+  const days = 'days=2026-10-03,2026-10-04,2026-10-05';
+  const aware = await handleScoresRequest(get(`${days}&authority=1`), { rest: fakeRest(rows, []), cfg });
+  const now = Object.fromEntries((await aware.json()).days.map((d: any) => [d.day, d]));
+  assertEquals(now['2026-10-03'].release_mode, 'production');
+  assertEquals(now['2026-10-03'].authority, released);
+  assertEquals(now['2026-10-03'].model.model_id, 'eldernet');
+  assertEquals(now['2026-10-04'].release_mode, 'candidate');
+  assertEquals(now['2026-10-04'].authority.release_mode, 'candidate');
+  assertEquals(now['2026-10-05'].release_mode, 'shadow');
+  assertEquals(now['2026-10-05'].authority.release_mode, 'shadow');
+  const again = await handleScoresRequest(get('days=2026-10-03&known=2026-10-03:2&authority=1'),
+    { rest: fakeRest(rows, []), cfg });
+  const [unchanged] = (await again.json()).days;
+  assertEquals(unchanged.unchanged, true);
+  assertEquals(unchanged.release_mode, 'production');
+
+  // A phone without the capability: never production, never a model, whatever the row says.
+  const legacy = await handleScoresRequest(get(days), { rest: fakeRest(rows, []), cfg });
+  for (const d of (await legacy.json()).days as any[]) {
+    assertEquals(d.release_mode, 'shadow', d.day);
+    assertEquals(d.model, undefined, d.day);
+    assertEquals(d.authority, undefined, d.day);
+    assertEquals(d.windows.format, 'gait-windows-1', d.day);
+  }
+  const legacyKnown = await handleScoresRequest(get('days=2026-10-03&known=2026-10-03:2'), { rest: fakeRest(rows, []), cfg });
+  assertEquals((await legacyKnown.json()).days[0].release_mode, 'shadow');
 });
 
 Deno.test('gait windows: an unknown or inconsistent stored release reads as shadow', async () => {

@@ -172,7 +172,7 @@ begin
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{day}','"garbage"'),'invalid_motion_heads_payload'), 'unparseable day';
   assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{schema}','"motion-heads-2"'),'invalid_motion_heads_schema'), 'schema';
   assert pg_temp.mh_rejects(tok,rev,p - 'schema','invalid_motion_heads_schema'), 'missing schema';
-  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{mode}','"production"'),'invalid_motion_heads_payload'), 'mode';
+  assert pg_temp.mh_rejects(tok,rev,jsonb_set(p,'{mode}','"released"'),'invalid_motion_heads_payload'), 'mode';
   assert pg_temp.mh_rejects(tok,rev,p || jsonb_build_object('pad', repeat('x', 17000000)),'invalid_motion_heads_size'),
     'oversized payload';
   -- Bundle provenance.

@@ -209,18 +209,25 @@ export async function readActivityWindows({ rest, userId, deviceId, days, known,
 /**
  * The release an expert row may be shown as: its stored release (the migration's trigger keeps it at or below the
  * row's mode), else its recorded mode for a row written before the release column existed, and shadow for anything
- * else. Never production: no expert table holds a production row.
+ * else. Production only for a caller with the authority capability and a production row whose stored release is
+ * production (a production row lowered to candidate reads as candidate); a caller without it never sees
+ * production, nor anything from a production row above shadow (the shape it had before production rows existed).
  */
+type ExpertRelease = 'shadow' | 'candidate' | 'production';
+const RELEASES: ExpertRelease[] = ['shadow', 'candidate', 'production'];
 const RELEASE_RANK: Record<string, number> = { shadow: 0, candidate: 1, production: 2 };
 
 /** The weaker of `recorded` (unknown text reads as shadow) and `cap`. */
-function lowerRelease(recorded: unknown, cap: 'shadow' | 'candidate'): 'shadow' | 'candidate' {
-  const rank = typeof recorded === 'string' ? RELEASE_RANK[recorded] ?? 0 : 0;
-  return Math.min(rank, RELEASE_RANK[cap]) >= 1 ? 'candidate' : 'shadow';
+function lowerRelease(recorded: unknown, cap: ExpertRelease): ExpertRelease {
+  const rank = typeof recorded === 'string' && Object.hasOwn(RELEASE_RANK, recorded) ? RELEASE_RANK[recorded] : 0;
+  return RELEASES[Math.min(rank, RELEASE_RANK[cap])];
 }
 
-export function expertReleaseMode(row: { release_mode?: unknown; mode?: unknown }): 'shadow' | 'candidate' {
+export function expertReleaseMode(row: { release_mode?: unknown; mode?: unknown }, authorityAware = false): ExpertRelease {
   const recorded = row.release_mode ?? row.mode;
+  if (authorityAware && row.mode === 'production') {
+    return recorded === 'production' ? 'production' : recorded === 'candidate' ? 'candidate' : 'shadow';
+  }
   return recorded === 'candidate' && row.mode === 'candidate' ? 'candidate' : 'shadow';
 }
 
@@ -370,9 +377,9 @@ const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,
  * detection and gait quality (`gait-windows-1`) plus its own day summary, for up to three UTC days. Same query
  * and `known` rule as `/activity-windows`. A day can hold a shadow and a candidate row (and rows of an older
  * model); the newest computed one is returned. The candidate decode document is never sent. Every row says the
- * release it may be used under (`release_mode`, never production) and the input revision it was computed from; a
- * full row adds the model identity and the producer's authority block (null on older rows), which a client feeds
- * to the shared selection policy (ActivityExpertSelection) rather than trusting.
+ * release it may be used under (`release_mode`; production only with `authority=1`, see expertReleaseMode) and the
+ * input revision it was computed from; a full row adds the model identity and the producer's authority block (null
+ * on older rows), which a client feeds to the shared selection policy (ActivityExpertSelection) rather than trusting.
  */
 export async function readGaitWindows({ rest, userId, deviceId, days, known, authorityAware = false }: {
   rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
@@ -386,7 +393,7 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known, aut
   const out = [];
   for (const head of newest.values()) {
     const revision = String(head.result_revision);
-    const release = { release_mode: expertReleaseMode(head), input_revision: String(head.input_revision) };
+    const release = { release_mode: expertReleaseMode(head, authorityAware), input_revision: String(head.input_revision) };
     if (known.get(head.day) === revision) {
       out.push({ ...head, ...release, result_revision: revision, unchanged: true });
       continue;
@@ -397,11 +404,11 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known, aut
       + '&select=result_revision,input_revision,release_mode,mode,authority,summary,windows,model_id,weights,'
       + 'weights_digest,upstream_commit,preprocessing_version'))?.[0];
     if (!body) continue;
-    const bodyRelease = expertReleaseMode(body);
+    const bodyRelease = expertReleaseMode(body, authorityAware);
     // A caller without the authority capability (a phone built before the policy) installs any row that names a
-    // model whose digest checks out as production gait evidence, whatever its mode. No row here is production, so
-    // such a caller gets the windows and the day summary (its walking card) but no model, identity or authority
-    // block: it stores nothing for its decoder and decodes on HART alone.
+    // model whose digest checks out as production gait evidence, whatever its mode. Such a caller gets the windows
+    // and the day summary (its walking card) but no model, identity or authority block, production rows included:
+    // it stores nothing for its decoder and decodes on HART alone.
     if (!authorityAware) {
       out.push({
         ...head,
@@ -452,6 +459,84 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known, aut
         windows_omitted: body.summary?.windows_omitted === true,
       },
       windows: body.windows ?? null,
+    });
+  }
+  return out;
+}
+
+const MOTION_HEADS_HEAD = 'day,mode,bundle_id,encoder_id,encoder_kind,evidence_tier_max,bundle_sha256,window_s,hop_s,'
+  + 'n_windows,n_ood,input_revision,release_mode,result_revision,computed_at';
+
+/** The most a motion-heads bundle may be released as: a stand-in or a shadow-tier bundle is shadow, else its tier. */
+function motionTierCap(row: { encoder_kind?: unknown; evidence_tier_max?: unknown }): ExpertRelease {
+  if (row.encoder_kind !== 'inertia1' && row.encoder_kind !== 'actinet') return 'shadow';
+  return lowerRelease(row.evidence_tier_max, 'production');
+}
+
+/** The stored summary without the producer's authority block (sent on its own, lowered to the row's release). */
+function motionSummary(summary: unknown): Record<string, unknown> | null {
+  if (!summary || typeof summary !== 'object' || Array.isArray(summary)) return null;
+  const { authority: _authority, ...rest } = summary as Record<string, unknown>;
+  return rest;
+}
+
+/**
+ * `GET /motion-heads?days=<YYYY-MM-DD>[,…][&known=<YYYY-MM-DD>:<revision>,…][&authority=1]`: the Inertia / ActiNet
+ * motion heads (`mh-col-1` windows plus the stored day summary), for up to three UTC days. Same query, scoping and
+ * `known` rule as `/gait-windows`; the newest computed row of a day wins and the candidate decode document is never
+ * sent. Every row says its release (`release_mode`, never above the bundle's tier; production only with
+ * `authority=1`) and input revision; a full row to a caller with the capability adds the stored bundle info
+ * (`bundle`, MotionHeadsBundleInfo with its nested manifest, null on rows written before it was stored) and the
+ * producer's authority block (null on older rows), which a client feeds to ActivityExpertSelection.
+ */
+export async function readMotionHeads({ rest, userId, deviceId, days, known, authorityAware = false }: {
+  rest: SupabaseRest; userId: string; deviceId: string; days: string[]; known: Map<string, string>;
+  authorityAware?: boolean;
+}) {
+  const owner = `user_id=eq.${userId}&device_id=eq.${deviceId}`;
+  const rows = await rest.select('activity_motion_heads_days',
+    `${owner}&day=in.(${days.join(',')})&select=${MOTION_HEADS_HEAD}&order=computed_at.desc`) ?? [];
+  const newest = new Map<string, any>();
+  for (const row of rows) if (!newest.has(row.day)) newest.set(row.day, row);
+  const out = [];
+  for (const head of newest.values()) {
+    const revision = String(head.result_revision);
+    const release = {
+      release_mode: lowerRelease(expertReleaseMode(head, authorityAware), motionTierCap(head)),
+      input_revision: String(head.input_revision),
+    };
+    if (known.get(head.day) === revision) {
+      out.push({ ...head, ...release, result_revision: revision, unchanged: true });
+      continue;
+    }
+    const body = (await rest.select('activity_motion_heads_days',
+      `${owner}&day=eq.${head.day}&mode=eq.${encodeURIComponent(head.mode)}`
+      + `&bundle_id=eq.${encodeURIComponent(head.bundle_id)}`
+      + '&select=result_revision,input_revision,release_mode,mode,encoder_kind,evidence_tier_max,authority,summary,'
+      + 'windows,bundle_info'))?.[0];
+    if (!body) continue;
+    // The body's own release and revision describe the windows sent (a republish between the reads).
+    const bodyRelease = lowerRelease(expertReleaseMode(body, authorityAware), motionTierCap(body));
+    const common = {
+      ...head,
+      release_mode: bodyRelease,
+      input_revision: String(body.input_revision),
+      result_revision: String(body.result_revision),
+      summary: motionSummary(body.summary),
+      windows: body.windows ?? null,
+    };
+    if (!authorityAware) {
+      out.push(common);
+      continue;
+    }
+    out.push({
+      ...common,
+      // The producer's view, never above the row's release.
+      authority: body.authority && typeof body.authority === 'object' && !Array.isArray(body.authority)
+        ? { ...body.authority, release_mode: lowerRelease(body.authority.release_mode, bodyRelease) }
+        : null,
+      bundle: body.bundle_info && typeof body.bundle_info === 'object' && !Array.isArray(body.bundle_info)
+        ? body.bundle_info : null,
     });
   }
   return out;
@@ -549,6 +634,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isSeries = req.method === 'GET' && route === '/series';
   const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
   const isGaitWindows = req.method === 'GET' && route === '/gait-windows';
+  const isMotionHeads = req.method === 'GET' && route === '/motion-heads';
   // RecGym exercise windows, shadow only (20261009160000): one device, a time range.
   const isExerciseWindows = req.method === 'GET' && route === '/exercise-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
@@ -584,8 +670,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   // GET for one device (deviceId) or every device of the owner.
   const isWorkoutsPost = req.method === 'POST' && route === '/workouts';
   const isWorkoutsGet = req.method === 'GET' && route === '/workouts';
-  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
-      && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
+  if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isMotionHeads && !isDiagnostics
+      && !isRegister && !isOverride && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
       && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes
       && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows && !isWorkoutsPost && !isWorkoutsGet
@@ -640,7 +726,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       return Response.json({ ...result, identity: { userId: user.id, sourceId: user.sourceId } },
         { headers: { 'cache-control': 'no-store' } });
     }
-    const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
+    const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isMotionHeads || isDiagnostics
+        || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
         || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
@@ -650,7 +737,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         : isContextIntervals ? CONTEXT_INTERVALS_MAX_BODY_BYTES
         : isWatchdogEpisodesPost ? WATCHDOG_EPISODES_MAX_BODY_BYTES
         : isWorkoutsPost ? USER_WORKOUTS_MAX_BODY_BYTES : undefined);
-    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
+    const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isMotionHeads
+        || isDiagnostics || isComputeRead
         || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates || isContextMinutes
         || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? url.searchParams.get('deviceId')
@@ -729,6 +817,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (!deviceId) throw fail('device_registration_pending', 409);
       const query = parseActivityWindowsQuery(url.searchParams);
       const days = await readGaitWindows({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isMotionHeads) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseActivityWindowsQuery(url.searchParams);
+      const days = await readMotionHeads({ rest, userId: user.id, deviceId, ...query });
       return Response.json({ days, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isComputeSubmit || isComputeRead) {

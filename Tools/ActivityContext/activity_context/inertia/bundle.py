@@ -67,7 +67,7 @@ import numpy as np
 from . import (CALIBRATION_SCHEMA, CLASSIFIER_HEADS, HEADS_SCHEMA, MULTILABEL_HEADS, OOD_SCHEMA, SOFTMAX_HEADS,
                TEST_GATE_SCHEMA)
 from . import bundle_math as bm
-from .bundle_schema import (SEAL_PROMOTED_FROM, REQUIRED_FILES, TEST_GATE_FILE, BundleError, supported_classes,
+from .bundle_schema import (SEAL_PROMOTED_FROM, SEAL_RELEASE, REQUIRED_FILES, TEST_GATE_FILE, BundleError, supported_classes,
                             validate_all, validate_manifest, validate_test_gate)
 from .contract import sha256_bytes
 
@@ -405,6 +405,8 @@ def presealed_sha256(manifest: Mapping[str, Any]) -> str:
     """bundle_sha256 of the bundle before :func:`seal_bundle` (manifest without ``seal``/gate entry)."""
     m = copy.deepcopy(dict(manifest))
     seal = m.pop("seal", None)
+    if isinstance(seal, Mapping) and isinstance(seal.get(SEAL_RELEASE), Mapping):
+        m["evidence_tier_max"] = seal[SEAL_RELEASE]["from"]
     if isinstance(seal, Mapping) and SEAL_PROMOTED_FROM in seal:
         m["evidence_tier_max"] = seal[SEAL_PROMOTED_FROM]
     m["files"] = {k: v for k, v in m["files"].items() if k != TEST_GATE_FILE}
@@ -509,5 +511,53 @@ def seal_bundle(bundle_dir: str, evaluation: Mapping[str, Any]) -> HeadBundle:
     return load_bundle(bundle_dir)
 
 
-__all__ = ["write_bundle", "load_bundle", "seal_bundle", "promotable", "gate_document", "presealed_sha256", "HeadBundle",
+def release_to_production(src_dir: str, dst_dir: str, reason: str, released_at: str) -> HeadBundle:
+    """Copy a sealed ``candidate`` bundle to ``dst_dir`` as ``production``: the operator's release decision, recorded
+    in ``manifest.seal.release``. Every other file is byte-identical, the test gate still verifies against the
+    evaluated (pre-seal) hash, and the copy has its own ``bundle_sha256`` (the deployment re-pins it). The source is
+    never modified."""
+    import shutil
+    b = load_bundle(src_dir)
+    if b.evidence_tier_max != "candidate" or not b.sealed:
+        raise BundleError("config_mismatch", f"{src_dir} is not a sealed candidate bundle "
+                          f"(evidence_tier_max {b.evidence_tier_max!r})")
+    if not reason.strip():
+        raise BundleError("config_mismatch", "a production release needs a reason")
+    if os.path.exists(dst_dir):
+        raise BundleError("config_mismatch", f"{dst_dir} already exists")
+    m = copy.deepcopy(b.manifest)
+    m["evidence_tier_max"] = "production"
+    m["seal"] = dict(m["seal"], **{SEAL_RELEASE: {"from": "candidate", "reason": reason.strip(),
+                                                  "released_at": released_at}})
+    validate_manifest(m)
+    shutil.copytree(src_dir, dst_dir)
+    tmp = os.path.join(dst_dir, ".manifest.json.tmp")
+    with open(tmp, "wb") as f:
+        f.write(json_bytes(m))
+    os.replace(tmp, os.path.join(dst_dir, "manifest.json"))
+    return load_bundle(dst_dir)
+
+
+def _release_main(argv: Optional[List[str]] = None) -> int:
+    import argparse
+    from datetime import datetime, timezone
+    p = argparse.ArgumentParser(prog="python -m activity_context.inertia.bundle",
+                                description="Release a sealed candidate head bundle to production (a copy).")
+    p.add_argument("release", choices=["release"])
+    p.add_argument("src")
+    p.add_argument("dst")
+    p.add_argument("--reason", required=True)
+    a = p.parse_args(argv)
+    out = release_to_production(a.src, a.dst, a.reason,
+                                datetime.now(timezone.utc).replace(microsecond=0).isoformat())
+    print(json.dumps({"bundle_dir": out.path, "bundle_id": out.bundle_id, "evidence_tier_max": out.evidence_tier_max,
+                      "bundle_sha256": out.bundle_sha256}))
+    return 0
+
+
+__all__ = ["write_bundle", "load_bundle", "seal_bundle", "release_to_production", "promotable", "gate_document", "presealed_sha256", "HeadBundle",
            "HeadOutputs", "BundleError", "compute_bundle_sha256", "encoder_block", "json_bytes", "npz_bytes"]
+
+
+if __name__ == "__main__":
+    raise SystemExit(_release_main())

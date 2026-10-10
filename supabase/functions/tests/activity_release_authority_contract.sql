@@ -4,7 +4,9 @@
 --
 -- Proves: expert rows carry the release they were produced under, never above their recorded mode (an old row
 -- without an authority block reads as its mode; a block can only lower it; a stand-in or shadow-tier bundle is
--- shadow whatever the mode; a direct write cannot raise it); the joint candidate table's fenced publish (stale
+-- shadow whatever the mode; a direct write cannot raise it); production rows (20261010130000: production only in
+-- production mode, lowered by a block or a candidate-tier bundle, never carrying a comparison or withheld reason,
+-- the motion bundle object stored whole); the joint candidate table's fenced publish (stale
 -- token, expired lease, wrong revision: NULL and nothing written; the job stays claimed; nothing published), its
 -- payload rules, its upsert, its retention, and that no client role can read or write it.
 \set ON_ERROR_STOP on
@@ -147,8 +149,57 @@ begin
   update public.activity_gait_windows_days set release_mode = 'candidate' where user_id=u and day=v_day and mode='shadow';
   assert (select release_mode from public.activity_gait_windows_days where user_id=u and day=v_day and mode='shadow')
     = 'shadow', 'a direct write cannot raise the release';
-  assert not exists(select 1 from public.activity_gait_windows_days where release_mode = 'production'),
-    'no gait row is production';
+  assert not exists(select 1 from public.activity_gait_windows_days where mode <> 'production'
+                    and release_mode = 'production'), 'only a production gait row can be production';
+
+  -- Production (20261010130000): production without a block or with a production block; a block lowers it.
+  perform public.publish_activity_gait_windows_day(j.lease_token, j.input_revision,
+    pg_temp.ra_gait(v_day, 'production'));
+  select * into r from public.activity_gait_windows_days where user_id=u and day=v_day and mode='production';
+  assert r.release_mode = 'production' and r.authority is null and r.withheld_reason is null
+     and r.candidate_document is null, 'a production row without a block is production';
+  perform public.publish_activity_gait_windows_day(j.lease_token, j.input_revision,
+    pg_temp.ra_gait(v_day, 'production', claims));
+  assert (select release_mode from public.activity_gait_windows_days where user_id=u and day=v_day and mode='production')
+    = 'production', 'a production block keeps a production row production';
+  perform public.publish_activity_gait_windows_day(j.lease_token, j.input_revision,
+    pg_temp.ra_gait(v_day, 'production', claims || '{"release_mode":"candidate"}'));
+  assert (select release_mode from public.activity_gait_windows_days where user_id=u and day=v_day and mode='production')
+    = 'candidate', 'a candidate block lowers a production row to candidate';
+  perform public.publish_activity_gait_windows_day(j.lease_token, j.input_revision,
+    pg_temp.ra_gait(v_day, 'production', lowered));
+  assert (select release_mode from public.activity_gait_windows_days where user_id=u and day=v_day and mode='production')
+    = 'shadow', 'a shadow block lowers a production row to shadow';
+  -- A production row carries neither a comparison nor a withheld reason, through the RPC or a direct write.
+  begin
+    perform public.publish_activity_gait_windows_day(j.lease_token, j.input_revision,
+      pg_temp.ra_gait(v_day, 'production') || '{"withheld_reason":"model_not_pinned"}');
+    assert false, 'a production row with a withheld reason must be refused';
+  exception when others then
+    assert sqlerrm = 'invalid_gait_windows_candidate', 'stable error for a production withheld reason';
+  end;
+  begin
+    update public.activity_gait_windows_days set withheld_reason = 'x' where user_id=u and day=v_day and mode='production';
+    assert false, 'the table refuses a production row with a withheld reason';
+  exception when check_violation then null;
+  end;
+  begin
+    update public.activity_gait_windows_days set mode = 'released' where user_id=u and day=v_day and mode='production';
+    assert false, 'the table refuses an unknown mode';
+  exception when check_violation then null;
+  end;
+  -- The checks themselves: never above the mode, production may be lowered to candidate.
+  assert (select count(*) from pg_constraint where conrelid = 'public.activity_gait_windows_days'::regclass
+          and conname in ('activity_gait_windows_days_mode_check', 'activity_gait_windows_days_check3',
+                          'activity_gait_windows_days_release_mode_check')) = 0, 'the old checks are gone';
+  alter table public.activity_gait_windows_days disable trigger activity_gait_windows_days_authority;
+  begin
+    update public.activity_gait_windows_days set release_mode = 'production' where user_id=u and day=v_day and mode='candidate';
+    assert false, 'a candidate row cannot be stored as production';
+  exception when check_violation then null;
+  end;
+  update public.activity_gait_windows_days set release_mode = 'candidate' where user_id=u and day=v_day and mode='production';
+  alter table public.activity_gait_windows_days enable trigger activity_gait_windows_days_authority;
 
   -- Motion heads: a stand-in, or a bundle evaluated only to the shadow tier, is shadow whatever the mode.
   perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
@@ -167,8 +218,45 @@ begin
           and bundle_id='fixture-heads-inertia1-candidate') = 'candidate', 'a candidate-tier real encoder: candidate';
   assert (select release_mode = 'shadow' and authority = lowered from public.activity_motion_heads_days
           where user_id=u and day=v_day and bundle_id='fixture-heads-actinet-production'), 'a block lowers motion rows';
-  assert not exists(select 1 from public.activity_motion_heads_days where release_mode = 'production'),
-    'no motion row is production';
+  assert not exists(select 1 from public.activity_motion_heads_days where mode <> 'production'
+                    and release_mode = 'production'), 'only a production motion row can be production';
+
+  -- Production motion rows: capped at the bundle's tier, and the validated bundle object is stored whole.
+  perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
+    pg_temp.ra_motion(v_day, 'production', 'actinet', 'production'));
+  perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
+    pg_temp.ra_motion(v_day, 'production', 'inertia1', 'candidate', claims));
+  perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
+    pg_temp.ra_motion(v_day, 'production', 'standin', 'production'));
+  select * into r from public.activity_motion_heads_days where user_id=u and day=v_day
+    and bundle_id='fixture-heads-actinet-production' and mode='production';
+  assert r.release_mode = 'production' and r.withheld_reason is null and r.candidate_document is null,
+    'a production-tier pinned bundle in production mode is production';
+  assert r.bundle_info = (pg_temp.ra_motion(v_day, 'production', 'actinet', 'production') -> 'bundle')
+     and r.bundle_info -> 'bundle' -> 'ood' ->> 'method' = 'knn', 'the whole bundle object is stored';
+  assert (select release_mode from public.activity_motion_heads_days where user_id=u and day=v_day
+          and bundle_id='fixture-heads-inertia1-candidate' and mode='production') = 'candidate',
+    'a candidate-tier bundle is at most candidate, whatever its block claims';
+  assert (select release_mode from public.activity_motion_heads_days where user_id=u and day=v_day
+          and bundle_id='fixture-heads-standin-production' and mode='production') = 'shadow',
+    'a stand-in is shadow even in production mode';
+  perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
+    pg_temp.ra_motion(v_day, 'production', 'actinet', 'production', claims || '{"release_mode":"candidate"}'));
+  assert (select release_mode from public.activity_motion_heads_days where user_id=u and day=v_day
+          and bundle_id='fixture-heads-actinet-production' and mode='production') = 'candidate',
+    'a candidate block lowers a production motion row to candidate';
+  begin
+    perform public.publish_activity_motion_heads_day(j.lease_token, j.input_revision,
+      pg_temp.ra_motion(v_day, 'production', 'actinet', 'production') || '{"withheld_reason":"x"}');
+    assert false, 'a production motion row with a withheld reason must be refused';
+  exception when others then
+    assert sqlerrm = 'invalid_motion_heads_candidate', 'stable error for a production withheld reason';
+  end;
+  begin
+    update public.activity_motion_heads_days set bundle_info = '[]'::jsonb where user_id=u and day=v_day;
+    assert false, 'bundle_info must be an object';
+  exception when check_violation then null;
+  end;
   raise notice 'PASS 1 expert release modes';
 end;
 $$;
