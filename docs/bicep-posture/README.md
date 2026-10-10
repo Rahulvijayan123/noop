@@ -154,6 +154,96 @@ offers continuous capture at a battery cost.
 - **Status in plain words.** The day view's entry says "Not in use yet: 1 of 2 runs done…", and the calibration
   screen shows the heart-rate model's state.
 
+## Calibration per placement, and what a switch switches
+
+Everything placement-sensitive is calibrated per placement (`ActivityWearPlacement.calibrationKey`: wrist / bicep /
+other, undeclared reads as wrist) and switches with Settings → Wear placement.
+
+| What | Wrist | Bicep | Where |
+|---|---|---|---|
+| Sit / stand posture cues | forearm orientation, hand pattern, HART fine rows, shift direction | off (still / moving / lying kept) | `ActivityWearPlacement`, `ActivityContextModel.score` |
+| Personal activity profile, heart-rate-by-posture model | fitted on wrist runs only | fitted on bicep runs only | `ActivityDecoderConfig.placementProfiles` / `placementPostureHeartRate`, phone refit groups runs and labels by the placement stamped on each label |
+| Measured stand-up / sit-down (vshift-2) | peak velocity ≥ 0.5 m/s; anchors +1.5 / −0.7 × quality | ≥ 0.25 m/s; anchors ln 5 / ln 3 | `ActivityStillPosture.anchorLean(_:placement:)` |
+| Still-duration prior | same (behavioural) | same | `ActivityStillPosture` |
+| Skin-temperature baseline | own fold | own fold; switching back resumes the other | `ChargeBaselines.skinPlacementByDay` (phone), `DayScorer.foldBaselines(skinPlacementByDay:)` (server) |
+| Step-estimate coefficient (WHOOP 4.0) | own fit | own fit | `IntelligenceEngine` steps block |
+| Watchdog skin temperature / IMU | used | not used (unchanged rule); account-level placement now read | `WatchdogService` |
+| Physiology-context references | own regime | own regime | already placement-keyed (`PCSignalValidity`) |
+| Coach context | told the placement and the last switch | | `CoachTurnContext.placement` |
+
+### Wrist calibration of the stand-up detector (D-wrist-shift)
+
+Opportunity lower-arm vs upper-arm IMUs (4 subjects, 265 labelled transitions per sensor).
+
+| Sensor | Rule | Direction correct | Precision | Recall | False events per sit/stand hour |
+|---|---|---|---|---|---|
+| Non-dominant wrist | shipped (vshift-1) | 0.91 | 0.56 | 0.46 | 12.4 |
+| Non-dominant wrist | vshift-2 wrist rule | 1.00 | 0.86 | 0.30 | 1.35 |
+| Dominant wrist | either | 0.29–0.75 | — | — | — |
+| Upper arm (pooled) | vshift-1 → vshift-2 rule | — | 0.42 → 0.90 | — | — |
+
+- On the dominant wrist, direction is unreliable: reaching flips the sign.
+- What failed was the "offset" candidates (the end of a long movement), at 0.02–0.63 direction accuracy. vshift-2
+  drops them.
+- An uncalibrated accelerometer costs most on the wrist, so vshift-2 fits offset and gain from still windows.
+- The owner's own bicep data under vshift-2: all 3 calibration changes and the 16:52 sit-down are still found. The
+  17:57 brief stand's rise was an offset candidate and is dropped; its sit-down is kept.
+
+### Wrist sit/stand before vs after (E-wrist-decoder, Capture-24)
+
+80 participants, 510 h of labelled sitting/standing; wrist streams (gravity + dynamic acceleration, no HR, steps or
+gyro).
+
+| Wrist decoder | Sitting recall | Sitting precision | Standing read as Sitting | Standing recall |
+|---|---|---|---|---|
+| hsmm-1.9 | 0.079 | 0.917 | 0.076 | 0 |
+| hsmm-2.0 | 0.194 | 0.951 | 0.106 | 0 |
+
+- **What changed.** hsmm-2.0 with the duration prior off is byte-identical to hsmm-1.9, so on a wrist the prior is
+  the whole change.
+- **What it costs.**
+  - About 98 % of the added Sitting claims are right: +53 h correct against +1.3 h of standing called sitting.
+  - 79 of 80 participants gain sitting recall.
+  - 4 people who stand a lot lose more than 2 points of precision. The "I often stand still for long stretches"
+    switch is their remedy.
+- **Fitted on the same people?** Refitting the knots on even IDs and testing on odd IDs lands within 0.007 of the
+  shipped table, so the in-sample effect is negligible.
+- **Tuning.** Weakening the prior (×0.5) gives up 7–8 points of recall to save about 2. Strengthening it (×1.5, or
+  steeper knots) adds sitting at near base-rate precision, at the cost of people who stand a lot. The wrist curve is
+  therefore kept as is.
+- **Open gaps on the wrist.**
+  - It never publishes "Standing".
+  - 62 % of sitting stays unresolved.
+  - Still stretches break at arm shifts.
+
+### Logging
+
+**Phone.** `PlacementSwitchLog` keeps an append-only JSONL file in Application Support.
+- **"Declared" entry:** from → to, effective start, revision, calibration before, decoder tag before.
+- **"Recalculated" entry:** what switched, calibration before → after, decoder tag before → after.
+- Each entry is also written to the strap log, which goes out with the Test Centre export.
+- Settings → Wear placement lists the recent switches.
+- Placement sync failures are now logged instead of dropped.
+
+**Server.** `public.placement_change_events` (migration `20261010090000`) is append-only, enforced by a trigger.
+- **Each row records:** op, placement, previous placement, effective span, revision, source, first re-derived day,
+  activity jobs re-queued, straps touched, and any invalidation error.
+- **What the trigger does on a change:** it re-queues activity-context jobs as well as the physiology-context and
+  measurement-context days.
+- **Rehearsal:** on production's schema dump, all 15 migrations apply. The smoke test shows a switch logged, the
+  recent activity day re-queued (old one untouched), the correction logged with its previous placement, and an update
+  rejected.
+
+### Not switched (documented, not changed here)
+
+- Sleep staging and motion-based sleep/wake (wrist-tuned stillness thresholds).
+- HRV, resting heart rate and respiration daily baselines: physiology does not depend on site; optical quality does,
+  and physiology context already splits by placement.
+- ElderNet / Inertia / RecGym and the energy models' motion evidence: shadow or not production evidence today.
+- ParaDigMa tremor gating: the inference worker's host source differs from git.
+- Longitudinal (Layer-1) baseline tapes.
+- The scoring attestation's `placement` slot.
+
 ## Replay of the owner's afternoon
 
 `ActivityBicepReplayTests`, opt-in via `NARA_BICEP_REPLAY_DIR`. Covers 16:52:30–18:20, seated, with the three
