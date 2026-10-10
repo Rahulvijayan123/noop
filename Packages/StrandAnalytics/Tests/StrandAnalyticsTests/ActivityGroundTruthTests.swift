@@ -269,12 +269,13 @@ final class ActivityGroundTruthTests: XCTestCase {
 
     func testTheCurrentProtocolIsShortAndWellFormed() {
         let p = ActivityCalibrationProtocols.current
-        XCTAssertEqual(p.version, "calibration-v4")
-        XCTAssertLessThanOrEqual(p.estimatedSeconds(), 330, "a run fits in five and a half minutes, start countdowns included")
+        XCTAssertEqual(p.version, "calibration-v5")
+        // v5 holds long enough for heart rate to settle (75 s) and lying long enough to personalise in two runs (40 s).
+        XCTAssertLessThanOrEqual(p.estimatedSeconds(), 540, "a run fits in nine minutes, start countdowns included")
         var ids = Set<String>()
         for task in p.tasks {
             XCTAssertTrue(ids.insert(task.id).inserted, "task ids are unique: \(task.id)")
-            XCTAssertLessThanOrEqual(task.durationSeconds, 30, "\(task.id): no long holds")
+            XCTAssertLessThanOrEqual(task.durationSeconds, ActivityCalibrationProtocols.v5HoldSeconds, "\(task.id): no long holds")
             XCTAssertGreaterThan(task.durationSeconds, 2 * task.guardSeconds, "\(task.id) keeps a guarded interval")
             XCTAssertNoThrow(try ActivityGroundTruthLabel.vocabularyCheck(
                 posture: task.posture, locomotion: nil, armBehavior: nil,

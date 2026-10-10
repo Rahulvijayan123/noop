@@ -39,6 +39,9 @@ private struct ActivityCalibrationPage: View {
     @State private var personalRecord: ActivityPersonalProfileStore.Record?
     @State private var personalScoped = true
     @State private var refitting = false
+    /// The wearer often stands still for long (standing desk, standing job): the still-duration prior is off for
+    /// them (`ActivityDecoderConfig.stillDurationPrior`, hsmm-2.0).
+    @AppStorage(Repository.longStillStandingKey) private var longStillStanding = false
 
     @Environment(\.scenePhase) private var scenePhase
 
@@ -81,6 +84,7 @@ private struct ActivityCalibrationPage: View {
     var body: some View {
         ScreenScaffold(title: "Activity calibration", titleDisplay: .navigationBar) {
             personalCard
+            standingHabitCard
             liveCard
             controls
             savedSummary
@@ -127,6 +131,24 @@ private struct ActivityCalibrationPage: View {
             let record = await model.refitActivityPersonalProfile()
             personalRecord = record ?? store.record()
             refitting = false
+        }
+    }
+
+    private var standingHabitCard: some View {
+        NoopCard {
+            Toggle(isOn: $longStillStanding) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("I often stand still for long stretches")
+                        .font(StrandFont.subhead.weight(.semibold)).foregroundStyle(StrandPalette.textPrimary)
+                    Text("For a standing desk or a standing job. Nara normally reads a long, motionless stretch as sitting, because most people sit when they stay still for long. Turn this on and long stillness stays \"sitting or standing\" unless something else tells them apart.")
+                        .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+            .onChangeCompat(of: longStillStanding) { _ in
+                model.activityContext.requestMaterialization()
+                Task { await model.repo.refresh() }
+            }
         }
     }
 

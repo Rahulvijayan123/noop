@@ -71,6 +71,10 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// default) is OFF: heart rate stays posture-neutral, as it always was. Set it only from
     /// `ActivityPostureHeartRateFitter` with status `.adopted`.
     public var postureHeartRate: ActivityPostureHeartRateModel? = nil
+    /// The still-duration prior (`ActivityStillPosture.durationLean`, hsmm-2.0). nil (the default) is ON; false turns
+    /// it off for a wearer whose long stillness is often standing (a standing desk, a standing job), whom the
+    /// population prior would read as sitting.
+    public var stillDurationPrior: Bool? = nil
 
     public init() {}
 }
@@ -439,7 +443,12 @@ public struct ActivityContextDecoder: Sendable {
         // feature window (so the snapshot is unchanged) nor scored.
         var f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
                             motionHeadsHoldS: motionHeads?.holdS ?? 0, gaitQualityHoldS: gaitQuality?.holdS ?? 0)
-        if gapS > Self.gapFlattenOnsetS { flattenAfterGap(gapS) }
+        if gapS > Self.gapFlattenOnsetS {
+            flattenAfterGap(gapS)
+            // Anything may have happened in a gap this long: the still stretch and its anchor start over.
+            tracking.stillSinceTs = nil
+            tracking.anchor = nil
+        }
         f.forearmSign = calibrateForearmSign(f)
         f.wristPostureCues = config.placement(at: obs.ts).wristPostureCues
         // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05). Never on the staged night
@@ -608,6 +617,9 @@ public struct ActivityContextDecoder: Sendable {
 
     // MARK: Still-stretch priors (hsmm-2.0)
 
+    /// The current still stretch's start and the priors' lean this second (tests and replays inspect them).
+    var stillPriorState: (since: Int?, lean: Double?) { (tracking.stillSinceTs, tracking.priorLean) }
+
     /// Track the current still stretch and set `tracking.priorLean`: the duration prior, a settled personal heart
     /// rate (`ActivityPostureHeartRateGate`) and a measured stand-up / sit-down's anchor, each bounded on its own and
     /// together by `ActivityStillPosture.maxPriorLean` (`postureEvidenceTotals` adds it to the seated / upright total).
@@ -635,9 +647,15 @@ public struct ActivityContextDecoder: Sendable {
             measuredShift = true
         }
         let night = obs.sleep == .asleep || obs.inBed
+        // A posture shift (a burst that left the strap in a new orientation, `shiftStrength`) may be a change of
+        // position the transition modes did not catch: it ends the stretch. A burst that returns (reaching, a fidget,
+        // adjusting in the chair) does not: on the owner's seated afternoon (2026-10-09) such bursts came every few
+        // minutes, and Capture-24's still stretches, which the duration prior is measured on, end only at
+        // locomotion, other activity or a change of posture.
         let breaks = night || moving >= ActivityStillPosture.breakMovingMass
             || transition >= ActivityStillPosture.breakTransitionMass
             || (f.gaitPresence ?? 0) >= ActivityStillPosture.breakGaitPresence || (obs.strapClass ?? 0) >= 1
+            || ActivityContextModel.shiftStrength(f) >= 0.5
         if measuredShift && !breaks {
             tracking.stillSinceTs = ts
         } else if breaks {
@@ -651,7 +669,14 @@ public struct ActivityContextDecoder: Sendable {
         let stillFor = tracking.stillSinceTs.map { max(0, ts - $0) } ?? 0
         var lean = 0.0
         if tracking.stillSinceTs != nil {
-            lean += ActivityStillPosture.durationLean(stillForS: stillFor)
+            // Duration tells sitting from standing, not lying from either (Capture-24's stretches end at lying), so
+            // it speaks only with a gravity direction this second, and steps back as far as the held orientation
+            // already leans recumbent (a flat forearm, a raised hand): a long stillness on a sofa is not "sitting".
+            if obs.gravity != nil, config.stillDurationPrior != false {
+                let rec = max(0, tracking.postureEvidence?[ActivityContextModel.PostureEvidence.recumbentOrientationIndex] ?? 0)
+                let recShare = min(1, rec / ActivityContextModel.PostureEvidence.caps[ActivityContextModel.PostureEvidence.recumbentOrientationIndex])
+                lean += ActivityStillPosture.durationLean(stillForS: stillFor) * (1 - recShare)
+            }
             if let model = config.postureHeartRate {
                 lean += ActivityPostureHeartRateGate.lean(
                     model: model, averageBpm: tracking.hrAverage, restingBpm: config.restingHeartRate,

@@ -267,10 +267,12 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
         }
     }
 
-    func testTwoShortRunsAskForAThird() {
+    /// calibration-v5's 75 s holds (40 s lying) give every posture 60 s per held-out fold from two runs, so two runs
+    /// are judged (v3 / v4 needed three). Whatever the verdict, a profile that is not adopted changes nothing.
+    func testTwoRunsAreEnoughToBeJudged() {
         let c = Self.calibrate(Self.busyStander, calibrationRuns: 2)
-        XCTAssertEqual(c.result.outcome, .needsMoreRuns(have: 2, need: 3))
-        XCTAssertEqual(c.after.balanced, c.before.balanced)
+        XCTAssertNotEqual(c.result.status, .needsMoreRuns, "\(c.result.outcome)")
+        if c.result.status != .adopted { XCTAssertEqual(c.after.balanced, c.before.balanced) }
     }
 
     /// No bed or sofa: the wearer skips lying every time. personal-profile-3: the profile is refused. Narrowing a
@@ -306,7 +308,7 @@ final class ActivityPersonalCalibrationEndToEndTests: XCTestCase {
 
     func testOneGuidedRunIsNotEnough() {
         let c = Self.calibrate(Self.busyStander, calibrationRuns: 1)
-        XCTAssertEqual(c.result.outcome, .needsMoreRuns(have: 1, need: 3))
+        XCTAssertEqual(c.result.outcome, .needsMoreRuns(have: 1, need: ActivityCalibrationProtocols.runsToPersonalise))
         XCTAssertEqual(c.after.balanced, c.before.balanced)
     }
 }

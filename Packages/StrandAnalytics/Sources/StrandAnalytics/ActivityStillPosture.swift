@@ -48,16 +48,16 @@ public enum ActivityStillPosture {
 
     /// (seconds still, extra log-odds toward seated). See `durationLean`.
     ///
-    /// Capture-24 (151 free-living participants, camera labels, `A-duration/results.json`): within uninterrupted
-    /// sitting-or-standing stretches, the log-odds of sitting rise over the first minute's by
-    ///   elapsed      2 m   3 m   5 m   7.5 m  10 m  15 m  20 m  30 m  45 m
-    ///   V1 (strict)  0.21  0.46  0.77  1.18   1.58  2.04  2.52  2.74  3.08
-    ///   V2 (chores)  0.12  0.27  0.44  0.68   0.92  1.15  1.37  1.50  1.64
-    /// (V2 counts household chores and manual work as not sitting: the conservative bound). The knots are their
-    /// midpoint at each bin's start. Per participant the effect is no artefact of pooling: the within-participant
-    /// median change is as large (V1 10–15 m: +6.3). Standing bouts are short (median 2.2 min, p90 7 min, 5 % past
-    /// 10 min); sitting bouts long (median 5.2 min, 15 % past 20 min). Only the duration-specific part is used, never
-    /// the 78 % base rate of sitting, so the first minute of a stretch stays even.
+    /// Capture-24 (151 free-living participants, camera labels; _build-scratch/bicep-posture/A-duration/REPORT.md):
+    /// within uninterrupted sitting-or-standing stretches, the log-odds of sitting rise over the first minute's by
+    ///   elapsed      1 m   2 m   3 m   5 m   7.5 m  10 m  15 m  30 m
+    ///   V1 (main)    0.22  0.46  0.75  1.17  1.56   1.95  2.26  2.48
+    ///   V2 (chores)  0.12  0.27  0.44  0.68  0.92   1.15  1.37  1.64
+    /// (V1 fit: 2.8·(1 − e^(−t/500 s)) − 0.16; V2 counts household chores and manual work as still and not sitting,
+    /// the conservative bound for a strap that cannot tell chores from stillness). The knots are roughly their midpoint.
+    /// The effect holds within a person (per-participant intercepts agree within 0.1 logit). Standing bouts are short
+    /// (median 2.3 min, p90 8 min, 6.8 % past 10 min); sitting bouts long (median 9.5 min). Only the
+    /// duration-specific part is used, never the ~72 % base rate of sitting, so the first minute of a stretch stays even.
     public static let durationTable: [(s: Double, lean: Double)] = [
         (60, 0), (120, 0.16), (180, 0.36), (300, 0.6), (450, 0.93), (600, 1.25), (900, 1.6), (1200, 1.94),
         (1800, 2.12), (2700, 2.36),

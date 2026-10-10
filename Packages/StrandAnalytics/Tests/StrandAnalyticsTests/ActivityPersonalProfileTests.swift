@@ -129,9 +129,27 @@ final class ActivityPersonalProfileTests: XCTestCase {
     /// the classes it saw. It is still refused: the protocol labels no lying, and narrowing a stationary mode moves
     /// where lying seconds land without any guard able to see it (personal-profile-3; on the calibration simulator
     /// such a profile doubled the unseen day's wrong claims, the lie-down read as sitting).
+    /// These synthetic runs stand up from a long seated lead-in without a step. Since hsmm-2.0 the still-duration
+    /// prior reads such a stand as sitting by default (Capture-24: ~85 % of still time 6 minutes into a stretch is
+    /// sitting), which no 90-s personal row overturns; the profile mechanism is tested with that prior off.
+    static var noDurationPrior: ActivityDecoderConfig {
+        var c = ActivityDecoderConfig()
+        c.stillDurationPrior = false
+        return c
+    }
+
+    func testTheDurationPriorReadsAStepFreeStandAfterLongSittingAsSitting() {
+        let run = Self.run(Wearer(), session: "s", seed: 5, start: 1_760_000_000)
+        let on = ActivityPersonalProfileFitter.replay(run, config: ActivityDecoderConfig()).samples
+        let upright = on.filter { $0.truth == .upright }
+        XCTAssertFalse(upright.isEmpty)
+        XCTAssertEqual(upright.filter { $0.predicted == .upright }.count, 0,
+                       "the known trade-off of the duration prior (turn it off per wearer with stillDurationPrior)")
+    }
+
     func testAPersonalProfileFixesTheWearersStandingOnHeldOutRunsButNeedsLyingValidatedToBeAdopted() throws {
         let result = ActivityPersonalProfileFitter.fit(runs: Self.runs(Wearer(), count: 3),
-                                                       config: ActivityDecoderConfig(), now: 1_770_000_000)
+                                                       config: Self.noDurationPrior, now: 1_770_000_000)
         let v = try XCTUnwrap(result.validation)
         let upright = try XCTUnwrap(v.classes["upright"])
         XCTAssertGreaterThanOrEqual(v.gain, 0.03)
@@ -149,14 +167,14 @@ final class ActivityPersonalProfileTests: XCTestCase {
         // The adaptation itself (as the fitter would build it from these runs), applied directly: the decoder reads
         // the wearer's busy stand as standing. Adoption is the fitter's separate decision (above).
         let runs = Self.runs(Wearer(), count: 3)
-        let samples = runs.flatMap { ActivityPersonalProfileFitter.replay($0, config: ActivityDecoderConfig()).samples }
+        let samples = runs.flatMap { ActivityPersonalProfileFitter.replay($0, config: Self.noDurationPrior).samples }
         let modes = ActivityPersonalProfileFitter.fitModes(samples)
         XCTAssertNotNil(modes["upright"])
         let profile = ActivityPersonalProfile(fittedAt: 0, sessionIds: runs.map(\.sessionId), modes: modes)
-        var personal = ActivityDecoderConfig()
+        var personal = Self.noDurationPrior
         personal.personalProfile = profile
         let fresh = Self.run(Wearer(), session: "fresh", seed: 99, start: 1_761_000_000)
-        let before = ActivityPersonalProfileFitter.replay(fresh, config: ActivityDecoderConfig())
+        let before = ActivityPersonalProfileFitter.replay(fresh, config: Self.noDurationPrior)
         let after = ActivityPersonalProfileFitter.replay(fresh, config: personal)
         func uprightRecall(_ r: ActivityPersonalProfileFitter.Replay) -> Double {
             let upright = r.samples.filter { $0.truth == .upright }
@@ -173,7 +191,10 @@ final class ActivityPersonalProfileTests: XCTestCase {
         XCTAssertEqual(result.status, .notBetter)
         XCTAssertNil(result.profile)
         let v = try XCTUnwrap(result.validation)
-        XCTAssertLessThan(v.gain, 0.03)
+        // With sitting and standing identical, nothing personal can tell them apart: standing recall must not rise.
+        // (Balanced accuracy alone can: since hsmm-2.0 a profile that reads every long stillness as sitting gains
+        // seated recall; the per-class guard refuses it.)
+        XCTAssertLessThanOrEqual(v.classes["upright"]?.personalRecall ?? 0, (v.classes["upright"]?.baselineRecall ?? 0) + 1e-9)
         if case .notBetter(let baseline, let personal) = result.outcome {
             XCTAssertEqual(baseline, v.baselineBalancedAccuracy)
             XCTAssertEqual(personal, v.personalBalancedAccuracy)
@@ -401,16 +422,17 @@ final class ActivityPersonalProfileTests: XCTestCase {
         // Quiet sitting with no posture evidence: the decoder publishes "stationary" (posture unresolved), which
         // claims neither posture. The body-mode argmax used to call those seconds standing.
         var sim = ActivitySim(start: 1_760_000_000, seed: 5)
+        // Short enough that the still-duration prior (hsmm-2.0) has not yet leaned the posture.
         sim.forearm(0.55)
-        sim.still(300)
+        sim.still(30)
         let a = sim.ts
-        sim.still(300)
+        sim.still(200)
         let label = ActivityGroundTruthLabel(labelKey: "guided:s:\(a)", source: .guided, sessionId: "s",
                                              protocolVersion: "calibration-v2", startTs: a, endTs: sim.ts,
                                              posture: PostureClass.seatedLikely.rawValue)
         let run = ActivityCalibrationRun(sessionId: "s", observations: sim.observations, labels: [label])
         let samples = ActivityPersonalProfileFitter.replay(run, config: ActivityDecoderConfig()).samples
-        XCTAssertGreaterThan(samples.count, 200)
+        XCTAssertGreaterThan(samples.count, 150)
         XCTAssertEqual(samples.filter { $0.predicted == .upright }.count, 0, "a hedged second is not a standing claim")
         var d = ActivityContextDecoder(config: ActivityDecoderConfig())
         let published = d.run(sim.observations).filter { $0.ts >= a + 3 && $0.ts < sim.ts - 1 }

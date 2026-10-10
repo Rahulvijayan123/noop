@@ -60,8 +60,14 @@ extension Repository {
         let span = window ?? 0..<Int.max
         config.placements = ActivityDecoderConfig.decodingPlacements(
             ActivityPlacementCache.shared.spans(deviceId: deviceId), from: span.lowerBound, to: span.upperBound)
+        // A wearer who often stands still for long (Activity calibration → standing habit) is not read with the
+        // population's still-duration prior. Phone-only, like the personal profile.
+        if UserDefaults.standard.bool(forKey: Self.longStillStandingKey) { config.stillDurationPrior = false }
         return config
     }
+
+    /// UserDefaults key of the "I often stand still for long stretches" switch.
+    static let longStillStandingKey = "activityLongStillStanding"
 
     /// The config the canonical decode of the day starting at `dayStart` runs with: that day's reference plus the
     /// expert evidence the shared policy admits for its stored rows (`ActivityPhoneEvidence`).

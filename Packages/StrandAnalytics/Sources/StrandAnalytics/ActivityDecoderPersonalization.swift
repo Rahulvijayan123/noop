@@ -68,6 +68,7 @@ extension ActivityDecoderConfig {
         // A non-wrist placement (`-pl<hash>`) and an adopted heart-rate-by-posture model (`-ph<tag>`), hsmm-2.0.
         if let placement = placementTag { tag += "-pl\(placement)" }
         if let hr = postureHeartRate, hr.isUsable { tag += "-ph\(hr.tag)" }
+        if stillDurationPrior == false { tag += "-nd" }
         return tag
     }
 }

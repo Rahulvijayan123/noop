@@ -832,7 +832,17 @@ public enum ActivityCalibrationProtocols {
             id: "sit-stand", title: "Sit and stand",
             setup: "Sit on a chair, or on the edge of a bed or sofa. Keep the phone with you; the screen tells you each step.",
             tasks: tasks)
-        let lieDown = v3.activities.first { $0.id == "lie-down" }!
+        // v3's lie-down activity with 40 s lying holds (v3: 25 s): after the guards and trims that is 32 s per hold,
+        // 64 s per run, so two runs personalise lying too.
+        let v3LieDown = v3.activities.first { $0.id == "lie-down" }!
+        let lieDown = ActivityCalibrationActivity(
+            id: v3LieDown.id, title: v3LieDown.title, setup: v3LieDown.setup,
+            tasks: v3LieDown.tasks.map { t in
+                guard !t.isMove, t.posture == PostureClass.recumbent.rawValue else { return t }
+                var t = t
+                t.durationSeconds = 40
+                return t
+            })
         return ActivityCalibrationProtocolModel(version: "calibration-v5", activities: [sitStand, lieDown])
     }()
 }

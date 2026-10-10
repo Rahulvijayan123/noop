@@ -467,7 +467,7 @@ final class ActivitySitStandTests: XCTestCase {
     func testCalibrationV4Shape() {
         let p = ActivityCalibrationProtocols.v4
         XCTAssertEqual(p.version, "calibration-v4")
-        XCTAssertEqual(ActivityCalibrationProtocols.current.version, "calibration-v4")
+        XCTAssertEqual(ActivityCalibrationProtocols.current.version, "calibration-v5")
         XCTAssertEqual(p.activities.map(\.id), ["sit-stand", "lie-down"])
         let sitStand = p.activities[0]
         XCTAssertEqual(sitStand.tasks.map(\.id), [

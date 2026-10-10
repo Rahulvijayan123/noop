@@ -27,9 +27,14 @@ final class ActivityContextPostureHonestyTests: XCTestCase {
 
     // MARK: Posture honesty (D2-07, D1V-01)
 
-    func testAQuarterHourOfQuietStandingDoesNotBecomeConfidentSitting() throws {
+    func testAQuarterHourOfQuietStandingStaysUnresolvedEarlyAndOnlyThenLeansSitting() throws {
         // Walk, then stand quietly for 900 s with the arm hanging. The old seated dwell prior (900 s against
-        // upright's 100 s) turned this into "Sitting quietly" at seated 0.82 within five minutes.
+        // upright's 100 s) turned this into "Sitting quietly" at seated 0.82 within five minutes; hsmm-1.8 made it
+        // stay unresolved for good. hsmm-2.0 measures what elapsed stillness says (Capture-24, 151 people: P(sitting)
+        // within still stretches rises from 0.78 in the first minute to 0.92 at 5–7.5 min and 0.97 at 10–15 min;
+        // 5 % of standing bouts pass 10 min), so the first minutes stay unresolved and only a long stillness leans
+        // sitting, capped like every wrist-only posture claim. A real long stand is this decoder's known error mode;
+        // a measured stand-up (`ActivityVerticalShift`) or a verified personal head counters it.
         var sim = ActivitySim()
         sim.forearm(0.9)
         sim.walk(90)
@@ -38,9 +43,14 @@ final class ActivityContextPostureHonestyTests: XCTestCase {
         let states = decode(sim.observations).filter { $0.ts >= stop + 30 }
         XCTAssertFalse(states.isEmpty)
         for (s, k) in zip(states, classes(states)) {
-            XCTAssertLessThan(s.posture[.seatedLikely], 0.6, "at \(s.ts - stop) s")
-            XCTAssertFalse(k.activityClass == .sitting || k.activityClass == .sittingDesk,
-                           "a quiet stand must not read as sitting (at \(s.ts - stop) s: \(k.activityClass))")
+            if s.ts - stop < 180 {
+                XCTAssertFalse(k.activityClass == .sitting || k.activityClass == .sittingDesk,
+                               "the first minutes of a quiet stand stay unresolved (at \(s.ts - stop) s: \(k.activityClass))")
+            }
+            XCTAssertLessThan(s.posture[.seatedLikely], 0.7, "at \(s.ts - stop) s")
+            if [.sitting, .sittingDesk, .standing].contains(k.activityClass) {
+                XCTAssertLessThanOrEqual(k.confidence, ActivityClassifier.wristOnlyPostureConfidenceCap + 1e-12)
+            }
         }
         let end = try XCTUnwrap(states.last)
         XCTAssertEqual(end.locomotion.top?.0, .stationary)
