@@ -24,7 +24,7 @@ import UIKit
 
 /// One physiology series drawn as a lane under the stages.
 enum SleepOverlay: String, CaseIterable, Identifiable, Hashable {
-    case heartRate, rmssd, skinTemp, respiration
+    case heartRate, rmssd, skinTemp, respiration, spo2
 
     var id: String { rawValue }
 
@@ -34,16 +34,18 @@ enum SleepOverlay: String, CaseIterable, Identifiable, Hashable {
         case .rmssd: return "RMSSD"
         case .skinTemp: return String(localized: "Skin temp")
         case .respiration: return String(localized: "Breathing")
+        case .spo2: return "SpO₂"
         }
     }
 
-    /// The lane's gutter label, short enough for two lines in the gutter.
+    /// The lane's gutter and chip label, short enough to fit both.
     var shortTitle: String {
         switch self {
         case .heartRate: return "HR"
         case .rmssd: return "RMSSD"
-        case .skinTemp: return String(localized: "Skin temp")
-        case .respiration: return String(localized: "Breathing")
+        case .skinTemp: return String(localized: "Temp")
+        case .respiration: return String(localized: "Breath")
+        case .spo2: return "SpO₂"
         }
     }
 
@@ -53,6 +55,7 @@ enum SleepOverlay: String, CaseIterable, Identifiable, Hashable {
         case .rmssd: return "ms"
         case .skinTemp: return temperature == .fahrenheit ? "°F" : "°C"
         case .respiration: return "br/min"
+        case .spo2: return "%"
         }
     }
 
@@ -70,6 +73,7 @@ enum SleepOverlay: String, CaseIterable, Identifiable, Hashable {
         case .rmssd: return 20
         case .skinTemp: return temperature == .fahrenheit ? 1.8 : 1
         case .respiration: return 4
+        case .spo2: return 6
         }
     }
 
@@ -79,6 +83,7 @@ enum SleepOverlay: String, CaseIterable, Identifiable, Hashable {
         case .rmssd: return Color(light: "#6D3FE0", dark: "#A47BFF")
         case .skinTemp: return Color(light: "#C2410C", dark: "#FF8A4C")
         case .respiration: return Color(light: "#0F8F82", dark: "#3DD6C3")
+        case .spo2: return Color(light: "#1D64C8", dark: "#5AA9FF")
         }
     }
 
@@ -141,7 +146,7 @@ final class SleepOverlayStore: ObservableObject {
     private(set) var window: (from: Int, to: Int)?
     private var tasks: [SleepOverlay: Task<Void, Never>] = [:]
 
-    private static let defaultsKey = "sleep.stages.lanes"
+    private static let defaultsKey = "sleep.stages.lanes.v2"
 
     init() {
         if let saved = UserDefaults.standard.string(forKey: Self.defaultsKey) {
@@ -228,6 +233,10 @@ enum SleepOverlayLoader {
                     gapSeconds: max(step * 3, 600), matchSeconds: max(step, 300))
             }
             return await serverRespiration(from: from, to: to)
+        case .spo2:
+            let banked = await repo.bankedSpo2(from: from, to: to)
+            return SleepOverlaySeries(points: banked.points.map { .init(ts: $0.ts, value: $0.value) },
+                                      gapSeconds: 900, matchSeconds: 300)
         }
     }
 
@@ -267,6 +276,7 @@ struct SleepStagesCard: View {
     @State private var highlighted: SleepStage?
     @State private var expanded = false
     @State private var caveatsOpen = false
+    @Environment(\.colorScheme) private var colorScheme
 
     private var temperature: TemperatureUnit {
         UnitPrefs.resolveTemperature(system: UnitSystem(rawValue: unitSystemRaw) ?? .imperial, override: temperatureRaw)
@@ -390,6 +400,8 @@ struct SleepStagesCard: View {
         SleepStagesFullScreen(model: model, stages: isStub ? nil : night.stages, store: store,
                               temperature: temperature, highlighted: $highlighted)
             .environmentObject(repo)
+            // A presented cover keeps the scheme it was presented with, not the app's chosen appearance.
+            .preferredColorScheme(colorScheme)
     }
 }
 
@@ -465,7 +477,6 @@ private struct SleepStagesFullScreen: View {
             }
         }
         .background(StrandPalette.surfaceBase.ignoresSafeArea())
-        .preferredColorScheme(.dark)
     }
 }
 
@@ -492,7 +503,7 @@ struct SleepStagesExplorer: View {
     static let gutter: CGFloat = labelWidth + valueWidth
     static let gutterSpacing: CGFloat = 6
     static let axisHeight: CGFloat = 18
-    static let hintHeight: CGFloat = 20
+    static let hintHeight: CGFloat = 28
     static let laneGap: CGFloat = 8
     static let compactStageHeight: CGFloat = 132
     static let compactLaneHeight: CGFloat = 46
@@ -538,7 +549,6 @@ struct SleepStagesExplorer: View {
                     }
                     .overlay { selectionRule }
                     .overlay { scrubSurface }
-                    .overlay(alignment: .topLeading) { tooltip }
                 }
                 xAxis(axis)
                     .padding(.top, Self.laneGap)
@@ -556,59 +566,118 @@ struct SleepStagesExplorer: View {
         .onChangeCompat(of: model.toTs) { _ in selection = nil }
     }
 
+    /// "Drag to inspect" at rest; while inspecting, the scrubbed time and stage with a way to clear it. The
+    /// lane values sit in each lane's gutter, so nothing covers the chart.
+    @ViewBuilder
     private var hint: some View {
-        HStack(spacing: 6) {
-            Spacer(minLength: 0)
-            Image(systemName: "arrow.left.and.right")
-                .font(StrandFont.icon(.inline))
-                .accessibilityHidden(true)
-            Text("Drag to inspect")
-                .font(StrandFont.footnote)
+        if let selected = selection {
+            let stage = model.timeline?.segment(at: selected)?.stage
+            HStack(spacing: NoopMetrics.space2) {
+                Text(Night.clockString(Int(selected.timeIntervalSince1970)))
+                    .font(StrandFont.subhead.weight(.semibold).monospacedDigit())
+                    .foregroundStyle(StrandPalette.textPrimary)
+                Circle()
+                    .fill(stage.map(StrandPalette.sleepStageColor) ?? StrandPalette.textTertiary)
+                    .frame(width: 8, height: 8)
+                Text(stage?.label ?? String(localized: "No stage"))
+                    .font(StrandFont.footnote.weight(.medium))
+                    .foregroundStyle(stage == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
+                Spacer(minLength: 0)
+                Button { set(nil) } label: {
+                    Label("Clear", systemImage: "xmark.circle.fill")
+                        .font(StrandFont.footnote.weight(.medium))
+                        .foregroundStyle(StrandPalette.textSecondary)
+                        .frame(minHeight: NoopMetrics.minimumHitTarget)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Clear inspected time")
+            }
+            .frame(height: Self.hintHeight)
+        } else {
+            HStack(spacing: 6) {
+                Spacer(minLength: 0)
+                Image(systemName: "arrow.left.and.right")
+                    .font(StrandFont.icon(.inline))
+                    .accessibilityHidden(true)
+                Text("Drag or tap to inspect")
+                    .font(StrandFont.footnote)
+            }
+            .foregroundStyle(StrandPalette.textSecondary)
+            .frame(height: Self.hintHeight)
+            .accessibilityHidden(true)
         }
-        .foregroundStyle(StrandPalette.textSecondary)
-        .frame(height: Self.hintHeight)
-        .accessibilityHidden(true)
+    }
+
+    private var selectedStage: SleepStage? {
+        selection.flatMap { model.timeline?.segment(at: $0)?.stage }
     }
 
     // MARK: Stages
 
     private var stageGutter: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            ForEach(stagesTopToBottom, id: \.self) { stage in
-                Text(stage.label)
-                    .font(StrandFont.footnote)
-                    .foregroundStyle(highlighted == stage ? StrandPalette.textPrimary : StrandPalette.textSecondary)
-                    .lineLimit(1)
-                    .minimumScaleFactor(0.7)
-                    .frame(maxHeight: .infinity, alignment: .center)
+        let rows = CGFloat(stagesTopToBottom.count)
+        let barH = stageHeight / (rows + 1)
+        let spacing = (stageHeight - barH * rows) / (rows - 1)
+        return ZStack(alignment: .topLeading) {
+            ForEach(Array(stagesTopToBottom.enumerated()), id: \.element) { rank, stage in
+                let emphasized = selection == nil ? highlighted == stage : selectedStage == stage
+                HStack(spacing: 5) {
+                    Circle().fill(StrandPalette.sleepStageColor(stage)).frame(width: 7, height: 7)
+                    Text(stage.label)
+                        .font(emphasized ? StrandFont.footnote.weight(.semibold) : StrandFont.footnote)
+                        .foregroundStyle(emphasized ? StrandPalette.textPrimary : StrandPalette.textSecondary)
+                        .lineLimit(1)
+                        .minimumScaleFactor(0.7)
+                }
+                .frame(width: Self.gutter, height: barH + spacing, alignment: .leading)
+                .offset(y: (barH + spacing) * CGFloat(rank) + barH / 2 - (barH + spacing) / 2)
             }
         }
-        .frame(width: Self.gutter, height: stageHeight, alignment: .leading)
+        .frame(width: Self.gutter, height: stageHeight, alignment: .topLeading)
     }
 
     @ViewBuilder
     private func stagePlot(grid: [Date]) -> some View {
         let highlightedStage = highlighted
         ZStack {
+            // The bar-and-connector drawing is ported from SleepChartKit's `SleepTimelineGraph`
+            // (github.com/DanielJamesTronca/SleepChartKit, MIT License, Copyright (c) Daniel James Tronca).
             Canvas { ctx, size in
                 let w = size.width, h = size.height
-                let rowStep = h / 4
-                func rowY(_ rank: Int) -> CGFloat { rowStep * (CGFloat(rank) + 0.5) }
-                for (rank, stage) in stagesTopToBottom.enumerated() {
-                    let laneH = rowStep * 0.8
-                    let rect = CGRect(x: 0, y: rowY(rank) - laneH / 2, width: w, height: laneH)
-                    ctx.fill(Path(roundedRect: rect, cornerRadius: 6),
-                             with: .color(StrandPalette.sleepStageColor(stage).opacity(highlightedStage == stage ? 0.16 : 0.06)))
+                let rows = CGFloat(stagesTopToBottom.count)
+                let barH = h / (rows + 1)
+                let spacing = (h - barH * rows) / (rows - 1)
+                func rowY(_ rank: Int) -> CGFloat { (barH + spacing) * CGFloat(rank) }
+
+                for g in grid {
+                    let gx = CGFloat(g.timeIntervalSince(model.onset) / model.span) * w
+                    guard gx > 0.5, gx < w - 0.5 else { continue }
+                    var p = Path()
+                    p.move(to: CGPoint(x: gx, y: 0)); p.addLine(to: CGPoint(x: gx, y: h))
+                    ctx.stroke(p, with: .color(StrandPalette.textTertiary.opacity(0.5)),
+                               style: StrokeStyle(lineWidth: 0.5, dash: [2, 3]))
                 }
-                drawGrid(ctx, grid: grid, size: size)
                 guard let timeline = model.timeline else { return }
+
+                var previous: (rect: CGRect, stage: SleepStage)?
                 for seg in timeline.segments {
                     let x0 = CGFloat(seg.start / model.span) * w, x1 = CGFloat(seg.end / model.span) * w
-                    let y = rowY(seg.stage.bandRank)
-                    let rect = CGRect(x: x0, y: y - rowStep * 0.32, width: max(1, x1 - x0), height: max(0, h - y + rowStep * 0.32))
+                    let rect = CGRect(x: x0, y: rowY(seg.stage.bandRank), width: max(1, x1 - x0), height: barH)
                     let dimmed = highlightedStage != nil && seg.stage != highlightedStage
-                    ctx.fill(Path(roundedRect: rect, cornerRadius: 3),
-                             with: .color(StrandPalette.sleepStageColor(seg.stage).opacity(dimmed ? 0.2 : 0.9)))
+                    ctx.fill(Path(roundedRect: rect, cornerRadius: barH / 6),
+                             with: .color(StrandPalette.sleepStageColor(seg.stage).opacity(dimmed ? 0.25 : 1)))
+                    if let previous, previous.stage != seg.stage {
+                        let start = CGPoint(x: previous.rect.maxX, y: previous.rect.midY)
+                        let end = CGPoint(x: rect.minX, y: rect.midY)
+                        var connector = Path()
+                        connector.move(to: start)
+                        connector.addCurve(to: end,
+                                           control1: CGPoint(x: start.x + (end.x - start.x) * 0.3, y: start.y),
+                                           control2: CGPoint(x: start.x + (end.x - start.x) * 0.7, y: end.y))
+                        ctx.stroke(connector, with: .color(Color.gray.opacity(0.4)), lineWidth: 1.5)
+                    }
+                    previous = (rect, seg.stage)
                 }
             }
             if model.timeline == nil {
@@ -627,7 +696,40 @@ struct SleepStagesExplorer: View {
     private func laneGutter(_ overlay: SleepOverlay) -> some View {
         let series = store.series(overlay)
         let domain = series?.domain(from: model.fromTs, to: model.toTs, minSpan: overlay.minSpan(temperature))
-        return HStack(spacing: 0) {
+        return Group {
+            if let selected = selection, let series, !series.isEmpty {
+                selectedGutter(overlay, value: series.value(at: Int(selected.timeIntervalSince1970)))
+            } else {
+                restingGutter(overlay, domain: domain)
+            }
+        }
+        .frame(height: laneHeight)
+    }
+
+    /// While inspecting: the lane's value at the scrubbed minute, in the lane's colour.
+    private func selectedGutter(_ overlay: SleepOverlay, value: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 1) {
+            Text(overlay.shortTitle)
+                .font(StrandFont.caption.weight(.medium))
+                .foregroundStyle(overlay.color)
+            if let value {
+                (Text(overlay.format(value)).font(StrandFont.subhead.weight(.semibold).monospacedDigit())
+                 + Text(" \(overlay.unit(temperature))").font(StrandFont.caption))
+                    .foregroundColor(StrandPalette.textPrimary)
+            } else {
+                Text("No reading")
+                    .font(StrandFont.caption)
+                    .foregroundStyle(StrandPalette.textTertiary)
+            }
+        }
+        .lineLimit(1)
+        .minimumScaleFactor(0.6)
+        .frame(width: Self.gutter, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .center)
+    }
+
+    private func restingGutter(_ overlay: SleepOverlay, domain: ClosedRange<Double>?) -> some View {
+        HStack(spacing: 0) {
             VStack(alignment: .leading, spacing: 0) {
                 Text(overlay.shortTitle)
                     .font(StrandFont.caption.weight(.medium))
@@ -653,7 +755,6 @@ struct SleepStagesExplorer: View {
             .minimumScaleFactor(0.7)
             .frame(width: Self.valueWidth, alignment: .trailing)
         }
-        .frame(height: laneHeight)
     }
 
     @ViewBuilder
@@ -752,66 +853,6 @@ struct SleepStagesExplorer: View {
             ctx.stroke(p, with: .color(NaraChartStyle.selectionColor), style: StrokeStyle(lineWidth: 1, dash: [4, 3]))
         }
         .allowsHitTesting(false)
-    }
-
-    @ViewBuilder
-    private var tooltip: some View {
-        if let selected = selection {
-            GeometryReader { geo in
-                let x = CGFloat(selected.timeIntervalSince(model.onset) / model.span) * geo.size.width
-                tooltipCard(selected)
-                    .fixedSize()
-                    .alignmentGuide(.leading) { d in
-                        -min(max(x - d.width / 2, 0), max(0, geo.size.width - d.width))
-                    }
-                    .alignmentGuide(.top) { _ in -4 }
-                    .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
-            }
-            .allowsHitTesting(false)
-            .accessibilityHidden(true)
-        }
-    }
-
-    private func tooltipCard(_ selected: Date) -> some View {
-        let ts = Int(selected.timeIntervalSince1970)
-        let stage = model.timeline?.segment(at: selected)?.stage
-        return VStack(alignment: .leading, spacing: 5) {
-            Text(Night.clockString(ts))
-                .font(StrandFont.subhead.weight(.semibold).monospacedDigit())
-                .foregroundStyle(StrandPalette.textPrimary)
-            ForEach(lanes) { overlay in
-                if let series = store.series(overlay), !series.isEmpty {
-                    tooltipRow(color: overlay.color, label: overlay.title,
-                               value: series.value(at: ts).map { "\(overlay.format($0)) \(overlay.unit(temperature))" })
-                }
-            }
-            Rectangle().fill(StrandPalette.hairline).frame(height: 1).padding(.vertical, 1)
-            tooltipRow(color: stage.map(StrandPalette.sleepStageColor) ?? StrandPalette.textTertiary,
-                       label: String(localized: "Stage"), value: stage?.label)
-        }
-        .padding(.horizontal, NoopMetrics.space3)
-        .padding(.vertical, NoopMetrics.space2)
-        .background {
-            RoundedRectangle(cornerRadius: 10, style: .continuous)
-                .fill(StrandPalette.surfaceRaised)
-                .shadow(color: .black.opacity(0.35), radius: 8, y: 3)
-        }
-        .overlay {
-            RoundedRectangle(cornerRadius: 10, style: .continuous).stroke(StrandPalette.hairlineStrong, lineWidth: 1)
-        }
-    }
-
-    private func tooltipRow(color: Color, label: String, value: String?) -> some View {
-        HStack(spacing: 6) {
-            Circle().fill(color).frame(width: 8, height: 8)
-            Text(label)
-                .font(StrandFont.footnote)
-                .foregroundStyle(StrandPalette.textSecondary)
-                .frame(minWidth: 72, alignment: .leading)
-            Text(value ?? String(localized: "No reading"))
-                .font(value == nil ? StrandFont.footnote : StrandFont.captionNumber)
-                .foregroundStyle(value == nil ? StrandPalette.textTertiary : StrandPalette.textPrimary)
-        }
     }
 
     // MARK: Axis
@@ -931,7 +972,8 @@ struct SleepLaneToggles: View {
     @EnvironmentObject private var repo: Repository
 
     var body: some View {
-        HStack(spacing: NoopMetrics.space2) {
+        LazyVGrid(columns: [GridItem(.adaptive(minimum: 104), spacing: NoopMetrics.space2)],
+                  alignment: .leading, spacing: NoopMetrics.space2) {
             ForEach(SleepOverlay.allCases) { chip($0) }
         }
     }
@@ -963,10 +1005,10 @@ struct SleepLaneToggles: View {
                         .foregroundStyle(StrandPalette.textTertiary)
                 }
                 .lineLimit(1)
-                .minimumScaleFactor(0.7)
+                .minimumScaleFactor(0.85)
                 Spacer(minLength: 0)
             }
-            .padding(.horizontal, 6)
+            .padding(.horizontal, NoopMetrics.space2)
             .frame(maxWidth: .infinity, minHeight: NoopMetrics.minimumHitTarget + 4)
             .background {
                 RoundedRectangle(cornerRadius: 10, style: .continuous)

@@ -24,6 +24,16 @@ import UIKit
 /// }
 /// ```
 public struct HorizontalScrubSurface: UIViewRepresentable {
+    /// Whether any scrub surface is scrubbing now, or stopped within `settle` seconds. An ancestor
+    /// sideways gesture (the tab bar's swipe-between-tabs) recognises alongside the scrub, so it must check
+    /// this and stand down rather than switching tabs at the end of a scrub.
+    @MainActor public static func isScrubbing(settle: TimeInterval = 0.35) -> Bool {
+        activeScrubs > 0 || Date().timeIntervalSince(lastScrubEnd) < settle
+    }
+
+    @MainActor static var activeScrubs = 0
+    @MainActor static var lastScrubEnd = Date.distantPast
+
     /// Called with the finger's x position, in this surface's own coordinate space, while scrubbing.
     public var onScrub: (CGFloat) -> Void
     /// Called when the finger lifts or the system takes the touch away.
@@ -67,11 +77,16 @@ public struct HorizontalScrubSurface: UIViewRepresentable {
         var onTap: ((CGFloat) -> Void)?
         weak var tapRecognizer: UITapGestureRecognizer?
 
-        @objc func pan(_ recognizer: UIPanGestureRecognizer) {
+        @MainActor @objc func pan(_ recognizer: UIPanGestureRecognizer) {
             switch recognizer.state {
-            case .began, .changed:
+            case .began:
+                HorizontalScrubSurface.activeScrubs += 1
+                onScrub(recognizer.location(in: recognizer.view).x)
+            case .changed:
                 onScrub(recognizer.location(in: recognizer.view).x)
             case .ended, .cancelled, .failed:
+                HorizontalScrubSurface.activeScrubs = max(0, HorizontalScrubSurface.activeScrubs - 1)
+                HorizontalScrubSurface.lastScrubEnd = Date()
                 onEnd()
             default:
                 break

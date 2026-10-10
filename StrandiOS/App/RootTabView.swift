@@ -142,6 +142,8 @@ struct RootTabView: View {
             .onEnded { v in
                 // Today (tab 0) uses horizontal swipe to change DAYS, so tab-swipe is off there.
                 guard selectedTab != 0 else { return }
+                // A sideways drag that scrubbed a chart is not a tab swipe.
+                guard !HorizontalScrubSurface.isScrubbing() else { return }
                 let dx = v.translation.width, dy = v.translation.height
                 guard abs(dx) > 60, abs(dx) > abs(dy) * 1.6 else { return }
                 let next = min(4, max(0, selectedTab + (dx < 0 ? 1 : -1)))
