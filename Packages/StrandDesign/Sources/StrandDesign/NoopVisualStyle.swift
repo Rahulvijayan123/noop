@@ -105,10 +105,10 @@ public struct NoopPanelSurface: View {
             NoopOuterShadow(shape: shape, shadow: shadow)
             LiquidGlassBackdrop(level: glass, scale: 0.5)
                 .clipShape(shape)
-            shape
-                .fill(NoopVisualStyle.surface)
-                .opacity(glass.bodyOpacity(scheme))
-            shape.strokeBorder(NoopVisualStyle.border.opacity(0.45), lineWidth: NoopMetrics.hairlineWidth)
+            LiquidGlassBody(shape: shape, level: glass)
+            if scheme == .dark {
+                shape.strokeBorder(NoopVisualStyle.border.opacity(0.45), lineWidth: NoopMetrics.hairlineWidth)
+            }
             LiquidGlassHighlights(shape: shape, level: glass)
         }
     }
@@ -225,7 +225,7 @@ public struct NoopInsetSurface: View {
             // or list instead of a solid patch sitting on it.
             ZStack {
                 shape.fill(NoopVisualStyle.inset).opacity(glass.insetBodyOpacity(scheme))
-                LiquidGlassHighlights(shape: shape, level: glass)
+                LiquidGlassHighlights(shape: shape, level: glass, restrained: true)
             }
         } else {
             shape.fill(NoopVisualStyle.inset)

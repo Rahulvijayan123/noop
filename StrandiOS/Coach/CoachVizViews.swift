@@ -542,7 +542,7 @@ private struct CoachVizChartBody: View {
     private func referenceLegend(_ value: Double) -> some View {
         HStack(spacing: 6) {
             CoachVizDashLine()
-                .stroke(Color.white.opacity(0.55), style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
+                .stroke(StrandPalette.brandInk.opacity(0.55), style: StrokeStyle(lineWidth: 1.2, dash: [4, 3]))
                 .frame(width: 18, height: 2)
             Text("Reference \(CoachVizFormat.reading(value, unit: unit))")
                 .font(CoachVizFont.caption2)
@@ -724,7 +724,7 @@ private struct CoachVizChartBody: View {
             if let reference = viz.reference {
                 RuleMark(y: .value("Reference", reference))
                     .lineStyle(StrokeStyle(lineWidth: 1, dash: [4, 4]))
-                    .foregroundStyle(Color.white.opacity(0.35))
+                    .foregroundStyle(StrandPalette.brandInk.opacity(0.35))
             }
             if let selected {
                 RuleMark(x: .value("Selected", selected))
@@ -951,8 +951,8 @@ private struct CoachVizChartBody: View {
     private func categoryAxis() -> some AxisContent {
         AxisMarks(values: tickLabels) { value in
             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
-                .foregroundStyle(Color.white.opacity(0.06))
-            AxisTick().foregroundStyle(Color.white.opacity(0.22))
+                .foregroundStyle(StrandPalette.brandInk.opacity(0.10))
+            AxisTick().foregroundStyle(StrandPalette.brandInk.opacity(0.22))
             AxisValueLabel(anchor: .top) {
                 if let label = value.as(String.self) {
                     Text(label)
@@ -987,7 +987,7 @@ private struct CoachVizChartBody: View {
     private func valueAxis(_ position: AxisMarkPosition) -> some AxisContent {
         AxisMarks(position: position, values: .automatic(desiredCount: 4)) { value in
             AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3))
-                .foregroundStyle(Color.white.opacity(0.08))
+                .foregroundStyle(StrandPalette.brandInk.opacity(0.10))
             AxisValueLabel {
                 if let number = value.as(Double.self) {
                     Text(CoachVizFormat.number(number))
@@ -1206,7 +1206,7 @@ private struct CoachVizProgressBody: View {
                     }
                     GeometryReader { proxy in
                         ZStack(alignment: .leading) {
-                            Capsule().fill(Color.white.opacity(0.08))
+                            Capsule().fill(StrandPalette.brandInk.opacity(0.10))
                             Capsule()
                                 .fill(ratio >= 1 ? StrandPalette.statusPositive : StrandPalette.accent)
                                 .frame(width: max(6, proxy.size.width * min(max(ratio, 0), 1)))
@@ -1264,7 +1264,7 @@ private struct CoachVizTimelineBody: View {
         .chartLegend(groups.count > 1 && !(groups.first?.isEmpty ?? true) ? .visible : .hidden)
         .chartXAxis {
             AxisMarks(values: .automatic(desiredCount: 4)) { _ in
-                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3)).foregroundStyle(Color.white.opacity(0.08))
+                AxisGridLine(stroke: StrokeStyle(lineWidth: 0.3)).foregroundStyle(StrandPalette.brandInk.opacity(0.10))
                 AxisValueLabel(format: .dateTime.month(.abbreviated).day(), anchor: .top)
                     .font(CoachVizFont.caption2)
                     .foregroundStyle(StrandPalette.textTertiary)

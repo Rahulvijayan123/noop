@@ -68,6 +68,9 @@ private struct ImageFXUniforms {
     /// 1 while this layer sits over content that must stay hidden until the reveal: an opaque card-coloured
     /// cover sits under the mosaic and dissolves with it.
     var backdrop: Float = 0
+    /// 1 on a light card: the shader's brightness maths is mirrored (darker is stronger), so the mosaic is drawn as
+    /// dark ink cells on the white card the way the dark theme draws pale cells on the dark one.
+    var invert: Float = 0
 
     /// The bundled `pixels-organic` tuning for one theme. Palette slots that equal the preset's card
     /// colour are replaced by the real card surface, as img-fx does for its `cardBg` override.
@@ -87,14 +90,20 @@ private struct ImageFXUniforms {
             u.fillOpacity = 0.44
             u.edgeFade = 24
         } else {
-            u.c1 = hex(0xe3e3e3); u.c2 = hex(0xffffff); u.c3 = surface; u.c4 = surface; u.c5 = hex(0x080808)
-            u.direction = 25 * .pi / 180
-            u.intensity = 0.85
-            u.highlight = 0.7
-            u.vignette = 0
-            u.vigOpacity = 0
-            u.fillOpacity = 0.18
-            u.edgeFade = 20
+            // The dark tuning mirrored: the card colour is the empty cell, and the three ink stops are pale lilac,
+            // indigo and deep indigo, which are to a white card what 4a4949 / b9b9b9 / d8d8d8 are to a dark one.
+            // The earlier light tuning used near-white stops on a white card, so most cells (and their dissolve)
+            // could not be seen.
+            u.c1 = surface; u.c2 = hex(0xcfc5e2); u.c3 = hex(0x4a3a7a); u.c4 = surface; u.c5 = hex(0x281e4e)
+            u.direction = 0
+            u.intensity = 1
+            u.highlight = 0.2
+            u.vignette = 0.26
+            u.vigOpacity = 1
+            u.fillOpacity = 0.44
+            u.dotOpacity = 0.84
+            u.edgeFade = 24
+            u.invert = 1
         }
         return u
     }
@@ -146,7 +155,7 @@ private final class ImageFXRenderer {
         float softness, distortion, complexity, shape;
         float vignette, vigOpacity, blur, highlight;
         float cellSize, gap, dotSize, dotSoftness, dotOpacity, hlScale, fillOpacity, edgeFade, fadeStr;
-        float reveal, revealSoftness, backdrop;
+        float reveal, revealSoftness, backdrop, invert;
     };
 
     struct VOut { float4 position [[position]]; };
@@ -278,7 +287,9 @@ private final class ImageFXRenderer {
         float vigRangePx = 40.0 * (1.0 + u.vignette * 3.0);
         float vig = (edgeDistPx * edgeDistPx) / (vigRangePx * vigRangePx);
         vig = smoothstep(0.0, 1.0, vig);
-        col *= mix(1.0, vig, u.vignette * u.vigOpacity);
+        float vigFactor = mix(1.0, vig, u.vignette * u.vigOpacity);
+        // Dark card: the edges sink toward black. Light card: they lift toward white, into the card.
+        col = u.invert > 0.5 ? 1.0 - (1.0 - col) * vigFactor : col * vigFactor;
 
         float2 cellLocal = fract(uv * gridSize);
 
@@ -303,7 +314,9 @@ private final class ImageFXRenderer {
 
         if (u.highlight > 0.01) {
             float hl = hlFactor * u.highlight;
-            col = col * (1.0 + hl * 2.5) + float3(hl * hl * 0.3);
+            col = u.invert > 0.5
+                ? 1.0 - (1.0 - col) * (1.0 + hl * 2.5) - float3(hl * hl * 0.3)
+                : col * (1.0 + hl * 2.5) + float3(hl * hl * 0.3);
         }
 
         if (u.edgeFade > 0.5 && u.fadeStr > 0.005) {
@@ -321,7 +334,9 @@ private final class ImageFXRenderer {
         // for the moving threshold, so the real content shows through in flowing patches.
         float e = 0.0;
         if (u.reveal >= 0.0) {
-            float3 sc = pow(max(baseCol, float3(0.0)), float3(1.3));
+            float3 sc = u.invert > 0.5
+                ? 1.0 - pow(max(1.0 - baseCol, float3(0.0)), float3(1.3))
+                : pow(max(baseCol, float3(0.0)), float3(1.3));
             float3 d = sc - u.c4.xyz;
             float m = exp(-8.0 * dot(d, d));
             float thr = 1.0 - u.reveal * (1.0 + u.revealSoftness);
@@ -533,12 +548,36 @@ private struct ImageFXRevealModifier: ViewModifier {
                             revealing: true,
                             onFirstFrame: { mosaicReady = true },
                             onRevealStart: { revealStart = $0 },
-                            onRevealFinished: { covered = false; onFinished() }
+                            onRevealFinished: { finish() }
                         )
                     }
                     .clipShape(RoundedRectangle(cornerRadius: cornerRadius, style: .continuous))
                     .allowsHitTesting(false)
                 }
             }
+            // The cover is opaque and the content under it is hidden, so it must never depend on the Metal view
+            // alone to go away: if that view stops delivering frames (it was detached, throttled or never got a
+            // size), the card would stay a blank sheet until something happened to redraw it, which on a light card
+            // reads as the screen going white. These deadlines end the cover whatever the GPU does.
+            .task {
+                guard covered else { return }
+                try? await Task.sleep(nanoseconds: UInt64(Self.firstFrameDeadline * 1_000_000_000))
+                guard covered, !Task.isCancelled else { return }
+                if !mosaicReady { finish(); return }
+                try? await Task.sleep(nanoseconds: UInt64((ImageFXReveal.duration + Self.finishGrace) * 1_000_000_000))
+                guard covered, !Task.isCancelled else { return }
+                finish()
+            }
+    }
+
+    /// How long the mosaic has to draw its first frame before the content is shown plainly.
+    private static let firstFrameDeadline: Double = 1.5
+    /// Extra time past the dissolve's own length before the cover is removed regardless.
+    private static let finishGrace: Double = 1.0
+
+    private func finish() {
+        guard covered else { return }
+        covered = false
+        onFinished()
     }
 }

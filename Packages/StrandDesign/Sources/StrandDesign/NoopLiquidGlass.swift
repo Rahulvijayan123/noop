@@ -130,14 +130,23 @@ struct LiquidGlassHighlights<S: InsettableShape>: View {
     let shape: S
     let level: LiquidGlassLevel
     var pressed = false
+    /// True over a solid-colour fill (a filled button) or a well nested in glass: the light sheen stays thin so the
+    /// label on it keeps its contrast and a nested chip does not shine as brightly as the card around it.
+    var restrained = false
     @Environment(\.colorScheme) private var scheme
 
     var body: some View {
-        // On the light canvas a white rim vanishes against a white body, so it leans on the ink colour.
-        let rimColor = scheme == .dark ? Color.white : NaraBrand.deepIndigo
-        let rim = level.rimOpacity * (scheme == .dark ? 1 : 0.30)
+        if scheme == .dark {
+            darkBody
+        } else {
+            lightBody
+        }
+    }
+
+    private var darkBody: some View {
+        let rim = level.rimOpacity
         let sheen = level.sheenOpacity * (pressed ? 1.8 : 1)
-        ZStack {
+        return ZStack {
             shape.fill(
                 LinearGradient(
                     colors: [Color.white.opacity(sheen), Color.white.opacity(sheen * 0.25), .clear],
@@ -148,10 +157,10 @@ struct LiquidGlassHighlights<S: InsettableShape>: View {
             shape.strokeBorder(
                 LinearGradient(
                     colors: [
-                        rimColor.opacity(rim),
-                        rimColor.opacity(rim * 0.10),
-                        rimColor.opacity(rim * 0.10),
-                        rimColor.opacity(rim * 0.45),
+                        Color.white.opacity(rim),
+                        Color.white.opacity(rim * 0.10),
+                        Color.white.opacity(rim * 0.10),
+                        Color.white.opacity(rim * 0.45),
                     ],
                     startPoint: .topLeading,
                     endPoint: .bottomTrailing
@@ -162,6 +171,96 @@ struct LiquidGlassHighlights<S: InsettableShape>: View {
             shape.inset(by: 1.5).strokeBorder(Color.white.opacity(level.rimOpacity * 0.16), lineWidth: 1)
         }
         .allowsHitTesting(false)
+    }
+
+    /// On a light canvas white light on a white body disappears, so the glass is built from what does show there:
+    /// a defined ink edge, a bright bevel just inside it, a bright cap of sheen over a body that is a shade
+    /// darker than it, and a denser lilac toward the bottom, the way thicker glass reads.
+    private var lightBody: some View {
+        let a = level.amount
+        let press = pressed ? 1.35 : 1
+        let cap = restrained ? 0.24 : 0.95
+        let capMid = restrained ? 0.06 : 0.32
+        let wash = restrained ? 0.0 : 0.08
+        return ZStack {
+            // Thicker toward the bottom: a lilac wash that deepens, so the sheen above it has something to sit on.
+            shape.fill(
+                LinearGradient(
+                    colors: [.clear, NaraBrand.deepPurple.opacity(wash * a)],
+                    startPoint: UnitPoint(x: 0.5, y: 0.4),
+                    endPoint: .bottom
+                )
+            )
+            // The specular cap across the top.
+            shape.fill(
+                LinearGradient(
+                    colors: [Color.white.opacity(min(1, cap * a * press)),
+                             Color.white.opacity(capMid * a * press),
+                             .clear],
+                    startPoint: .top,
+                    endPoint: UnitPoint(x: 0.5, y: 0.55)
+                )
+            )
+            // The edge: ink, strongest where the glass turns away from the light (bottom-trailing).
+            shape.strokeBorder(
+                LinearGradient(
+                    colors: [
+                        NaraBrand.deepIndigo.opacity(0.14 * a),
+                        NaraBrand.deepIndigo.opacity(0.07 * a),
+                        NaraBrand.deepIndigo.opacity(0.07 * a),
+                        NaraBrand.deepIndigo.opacity(0.22 * a),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                lineWidth: 0.75
+            )
+            // The bevel: a bright line just inside the edge, brightest on the lit side.
+            shape.inset(by: 0.75).strokeBorder(
+                LinearGradient(
+                    colors: [
+                        Color.white.opacity(min(1, 1.15 * a)),
+                        Color.white.opacity(0.28 * a),
+                        Color.white.opacity(0.28 * a),
+                        Color.white.opacity(0.80 * a),
+                    ],
+                    startPoint: .topLeading,
+                    endPoint: .bottomTrailing
+                ),
+                lineWidth: 1.25
+            )
+        }
+        .allowsHitTesting(false)
+    }
+}
+
+/// The body of a piece of glass: the solid colour that is kept (thinned by the intensity) under the backdrop.
+/// Dark glass keeps the flat surface colour. Light glass is a very pale lilac that deepens downward: against a
+/// white body the lighting has nothing to contrast with, and the glass reads as a flat white card.
+struct LiquidGlassBody<S: InsettableShape>: View {
+    let shape: S
+    let level: LiquidGlassLevel
+    /// The flat colour used in dark mode (and as the fallback shade).
+    var dark: Color = NoopVisualStyle.surface
+    /// Multiplies the resolved body opacity (a floating control keeps less than a card).
+    var opacityScale: Double = 1
+    @Environment(\.colorScheme) private var scheme
+
+    var body: some View {
+        Group {
+            if scheme == .dark {
+                shape.fill(dark)
+            } else {
+                shape.fill(
+                    LinearGradient(
+                        colors: [Color(hex: "#FBF7FF"), Color(hex: "#EDE3F8")],
+                        startPoint: .top,
+                        endPoint: .bottom
+                    )
+                )
+            }
+        }
+        .opacity(level.bodyOpacity(scheme) * opacityScale)
     }
 }
 
@@ -182,17 +281,21 @@ struct LiquidGlassControlBackground<S: InsettableShape>: View {
             if let tint {
                 shape.fill(tint).opacity(level.tintedBodyOpacity)
             } else {
-                shape.fill(
-                    LinearGradient(
-                        colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
-                        startPoint: .top,
-                        endPoint: .bottom
-                    )
-                )
                 // Controls float over content, so they keep less body than a card.
-                .opacity(level.bodyOpacity(scheme) * 0.72)
+                if scheme == .dark {
+                    shape.fill(
+                        LinearGradient(
+                            colors: [NoopVisualStyle.surfaceTop, NoopVisualStyle.surfaceBottom],
+                            startPoint: .top,
+                            endPoint: .bottom
+                        )
+                    )
+                    .opacity(level.bodyOpacity(scheme) * 0.72)
+                } else {
+                    LiquidGlassBody(shape: shape, level: level, opacityScale: 0.72)
+                }
             }
-            LiquidGlassHighlights(shape: shape, level: level, pressed: pressed)
+            LiquidGlassHighlights(shape: shape, level: level, pressed: pressed, restrained: tint != nil)
         }
         .modifier(LiquidGlassRefraction(shape: shape, level: level, enabled: refraction))
     }
