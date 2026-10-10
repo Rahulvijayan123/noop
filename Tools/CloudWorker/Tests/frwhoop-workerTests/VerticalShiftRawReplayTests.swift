@@ -61,3 +61,25 @@ final class VerticalShiftRawReplayTests: XCTestCase {
         }
     }
 }
+
+/// hsmm-2.0: the declared placement reaches the server decode (srv-cfg-2).
+final class ActivityPlacementReferenceTests: XCTestCase {
+    func testStrapPiecesWinOverAccountLevelAndWristIsDropped() {
+        typealias P = PhysiologyContext.PlacementInput
+        let rows = [P(start: 0, end: nil, placement: "wrist", source: "user", revision: 1, recordedAt: nil, scope: "account"),
+                    P(start: 100, end: nil, placement: "bicep", source: "user", revision: 2, recordedAt: nil, scope: "device")]
+        let spans = ActivityContextDays.placementSpans(rows)
+        XCTAssertEqual(spans, [ActivityPlacementSpan(start: 100, end: nil, placement: .bicep)])
+        var r = ActivityContextDays.DecoderReference()
+        r.placements = ActivityDecoderConfig.decodingPlacements(spans, from: 0, to: 1_000)
+        r.placementSource = "placement_intervals"
+        XCTAssertEqual(r.config.placement(at: 500), .bicep)
+        XCTAssertEqual(r.config.placement(at: 50), .unknown)
+        let p = r.provenance()
+        XCTAssertEqual(p.placement, "bicep")
+        XCTAssertTrue(p.tag.hasPrefix("srv-cfg-2:"))
+        XCTAssertTrue(p.tag.contains("-pl"), "the placement is part of the config tag")
+        // Account-level only (no strap pieces): those are read.
+        XCTAssertEqual(ActivityContextDays.placementSpans([rows[0]]).first?.placement, .wrist)
+    }
+}
