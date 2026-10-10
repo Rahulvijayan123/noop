@@ -1924,6 +1924,7 @@ extension CoachChatViewModel {
         connection = .online
     }
 }
+#endif
 
 extension CoachChatViewModel {
     /// "bicep since 2026-10-07; previously wrist" from the declared placements (nil when none was ever declared).
