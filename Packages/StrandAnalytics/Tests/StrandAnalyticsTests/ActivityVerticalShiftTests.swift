@@ -67,6 +67,11 @@ final class ActivityVerticalShiftTests: XCTestCase {
                       "leaning forward a few centimetres is not a change of posture")
     }
 
+    func testABendToALowDrawerIsNotASitDown() {
+        XCTAssertTrue(ActivityVerticalShift.detect(run(vertical: -0.85), sampleRateHz: 100, startTs: 0).isEmpty,
+                      "deeper than any sit-down")
+    }
+
     func testStillnessAloneFindsNothingAndShortRunsAreSkipped() {
         XCTAssertTrue(ActivityVerticalShift.detect(run(), sampleRateHz: 100, startTs: 0).isEmpty)
         XCTAssertTrue(ActivityVerticalShift.detect(Array(run(vertical: 0.4).prefix(300)), sampleRateHz: 100, startTs: 0).isEmpty)

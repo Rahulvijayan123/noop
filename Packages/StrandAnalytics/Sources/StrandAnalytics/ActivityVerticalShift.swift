@@ -52,8 +52,15 @@ public enum ActivityVerticalShift {
     /// Gyro-aided gravity: pull toward the accelerometer direction (1/s), down-weighted away from 1 g.
     static let gravityGain = 1.0, gravityNormTolerance = 0.15
     /// Decision: |Δh| at least this (m) with a peak vertical velocity of the same sign at least `minPeakVelocity`.
+    ///
+    /// Opportunity's upper-arm IMUs (4 people, B-upperarm/REPORT.md) put stand-ups at +0.48 m median (p10 +0.32) and
+    /// sit-downs at −0.52 m; the owner's own bicep strap measured +0.34 / +0.37 / −0.23 / −0.25 m, so the floor is
+    /// 0.20 m for movements bounded by stillness (direction right on every such burst there and on the owner's).
     public static let minDisplacementM = 0.20
     public static let minPeakVelocity = 0.25
+    /// Larger than any sit-down (Opportunity p10 −0.61 m): bending or squatting to a low drawer (−0.7 to −0.9 m), not a
+    /// change of posture.
+    public static let maxDisplacementM = 0.70
     /// Pad velocity residual (m/s RMS) at which a measurement is worthless (quality 0); half of it gives 0.5.
     static let maxPadVelocity = 0.20
 
@@ -89,7 +96,8 @@ public enum ActivityVerticalShift {
         var out: [ActivityVerticalShiftEvidence] = []
         for event in segment(acc, fs: fs) {
             guard let m = measure(acc, gravity, fs: fs, from: event.0, to: event.1) else { continue }
-            guard abs(m.dh) >= minDisplacementM, abs(m.vpeak) >= minPeakVelocity, (m.dh > 0) == (m.vpeak > 0) else {
+            guard abs(m.dh) >= minDisplacementM, abs(m.dh) <= maxDisplacementM, abs(m.vpeak) >= minPeakVelocity,
+                  (m.dh > 0) == (m.vpeak > 0) else {
                 continue
             }
             let quality = max(0, min(1, 1 - m.padVelocity / maxPadVelocity))

@@ -132,6 +132,15 @@ Plumbing:
 - **Storage.** It stores the shifts in `activity_encoder_windows` as an additive `v_*` block (`vertical-shift-1`).
 - **Readers.** The phone and the stream days read the shifts back.
 
+**Cross-person check** (Opportunity upper-arm IMUs, 4 people; `B-upperarm/REPORT.md`):
+- With gyro-aided gravity, direction is right 98 % / 96 % of labelled transitions.
+- Accelerometer-only causal filters are near chance, so the gyro is essential.
+- Every still-bounded burst gets the right direction, but only 39–54 % of kitchen transitions are still-bounded, so
+  recall is partial.
+- Bends and squats to low drawers (−0.7 to −0.9 m) are rejected by an upper bound of 0.70 m.
+- A free-running detector there needs |Δh| ≥ 0.35 m (precision ~0.6). The owner's own bicep events measured
+  0.23–0.37 m, hence the 0.20 m floor on still-bounded movements only.
+
 **Coverage limit.** Raw IMU is captured part-time by default (60 s in every 180 s), so about two thirds of posture
 changes fall outside a capture window. The calibration screen forces continuous capture; Power saving → IMU capture
 offers continuous capture at a battery cost.
