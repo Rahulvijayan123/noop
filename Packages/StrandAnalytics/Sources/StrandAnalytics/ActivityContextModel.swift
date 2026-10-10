@@ -813,6 +813,19 @@ enum ActivityContextModel {
             }
         }
 
+        // hsmm-2.0: off the wrist (`ActivityWearPlacement`) the wrist-geometry cues below keep everything they say
+        // except seated versus upright, and standing up versus sitting down: those two pairs are made equal (the
+        // better-supported value of each), so the channel still separates still from moving, lying from not
+        // lying, and a transition from none, but no longer picks a posture by a forearm rule.
+        let wristCues = f.wristPostureCues
+        func evenPostures(_ v: inout [Double]) {
+            guard !wristCues else { return }
+            let s = BodyMode.seated.rawValue, u = BodyMode.upright.rawValue
+            let a = BodyMode.sitToStand.rawValue, b = BodyMode.standToSit.rawValue
+            let su = max(v[s], v[u]); v[s] = su; v[u] = su
+            let ab = max(v[a], v[b]); v[a] = ab; v[b] = ab
+        }
+
         // 1. Movement intensity.
         var hasMotion = false
         if let m10 = f.m10 {
@@ -878,11 +891,16 @@ enum ActivityContextModel {
             v[bed] = max(0.01, fbed / max(fs, fu))
             add(v, unknownValue: 1, weight: wOrientRecumbent, isEvidence: false)
             orientRecumbent = wOrientRecumbent * log(v[bed])
-            var w = [Double](repeating: 1, count: n)
-            let ref = (fs + fu) / 2
-            w[seat] = fs / ref; w[up] = fu / ref
-            add(w, unknownValue: 1, weight: wOrientUpright, isEvidence: false)
-            orientSeated = wOrientUpright * (log(w[seat]) - log(w[up]))
+            // "A hanging arm leans upright" is a forearm rule: an upper arm hangs in both postures. A wearer's own
+            // adopted rows (fitted and validated where they wear the strap) still speak.
+            let personalRows = row(seat, []).count == 4 || row(up, []).count == 4
+            if wristCues || personalRows {
+                var w = [Double](repeating: 1, count: n)
+                let ref = (fs + fu) / 2
+                w[seat] = fs / ref; w[up] = fu / ref
+                add(w, unknownValue: 1, weight: wOrientUpright, isEvidence: false)
+                orientSeated = wOrientUpright * (log(w[seat]) - log(w[up]))
+            }
         }
 
         // 3b. Posture-shift signature: a burst of movement that leaves the wrist in a different
@@ -920,7 +938,9 @@ enum ActivityContextModel {
         // used to share one observation profile, so the event kind came from where the belief's mass was
         // (D2-06, D7: direction right 15 of 35). Not an evidence channel; neutral for every other mode.
         if let a = forearmAxis(f.shiftFromUx, sign: f.forearmSign), let b = forearmAxis(f.shiftToUx, sign: f.forearmSign) {
-            add(shiftDirection(from: a, to: b), unknownValue: 1, weight: wShiftDirection, isEvidence: false)
+            var v = shiftDirection(from: a, to: b)
+            evenPostures(&v)
+            add(v, unknownValue: 1, weight: wShiftDirection, isEvidence: false)
         }
 
         // 4. Short-window motion encoder (HART or any other), weighted by how much to trust it. With HART's
@@ -929,7 +949,9 @@ enum ActivityContextModel {
         var encoderSpoke = false
         let fine = f.encoder?.fineProbs.flatMap(HartFineActivities.vector)
         if let enc = f.encoder, let fine {
-            let L = HartFineActivities.bodyLikelihood(fine)
+            var L = HartFineActivities.bodyLikelihood(fine)
+            // HART's fine rows were trained on wrist data (WISDM): off the wrist its sit / stand rows say nothing.
+            evenPostures(&L)
             let best = max(L.max() ?? 1, 1e-12)
             var w = wEncoder
             if !enc.calibrated { w *= 0.6 }
@@ -1008,6 +1030,12 @@ enum ActivityContextModel {
                 }
                 sum += v[m]; count += 1
             }
+            // Its direction rows were trained on waist / wrist sensors (HAPT, FORTH): off the wrist only "a
+            // transition" versus "none" is kept.
+            if !wristCues {
+                evenPostures(&v)
+                sum = (0..<n).filter { $0 != unknownIdx }.reduce(0.0) { $0 + v[$1] }
+            }
             add(v, unknownValue: count > 0 ? sum / Double(count) : 1,
                 weight: wTransition * transitionAgeFactor(f.transitionAgeS))
         }
@@ -1025,6 +1053,8 @@ enum ActivityContextModel {
                     // A fully matching pattern scores about 0.35 (rows spread over 7 classes); 3.2× maps that to ~1.
                     v[m] = min(1, max(0.01, s * 3.2))
                 }
+                // The hand pattern (desk-like typing, gesturing) is a wrist's view; the upper arm barely shows it.
+                evenPostures(&v)
                 add(v, unknownValue: uArm, weight: wArm)
                 // Posture evidence only once the pattern is steady (4 s and 10 s means and the 30 s median agree):
                 // the seconds after a walk pass through a desk-like movement level on their way to still.
@@ -1152,7 +1182,9 @@ enum ActivityContextModel {
                 let best = max(post.L.max() ?? 1, 1e-6)
                 for m in 0..<n where m != unknownIdx { dis[m] += post.weight * log(max(post.L[m], 1e-6) / best) }
                 dis[unknownIdx] += post.weight * min(0, log(1 / best))
-                postureShift = post.L.map { temperature * post.weight * log(max($0, 1e-6)) }
+                var L = post.L
+                evenPostures(&L)
+                postureShift = L.map { temperature * post.weight * log(max($0, 1e-6)) }
             }
             armTerm = t.arm
         }

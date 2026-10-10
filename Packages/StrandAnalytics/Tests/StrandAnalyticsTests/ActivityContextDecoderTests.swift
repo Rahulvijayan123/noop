@@ -87,7 +87,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         // tables or the feature layout change behaviour.
         XCTAssertEqual(ActivityContextVersions.schema, 2)
         XCTAssertEqual(ActivityContextVersions.ontology, "v2.0")
-        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-1.9")
+        XCTAssertEqual(ActivityContextVersions.decoder, "hsmm-2.0")
         XCTAssertEqual(ActivityContextVersions.featureSchema, "imu-feat-2")  // bumped by I4 (true gyro RMS, per-second jerk)
     }
 
@@ -125,7 +125,7 @@ final class ActivityContextDecoderTests: XCTestCase {
         XCTAssertGreaterThan(try XCTUnwrap(loco["walking"]), 0.5)
         let versions = try XCTUnwrap(json["versions"] as? [String: Any])
         XCTAssertEqual(versions["ontology"] as? String, "v2.0")
-        XCTAssertEqual(versions["decoder"] as? String, "hsmm-1.9")
+        XCTAssertEqual(versions["decoder"] as? String, "hsmm-2.0")
         XCTAssertEqual(versions["feature_schema"] as? String, "imu-feat-2")  // I4 bumped the feature contract
         XCTAssertEqual(versions["schema"] as? Int, 2)
         let intensity = try XCTUnwrap(json["intensity"] as? Double)

@@ -63,6 +63,35 @@ public struct ActivityDecoderConfig: Codable, Equatable, Sendable {
     /// second's still-segment log-odds feed the learned posture memory (bounded per second, with its usual cap
     /// and decay), and sitting / standing claims it agrees with read "Likely sitting" / "Likely standing".
     public var sitStandHead: ActivitySitStandModel? = nil
+    /// Declared strap placement over time (`ActivityWearPlacement.swift`, hsmm-2.0). nil or empty (the default)
+    /// reads every second as a wrist, exactly as before placement existed; build it with
+    /// `ActivityDecoderConfig.decodingPlacements(_:from:to:)` so wrist-only days keep their tag.
+    public var placements: [ActivityPlacementSpan]? = nil
+    /// The wearer's verified heart-rate-by-posture model (`ActivityPostureHeartRate.swift`, hsmm-2.0). nil (the
+    /// default) is OFF: heart rate stays posture-neutral, as it always was. Set it only from
+    /// `ActivityPostureHeartRateFitter` with status `.adopted`.
+    public var postureHeartRate: ActivityPostureHeartRateModel? = nil
+    /// The still-duration prior (`ActivityStillPosture.durationLean`, hsmm-2.0). nil (the default) is ON; false turns
+    /// it off for a wearer whose long stillness is often standing (a standing desk, a standing job), whom the
+    /// population prior would read as sitting.
+    public var stillDurationPrior: Bool? = nil
+    /// Per-placement calibration (hsmm-2.0): the wearer's adopted profile and heart-rate model for each place they
+    /// wear the strap, keyed by `ActivityWearPlacement.calibrationKey` ("wrist", "bicep", "other"). A second is
+    /// scored with the entry for the placement it was worn at (`placements`), falling back to `personalProfile` /
+    /// `postureHeartRate`; a calibration made on the bicep therefore never shapes a wrist second, and switching
+    /// placement switches calibration. nil (the default) decodes exactly as before.
+    public var placementProfiles: [String: ActivityPersonalProfile]? = nil
+    public var placementPostureHeartRate: [String: ActivityPostureHeartRateModel]? = nil
+
+    /// The personal profile that applies at placement `key`.
+    public func personalProfile(forCalibration key: String) -> ActivityPersonalProfile? {
+        placementProfiles?[key] ?? personalProfile
+    }
+
+    /// The heart-rate-by-posture model that applies at placement `key`.
+    public func postureHeartRate(forCalibration key: String) -> ActivityPostureHeartRateModel? {
+        placementPostureHeartRate?[key] ?? postureHeartRate
+    }
 
     public init() {}
 }
@@ -156,6 +185,25 @@ struct DecoderTracking: Codable, Equatable {
     /// The personal sit / stand head's causal still-segment state. Only ever set while
     /// `ActivityDecoderConfig.sitStandHead` is, so a snapshot without a head encodes exactly the keys it always did.
     var sitStand: SitStandTrack?
+    /// hsmm-2.0 (`ActivityStillPosture.swift`): the second the current still stretch began (no gait, no moving or
+    /// transition mass, awake, outside the in-bed window), the last exertion second, a slow average of the heart rate,
+    /// the posture anchor a measured stand-up / sit-down left, and the lean those priors put on seated over upright
+    /// this second. All nil in older snapshots (and then rebuilt from the next second).
+    var stillSinceTs: Int?
+    var lastExertionTs: Int?
+    var hrAverage: Double?
+    var anchor: PostureAnchor?
+    var priorLean: Double?
+    /// Recent seconds with a step signal (step ticks, the strap's walk class, or gait presence), last
+    /// `ActivityStillPosture.gaitWindowS` only: a foot shuffle is not walking away.
+    var gaitSeconds: [Int]?
+}
+
+/// The posture a measured change of height left (`ActivityVerticalShift`): log-odds of seated over upright, and the
+/// second of the event. Held while the still stretch that followed it lasts.
+struct PostureAnchor: Codable, Equatable {
+    var lean: Double
+    var ts: Int
 }
 
 /// Causal form of `ActivitySitStandSmoothing` inside the decoder: the trailing (not centred) 10-s mean of the
@@ -258,8 +306,14 @@ public struct ActivityContextDecoder: Sendable {
     public let gaitQualityRefusal: String?
     /// What ElderNet did in this decoder's lifetime (nil without a gait config). Not part of the snapshot.
     public private(set) var gaitQualityReport: GaitQualityTrackReport?
-    /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy.
-    private let observationProfiles: [ModeProfile]
+    /// Observation profiles this decoder scores with: the static table, or the wearer's adapted copy, per
+    /// calibration key (the placement the second was worn at); `defaultProfiles` for a key without its own entry.
+    private let defaultProfiles: [ModeProfile]
+    private let placementTables: [String: [ModeProfile]]
+    /// The calibration key of the second being ingested (set at the top of `ingest`).
+    private var activeCalibrationKey = ActivityWearPlacement.wrist.calibrationKey
+    private var observationProfiles: [ModeProfile] { placementTables[activeCalibrationKey] ?? defaultProfiles }
+    private var activeProfile: ActivityPersonalProfile? { config.personalProfile(forCalibration: activeCalibrationKey) }
     /// The personal sit / stand head when `config.sitStandHead` is set and usable; nil keeps every path as it was.
     private let sitStandHead: ActivitySitStandModel?
     /// When set, `ingest` keeps the scored second's features and body posterior in `lastScored` (the
@@ -285,7 +339,8 @@ public struct ActivityContextDecoder: Sendable {
 
     public init(config: ActivityDecoderConfig = ActivityDecoderConfig()) {
         self.config = config
-        self.observationProfiles = ActivityContextModel.profiles(for: config.personalProfile)
+        self.defaultProfiles = ActivityContextModel.profiles(for: config.personalProfile)
+        self.placementTables = (config.placementProfiles ?? [:]).mapValues { ActivityContextModel.profiles(for: $0) }
         self.body = bodyLayout.expand(ActivityContextModel.prior)
         self.arm = ActivityContextModel.armPrior
         let prepared = PreparedMotionHeads.prepare(config.motionHeads)
@@ -415,8 +470,16 @@ public struct ActivityContextDecoder: Sendable {
         // feature window (so the snapshot is unchanged) nor scored.
         var f = window.push(obs, restingHR: config.restingHeartRate, maxHR: config.maxHeartRate,
                             motionHeadsHoldS: motionHeads?.holdS ?? 0, gaitQualityHoldS: gaitQuality?.holdS ?? 0)
-        if gapS > Self.gapFlattenOnsetS { flattenAfterGap(gapS) }
+        if gapS > Self.gapFlattenOnsetS {
+            flattenAfterGap(gapS)
+            // Anything may have happened in a gap this long: the still stretch and its anchor start over.
+            tracking.stillSinceTs = nil
+            tracking.anchor = nil
+        }
         f.forearmSign = calibrateForearmSign(f)
+        let placement = config.placement(at: obs.ts)
+        f.wristPostureCues = placement.wristPostureCues
+        activeCalibrationKey = placement.calibrationKey
         // No pulse, no wear evidence, stiller than a resting wrist: count it (D1-05). Never on the staged night
         // or in its in-bed window: a sleeper is very still, and sleep staging already says someone is there.
         if obs.wear == .unknown, f.hr == nil, obs.sleep != .asleep, !obs.inBed, ActivityContextModel.implausiblyStill(f) {
@@ -435,6 +498,7 @@ public struct ActivityContextDecoder: Sendable {
                                                gaitQuality: gaitQuality, table: observationProfiles)
         applyBody(score)
         let sitStandEvidence = sitStandHead.map { sitStandStep(obs, head: $0) } ?? 0
+        updateStillPriors(obs, f)
         boundPosture(score, f, sleep: obs.sleep, inBed: obs.inBed, learnedExtra: sitStandEvidence)
         applyArm(f, motionHeads: score.arm)
         smoothArmForDisplay()
@@ -520,6 +584,10 @@ public struct ActivityContextDecoder: Sendable {
         tracking.gaitStretch = nil
         tracking.postureEvidence = nil
         tracking.noPulseStillS = nil
+        tracking.stillSinceTs = nil
+        tracking.anchor = nil
+        tracking.priorLean = nil
+        tracking.hrAverage = nil
         tracking.sitStand?.closeSegment()
     }
 
@@ -576,6 +644,92 @@ public struct ActivityContextDecoder: Sendable {
         return min(Self.sitStandMaxPerSecond, max(-Self.sitStandMaxPerSecond, Self.sitStandGain * segmentMean))
     }
 
+    // MARK: Still-stretch priors (hsmm-2.0)
+
+    /// The current still stretch's start and the priors' lean this second (tests and replays inspect them).
+    var stillPriorState: (since: Int?, lean: Double?) { (tracking.stillSinceTs, tracking.priorLean) }
+    var stillPriorAnchorTs: Int? { tracking.anchor?.ts }
+
+    /// Track the current still stretch and set `tracking.priorLean`: the duration prior, a settled personal heart
+    /// rate (`ActivityPostureHeartRateGate`) and a measured stand-up / sit-down's anchor, each bounded on its own and
+    /// together by `ActivityStillPosture.maxPriorLean` (`postureEvidenceTotals` adds it to the seated / upright total).
+    private mutating func updateStillPriors(_ obs: ActivityObservation, _ f: ActivityFeatures) {
+        let ts = obs.ts
+        let post = bodyPosterior()
+        var moving = 0.0, transition = 0.0, stationary = 0.0
+        for m in 0..<BodyMode.count {
+            let mode = BodyMode(rawValue: m)!
+            if mode.isTransition { transition += post[m] }
+            else if mode.isStationary { stationary += post[m] }
+            else if mode != .unknown { moving += post[m] }
+        }
+        if let rel = f.hrRel, rel >= ActivityPostureHeartRateGate.exertionHrRel { tracking.lastExertionTs = ts }
+        if let hr = f.hr, hr.isFinite {
+            let k = exp(-1 / ActivityPostureHeartRateGate.averageTauS)
+            tracking.hrAverage = tracking.hrAverage.map { $0 * k + hr * (1 - k) } ?? hr
+        }
+        // A measured change of height (`ActivityVerticalShift`) anchors the posture it ended in.
+        // It also begins a new still stretch: the stillness before it was another posture's, and its length must
+        // not count toward the new one.
+        var measuredShift = false
+        if let shift = obs.verticalShift,
+           let lean = ActivityStillPosture.anchorLean(shift, placement: config.placement(at: obs.ts)) {
+            tracking.anchor = PostureAnchor(lean: lean, ts: shift.ts)
+            measuredShift = true
+        }
+        let night = obs.sleep == .asleep || obs.inBed
+        // A posture shift (a burst that left the strap in a new orientation, `shiftStrength`) may be a change of
+        // position the transition modes did not catch: it ends the stretch. A burst that returns (reaching, a fidget,
+        // adjusting in the chair) does not: on the owner's seated afternoon (2026-10-09) such bursts came every few
+        // minutes, and Capture-24's still stretches, which the duration prior is measured on, end only at
+        // locomotion, other activity or a change of posture.
+        // Stepping counts as moving on only when sustained: one or two step ticks while seated (shifting the feet,
+        // reaching under the desk) came every half hour on the owner's seated afternoon.
+        var gait = (tracking.gaitSeconds ?? []).filter { ts - $0 < ActivityStillPosture.gaitWindowS }
+        if (f.gaitPresence ?? 0) >= ActivityStillPosture.breakGaitPresence || (obs.strapClass ?? 0) >= 1
+            || (obs.stepTicks ?? 0) > 0 { gait.append(ts) }
+        tracking.gaitSeconds = gait.isEmpty ? nil : gait
+        let locomotion = night || moving >= ActivityStillPosture.breakMovingMass
+            || gait.count >= ActivityStillPosture.breakGaitSeconds
+        let breaks = locomotion || transition >= ActivityStillPosture.breakTransitionMass
+            || ActivityContextModel.shiftStrength(f) >= 0.5
+        // A measured stand-up / sit-down holds until the wearer moves on (steps, a moving mode, the night) or a new
+        // shift is measured: a seated person adjusting in the chair is still seated (the owner's measured sit-down at
+        // 16:52 on 2026-10-09 was followed by an arm shift every few minutes). The event's own seconds are allowed.
+        if locomotion, let a = tracking.anchor, ts - a.ts > ActivityStillPosture.anchorEventSlackS { tracking.anchor = nil }
+        if measuredShift && !breaks {
+            tracking.stillSinceTs = ts
+        } else if breaks {
+            tracking.stillSinceTs = nil
+        } else if tracking.stillSinceTs == nil, stationary >= ActivityStillPosture.startStationaryMass {
+            tracking.stillSinceTs = ts
+        }
+        // While a measured shift's anchor holds, the posture bout is known to have lasted since it: the duration prior
+        // reads that age, so a stand-up's "standing" fades the way standing bouts do even if arm shifts restart the
+        // still stretch (and a sit-down's "sitting" only firms up).
+        let anchorAge = tracking.anchor.map { max(0, ts - $0.ts) }
+        let stillFor = max(tracking.stillSinceTs.map { max(0, ts - $0) } ?? 0, anchorAge ?? 0)
+        var lean = 0.0
+        if tracking.stillSinceTs != nil || anchorAge != nil {
+            // Duration tells sitting from standing, not lying from either (Capture-24's stretches end at lying), so
+            // it speaks only with a gravity direction this second, and steps back as far as the held orientation
+            // already leans recumbent (a flat forearm, a raised hand): a long stillness on a sofa is not "sitting".
+            if obs.gravity != nil, config.stillDurationPrior != false {
+                let rec = max(0, tracking.postureEvidence?[ActivityContextModel.PostureEvidence.recumbentOrientationIndex] ?? 0)
+                let recShare = min(1, rec / ActivityContextModel.PostureEvidence.caps[ActivityContextModel.PostureEvidence.recumbentOrientationIndex])
+                lean += ActivityStillPosture.durationLean(stillForS: stillFor) * (1 - recShare)
+            }
+            if let model = config.postureHeartRate(forCalibration: activeCalibrationKey) {
+                lean += ActivityPostureHeartRateGate.lean(
+                    model: model, averageBpm: tracking.hrAverage, restingBpm: config.restingHeartRate,
+                    stillForS: stillFor, sinceExertionS: tracking.lastExertionTs.map { ts - $0 }, slope: f.hrSlope)
+            }
+        }
+        if let a = tracking.anchor, !night { lean += a.lean }
+        lean = min(ActivityStillPosture.maxPriorLean, max(-ActivityStillPosture.maxPriorLean, lean))
+        tracking.priorLean = lean == 0 ? nil : lean
+    }
+
     /// Whether the personal head currently backs a posture claim: an open still segment it has read.
     private var sitStandBacking: Bool { sitStandHead != nil && (tracking.sitStand?.count ?? 0) > 0 }
 
@@ -584,7 +738,7 @@ public struct ActivityContextDecoder: Sendable {
     /// Seated-vs-upright evidence cap: an adopted personal profile that adapts a stationary mode was validated on
     /// the wearer's own held-out runs, so it may carry more.
     private var postureCapSU: Double {
-        let personal = config.personalProfile?.modes.keys.contains { ["bedRest", "seated", "upright"].contains($0) } ?? false
+        let personal = activeProfile?.modes.keys.contains { ["bedRest", "seated", "upright"].contains($0) } ?? false
         return personal ? ActivityContextModel.postureEvidenceCapSUPersonal : ActivityContextModel.postureEvidenceCapSU
     }
 
@@ -655,7 +809,10 @@ public struct ActivityContextDecoder: Sendable {
         // The wrist's own upright evidence (arm pattern, held orientation, a stand-up's direction) is capped on
         // its own: it may hedge toward standing but never commit it. Learned / personal heads may go further.
         let wrist = e[0] + e[1] + e[2]
-        let su = max(-ActivityContextModel.postureEvidenceCapUprightWrist, wrist) + e[3], rec = e[k...].reduce(0, +)
+        // hsmm-2.0: the still-stretch priors (duration, a settled personal heart rate, a measured stand-up / sit-down)
+        // join the total, each bounded on its own (`ActivityStillPosture`).
+        let su = max(-ActivityContextModel.postureEvidenceCapUprightWrist, wrist) + e[3] + (tracking.priorLean ?? 0)
+        let rec = e[k...].reduce(0, +)
         let capRec = ActivityContextModel.postureEvidenceCapRecumbent
         return (min(postureCapSU, max(-postureCapSU, su)), min(capRec, max(-capRec, rec)))
     }

@@ -647,11 +647,41 @@ private struct PlacementEditorView: View {
     @Binding var current: StrapPlacement
     @State private var selection = StrapPlacement.unknown.rawValue
     @State private var loaded = false
+    @State private var history: [PlacementSwitchLog.Entry] = []
+
+    /// One logged switch in plain words.
+    static func describe(_ e: PlacementSwitchLog.Entry) -> String {
+        let when = e.at.formatted(date: .abbreviated, time: .shortened)
+        func name(_ raw: String?) -> String { raw.flatMap(StrapPlacement.init(rawValue:))?.displayName ?? (raw ?? "none") }
+        switch e.kind {
+        case .declared:
+            return "\(when): set to \(name(e.to)) (was \(name(e.from)))."
+        case .recalculated:
+            let what = e.switched.contains("activity_calibration")
+                ? "activity calibration, skin-temperature baseline and step estimate switched to \(name(e.to))"
+                : "activity days re-derived"
+            return "\(when): recalculated for \(name(e.to)): \(what)."
+        }
+    }
 
     var body: some View {
-        SettingsEditPage("Wear placement", footnote: "Applies from now on.") {
+        SettingsEditPage("Wear placement",
+                         footnote: "Applies from now on. Switching placement switches what is calibrated to it: sitting and standing, your personal activity calibration, the skin-temperature baseline and the step estimate. Each switch is logged below.") {
             SettingsOptions(selection: $selection,
                             options: PlacementChoices.options.map { ($0.rawValue, LocalizedStringKey($0.displayName)) })
+            if !history.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("Recent switches").font(StrandFont.subhead.weight(.semibold))
+                        .foregroundStyle(StrandPalette.textPrimary)
+                    ForEach(history) { e in
+                        Text(Self.describe(e))
+                            .font(StrandFont.footnote).foregroundStyle(StrandPalette.textSecondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .padding(.top, 12)
+                .accessibilityIdentifier("settings.placement.history")
+            }
         }
         .task { await load() }
         .onChange(of: selection) { newValue in
@@ -667,17 +697,22 @@ private struct PlacementEditorView: View {
         let active = SettingsView.activePlacement(placementStore, deviceId: model.repo.deviceId)
         current = active
         selection = active.rawValue
+        history = PlacementSwitchLog.shared.recent(6)
         loaded = true
     }
 
     private func save(_ placement: StrapPlacement) async {
         guard let store = await model.repo.storeHandle(),
               let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
-        guard (try? placementStore.setCurrent(placement, deviceId: model.repo.deviceId)) != nil else { return }
+        guard let (change, interval) = try? placementStore.setCurrent(placement, deviceId: model.repo.deviceId) else {
+            return
+        }
+        model.notePlacementDeclared(from: current, to: placement, change: change, interval: interval)
         current = placement
         // Best-effort upload of the journal. A failure leaves the rows unsynced; the next app activation
-        // or save retries them (`AppModel.syncPlacement`).
-        await model.syncPlacement()
+        // or save retries them (`AppModel.syncPlacement`). It then recalculates what depends on placement and logs it.
+        await model.syncPlacement(source: "settings")
+        history = PlacementSwitchLog.shared.recent(6)
     }
 }
 

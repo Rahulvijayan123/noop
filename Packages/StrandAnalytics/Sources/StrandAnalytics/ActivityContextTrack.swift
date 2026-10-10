@@ -51,6 +51,9 @@ public struct ActivityContextTrackInput {
     /// Optional in-process ElderNet gait-expert windows (10 s, own hop), attached by end second. Ignored on
     /// any second where the gait-quality channel above is present.
     public var gaitWindows: [ActivityGaitWindow]
+    /// Measured stand-ups / sit-downs from the raw IMU (`ActivityVerticalShift`, hsmm-2.0), attached to the first
+    /// observed second at or up to 2 s after their end. Empty (the default) decodes exactly as before.
+    public var verticalShifts: [ActivityVerticalShiftEvidence] = []
 
     public init(dayStart: Int, dayEnd: Int,
                 hr: [HRSample] = [], gravity: [GravitySample] = [], steps: [StepSample] = [],
@@ -460,7 +463,22 @@ public enum ActivityContextTrackBuilder {
             }
             out.append(o)
         }
+        attachVerticalShifts(input.verticalShifts, to: &out, lo: lo, hi: hi)
         return out
+    }
+
+    /// A measured shift never creates an observation second: it rides on the first on-wrist observed second in
+    /// `[ts, ts + 2]` inside `[lo, hi)`; a later shift on the same second supersedes an earlier one.
+    static func attachVerticalShifts(_ shifts: [ActivityVerticalShiftEvidence], to out: inout [ActivityObservation],
+                                     lo: Int, hi: Int) {
+        guard !shifts.isEmpty, hi > lo else { return }
+        var indexAt: [Int: Int] = [:]
+        for (i, o) in out.enumerated() where o.wear != .offWrist { indexAt[o.ts] = i }
+        for v in shifts.sorted(by: { ($0.ts, $0.startTs) < ($1.ts, $1.startTs) }) where v.ts < hi && v.ts + 2 >= lo {
+            for ts in max(v.ts, lo)...min(v.ts + 2, hi - 1) {
+                if let i = indexAt[ts] { out[i].verticalShift = v; break }
+            }
+        }
     }
 }
 
@@ -1250,6 +1268,17 @@ public enum ActivityContextDayBuilder {
             foldWord(w.abstained ? 1 : 0, into: &h)
             foldString(w.modelVersion, into: &h)
             foldString(w.preprocessingVersion, into: &h)
+        }
+        // Measured stand-ups / sit-downs (hsmm-2.0) also arrive with the server's windows. Folded only when present,
+        // so a day without them hashes exactly as before.
+        if !input.verticalShifts.isEmpty {
+            let shifts = input.verticalShifts.sorted { ($0.ts, $0.startTs) < ($1.ts, $1.startTs) }
+            fold(shifts, into: &h, lo: input.dayStart, hi: hi, ts: { $0.ts }) { v, h in
+                foldInt(v.startTs, into: &h)
+                foldWord(v.displacementM.bitPattern, into: &h)
+                foldWord(v.quality.bitPattern, into: &h)
+                foldString(v.version, into: &h)
+            }
         }
         // ElderNet and Inertia windows also arrive from the server after the strap's streams; a late batch must
         // re-decode the day. Folded only when the config accepts them, so a day without accepted windows hashes

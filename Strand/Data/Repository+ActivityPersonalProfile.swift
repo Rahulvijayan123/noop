@@ -47,30 +47,86 @@ extension Repository {
         guard let scope = store.currentScope else { return nil }
         let base = activityBaseDecoderConfig
         let labels = ActivityGroundTruthStore.shared.all()
+        // Calibration is per placement (hsmm-2.0): a run made on the bicep fits the bicep's profile and nothing else.
+        let cache = ActivityPlacementCache.shared
+        let keyOf: (ActivityGroundTruthLabel) -> String = { cache.calibrationKey(for: $0) }
+        let current = cache.placement(at: Int(Date().timeIntervalSince1970), deviceId: deviceId).calibrationKey
         let sessions = Self.calibrationSessions(labels)
+        let sessionsByKey = Dictionary(grouping: sessions) { s in s.labels.first.map(keyOf) ?? current }
+        let labelsByKey = Dictionary(grouping: labels, by: keyOf)
+        let keys = Set(sessionsByKey.keys).union(labelsByKey.keys).union([current]).sorted()
+        let hrLabelsByKey = labelsByKey.mapValues { ActivityPostureHeartRateFitter.labels(from: $0) }
         let fingerprint = await Task.detached(priority: .utility) {
-            Self.personalProfileFingerprint(sessions, config: base)
+            var text = "placement-cal-1|\(current)"
+            for key in keys {
+                text += "|\(key):" + Self.personalProfileFingerprint(sessionsByKey[key] ?? [], config: base)
+                    + "-" + Self.postureHeartRateFingerprint(hrLabelsByKey[key] ?? [])
+            }
+            var h: UInt64 = 0xcbf29ce484222325
+            for byte in text.utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
+            return String(h, radix: 16)
         }.value
         if !force, let stored = store.record(), stored.fingerprint == fingerprint { return stored }
 
-        var inputs: [(session: CalibrationSessionSpan, input: ActivityContextTrackInput)] = []
-        for session in sessions {
-            guard let input = await calibrationTrackInput(session, config: base) else { continue }
-            inputs.append((session, input))
-        }
         let now = Int(Date().timeIntervalSince1970)
-        let result = await Task.detached(priority: .utility) {
-            let runs = inputs.map { entry in
-                ActivityCalibrationRun(
-                    sessionId: entry.session.id,
-                    observations: ActivityContextTrackBuilder.observations(for: entry.input, config: base).observations,
-                    labels: entry.session.labels)
+        var fits: [String: ActivityPersonalProfileStore.PlacementFit] = [:]
+        for key in keys {
+            let keySessions = sessionsByKey[key] ?? []
+            var inputs: [(session: CalibrationSessionSpan, input: ActivityContextTrackInput)] = []
+            for session in keySessions {
+                guard let input = await calibrationTrackInput(session, config: base) else { continue }
+                inputs.append((session, input))
             }
-            return ActivityPersonalProfileFitter.fit(runs: runs, config: base, now: now)
-        }.value
-        let record = ActivityPersonalProfileStore.Record(fingerprint: fingerprint, result: result)
+            let result = await Task.detached(priority: .utility) {
+                let runs = inputs.map { entry in
+                    ActivityCalibrationRun(
+                        sessionId: entry.session.id,
+                        observations: ActivityContextTrackBuilder.observations(for: entry.input, config: base).observations,
+                        labels: entry.session.labels)
+                }
+                return ActivityPersonalProfileFitter.fit(runs: runs, config: base, now: now)
+            }.value
+            let hr = await fitPostureHeartRate(hrLabelsByKey[key] ?? [])
+            fits[key] = ActivityPersonalProfileStore.PlacementFit(result: result, postureHeartRate: hr,
+                                                                  runs: keySessions.count,
+                                                                  labels: hrLabelsByKey[key]?.count ?? 0)
+        }
+        let worn = fits[current]
+        let record = ActivityPersonalProfileStore.Record(
+            fingerprint: fingerprint,
+            result: worn?.result ?? ActivityPersonalProfileFitter.fit(runs: [], config: base, now: now),
+            postureHeartRate: worn?.postureHeartRate, placements: fits, currentPlacement: current)
         store.save(record, scope: scope)
         return record
+    }
+
+    /// Fit the wearer's heart-rate-by-posture model (hsmm-2.0) from their labelled sitting / standing stretches and
+    /// the strap's heart rate over them, each run against the resting reference its day decodes with.
+    private func fitPostureHeartRate(_ labels: [ActivityPostureHeartRateLabel]) async -> ActivityPostureHeartRateFitResult {
+        var hr: [(ts: Int, bpm: Double)] = []
+        var resting: [String: Double] = [:]
+        for l in labels {
+            if let signals = await stretchSignals(from: l.start, to: l.end) {
+                hr += signals.hr.filter { $0.ts >= l.start && $0.ts < l.end }.map { (ts: $0.ts, bpm: Double($0.bpm)) }
+            }
+            if resting[l.run] == nil {
+                let dayStart = Int(Calendar.current.startOfDay(for: Date(timeIntervalSince1970: TimeInterval(l.start)))
+                    .timeIntervalSince1970)
+                resting[l.run] = activityBaseDecoderConfig(forDayStart: dayStart).restingHeartRate
+            }
+        }
+        let samples = hr, rest = resting
+        return await Task.detached(priority: .utility) {
+            ActivityPostureHeartRateFitter.fit(labels: labels, hr: samples, restingBpm: rest)
+        }.value
+    }
+
+    nonisolated static func postureHeartRateFingerprint(_ labels: [ActivityPostureHeartRateLabel]) -> String {
+        var text = ActivityPostureHeartRateModel.version
+        for l in labels { text += "|\(l.run):\(l.start)-\(l.end):\(l.seated ? "s" : "u")" }
+        var h: UInt64 = 0xcbf29ce484222325
+        for byte in text.utf8 { h = (h ^ UInt64(byte)) &* 0x100000001b3 }
+        return String(h, radix: 16)
     }
 
     /// The strap's streams over one calibration run (with lead-in) in decoder-input form, with the HART windows the
@@ -89,6 +145,7 @@ extension Repository {
             input.encoderId = encoder.encoderId
             input.encoderVersion = encoder.encoderVersion
             input.transitionWindows = encoder.transitions
+            input.verticalShifts = encoder.verticalShifts
         }
         // No ElderNet windows: the base config carries no expert evidence (which stored expert rows may shape a
         // decode is decided per day by `ActivityPhoneEvidence`), so a fit replays HART and the strap streams alone.

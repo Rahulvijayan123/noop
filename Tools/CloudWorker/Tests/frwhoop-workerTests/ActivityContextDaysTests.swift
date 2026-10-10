@@ -684,7 +684,7 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
         XCTAssertEqual(config.restingHeartRate, 48, "quantised to 3 bpm, as on the phone")
         XCTAssertEqual(config.maxHeartRate, 180)
         let p = reference.provenance(gaitWindows: 3)
-        XCTAssertEqual(p.tag, "srv-cfg-1:r48m180")
+        XCTAssertEqual(p.tag, "srv-cfg-2:r48m180")
         XCTAssertEqual(p.restingHeartRateSource, "server_daily_scores")
         XCTAssertEqual(p.restingHeartRateNights, 5)
         XCTAssertEqual(p.maxHeartRateSource, "tanaka_age")
@@ -695,7 +695,7 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
         let none = ActivityContextDays.DecoderReference()
         XCTAssertEqual(none.config, ActivityDecoderConfig())
         let p = none.provenance()
-        XCTAssertEqual(p.tag, "srv-cfg-1:r60m190")
+        XCTAssertEqual(p.tag, "srv-cfg-2:r60m190")
         XCTAssertEqual(p.restingHeartRateSource, "default")
         XCTAssertEqual(p.maxHeartRateSource, "default")
         // Two nights are too thin to call typical; an implausible value is never trusted.
@@ -724,8 +724,8 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
         let payload = try XCTUnwrap(try JSONSerialization.jsonObject(with: Data(built.payloadText.utf8)) as? [String: Any])
         let document = try XCTUnwrap(payload["document"] as? [String: Any])
         let config = try XCTUnwrap(document["decoder_config"] as? [String: Any])
-        XCTAssertEqual(config["tag"] as? String, "srv-cfg-1:r45m185")
-        XCTAssertEqual(built.decoderConfigTag, "srv-cfg-1:r45m185")
+        XCTAssertEqual(config["tag"] as? String, "srv-cfg-2:r45m185")
+        XCTAssertEqual(built.decoderConfigTag, "srv-cfg-2:r45m185")
         XCTAssertEqual(config["resting_hr_source"] as? String, "server_daily_scores")
         XCTAssertEqual(config["max_hr_source"] as? String, "tanaka_age")
         // The shared document still decodes, extra key and all.
@@ -737,7 +737,7 @@ final class ActivityContextDaysLookbackAndConfigTests: XCTestCase {
             now: dayEnd + 86_400))
         let plainDoc = try XCTUnwrap((try JSONSerialization.jsonObject(with: Data(plain.payloadText.utf8))
             as? [String: Any])?["document"] as? [String: Any])
-        XCTAssertEqual((plainDoc["decoder_config"] as? [String: Any])?["tag"] as? String, "srv-cfg-1:r60m190")
+        XCTAssertEqual((plainDoc["decoder_config"] as? [String: Any])?["tag"] as? String, "srv-cfg-2:r60m190")
     }
 
     // MARK: Versions

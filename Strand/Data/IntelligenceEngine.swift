@@ -2112,12 +2112,17 @@ final class IntelligenceEngine: ObservableObject {
         for m in BaselineStandard.Metric.allCases {
             chargeContext.epochs[m] = m == .hrvRmssd ? hrvEpoch : recoveryEpoch
         }
-        let chargeBaselines = ChargeBaselines.asOf(ChargeBaselines.Inputs(
+        var chargeInputs = ChargeBaselines.Inputs(
             hrvMerged: values(histHrvByDay), hrvComputed: hrvComputed,
             rhrMerged: values(histRhrByDay), rhrComputed: rhrComputed,
             respMerged: values(histRespByDay), respComputed: respComputed,
             skinAbsolute: skinAbsolute, context: chargeContext,
-            through: dayRun.first?.date.key ?? AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset)))
+            through: dayRun.first?.date.key ?? AnalyticsEngine.dayString(nowLocalMidnight, offsetSec: tzOffset))
+        // hsmm-2.0: one skin-temperature baseline per strap placement (bicep skin is not wrist skin), so switching
+        // placement switches the skin baseline and switching back resumes the old one.
+        chargeInputs.skinPlacementByDay = ActivityPlacementCache.shared.calibrationKeyByNight(
+            days: skinAbsolute.keys, deviceId: deviceId)
+        let chargeBaselines = ChargeBaselines.asOf(chargeInputs)
         // #1614: the per-night HRV fold, traced. HRV ONLY, deliberately: it is Charge's dominant driver and the
         // one whose spread the score divides by. Capped at the last 14 nights. Now traces the ln series the
         // scorer folds (rule 1), over the same merged history; confounder and regime handling are summarised
@@ -2875,19 +2880,36 @@ final class IntelligenceEngine: ObservableObject {
         // reporter to enter Apple Health steps by hand expecting calibration to start, which it cannot.
         profile.stepsHasBankedMotion = !motionByDay.isEmpty
         // Build calibration points only for days with BOTH a motion volume and a real phone step count.
-        let calPoints = motionByDay.compactMap { (day, motion) -> StepsEstimateEngine.CalibrationPoint? in
-            guard let s = refStepsByDay[day] else { return nil }
-            return StepsEstimateEngine.CalibrationPoint(motion: motion, steps: s)
+        // hsmm-2.0: `k` depends on where the strap is worn (the engine says so), so it is fitted per placement: a day
+        // is calibrated only against phone-counted days worn at the same place, and the profile shows the fit of the
+        // placement worn on the newest day. With no placement ever declared, every day shares one fit as before.
+        let stepsPlacement = ActivityPlacementCache.shared.calibrationKeyByNight(
+            days: Set(motionByDay.keys).union(dailies.map(\.day)), deviceId: deviceId)
+        func stepsKey(_ day: String) -> String { stepsPlacement?[day] ?? "all" }
+        let newestStepsKey = stepsKey(dailies.map(\.day).max() ?? "")
+        func points(_ key: String) -> [StepsEstimateEngine.CalibrationPoint] {
+            motionByDay.compactMap { (day, motion) -> StepsEstimateEngine.CalibrationPoint? in
+                guard let s = refStepsByDay[day], stepsKey(day) == key else { return nil }
+                return StepsEstimateEngine.CalibrationPoint(motion: motion, steps: s)
+            }
         }
-        if let cal = StepsEstimateEngine.calibrate(calPoints, manualOverride: profile.stepsManualOverride) {
+        let calPoints = points(newestStepsKey)
+        var calByKey: [String: StepsEstimateEngine.Calibration?] = [:]
+        func calibration(_ key: String) -> StepsEstimateEngine.Calibration? {
+            if let c = calByKey[key] { return c }
+            let c = StepsEstimateEngine.calibrate(points(key), manualOverride: profile.stepsManualOverride)
+            calByKey[key] = c
+            return c
+        }
+        if let cal = calibration(newestStepsKey) {
             // Estimate + upsert for each recent scored day that has motion but NO real phone step count.
             // (Days the phone DID count keep their real value , surfaced directly by the Today tile, not
             // overwritten by an estimate.) This runs AFTER any timestamp-heal upstream, so the motion it
-            // reads is the healed-day motion, never pre-heal.
+            // reads is the healed-day motion, never pre-heal. Each day uses its own placement's fit.
             var estPts: [MetricPoint] = []
             for dm in dailies where refStepsByDay[dm.day] == nil {
-                guard let motion = motionByDay[dm.day],
-                      let est = StepsEstimateEngine.estimate(motion: motion, calibration: cal) else { continue }
+                guard let motion = motionByDay[dm.day], let dayCal = calibration(stepsKey(dm.day)),
+                      let est = StepsEstimateEngine.estimate(motion: motion, calibration: dayCal) else { continue }
                 estPts.append(MetricPoint(day: dm.day, key: "steps_est", value: Double(est)))
             }
             if !estPts.isEmpty { _ = try? await store.upsertMetricSeries(estPts, deviceId: computedId) }
