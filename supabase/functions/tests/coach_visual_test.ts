@@ -1,7 +1,8 @@
 import { assert, assertEquals } from 'jsr:@std/assert';
 import { coachConfig, handleCoachRequest } from '../_shared/coach.ts';
 import {
-  axisIssues, correctnessIssues, parseVisualization, planTypes, produceVisual, routeVisual, type VisualDeps,
+  axisIssues, correctnessIssues, customDigest, parseCustomUi, parseVisualization, planTypes, produceVisual, routeVisual,
+  sanitizeRoute, type VisualDeps,
 } from '../_shared/coach_visual.ts';
 import { hashIngestToken } from '../_shared/tokens.ts';
 import { makeMemRest } from './helpers.ts';
@@ -107,6 +108,51 @@ Deno.test('visual pipeline: bad designs go back to the model, a failed fact-chec
   const unreadable = script(toolReply(line()), { choices: [{ message: { content: 'not json' } }] }, new Error('boom'));
   const dropped = await produceVisual(unreadable, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
   assertEquals([dropped.viz, dropped.audit, unreadable.calls.length], [null, 'unavailable', 3]);
+});
+
+const pacer = (over: Record<string, unknown> = {}) => ({
+  title: 'Breathing pacer', subtitle: 'Follow the circle', initialHeight: 900,
+  css: '.dot{width:80px;height:80px;border-radius:50%;background:var(--accent)}',
+  html: '<div class="stack"><div class="dot" id="d"></div><input type="range" id="r" min="3" max="8" value="5"><span class="value" id="v">5 s</span></div>',
+  js: "(() => { const r = document.getElementById('r'); const v = document.getElementById('v'); r.oninput = () => { v.textContent = r.value + ' s'; }; })();",
+  ...over,
+});
+
+Deno.test('custom UI: an interactive tool routes to custom, parses, and refuses network, storage and script tags', () => {
+  assertEquals(planTypes('interactive_tool', { choice: 'line', probabilities: { line: 0.9 } }), ['custom']);
+  assertEquals(sanitizeRoute({ kind: 'interactive_tool', types: ['custom'] }), { kind: 'interactive_tool', types: ['custom'] });
+
+  const ok = parseCustomUi(pacer());
+  assert(ok.ok);
+  if (ok.ok) {
+    assertEquals(ok.viz.type, 'custom');
+    assertEquals(ok.viz.custom.height, 640);
+    assert(customDigest(ok.viz).includes('Visible text: 5 s'));
+  }
+  const bad = (over: Record<string, unknown>) => {
+    const parsed = parseCustomUi(pacer(over));
+    return parsed.ok ? [] : parsed.issues;
+  };
+  assert(bad({ js: "fetch('https://x.test')" }).some((i) => i.includes('network')));
+  assert(bad({ js: "localStorage.setItem('a', 1)" }).some((i) => i.includes('storage')));
+  assert(bad({ html: '<div></div><script>alert(1)</script>' }).some((i) => i.includes('<script>')));
+  assert(bad({ html: '<img src="https://x.test/a.png">' }).some((i) => i.includes('external URLs')));
+  assert(bad({ js: 'x'.repeat(7_001) }).some((i) => i.includes('js is')));
+  assert(bad({ html: '' }).some((i) => i.includes('html is required')));
+});
+
+Deno.test('custom UI pipeline: designed, fixed after a lint issue, and fact-checked with the tool auditor', async () => {
+  const model = script(
+    toolReply(pacer({ js: "fetch('/x')" }), 'render_custom_ui'),
+    toolReply(pacer(), 'render_custom_ui'),
+    verdict(true),
+  );
+  const out = await produceVisual(model, { question: 'Help me slow my breathing', answer: ANSWER, evidence: '', route: { kind: 'interactive_tool', types: ['custom'] } });
+  assertEquals([out.audit, out.viz?.type], ['passed', 'custom']);
+  assertEquals(model.calls[0].tools[0].function.name, 'render_custom_ui');
+  assert(model.calls[1].messages.some((m: any) => m.role === 'tool' && m.content.includes('network')));
+  assert(model.calls[2].messages[0].content.includes('interactive tools'));
+  assert(model.calls[2].messages[1].content.includes('TOOL\nTitle: Breathing pacer'));
 });
 
 Deno.test('visual pipeline: pure text cards skip the fact-check call', async () => {

@@ -36,7 +36,13 @@ export const CARD_TYPES: Record<string, string> = {
   alerts: 'A few warnings or caveats that deserve emphasis.',
 };
 
-export const ALL_TYPES: Record<string, string> = { ...CHART_TYPES, ...TIMELINE_TYPES, ...CARD_TYPES };
+// An Open Generative UI style answer (CopilotKit/OpenIntelligentUI): the designer writes a small HTML, CSS and
+// JavaScript tool that the app runs in a sandboxed web view with no network.
+export const CUSTOM_TYPES: Record<string, string> = {
+  custom: 'A small interactive tool written in HTML, CSS and JavaScript: a calculator or planner with working controls, a what-if slider over stated figures, a step-through explanation, or an animated diagram.',
+};
+
+export const ALL_TYPES: Record<string, string> = { ...CHART_TYPES, ...TIMELINE_TYPES, ...CARD_TYPES, ...CUSTOM_TYPES };
 
 export const VISUAL_KINDS: Record<string, string> = {
   none: 'Plain prose is enough: no concrete figures, comparisons, sequences, or lists that a visual would clarify.',
@@ -53,6 +59,7 @@ export const VISUAL_KINDS: Record<string, string> = {
   comparison_cards: 'Two to four options, sessions, or periods compared side by side (comparison cards).',
   ranked_list: 'An ordered list of items or steps, each with a tag (list).',
   risk_alerts: 'A few warnings, red flags, or caveats that deserve emphasis (alerts).',
+  interactive_tool: 'Something to use or explore rather than read: a calculator or planner with working controls (sleep timing, hydration, pace, macros, training load), a what-if slider over the stated figures, a step-through explanation of how something in the body works, or an animated diagram such as a breathing pacer. Choose it when changing an input or watching a mechanism would help more than a static chart.',
 };
 
 export const KIND_TYPES: Record<string, string[]> = {
@@ -69,6 +76,7 @@ export const KIND_TYPES: Record<string, string[]> = {
   comparison_cards: ['comparison'],
   ranked_list: ['list'],
   risk_alerts: ['alerts'],
+  interactive_tool: ['custom'],
 };
 
 export const ROW_SHAPES: Record<string, string> = {
@@ -668,7 +676,7 @@ export function rankChartTypes(answer: any): string[] {
 
 export function planTypes(kind: string, chartAnswer: any): string[] {
   const family = KIND_TYPES[kind] ?? [];
-  if (family.every((type) => type in CARD_TYPES)) return family.slice(0, 1);
+  if (family.every((type) => type in CARD_TYPES || type in CUSTOM_TYPES)) return family.slice(0, 1);
   const ranked = rankChartTypes(chartAnswer);
   const confident = (chartAnswer?.probabilities?.[ranked[0]] ?? 0) >= EXACT_TYPE_PROBABILITY;
   const inFamily = ranked.filter((type) => family.includes(type));
@@ -690,7 +698,7 @@ async function routeVisualFallback(deps: VisualDeps, question: string, answer: s
   try {
     const data = await deps.callModel({
       messages: [
-        { role: 'system', content: `You pick whether a coach answer deserves a visual. Reply with JSON only: {"kind": "<one of ${Object.keys(VISUAL_KINDS).join('|')}>"} . Choose none by default: for questions about the assistant itself, definitions, general advice, how-to guidance, or answers where figures are incidental or merely restated from memory. Choose a visual only when the user's own measured figures, a comparison, a sequence, or a list ARE the substance of the answer, or the user asked for a chart, graph, or table.` },
+        { role: 'system', content: `You pick whether a coach answer deserves a visual. Reply with JSON only: {"kind": "<one of ${Object.keys(VISUAL_KINDS).join('|')}>"} . Choose none by default: for questions about the assistant itself, definitions, general advice, how-to guidance, or answers where figures are incidental or merely restated from memory. Choose a visual only when the user's own measured figures, a comparison, a sequence, or a list ARE the substance of the answer, or the user asked for a chart, graph, or table. Choose interactive_tool when the user would get more from something to use or explore (a calculator, planner, what-if slider, pacer, or step-through explanation of how something works) than from reading, or asked for one.` },
         { role: 'user', content: `Question: ${question.slice(0, 1500)}\n\nAnswer: ${answer.slice(0, 4500)}` },
       ],
       response_format: { type: 'json_object' },
@@ -713,7 +721,7 @@ export async function routeVisual(deps: VisualDeps, question: string, answer: st
   const questions = {
     visual: {
       type: 'choice',
-      instructions: 'Which visual, if any, would make this answer to a health and wellbeing question clearer or more useful? Choose none unless the answer states concrete figures, comparisons, sequences, or lists worth visualizing, or the user asked for a chart, graph, or table.',
+      instructions: 'Which visual, if any, would make this answer to a health and wellbeing question clearer or more useful? Choose none unless the answer states concrete figures, comparisons, sequences, or lists worth visualizing, the user asked for a chart, graph, or table, or an interactive tool (a calculator, planner, what-if slider, pacer, or step-through explanation) would help the user act on or understand the answer.',
       criteria: VISUAL_KINDS,
     },
     chart: {
@@ -881,6 +889,7 @@ interface DesignArgs {
  * cosmetic issues go back once, after which the best valid spec is kept.
  */
 export async function designVisual(deps: VisualDeps, args: DesignArgs): Promise<any | null> {
+  if (args.types[0] === 'custom') return designCustomUi(deps, args);
   const { question, answer, evidence, kind, types, previous, rejection } = args;
   const source = [question, answer, evidence].join('\n');
   const [wanted, ...fallbacks] = types;
@@ -933,6 +942,147 @@ export async function designVisual(deps: VisualDeps, args: DesignArgs): Promise<
 }
 
 // ---------------------------------------------------------------------------
+// 2b. Design a custom interactive UI (HTML, CSS, JS in the app's sandbox)
+// ---------------------------------------------------------------------------
+
+// Kept well inside the app's 19,000-character meta budget once JSON-escaped, alongside the rest of the meta.
+export const CUSTOM_LIMITS = { css: 4_000, html: 6_000, js: 7_000, total: 12_000, minHeight: 140, maxHeight: 640 };
+const CUSTOM_DESIGN_TIMEOUT_MS = 45_000;
+
+/** Things the sandbox blocks anyway (its CSP allows no network, frames or storage); asking the model to drop them keeps the tool working. */
+const CUSTOM_FORBIDDEN: [RegExp, string][] = [
+  [/\bfetch\s*\(|XMLHttpRequest|WebSocket|EventSource|sendBeacon/, 'no network calls (fetch, XMLHttpRequest, WebSocket); everything the tool needs must be inline'],
+  [/\bimport\s*\(|^\s*import\s|\brequire\s*\(/m, 'no imports or modules; write plain inline JavaScript'],
+  [/<script\b/i, 'put all JavaScript in the js field, not in <script> tags inside html'],
+  [/<(?:iframe|frame|object|embed|link|base|meta|form)\b/i, 'no iframe, object, embed, link, base, meta or form elements'],
+  [/(?:src|href|action)\s*=\s*["']?\s*(?:https?:|\/\/|javascript:)/i, 'no external URLs or javascript: links; draw images with inline SVG or canvas'],
+  [/@import|url\(\s*["']?\s*(?:https?:|\/\/)/i, 'no external stylesheets, fonts or images in CSS'],
+  [/localStorage|sessionStorage|indexedDB|document\.cookie|caches\./, 'no storage APIs; keep state in JavaScript variables'],
+  [/window\.open|\blocation\s*(?:=|\.href|\.assign|\.replace)|\btop\.|\bparent\./, 'no navigation or window access'],
+  [/\beval\s*\(|new\s+Function\s*\(/, 'no eval or new Function'],
+];
+
+export function parseCustomUi(raw: unknown): Parsed {
+  if (!isObject(raw)) return { ok: false, issues: ['the tool arguments must be an object'] };
+  const title = text(raw.title, 120);
+  if (!title) return { ok: false, issues: ['title is required and must name what the tool does'] };
+  const css = typeof raw.css === 'string' ? raw.css.trim() : '';
+  const html = typeof raw.html === 'string' ? raw.html.trim() : '';
+  const js = typeof raw.js === 'string' ? raw.js.trim() : '';
+  const issues: string[] = [];
+  if (!html) issues.push('html is required: the markup of the tool');
+  if (css.length > CUSTOM_LIMITS.css) issues.push(`css is ${css.length} characters; keep it under ${CUSTOM_LIMITS.css} (the app already styles controls)`);
+  if (html.length > CUSTOM_LIMITS.html) issues.push(`html is ${html.length} characters; keep it under ${CUSTOM_LIMITS.html}`);
+  if (js.length > CUSTOM_LIMITS.js) issues.push(`js is ${js.length} characters; keep it under ${CUSTOM_LIMITS.js}`);
+  if (css.length + html.length + js.length > CUSTOM_LIMITS.total) issues.push(`the tool is too large; css, html and js together must stay under ${CUSTOM_LIMITS.total} characters`);
+  const all = `${css}\n${html}\n${js}`;
+  for (const [pattern, issue] of CUSTOM_FORBIDDEN) if (pattern.test(all)) issues.push(issue);
+  if (issues.length) return { ok: false, issues: issues.slice(0, 6) };
+  const height = Math.round(Math.min(CUSTOM_LIMITS.maxHeight, Math.max(CUSTOM_LIMITS.minHeight, toNumber(raw.initialHeight) ?? 300)));
+  return {
+    ok: true,
+    viz: {
+      type: 'custom',
+      title,
+      ...(text(raw.subtitle, 160) ? { subtitle: text(raw.subtitle, 160) } : {}),
+      ...(text(raw.source, 120) ? { source: text(raw.source, 120) } : {}),
+      custom: { height, css, html, js },
+    },
+  };
+}
+
+/** The tool's visible text and script, for the fact-check: what it shows and what it computes. */
+export function customDigest(viz: any): string {
+  const visible = String(viz.custom?.html ?? '')
+    .replace(/<style[\s\S]*?<\/style>/gi, ' ')
+    .replace(/<[^>]+>/g, ' ')
+    .replace(/&nbsp;/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [
+    `Title: ${viz.title}`,
+    viz.subtitle ? `Subtitle: ${viz.subtitle}` : '',
+    `Visible text: ${visible.slice(0, 3000)}`,
+    `Script:\n${String(viz.custom?.js ?? '').slice(0, 5000)}`,
+  ].filter(Boolean).join('\n');
+}
+
+const CUSTOM_UI_INSTRUCTIONS = `You build one small interactive tool that sits under a wellbeing assistant's answer in a phone app, by calling render_custom_ui once.
+
+The app renders your html inside <body>, your css in a <style>, and runs your js after the markup has loaded, in a sandboxed web view about 330 points wide with no network. The page background is transparent: the app draws the card, its title and subtitle above your markup, so do not repeat the title.
+
+Use the app's design system instead of your own colours and fonts:
+- CSS variables: --text, --text-2, --text-3 (primary to faint text), --accent, --accent-soft, --surface, --surface-inset, --hairline, --positive, --warning, --critical, --series-1 ... --series-6, --radius (12px), --font.
+- Buttons, range sliders, number inputs, selects and checkboxes are already styled; .row (horizontal group), .stack (vertical group), .muted, .value (large figure), .pill and .grid2 helper classes exist.
+- SVG and <canvas> are available. For a canvas, size it to its CSS box times window.devicePixelRatio and read colours with getComputedStyle(document.documentElement).getPropertyValue('--accent').
+- Light and dark mode both work through those variables; never hard-code white or black.
+
+The host bridge: window.nara.send(text) asks the assistant a follow-up as the user (only from a button the user taps, one short sentence, e.g. "Plan my week around a 10:30pm bedtime"). window.nara.resize() re-measures after you change the layout; the app also measures on its own.
+
+Rules:
+- It must work: every control updates the output immediately, with sensible defaults already showing a result before anyone touches it.
+- Figures that describe the user (their HRV, sleep, weight, workouts) must be stated in the answer or the DATA block. Formula constants, unit conversions, slider ranges and example defaults are fine, labelled as such. Never invent the user's data, and do not make medical claims the answer does not make.
+- Keep it compact: one focused tool, under 640 points tall, readable at 13-15px, touch targets at least 36px.
+- No network, imports, storage, iframes, forms, external images or fonts, eval, or navigation. Plain modern JavaScript; wrap your code so it does not leak globals.
+- initialHeight is your best estimate of the content height in points.
+- If the tool returns issues, call it again with the full corrected tool.`;
+
+export const CUSTOM_UI_TOOL = {
+  type: 'function',
+  function: {
+    name: 'render_custom_ui',
+    description: 'Render one small interactive HTML/CSS/JS tool in the app\'s sandbox.',
+    parameters: {
+      type: 'object',
+      properties: {
+        title: { type: 'string', description: 'Names what the tool does, shown by the app above it.' },
+        subtitle: { type: 'string', description: 'One short line on how to use it.' },
+        source: { type: 'string', description: 'Where any of the user\'s figures come from, e.g. "Your last 14 nights".' },
+        initialHeight: { type: 'number', description: 'Estimated content height in points (140-640).' },
+        css: { type: 'string', description: 'Stylesheet for your markup.' },
+        html: { type: 'string', description: 'Markup placed inside <body>. No <script> tags.' },
+        js: { type: 'string', description: 'JavaScript run after the markup loads.' },
+      },
+      required: ['title', 'html', 'js'],
+    },
+  },
+};
+
+async function designCustomUi(deps: VisualDeps, args: DesignArgs): Promise<any | null> {
+  const messages: any[] = [
+    { role: 'system', content: CUSTOM_UI_INSTRUCTIONS },
+    { role: 'user', content: briefing(args) },
+  ];
+  for (let step = 0; step < MAX_DESIGN_STEPS; step += 1) {
+    const data = await deps.callModel({
+      messages, tools: [CUSTOM_UI_TOOL], tool_choice: 'required',
+      temperature: 0.3, max_tokens: 7000, reasoning_effort: 'none',
+    }, CUSTOM_DESIGN_TIMEOUT_MS);
+    const message = data?.choices?.[0]?.message;
+    const calls: any[] = Array.isArray(message?.tool_calls) ? message.tool_calls : [];
+    if (calls.length === 0) {
+      messages.push({ role: 'assistant', content: message?.content ?? '' }, { role: 'user', content: 'Call render_custom_ui with the tool.' });
+      continue;
+    }
+    const [call, ...extra] = calls;
+    let issues: string[];
+    try {
+      const parsed = parseCustomUi(JSON.parse(call.function?.arguments ?? '{}'));
+      if (parsed.ok) return parsed.viz;
+      issues = parsed.issues;
+    } catch {
+      issues = ['the tool arguments were not valid JSON; return a smaller, complete JSON object'];
+    }
+    messages.push(
+      { role: 'assistant', content: message.content ?? '', tool_calls: calls },
+      { role: 'tool', tool_call_id: call.id, content: JSON.stringify({ ok: false, issues, next: 'Fix these problems and call render_custom_ui again with the full corrected tool.' }) },
+      ...extra.map((other) => ({ role: 'tool', tool_call_id: other.id, content: JSON.stringify({ ok: false, issues: ['only one tool call is allowed'] }) })),
+    );
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
 // 3. Validate (independent fact-check call, fail-closed)
 // ---------------------------------------------------------------------------
 
@@ -945,7 +1095,7 @@ export function distillEvidence(evidence: unknown): string {
 
 /** Data visuals and figure-bearing cards need the fact-check call; pure text cards do not. */
 export function auditRequired(viz: any): boolean {
-  if (viz.points || viz.tasks) return true;
+  if (viz.points || viz.tasks || viz.custom) return true;
   if (viz.facts?.some((f: any) => /\d/.test(`${f.value ?? ''} ${f.detail ?? ''}`))) return true;
   if (viz.rows?.some((row: string[]) => row.some((cell) => /\d/.test(String(cell))))) return true;
   if (viz.options?.some((o: any) => o.facts?.some((f: any) => /\d/.test(`${f.label ?? ''} ${f.value ?? ''}`)))) return true;
@@ -962,6 +1112,16 @@ Check every plotted value, label, date, unit, and claim in VISUAL against SOURCE
 
 Reply with JSON only: {"ok": true|false, "issues": ["short description of each unsupported item"]}. Set ok=false if any value or claim is unsupported.`;
 
+const CUSTOM_AUDITOR_INSTRUCTIONS = `You are a strict fact-checker for small interactive tools in a health and wellbeing app. You receive SOURCE (the user's question, the coach's answer, and the user's logged data) and TOOL (its title, visible text and script).
+
+Check:
+- Any figure the tool presents as the user's own (their measurements, history, workouts, sleep) is stated in SOURCE.
+- Formulas compute what their labels say, with correct units and direction.
+- Text makes no health or medical claim beyond what SOURCE says, and no diagnosis.
+Formula constants, unit conversions, slider ranges and clearly labelled example defaults are allowed.
+
+Reply with JSON only: {"ok": true|false, "issues": ["short description of each problem"]}. Set ok=false if any of the above fails.`;
+
 export function parseAuditReply(content: unknown): { ok: boolean; issues: string[] } | null {
   const parsed = parseJsonReply(content);
   if (typeof parsed?.ok !== 'boolean') return null;
@@ -976,12 +1136,14 @@ type Review = { status: 'deterministic_pass' | 'passed' | 'rejected' | 'unavaila
  */
 export async function reviewVisual(deps: VisualDeps, a: { question: string; answer: string; evidence: string; viz: any }): Promise<Review> {
   if (!auditRequired(a.viz)) return { status: 'deterministic_pass', issues: [] };
+  const custom = a.viz.type === 'custom';
+  const source = `SOURCE\nQuestion: ${a.question}\n\nAnswer: ${a.answer}\n\n${a.evidence ? `Logged data:\n${a.evidence}\n\n` : ''}`;
   for (let attempt = 0; attempt < AUDIT_ATTEMPTS; attempt += 1) {
     try {
       const data = await deps.callModel({
         messages: [
-          { role: 'system', content: AUDITOR_INSTRUCTIONS },
-          { role: 'user', content: `SOURCE\nQuestion: ${a.question}\n\nAnswer: ${a.answer}\n\n${a.evidence ? `Logged data:\n${a.evidence}\n\n` : ''}VISUAL\n${JSON.stringify(a.viz).slice(0, 8000)}` },
+          { role: 'system', content: custom ? CUSTOM_AUDITOR_INSTRUCTIONS : AUDITOR_INSTRUCTIONS },
+          { role: 'user', content: custom ? `${source}TOOL\n${customDigest(a.viz)}` : `${source}VISUAL\n${JSON.stringify(a.viz).slice(0, 8000)}` },
         ],
         response_format: { type: 'json_object' },
         temperature: 0, max_tokens: 500, reasoning_effort: 'none',

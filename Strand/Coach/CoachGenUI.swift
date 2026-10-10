@@ -458,14 +458,16 @@ enum CoachGenUI {
 }
 
 extension CoachMessageMeta {
-    /// Within the server's meta limit: the card's state is dropped first, then the card itself.
+    /// Within the server's meta limit: the card's state is dropped first, then a custom interactive visual (the
+    /// largest kind of visual, and never the answer itself), then the card.
     func fittingServerLimit() -> CoachMessageMeta {
         func size(_ m: CoachMessageMeta) -> Int {
             (try? JSONEncoder().encode(m)).map { String(decoding: $0, as: UTF8.self).utf16.count } ?? 0
         }
-        guard ui != nil, size(self) > CoachGenUI.metaBudget else { return self }
+        guard ui != nil || viz?.custom != nil, size(self) > CoachGenUI.metaBudget else { return self }
         var out = self
         out.ui?.state = nil
+        if size(out) > CoachGenUI.metaBudget, out.viz?.custom != nil { out.viz = nil }
         if size(out) > CoachGenUI.metaBudget { out.ui = nil }
         return out
     }

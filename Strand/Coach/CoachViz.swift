@@ -67,6 +67,14 @@ struct CoachViz: Codable, Equatable, Identifiable {
         var id: String { "\(title)|\(detail ?? "")" }
     }
 
+    /// A small HTML, CSS and JavaScript tool the coach wrote, run in the app's sandboxed web view (no network).
+    struct Custom: Codable, Equatable {
+        var height: Double?
+        var css: String
+        var html: String
+        var js: String
+    }
+
     enum Layout {
         case chart
         case progress
@@ -76,6 +84,7 @@ struct CoachViz: Codable, Equatable, Identifiable {
         case comparison
         case list
         case alerts
+        case custom
         case unsupported
     }
 
@@ -95,6 +104,7 @@ struct CoachViz: Codable, Equatable, Identifiable {
     var options: [Option]?
     var items: [Item]?
     var alerts: [Alert]?
+    var custom: Custom?
 
     var id: String { "\(type)|\(title)" }
 
@@ -113,6 +123,7 @@ struct CoachViz: Codable, Equatable, Identifiable {
         case "comparison": return (options?.count ?? 0) >= 2 ? .comparison : .unsupported
         case "list": return (items?.count ?? 0) >= 2 ? .list : .unsupported
         case "alerts": return alerts?.isEmpty == false ? .alerts : .unsupported
+        case "custom": return custom.map { !$0.html.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } == true ? .custom : .unsupported
         default: return .unsupported
         }
     }

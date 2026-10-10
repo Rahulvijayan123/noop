@@ -76,4 +76,25 @@ final class CoachGenUIUITests: XCTestCase {
         XCTAssertEqual(sent.label, "The box breathing helped. What next?")
         XCTAssertTrue(labelled("Inhale").exists)
     }
+
+    /// The sandboxed HTML tool: its slider recomputes in the web view, and its button asks through the bridge.
+    func testASandboxedToolRunsAndAsksAfterATap() {
+        launch("genui3")
+        let web = app.webViews.firstMatch
+        XCTAssertTrue(web.waitForExistence(timeout: 15))
+        let slider = web.sliders.firstMatch
+        XCTAssertTrue(slider.waitForExistence(timeout: 10))
+        XCTAssertTrue(web.staticTexts["21:15"].waitForExistence(timeout: 5))
+        let from = slider.coordinate(withNormalizedOffset: CGVector(dx: 0.3, dy: 0.5))
+        let to = slider.coordinate(withNormalizedOffset: CGVector(dx: 1.2, dy: 0.5))
+        from.press(forDuration: 0.1, thenDragTo: to)
+        XCTAssertTrue(web.staticTexts["10:00"].waitForExistence(timeout: 5))
+        XCTAssertTrue(web.staticTexts["0:45"].exists)
+        XCTAssertEqual(sent.label, "Nothing sent yet")
+
+        web.buttons["Plan my evening around this"].tap()
+        let asked = NSPredicate(format: "label == %@", "Plan my evening for a 0:45 bedtime")
+        expectation(for: asked, evaluatedWith: sent)
+        waitForExpectations(timeout: 5)
+    }
 }

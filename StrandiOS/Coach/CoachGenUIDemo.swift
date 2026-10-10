@@ -52,6 +52,46 @@ struct CoachGenUIDemoScreen: View {
         return try? JSONDecoder().decode(CoachViz.self, from: Data(json.utf8))
     }
 
+    /// `genui3`: an Open Generative UI tool as the visual pipeline returns it.
+    static let bedtime = CoachViz(
+        type: "custom", title: "Bedtime from your wake time", subtitle: "Drag to your alarm; cycles are about 90 minutes",
+        source: "Example defaults",
+        custom: .init(height: 300, css: """
+        .times{display:grid;grid-template-columns:repeat(3,1fr);gap:8px}
+        .opt{padding:10px;border-radius:var(--radius);background:var(--surface-inset);text-align:center}
+        .opt.best{background:var(--accent-soft);color:var(--accent)}
+        canvas{width:100%;height:56px;display:block}
+        """, html: """
+        <div class="stack">
+          <div class="row"><label for="w">Wake at</label><span class="value" id="wv">6:30</span></div>
+          <input type="range" id="w" min="300" max="600" step="15" value="390">
+          <canvas id="c"></canvas>
+          <div class="times" id="t"></div>
+          <button id="ask">Plan my evening around this</button>
+        </div>
+        """, js: """
+        (() => {
+          const w = document.getElementById('w'), wv = document.getElementById('wv'), t = document.getElementById('t');
+          const c = document.getElementById('c'), ctx = c.getContext('2d');
+          const fmt = (m) => { m = ((m % 1440) + 1440) % 1440; const h = Math.floor(m / 60), mm = m % 60; return h + ':' + String(mm).padStart(2, '0'); };
+          const css = (v) => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+          let best = '';
+          const draw = () => {
+            const wake = +w.value; wv.textContent = fmt(wake);
+            const opts = [6, 5, 4].map((n) => ({ n, at: wake - n * 90 - 15 }));
+            best = fmt(opts[0].at);
+            t.innerHTML = opts.map((o, i) => '<div class="opt' + (i === 0 ? ' best' : '') + '"><div class="value" style="font-size:20px">' + fmt(o.at) + '</div><small>' + o.n + ' cycles</small></div>').join('');
+            const r = window.devicePixelRatio || 1; c.width = c.clientWidth * r; c.height = c.clientHeight * r; ctx.scale(r, r);
+            const W = c.clientWidth, H = c.clientHeight; ctx.clearRect(0, 0, W, H);
+            for (let i = 0; i < 6; i++) { const x = (i / 6) * W; ctx.fillStyle = i % 2 ? css('--series-2') : css('--accent'); ctx.globalAlpha = 0.85; ctx.beginPath(); ctx.roundRect(x + 2, 14, W / 6 - 4, H - 28, 8); ctx.fill(); }
+            ctx.globalAlpha = 1;
+          };
+          w.addEventListener('input', draw);
+          document.getElementById('ask').addEventListener('click', () => window.nara.send('Plan my evening for a ' + best + ' bedtime'));
+          draw();
+        })();
+        """))
+
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
@@ -59,7 +99,11 @@ struct CoachGenUIDemoScreen: View {
                     .font(StrandFont.caption)
                     .foregroundStyle(StrandPalette.textSecondary)
                     .accessibilityIdentifier("genuiDemo.sent")
-                ForEach(cards, id: \.self) { source in
+                if page == 3 {
+                    CoachVizView(viz: Self.bedtime)
+                        .environment(\.coachSandboxSend) { sent = $0 }
+                }
+                ForEach(page == 3 ? [] : cards, id: \.self) { source in
                     CoachGenUICard(source: source, streaming: false, interactive: true,
                                    visual: hrv.map { AnyView(CoachVizView(viz: $0)) },
                                    onSend: { text, _, _ in sent = text; return true },

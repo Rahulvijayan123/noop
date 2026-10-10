@@ -258,6 +258,7 @@ struct CoachVizView: View, Equatable {
             case .comparison: CoachVizComparisonBody(options: viz.options ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
             case .list: CoachVizListBody(items: viz.items ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
             case .alerts: CoachVizAlertsBody(alerts: viz.alerts ?? []).modifier(CoachVizWipe(axis: .vertical, delay: 0.1, span: 0.9))
+            case .custom: viz.custom.map { CoachSandboxedUIView(custom: $0, title: viz.title) }
             case .unsupported: EmptyView()
             }
         }

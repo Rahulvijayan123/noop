@@ -34,6 +34,14 @@ public struct HorizontalScrubSurface: UIViewRepresentable {
     @MainActor static var activeScrubs = 0
     @MainActor static var lastScrubEnd = Date.distantPast
 
+    /// For a surface that handles its own sideways drags (a web view's sliders, say) without this view: call
+    /// `beginScrub` when a finger goes down on it and `endScrub` exactly once when that finger lifts.
+    @MainActor public static func beginScrub() { activeScrubs += 1 }
+    @MainActor public static func endScrub() {
+        activeScrubs = max(0, activeScrubs - 1)
+        lastScrubEnd = Date()
+    }
+
     /// Called with the finger's x position, in this surface's own coordinate space, while scrubbing.
     public var onScrub: (CGFloat) -> Void
     /// Called when the finger lifts or the system takes the touch away.

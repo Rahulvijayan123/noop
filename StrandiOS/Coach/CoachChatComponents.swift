@@ -168,6 +168,7 @@ struct CoachBubble: View {
                 CoachVizView(viz: viz)
                     .equatable()
             }
+            .environment(\.coachSandboxSend, message.isStreaming ? nil : onFollowUp)
             .imageFXReveal(active: vizWasGenerating, cornerRadius: CoachVizMetric.radiusMD) {
                 vizWasGenerating = false
             }

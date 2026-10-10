@@ -736,6 +736,7 @@ enum DemoScreens {
         case "scoringguide": return AnyView(NavigationStack { ScoringGuideView() })
         case "genui":    return AnyView(CoachGenUIDemoScreen(page: 1))
         case "genui2":   return AnyView(CoachGenUIDemoScreen(page: 2))
+        case "genui3":   return AnyView(CoachGenUIDemoScreen(page: 3))
         case "chargebreakdown": return AnyView(ChargeBreakdownDemoHost())
         case "devices":  return AnyView(DevicesView())
         case "strap":    return AnyView(StrapConnectionDemoScreen())

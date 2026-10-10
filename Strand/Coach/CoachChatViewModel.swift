@@ -1401,7 +1401,7 @@ final class CoachChatViewModel: ObservableObject {
     /// a "generating" placeholder, then design + fact-check (one retry). Anything that fails shows nothing.
     private func startVisual(for id: UUID, threadId: String, question: String, answer: String, evidence: [String]) {
         let hasDigits = answer.rangeOfCharacter(from: .decimalDigits) != nil
-        guard !evidence.isEmpty || hasDigits else { return }
+        guard !evidence.isEmpty || hasDigits || Self.asksForTool(question) else { return }
         let composed = CoachVisualEvidence.compose(evidence)
         visualTasks[id]?.task.cancel()
         let task = Task { [weak self] in
@@ -1422,6 +1422,13 @@ final class CoachChatViewModel: ObservableObject {
             self.updateMessage(id, in: threadId, persist: visual != nil) { $0.viz = visual; $0.vizPhase = visual == nil ? .none : .ready }
         }
         visualTasks[id] = (threadId, task)
+    }
+
+    /// A question an interactive tool could answer even when the reply has no figures ("how does HRV work",
+    /// "make me a breathing timer"), so it still reaches the router.
+    static func asksForTool(_ question: String) -> Bool {
+        question.range(of: #"\b(?:calculat\w*|planner|plan my|simulat\w*|what if|how does|how do\b.*\bwork|explain|show me|visuali[sz]e|interactive|tool|timer|pacer|breath\w*|slider|estimate|convert)\b"#,
+                       options: [.regularExpression, .caseInsensitive]) != nil
     }
 
     /// Changes one message wherever it lives: in the open chat, or (after a switch) in its thread's cached copy.
