@@ -6,6 +6,7 @@
 // This is deliberately not a second identity system: `auth.users.id` is the sole cloud user id.
 import { isUuid } from './keys.ts';
 import { RestAuthorityError, type SupabaseRest } from './rest.ts';
+import { type SyncPolicy, syncPolicyBody, syncPolicyFromEnv } from './syncPolicy.ts';
 import {
   IdentityError,
   INGEST_TOKEN_PREFIX,
@@ -107,6 +108,9 @@ async function readBounded(req: Request, limit: number): Promise<Uint8Array> {
  *
  * A source id that belongs to any other account is reported exactly like a source that does not
  * exist (`installation_unavailable`), so provisioning cannot be used to probe other accounts.
+ *
+ * Every success also carries `syncPolicy` (_shared/syncPolicy.ts): a signed-in account must keep
+ * syncing. The key is additive, so the protocol version is unchanged and older apps ignore it.
  */
 export function createInstallationProvisioning({
   rest,
@@ -114,12 +118,14 @@ export function createInstallationProvisioning({
   anonKey,
   fetchImpl = fetch,
   newToken = generateIngestToken,
+  syncPolicy = syncPolicyFromEnv(),
 }: {
   rest: SupabaseRest;
   supabaseUrl: string;
   anonKey: string;
   fetchImpl?: typeof fetch;
   newToken?: () => string;
+  syncPolicy?: SyncPolicy;
 }) {
   const reply = (body: unknown, status = 200, extra: Record<string, string> = {}) =>
     Response.json(body, { status, headers: { 'cache-control': 'no-store', ...extra } });
@@ -190,6 +196,7 @@ export function createInstallationProvisioning({
         action,
         expiresAt: row.expiresAt,
         ...(action === 'reused' ? {} : { installationToken: candidate }),
+        syncPolicy: syncPolicyBody(syncPolicy),
       }, action === 'created' ? 201 : 200);
     } catch (err) {
       if (err instanceof ProvisioningError) {

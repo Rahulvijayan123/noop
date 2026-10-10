@@ -166,6 +166,8 @@ struct SensorBiomarkerLane {
     var tablesCheckedAt: Date?
     /// Whether `placement_intervals` exists (probed once; the lane runs on databases without it).
     var placementTablePresent: Bool?
+    /// Whether the strap placement resolver (20261009150100) exists (probed once with the table).
+    var placementResolverPresent: Bool?
     var lastReconcileAt: Date?
     var backoffUntil: Date?
     var consecutiveFailures = 0
@@ -605,7 +607,7 @@ struct SensorBiomarkerLane {
         // 5. Per UTC hour, build the CONTRACTS.md §4 requests and call the sidecar. Only one
         //    hour's decoded samples are resident at a time. A request asks only for families whose
         //    input it carries; a family no request could ask for is published withheld with the
-        //    coverage reason, and one the responses never report becomes `artifact_unavailable`.
+        //    coverage reason, and one the responses never report becomes `model_unavailable`.
         var stagesByFamily: [String: [SensorBiomarkerFamilyStage]] = [:]
         var sentFamilies = Set<String>()
         var requestCount = 0, imuSegmentsSent = 0, ppgSegmentsSent = 0
@@ -639,7 +641,8 @@ struct SensorBiomarkerLane {
                 ppgSegmentsSent += built.input.ppg?.segments.count ?? 0
                 sentFamilies.formUnion(built.input.families)
                 for (family, stage) in stages {
-                    stagesByFamily[family, default: []].append(stage)
+                    stagesByFamily[family, default: []].append(Self.placementReason(stage,
+                                                                                    placement: built.input.placement))
                 }
             }
         }
@@ -671,8 +674,10 @@ struct SensorBiomarkerLane {
                 stats.familiesWithheld += 1
                 stats.familiesWithoutInput += 1
             } else {
-                // Asked, but no request reported this family: explicit withheld with a precise reason.
-                familiesDoc[family] = SensorBiomarkerFamilyStage.withheld(family: family, reason: "artifact_unavailable").jsonValue
+                // Asked, but no request reported this family: its input was sent, so the gap is the
+                // sidecar's (no model answered for it), never the data's.
+                familiesDoc[family] = SensorBiomarkerFamilyStage.withheld(
+                    family: family, reason: SensorBiomarkerInputs.reasonModelUnavailable).jsonValue
                 stats.familiesWithheld += 1
             }
         }
@@ -689,6 +694,25 @@ struct SensorBiomarkerLane {
             stats.ppgEligibleSeconds += coverage.ppg.eligibleSeconds
         }
         return published
+    }
+
+    /// Canonical `placement_unsupported` (contracts/reason-codes.json, confirmed: the wearer declared it).
+    static let reasonPlacementUnsupported = "placement_unsupported"
+    /// The provider's reason when it cannot verify a wrist side (ParaDigMa arm swing).
+    static let reasonUnknownWristPlacement = "unknown_wrist_placement"
+
+    /// A wrist-trained family withheld for an unverified wrist side, in a request whose every second is declared
+    /// worn off the wrist (bicep or other), is withheld because the placement is unsupported: the declared location
+    /// is the reason, and it is known, not unknown. Any other stage is returned unchanged.
+    static func placementReason(_ stage: SensorBiomarkerFamilyStage,
+                                placement: SensorBiomarkerInputs.PlacementSummary) -> SensorBiomarkerFamilyStage {
+        guard stage.status == "withheld", stage.reason == reasonUnknownWristPlacement,
+              ["bicep", "other"].contains(placement.bodyLocation) else { return stage }
+        return SensorBiomarkerFamilyStage(family: stage.family, status: stage.status, releaseTier: stage.releaseTier,
+            providerRevision: stage.providerRevision, observedSeconds: stage.observedSeconds,
+            eligibleSeconds: stage.eligibleSeconds, contactState: stage.contactState,
+            reason: reasonPlacementUnsupported, reasonCounts: stage.reasonCounts, measurements: stage.measurements,
+            extra: stage.extra)
     }
 
     /// The day's actual input coverage (UTC day bounds; objects can reach past them).
@@ -714,10 +738,13 @@ struct SensorBiomarkerLane {
                               coverage: DayCoverage) -> (String, [String: Int]) {
         switch SensorBiomarkerInputs.requiredModality(of: family) {
         case .ppg?:
-            if resolved.ppg.isEmpty || coverage.ppg.expectedSeconds == 0 { return ("artifact_unavailable", [:]) }
-            return (coverage.ppg.dominantWithheldReason ?? "artifact_unavailable", coverage.ppg.withheld)
+            if resolved.ppg.isEmpty || coverage.ppg.expectedSeconds == 0 {
+                return (SensorBiomarkerInputs.reasonNoVerifiedInput, [:])
+            }
+            return (coverage.ppg.dominantWithheldReason ?? SensorBiomarkerInputs.reasonNoVerifiedInput,
+                    coverage.ppg.withheld)
         case .imu?, nil:
-            return ("artifact_unavailable", [:])
+            return (SensorBiomarkerInputs.reasonNoVerifiedInput, [:])
         }
     }
 
@@ -752,8 +779,23 @@ struct SensorBiomarkerLane {
         }
     }
 
-    static let placementPresentSQL = "select (to_regclass('public.placement_intervals') is not null)::text as present"
-    /// The owner's recorded placement for the device (and user-level declarations) overlapping the day.
+    static let placementPresentSQL = """
+        select (to_regclass('public.placement_intervals') is not null)::text as present,
+               (to_regprocedure('internal.placement_intervals_for_device_v1(uuid,uuid,timestamptz,timestamptz)')
+                  is not null)::text as resolver
+        """
+    /// The strap's placement overlapping the day, resolved (20261009150100,
+    /// `internal.placement_intervals_for_device_v1`): declarations on the strap, its aliases and the installation
+    /// devices provably bound to it (the phone declares under its installation-scoped local id) as device-scoped
+    /// pieces, plus the owner's device-less declarations. Same columns and parameters as `placementSQL`.
+    static let placementResolvedSQL = """
+        select r.placement as placement, r.source as source, (r.scope = 'device')::text as device_scoped,
+               extract(epoch from r.effective_start)::bigint::text as start_ts,
+               coalesce(extract(epoch from r.effective_end)::bigint::text, '') as end_ts
+          from internal.placement_intervals_for_device_v1($1::uuid, $2::uuid, $4::timestamptz, $3::timestamptz) r
+         order by r.effective_start, (r.scope = 'account') desc, r.interval_id
+        """
+    /// The read before the resolver: the device's own declarations and user-level ones overlapping the day.
     static let placementSQL = """
         select p.placement as placement, p.source as source, (p.device_id is not null)::text as device_scoped,
                extract(epoch from p.effective_start)::bigint::text as start_ts,
@@ -780,11 +822,13 @@ struct SensorBiomarkerLane {
                                         dayBounds: (start: Int64, end: Int64)) throws -> [SensorBiomarkerInputs.PlacementInterval] {
         do {
             if placementTablePresent == nil {
-                placementTablePresent = (try db.query(Self.placementPresentSQL, [])).first?["present"].map(isTrue) ?? false
+                let probe = try db.query(Self.placementPresentSQL, []).first
+                placementTablePresent = probe?["present"].map(isTrue) ?? false
+                placementResolverPresent = probe?["resolver"].map(isTrue) ?? false
             }
             guard placementTablePresent == true else { return [] }
-            let rows = try db.query(Self.placementSQL, [job.userId, job.deviceId,
-                                                        Self.iso(dayBounds.end), Self.iso(dayBounds.start)])
+            let rows = try db.query(placementResolverPresent == true ? Self.placementResolvedSQL : Self.placementSQL,
+                                    [job.userId, job.deviceId, Self.iso(dayBounds.end), Self.iso(dayBounds.start)])
             return Self.parsePlacementRows(rows)
         } catch let e as PostgresClient.Error where e.kind == .connectionLost {
             throw e
@@ -823,11 +867,12 @@ struct SensorBiomarkerLane {
         return body
     }
 
-    /// Build all-withheld families for a day with no usable input.
+    /// Build all-withheld families for a day with no verified input object.
     mutating func allWithheldFamilies(_ families: [String]) -> [String: JSONValue] {
         var out: [String: JSONValue] = [:]
         for family in families {
-            out[family] = SensorBiomarkerFamilyStage.withheld(family: family, reason: "artifact_unavailable").jsonValue
+            out[family] = SensorBiomarkerFamilyStage.withheld(
+                family: family, reason: SensorBiomarkerInputs.reasonNoVerifiedInput).jsonValue
             stats.familiesWithheld += 1
         }
         return out
@@ -865,7 +910,7 @@ struct SensorBiomarkerLane {
 
     /// Parse one sidecar response into per-family stages. A top-level `withheld` or `error` status
     /// (a provider verdict) becomes withheld families with the envelope's reason — the lane never
-    /// retries a verdict. A family the response did not report becomes `artifact_unavailable`.
+    /// retries a verdict. A family no response reports is withheld by the caller (`model_unavailable`).
     static func parseEnvelope(_ response: InferenceResponse, families: [String]) throws -> [String: SensorBiomarkerFamilyStage] {
         var out: [String: SensorBiomarkerFamilyStage] = [:]
         if response.status == "withheld", response.withheldReason == "timeout" {

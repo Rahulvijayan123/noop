@@ -98,6 +98,13 @@ enum CoachContextPrompt {
 
     static let libraryHeader = "CONTEXT LIBRARY (queryable, not loaded):"
 
+    /// Saved memories are what the user stands by now: they can correct or forget one, while an older chat keeps
+    /// what was said then.
+    static let memoryPrecedence = """
+    Saved memories are the user's current facts, and the user may have corrected them: when a saved memory and an \
+    earlier chat (or an older message in this one) disagree, go by the saved memory.
+    """
+
     static let howToUse = """
     HOW TO USE IT: These are available on request, not loaded. For what was said in earlier chats, call \
     search_conversations (distinctive keywords, or an empty query with days, from or to to browse by date), then \
@@ -198,6 +205,7 @@ enum CoachContextPrompt {
             lines.append("• Wearable history on this phone: none synced yet.")
         }
         lines.append(howToUse)
+        lines.append(memoryPrecedence)
         return lines.joined(separator: "\n")
     }
 

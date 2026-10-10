@@ -74,8 +74,9 @@ public struct WearSignalEvidence: Equatable, Sendable {
     /// definitionally off-wrist (red-team 10 F4).
     public let charging: Bool?
     /// `WristWearRecovery.firstSustainedHR` criteria met (5 min run, <= 5 s gaps, 30-220 bpm):
-    /// closes a durable off interval — the strap can go quiet with the link up (a 5.0 never
-    /// sends `WRIST_OFF`), so sustained HR is the only exit path when `WRIST_ON` was missed.
+    /// closes a durable off interval — the strap can go quiet with the link up, and a missed `WRIST_ON` leaves
+    /// sustained HR as the only exit path. (A 5/MG does send `WRIST_OFF` / `WRIST_ON`: 4 OFF / 5 ON on the owner's
+    /// strap 10-06…10-09, and it writes no history records while off.)
     public let sustainedHrRecoveryMet: Bool?
 
     // - MARK: T2 stream/pulse presence

@@ -126,6 +126,10 @@ public struct ActivityExpertSelection: Equatable, Sendable {
         case gaitQuality = "gait_quality"
         case motionHeads = "motion_heads"
         case embeddedGait = "embedded_gait"
+        /// RecGym gym-exercise recognition (Tools/ActivityContext/RECGYM.md): a shadow-only producer. No selection
+        /// source carries it, so `use(of:)` is always `.none`: it never reaches `canonical(_:base:)`, a candidate
+        /// arm or the exercise-session rule. Its rows carry `ActivityExpertAuthority.shadowOnly`.
+        case exerciseRecognition = "exercise_recognition"
 
         private var rank: Int { Self.allCases.firstIndex(of: self) ?? 0 }
         public static func < (lhs: Self, rhs: Self) -> Bool { lhs.rank < rhs.rank }
@@ -516,6 +520,20 @@ public struct ActivityExpertAuthority: Codable, Equatable, Sendable {
             try c.encode(pinnedWeightsDigest, forKey: .pinnedWeightsDigest)
             try c.encode(gaitPrior, forKey: .gaitPrior)
         }
+    }
+
+    /// The block of a shadow-only producer (a channel no selection source carries, e.g. `.exerciseRecognition`):
+    /// mode and release shadow, use none, whatever pins it ran with. Nothing can raise it; a consumer re-running the
+    /// policy finds no source for the channel and reads it as shadow too.
+    public static func shadowOnly(channel: ActivityExpertSelection.Channel, inputRevision: Int64?,
+                                  pinnedModelVersion: String? = nil, pinnedWeightsDigest: String? = nil,
+                                  reason: String = "shadow_only") -> Self {
+        let decision = ActivityExpertSelection.Decision(channel: channel, route: ElderNetRoute.standalone.rawValue,
+                                                        releaseMode: .shadow, use: .none, reason: reason,
+                                                        identity: [:], inputRevision: inputRevision, day: nil,
+                                                        windows: 0)
+        return Self(decision: decision, mode: .shadow, pinnedModelVersion: pinnedModelVersion,
+                    pinnedWeightsDigest: pinnedWeightsDigest)
     }
 
     /// The policy source for a stored gait row: its recorded release (the row's `release_mode`), never above this

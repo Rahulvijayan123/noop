@@ -105,10 +105,11 @@ extension Repository {
         let sleep = nights.flatMap {
             DayStateSpan.asleep(stagesJSON: $0.stagesJSON, start: $0.effectiveStartTs, end: $0.endTs)
         }
-        let workouts: [DayStateWorkout] = await workoutRows(days: daysBack).compactMap { w in
+        let stored: [DayStateWorkout] = await workoutRows(days: daysBack).compactMap { w in
             (w.endTs > start && w.startTs < end)
                 ? DayStateWorkout(start: w.startTs, end: w.endTs, sport: w.sport) : nil
         }
+        let workouts = Self.withLoggedWorkouts(stored, logged: WorkoutModeStore.shared.spans(from: start, to: end, now: now))
         // Walks every heart-rate sample of the day, so it runs off the main actor.
         let offWrist: [DayStateSpan] = await Task.detached(priority: .userInitiated) { [events, hr] in
             AnalyticsEngine
@@ -130,6 +131,20 @@ extension Repository {
                           isLiveDay: now < dayEndTs, hr: hr, gravity: gravity,
                           stepLabels: stepLabels, stepCounter: counter,
                           sleep: sleep, inBed: inBed, workouts: workouts, offWrist: offWrist)
+    }
+
+    /// The day's workouts plus workout mode's logged ones (docs/context-watchdog/WORKOUTS.md): a running workout up to
+    /// now, and a logged one whose saved row is missing (no heart rate streamed, or logged afterwards). A logged
+    /// workout already saved as a row (same start) is that row. Its sport is the catalogue type's stored sport name,
+    /// so the decoder reads the type's kind (`WorkoutKind(sport:)`, pinned by WorkoutTypeCatalogTests).
+    nonisolated static func withLoggedWorkouts(_ stored: [DayStateWorkout],
+                                               logged: [LoggedWorkoutSpan]) -> [DayStateWorkout] {
+        var out = stored
+        for span in logged where !stored.contains(where: { abs($0.start - span.startUnix) <= 60 }) {
+            guard let type = span.type else { continue }
+            out.append(DayStateWorkout(start: span.startUnix, end: span.endUnix, sport: type.sportName))
+        }
+        return out.sorted { ($0.start, $0.end) < ($1.start, $1.end) }
     }
 
     /// The inferred-state timeline for one day, from the strap's own stored signals.

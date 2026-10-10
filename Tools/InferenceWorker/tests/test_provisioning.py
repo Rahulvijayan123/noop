@@ -68,7 +68,7 @@ def _staging_dirs(models_root) -> list[str]:
 
 def test_the_plan_enumerates_every_entry_and_nested_artifact_of_the_real_manifest():
     entries, artifacts = _real_counts()
-    assert (entries, artifacts) == (11, 18), "the committed manifest at this branch"
+    assert (entries, artifacts) == (12, 20), "the committed manifest at this branch"
     plan = plan_manifest(load_manifest(str(REAL_MANIFEST)))
     assert len(plan) == artifacts
     assert len({p.entry_id for p in plan}) == entries - 2, "hypnospy and stepcount have no artifacts"
@@ -84,6 +84,8 @@ def test_the_plan_enumerates_every_entry_and_nested_artifact_of_the_real_manifes
         "paradigma/gait_filtering_clf_package.pkl",
         "deepbeat/deepbeat.h5",
         "siamaf/final_model.pt",
+        "recgym_cnn_transformer/models.zip",
+        "recgym_cnn_transformer/wrist_-_imu_only_best.pt",
     }
     assert by_action["check_installed"] == {"neurokit2/neurokit2-0.2.13-py3-none-any.whl"}
     assert by_action["record"] == {"neurokit2/neurokit2-0.2.13.tar.gz"}
@@ -163,7 +165,9 @@ def test_a_complete_revision_is_staged_verified_probed_and_selected(tmp_path):
     assert staged["sleepecg_wrn_gru_mesa/classifier.keras"]["origin"].startswith("zip:wrn-gru-mesa.zip")
     assert all(staged[f"{e}/{a}"]["status"] == "verified" for e, a in (
         ("deepbeat", "deepbeat.h5"), ("siamaf", "final_model.pt"),
-        ("paradigma", "tremor_detection_clf_package.pkl")))
+        ("paradigma", "tremor_detection_clf_package.pkl"),
+        ("recgym_cnn_transformer", "models.zip"), ("recgym_cnn_transformer", "wrist_-_imu_only_best.pt")))
+    assert staged["recgym_cnn_transformer/wrist_-_imu_only_best.pt"]["origin"].startswith("zip:models.zip")
     assert document["withheld"] == []
     assert document["required_providers"] == [SLEEPECG]
 

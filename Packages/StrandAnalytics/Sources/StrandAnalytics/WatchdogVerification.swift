@@ -55,6 +55,10 @@ public struct WatchdogQualityFeed: Equatable, Sendable {
     }
 
     public var v18: [V18Second] = []
+    /// Unix second → the strap's history record index, for every v18 record in the window (with or without optical
+    /// evidence). The 5/MG writes no records while off the body and the index then steps by exactly 1 across the
+    /// gap; records lost in transport leave the index stepping by the gap length (audit 2026-10-09). Empty = unknown.
+    public var v18RecordIndex: [Int: Int] = [:]
     /// WRIST_ON / WRIST_OFF events from the last 24 h (not just the 30-minute window), oldest first.
     public var wristEvents: [WristEvent] = []
     /// Live strap events since the app connected (a live WRIST_OFF / WRIST_ON).
@@ -113,15 +117,33 @@ public struct WatchdogQualityFeed: Equatable, Sendable {
 public struct WatchdogMinuteQuality: Equatable, Sendable, Codable {
     public var minuteUnix: Int
     public var onBody: WDOnBody
+    /// The heart-rate (bpm) channel's grade. `degraded` = usable but not verified (e.g. during movement).
     public var signal: WDSignal
+    /// The beat-timing channel's grade: R-R, HRV and beat-derived respiration. On WHOOP 5/MG the strap's
+    /// motion-mode optics (optical amplitude marker) leave the bpm stream continuous while beats go missing, so the
+    /// two are graded separately (audit 2026-10-09, `_build-scratch/ctxwd/B-quality/REPORT.md`).
+    public var beats: WDSignal
     public var motion: WDMotion
     /// "wrist" | "bicep" | "other"; nil = unknown.
     public var placement: String?
+    /// Legacy Watchdog quality codes; `DataReason.fromWatchdogQuality` maps each to the canonical code and certainty.
     public var reasons: [String]
-    public init(minuteUnix: Int, onBody: WDOnBody, signal: WDSignal, motion: WDMotion,
+    public init(minuteUnix: Int, onBody: WDOnBody, signal: WDSignal, beats: WDSignal? = nil, motion: WDMotion,
                 placement: String?, reasons: [String]) {
-        self.minuteUnix = minuteUnix; self.onBody = onBody; self.signal = signal; self.motion = motion
-        self.placement = placement; self.reasons = reasons
+        self.minuteUnix = minuteUnix; self.onBody = onBody; self.signal = signal; self.beats = beats ?? signal
+        self.motion = motion; self.placement = placement; self.reasons = reasons
+    }
+
+    private enum CodingKeys: String, CodingKey { case minuteUnix, onBody, signal, beats, motion, placement, reasons }
+    public init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        minuteUnix = try c.decode(Int.self, forKey: .minuteUnix)
+        onBody = try c.decode(WDOnBody.self, forKey: .onBody)
+        signal = try c.decode(WDSignal.self, forKey: .signal)
+        beats = try c.decodeIfPresent(WDSignal.self, forKey: .beats) ?? signal
+        motion = try c.decode(WDMotion.self, forKey: .motion)
+        placement = try c.decodeIfPresent(String.self, forKey: .placement)
+        reasons = try c.decodeIfPresent([String].self, forKey: .reasons) ?? []
     }
 }
 

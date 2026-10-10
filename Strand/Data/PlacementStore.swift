@@ -202,7 +202,9 @@ public struct PlacementStore: Sendable {
 /// docs/core-plumbing/findings/g34-wear-placement.md repair notes):
 ///   - `POST <host>/placement` body `{ placement, effective_start, device_id? }` → the edge function
 ///     resolves the installation identity and calls `set_placement_interval(p_owner, p_placement,
-///     p_effective_start, p_device)`; 2xx = accepted.
+///     p_effective_start, p_device)`; 2xx = accepted. `device_id` is the id the cloud files the strap's data
+///     under (`whoop-<serial>`) once known, so the declaration lands on the strap's own device; until then, or
+///     when the server has not registered that device yet (409), the local id as before.
 ///   - `GET  <host>/placement` → `{ intervals: [{ id?, device_id?, placement, effective_start,
 ///     effective_end?, source, revision }] }` for reconciliation.
 /// Changes are replayed in recorded order so an offline declaration keeps its original effective
@@ -266,34 +268,56 @@ public final class PlacementCloudSync: Sendable {
         return components.url
     }
 
+    /// The id the cloud files a local device's data under, when it differs from the local id (the strap's
+    /// `whoop-<serial>` for `my-whoop` once the serial is known); nil otherwise.
+    public static func cloudDeviceId(forLocal localId: String, localDevices: [LocalDevice]) -> String? {
+        guard let match = localDevices.first(where: { $0.local == localId }),
+              match.cloud.caseInsensitiveCompare(localId) != .orderedSame else { return nil }
+        return match.cloud
+    }
+
     /// Push every unsynced declaration in recorded order; clear `synced` on each accepted change.
     /// Returns the number of rows uploaded. Best-effort: a failure leaves rows unsynced.
+    ///
+    /// A device-scoped declaration names the strap's own cloud device when it is known, because the server stores
+    /// every sample there: under the installation-scoped local id it reached the strap's lanes only through the
+    /// server's binding rule. A 409 for that id (the server has not registered the strap's device yet) retries the
+    /// same declaration under the local id, which is what earlier builds sent.
     public func pushPending() async throws -> Int {
         guard let store = store(), let id = identity() else { return 0 }
         let pending = try store.pendingChanges()
         guard !pending.isEmpty else { return 0 }
         guard let base = endpoint() else { return 0 }
+        let devices = localDevices()
         var uploaded = 0
         for change in pending {
             var body: [String: Any] = [
                 "placement": change.placement.rawValue,
                 "effective_start": Self.isoUTC(change.effectiveStart),
             ]
-            if let device = change.deviceId { body["device_id"] = device }
-            var req = URLRequest(url: base.appendingPathComponent("placement"),
-                                 timeoutInterval: 30)
-            req.httpMethod = "POST"
-            CloudReceiverAuth.apply(id, to: &req)
-            req.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            req.httpBody = try JSONSerialization.data(withJSONObject: body)
-            let (_, resp) = try await session.data(for: req)
-            guard let http = resp as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                throw PlacementSyncError.serverRejected
+            let cloud = change.deviceId.flatMap { Self.cloudDeviceId(forLocal: $0, localDevices: devices) }
+            if let device = cloud ?? change.deviceId { body["device_id"] = device }
+            var status = try await post(body, to: base, identity: id)
+            if status == 409, cloud != nil, let local = change.deviceId {
+                body["device_id"] = local
+                status = try await post(body, to: base, identity: id)
             }
+            guard (200..<300).contains(status) else { throw PlacementSyncError.serverRejected }
             try store.markSynced(ids: [change.id])
             uploaded += 1
         }
         return uploaded
+    }
+
+    /// One `POST <host>/placement`; the HTTP status (0 when the response is not HTTP).
+    private func post(_ body: [String: Any], to base: URL, identity id: CloudPushIdentity) async throws -> Int {
+        var req = URLRequest(url: base.appendingPathComponent("placement"), timeoutInterval: 30)
+        req.httpMethod = "POST"
+        CloudReceiverAuth.apply(id, to: &req)
+        req.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        req.httpBody = try JSONSerialization.data(withJSONObject: body)
+        let (_, resp) = try await session.data(for: req)
+        return (resp as? HTTPURLResponse)?.statusCode ?? 0
     }
 
     /// Pull the server's interval model and reconcile locally when there are NO pending local

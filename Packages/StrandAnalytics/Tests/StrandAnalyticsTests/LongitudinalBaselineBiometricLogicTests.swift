@@ -28,6 +28,8 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 70
         case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 50
         case .walkingHR: return 100
+        case .exerciseSessionHR: return 115
+        case .exerciseRecoveryHR: return 85
         case .sleepHR: return 60
         case .sleepRHR: return 60
         case .awakeRestHR: return 70
@@ -50,6 +52,8 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 84
         case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 32
         case .walkingHR: return 118
+        case .exerciseSessionHR: return 128
+        case .exerciseRecoveryHR: return 95
         case .sleepHR: return 72
         case .sleepRHR: return 72
         case .awakeRestHR: return 84
@@ -71,6 +75,8 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
         case .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return 102
         case .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return 18
         case .walkingHR: return 150
+        case .exerciseSessionHR: return 165
+        case .exerciseRecoveryHR: return 120
         case .sleepHR: return 88
         case .sleepRHR: return 88
         case .awakeRestHR: return 102
@@ -114,8 +120,9 @@ final class LongitudinalBaselineBiometricLogicTests: XCTestCase {
     }
 
     func testEverySeriesIsAccountedFor() {
-        // 18 condensed-plan series + 8 v2.clinical context strata (posture, steady walking, sleep HR).
-        XCTAssertEqual(LBSeries.allCases.count, 26)
+        // 18 condensed-plan series + 8 v2.clinical context strata (posture, steady walking, sleep HR) + 2 exercise
+        // strata (session, recovery).
+        XCTAssertEqual(LBSeries.allCases.count, 28)
         for s in LBSeries.allCases {
             let spec = LongitudinalBaseline.seriesSpec(s)
             XCTAssertGreaterThan(spec.maxVal, spec.minVal, s.rawValue)

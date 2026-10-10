@@ -785,7 +785,16 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(reason, "missing_ppg_anchor")
         XCTAssertEqual(counts, ppg.withheld)
         XCTAssertEqual(SensorBiomarkerLane.noInputReason(family: "movement", resolved: objects, coverage: coverage).0,
-                       "artifact_unavailable")
+                       "no_verified_input", "no verified IMU object: the input is missing, not the model")
+        let noPpg = SensorBiomarkerInputs.ResolvedObjects(userId: "u", deviceId: "d", day: Self.day, imu: [], ppg: [])
+        XCTAssertEqual(SensorBiomarkerLane.noInputReason(family: "pulse_shape", resolved: noPpg, coverage: coverage).0,
+                       "no_verified_input")
+        var allNoInput = SensorBiomarkerInputs.ModalityCoverage()
+        allNoInput.expectedSeconds = 3
+        allNoInput.withheld = ["no_verified_input": 3]
+        XCTAssertEqual(SensorBiomarkerLane.noInputReason(
+            family: "pulse_shape", resolved: objects,
+            coverage: SensorBiomarkerLane.DayCoverage(imu: .init(), ppg: allNoInput)).0, "no_verified_input")
         XCTAssertEqual(SensorBiomarkerInputs.families(["movement", "pulse_shape", "rhythm_shadow"], imu: true, ppg: false),
                        ["movement"])
         XCTAssertEqual(SensorBiomarkerInputs.families(["movement", "pulse_shape"], imu: false, ppg: true), ["pulse_shape"])
@@ -949,6 +958,120 @@ final class SensorBiomarkerLaneTests: XCTestCase {
         XCTAssertEqual(job["consecutive_failures"], "0")
         XCTAssertTrue(lane.stats.published >= 1)
         XCTAssertTrue(lane.stats.sidecarRequests >= 1)
+        db.rollbackTransaction()
+        try db.deleteFixtureOwners([f.user])
+    }
+
+    /// The owner's case (20261009150100): the phone declared bicep on its installation-scoped device, whose
+    /// installation uploads the strap's data. The lane reads that placement for the strap, sends it to the sidecar,
+    /// and the wrist-trained family the provider withholds for an unverified wrist side is published as
+    /// `placement_unsupported` (the declared location is the reason), not `unknown_wrist_placement`.
+    func testInstallationDeclaredBicepReachesTheStrapAndIsPlacementUnsupported() throws {
+        let db = try connect()
+        let f = try makeFixture(db: db)
+        let resolver = try db.query("""
+            select (to_regprocedure('internal.placement_intervals_for_device_v1(uuid,uuid,timestamptz,timestamptz)')
+                    is not null)::text as present
+            """, []).first?["present"]
+        guard resolver.map(isTrue) == true else {
+            throw XCTSkip("apply 20261009150100_placement_device_resolution.sql to the scratch database")
+        }
+        let source = UUID().uuidString.lowercased()
+        let installation = UUID().uuidString.lowercased()
+        try db.exec("""
+            insert into public.devices(id,user_id,source_kind,external_device_id)
+              values ('\(installation)','\(f.user)','noop_push','installation:\(source):my-whoop')
+            """)
+        try db.exec("""
+            insert into public.noop_upload_receipts(id,user_id,source_id,device_id,auth_mode,lane,stream,batch_id,
+              body_sha256,accepted_status,accepted_at)
+            values (gen_random_uuid(),'\(f.user)','\(source)','\(f.device)','installation','inline','hr',
+              gen_random_uuid(),repeat('c',64),'accepted',to_timestamp(\(f.dayStart + 3600)))
+            """)
+        try db.exec("""
+            insert into public.placement_intervals(owner,device_id,placement,effective_start,source,revision)
+              values ('\(f.user)','\(installation)','bicep',to_timestamp(\(f.dayStart - 86_400)),'user',1)
+            """)
+        let objectID = UUID().uuidString.lowercased()
+        let digest = try seedImuObject(f, seconds: (0..<300).map { f.dayStart + Int64($0) }, objectID: objectID)
+        try enqueue(f, objectID: objectID, digest: digest, fingerprint: try fingerprintSQL(f, digests: [digest]))
+        let zstd = try syntheticImu(seconds: (0..<300).map { f.dayStart + Int64($0) }).zstd
+        var sentPlacement: [String: Any]?
+        let server = StubHTTPServer { request in
+            let body = try? JSONSerialization.jsonObject(with: request.body) as? [String: Any]
+            sentPlacement = (body?["input"] as? [String: Any])?["placement"] as? [String: Any]
+            return .json(self.okEnvelope())
+        }
+        defer { server.stop() }
+        var lane = makeLane(f: f, server: server, zstdByKey: ["sb-test-\(objectID)": zstd])
+        lane.drain(budget: 1)
+
+        XCTAssertEqual(sentPlacement?["body_location"] as? String, "bicep", "the strap's request carries the declaration")
+        XCTAssertEqual(sentPlacement?["source"] as? String, "user")
+        XCTAssertEqual(lane.stats.placementReadErrors, 0)
+        let row = try f.db.query(
+            "select withheld_reasons::text, document->'families'->'tremor'->>'reason' as tremor "
+            + "from public.sensor_biomarker_days where user_id=$1::uuid and device_id=$2::uuid",
+            [f.user, f.device]).first ?? [:]
+        XCTAssertEqual(row["tremor"], "placement_unsupported")
+        XCTAssertTrue(row["withheld_reasons"]?.contains("placement_unsupported") ?? false, row["withheld_reasons"] ?? "")
+        XCTAssertFalse(row["withheld_reasons"]?.contains("unknown_wrist_placement") ?? true)
+        db.rollbackTransaction()
+        try db.deleteFixtureOwners([f.user])
+    }
+
+    /// Only a request declared worn off the wrist for every second turns the provider's unverified-side reason into
+    /// `placement_unsupported`; wrist, mixed and undeclared requests, and every other stage, are unchanged.
+    func testPlacementReasonOnlyForDeclaredNonWristRequests() {
+        let stage = SensorBiomarkerFamilyStage.withheld(family: "tremor", reason: "unknown_wrist_placement")
+        func summary(_ location: String) -> SensorBiomarkerInputs.PlacementSummary {
+            SensorBiomarkerInputs.PlacementSummary(bodyLocation: location, source: "user")
+        }
+        XCTAssertEqual(SensorBiomarkerLane.placementReason(stage, placement: summary("bicep")).reason, "placement_unsupported")
+        XCTAssertEqual(SensorBiomarkerLane.placementReason(stage, placement: summary("other")).reason, "placement_unsupported")
+        for location in ["wrist", "mixed", "unknown"] {
+            XCTAssertEqual(SensorBiomarkerLane.placementReason(stage, placement: summary(location)).reason,
+                           "unknown_wrist_placement", location)
+        }
+        XCTAssertEqual(SensorBiomarkerLane.placementReason(stage, placement: .undeclared).reason, "unknown_wrist_placement")
+        let other = SensorBiomarkerFamilyStage.withheld(family: "movement", reason: "no_verified_input")
+        XCTAssertEqual(SensorBiomarkerLane.placementReason(other, placement: summary("bicep")).reason, "no_verified_input")
+        let merged = try? SensorBiomarkerFamilyStage.merge([
+            SensorBiomarkerLane.placementReason(stage, placement: summary("bicep")),
+            SensorBiomarkerLane.placementReason(stage, placement: summary("bicep"))])
+        XCTAssertEqual(merged?.reason, "placement_unsupported")
+    }
+
+    /// A family the lane asked for (its IMU input was sent) that no sidecar response reports is the
+    /// model's gap, not the data's: `model_unavailable`, never `no_verified_input` or the old
+    /// `artifact_unavailable` that said both.
+    func testAskedFamilyNoResponseReportsIsModelUnavailable() throws {
+        let db = try connect()
+        let f = try makeFixture(db: db)
+        let objectID = UUID().uuidString.lowercased()
+        let digest = try seedImuObject(f, seconds: (0..<300).map { f.dayStart + Int64($0) }, objectID: objectID)
+        let fp = try fingerprintSQL(f, digests: [digest])
+        try enqueue(f, objectID: objectID, digest: digest, fingerprint: fp)
+        let zstd = try syntheticImu(seconds: (0..<300).map { f.dayStart + Int64($0) }).zstd
+        let server = StubHTTPServer { _ in
+            .json(self.envelope(stages: [
+                "movement": self.stageJSON(family: "movement", status: "ok", observed: 600,
+                                           measurements: ["enmo_median_mg": ["value": 12.5]],
+                                           providerRevision: "imu-biomarkers/1.0.0"),
+            ]))
+        }
+        defer { server.stop() }
+        var lane = makeLane(f: f, server: server, zstdByKey: ["sb-test-\(objectID)": zstd])
+        lane.drain(budget: 1)
+
+        let row = try f.db.query(
+            "select document->'families'->'tremor'->>'status' as status, "
+            + "document->'families'->'tremor'->>'reason' as reason, withheld_reasons::text as reasons "
+            + "from public.sensor_biomarker_days where user_id=$1::uuid and device_id=$2::uuid",
+            [f.user, f.device]).first ?? [:]
+        XCTAssertEqual(row["status"], "withheld")
+        XCTAssertEqual(row["reason"], "model_unavailable")
+        XCTAssertFalse(row["reasons"]?.contains("artifact_unavailable") ?? true)
         db.rollbackTransaction()
         try db.deleteFixtureOwners([f.user])
     }

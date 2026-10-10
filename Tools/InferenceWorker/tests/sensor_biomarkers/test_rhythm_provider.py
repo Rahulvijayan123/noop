@@ -57,10 +57,10 @@ def test_flag_must_be_exactly_one(monkeypatch):
         doc = compute_rhythm_shadow_document(request, model_root="/nonexistent")
         assert doc["status"] == "withheld" and doc["reason"] == "family_disabled"
     monkeypatch.setenv(ENABLE_DEEPBEAT, "1")
-    # env flag on but no artifact under the root -> artifact_unavailable
+    # env flag on but no artifact under the root -> model_unavailable
     doc = compute_rhythm_shadow_document(request, model_root="/nonexistent")
     assert doc["status"] == "withheld"
-    assert doc["reason"] == "artifact_unavailable"
+    assert doc["reason"] == "model_unavailable"
 
 
 def test_missing_optional_artifacts_do_not_break_other_providers(clear_flags, tmp_path,

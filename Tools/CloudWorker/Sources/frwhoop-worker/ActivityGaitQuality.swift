@@ -464,6 +464,9 @@ enum ActivityGaitWindowsDays {
         /// The shared policy's inputs and decision for this row (ActivityExpertAuthority); the migration's trigger
         /// copies it into the row's `authority` column. Left out when the caller has no selection.
         var authority: ActivityExpertAuthority? = nil
+        /// Workout mode: each logged workout in the day with its type's attributes, the windows inside it and what
+        /// their gait means for the type (docs/context-watchdog/WORKOUTS.md). Left out when none was logged.
+        var workouts: [LoggedWorkouts.GaitContext] = []
 
         enum CodingKeys: String, CodingKey {
             case nWindows = "n_windows", nGait = "n_gait", nPrefiltered = "n_prefiltered"
@@ -471,7 +474,7 @@ enum ActivityGaitWindowsDays {
             case failureKinds = "failure_kinds", stopped, weightsDigest = "weights_digest"
             case meanGaitProb = "mean_gait_prob", gait, windowsOmitted = "windows_omitted"
             case candidateStamp = "candidate_stamp", gaitPrior = "gait_prior", trackReport = "track_report"
-            case authority
+            case authority, workouts
         }
 
         func encode(to encoder: Encoder) throws {
@@ -490,6 +493,7 @@ enum ActivityGaitWindowsDays {
             if let p = gaitPrior { try c.encode(p, forKey: .gaitPrior) } else { try c.encodeNil(forKey: .gaitPrior) }
             if let r = trackReport { try c.encode(r, forKey: .trackReport) } else { try c.encodeNil(forKey: .trackReport) }
             try c.encodeIfPresent(authority, forKey: .authority)
+            if !workouts.isEmpty { try c.encode(workouts, forKey: .workouts) }
         }
     }
 
@@ -579,7 +583,8 @@ enum ActivityGaitWindowsDays {
     /// attachment report used when there is no candidate decode (see `Summary.trackReport`).
     static func payload(day: String, mode: ElderNetSettings.Mode, collector: GaitQualityCollector,
                         candidate: Candidate, attachment: GaitQualityTrackReport? = nil,
-                        gaitPrior: Double? = nil, authority: ActivityExpertAuthority? = nil) throws -> String? {
+                        gaitPrior: Double? = nil, authority: ActivityExpertAuthority? = nil,
+                        workouts: [LoggedWorkouts.GaitContext] = []) throws -> String? {
         guard let gait = collector.trackInput else { return nil }
         let model = gait.model
         var probSum = 0.0
@@ -613,7 +618,8 @@ enum ActivityGaitWindowsDays {
             stopped: collector.stopped, weightsDigest: model.weightsDigest,
             meanGaitProb: gait.windows.isEmpty ? nil : rounded(probSum / Double(gait.windows.count)),
             gait: totals, windowsOmitted: windows == nil, candidateStamp: stamp,
-            gaitPrior: mode == .candidate ? gaitPrior : nil, trackReport: report, authority: authority)
+            gaitPrior: mode == .candidate ? gaitPrior : nil, trackReport: report, authority: authority,
+            workouts: workouts)
         let payload = Payload(day: day, mode: mode.rawValue, model: model, weightsDigest: model.weightsDigest,
                               summary: summary, windows: windows, withheldReason: withheld, candidateDocument: document)
         let data = try encoder.encode(payload)

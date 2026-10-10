@@ -36,7 +36,9 @@ A build without these values runs fully offline and cannot sign in or turn on cl
 Set `NOOP_FINAL_HOSTED_COMPUTE = YES` in the same file for any build you give to someone else. Cloud sync is
 then the only mode: the account sheet cannot be skipped, there is no sync switch, and neither a stored
 preference nor a developer endpoint override can turn sync off or point it at another server. With the
-default `NO`, cloud stays an opt-in switch, which is what a developer build wants.
+default `NO`, signing in stays optional, but a signed-in account is always synced: there is no switch while
+the server's sync policy requires it (the default, see `CloudSyncPolicy`), and signing out is what stops
+uploads. Only an account whose policy the server relaxed gets the old opt-in switch back.
 
 `NOOP_ALLOW_LEGACY_ENROLLMENT` and `NOOP_LEGACY_FLEET_TOKEN` exist only for a migration build whose phones
 still hold a credential from the old NARA enrollment-code flow and must keep uploading with it until the
@@ -81,7 +83,9 @@ Nothing is uploaded until a verified session exists.
 After that the app links this phone to your account by itself: there is nothing to paste and no code to
 redeem. Pair the strap as usual and the app confirms it against your account as soon as the strap reports
 its serial number. In a hosted-compute build it then uploads the strap history and shows the scores the
-backend computes, with no switch to find. In any other build, turn on **Sync with your account** first.
+backend computes, with no switch to find. Any other build does the same once you are signed in: the account
+screen shows **Synced with your account**, and **Not syncing since …** when the server has received nothing
+from the account for longer than its policy allows (24 hours by default).
 See [ARCHITECTURE.md](ARCHITECTURE.md) for what happens next.
 
 Signing out stops uploads and removes this account's credential from the Keychain. Data that was already

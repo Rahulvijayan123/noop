@@ -91,6 +91,9 @@ final class BaselineStore: ObservableObject {
     /// v2 context strata (posture / steady walking / sleep HR, and the full-day pooled awake-rest days) from the
     /// stored activity-context intervals. See `LongitudinalBaseline.ContextMaterializer`.
     @Published private(set) var contextObservations: [LBSeries: [LBDailyObservation]] = [:]
+    /// Recurring confirmed exercise sessions from the stored intervals (rule exercise-session-2; `ExerciseRoutine.build`
+    /// drops unconfirmed ones). Display and the in-session ceiling only.
+    @Published private(set) var exerciseRoutine: ExerciseRoutine = .empty
     private var contextRefreshedAt: Date?
     private var contextRefreshing = false
     private var contextVersion = 0
@@ -185,10 +188,17 @@ final class BaselineStore: ObservableObject {
         let now = Int(Date().timeIntervalSince1970)
         let (intervals, _) = await repo.storedActivityContext(from: now - 400 * 86_400, to: now)
         let rows = intervals.map(\.storeRow)
-        let obs = await Task.detached(priority: .utility) {
-            LongitudinalBaseline.ContextMaterializer.observations(rows: rows)
+        let (obs, routine) = await Task.detached(priority: .utility) { () -> ([LBSeries: [LBDailyObservation]], ExerciseRoutine) in
+            let observations = LongitudinalBaseline.ContextMaterializer.observations(rows: rows)
+            // When this person usually exercises (rule exercise-session-2, confirmed sessions only): interpretation and
+            // the in-session ceiling only; never opens a session or makes a reading "usual".
+            let sessions = LongitudinalBaseline.ContextMaterializer.exerciseSessions(rows: rows)
+            let routine = ExerciseRoutine.build(sessions, nowUnix: now,
+                                                historyStartUnix: rows.map(\.startTs).min())
+            return (observations, routine)
         }.value
         contextObservations = obs
+        exerciseRoutine = routine
         contextRefreshedAt = Date()
         contextVersion += 1
         promptMemo = nil
@@ -330,6 +340,7 @@ final class BaselineStore: ObservableObject {
         .sleepTemp, .sleepResp, .sleepSpO2Mean,
         .sleepHR, .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR, .walkingHR,
         .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn,
+        .exerciseSessionHR, .exerciseRecoveryHR,
     ]
 
     func watchdogPromptEvaluations(days: [DailyMetric]) -> [LBEvaluation] {
@@ -638,7 +649,8 @@ final class BaselineStore: ObservableObject {
     private func verdict(show: Bool, trust: Int?, z: Double?, k: Double) -> String {
         if !show { return "BUILDING" }
         if (trust ?? 0) < LongitudinalBaseline.trustHideThreshold { return "NOT ENOUGH NIGHTS" }
-        if evaluation?.stale == true { return "WEAK SIGNAL" }
+        // Layer 1 `stale` means no recent day (canonical reason `stale`), not a poor signal.
+        if evaluation?.stale == true { return "NOT RECENT" }
         if LongitudinalBaseline.isOffUsual(z: z, k: k) { return "OFF" }
         return "IN RANGE"
     }

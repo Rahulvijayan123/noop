@@ -59,6 +59,13 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     /// Mean HR across asleep minutes (all stages) with a within-night scale: the reference for LIVE minutes
     /// while asleep. `sleepRHR` (the nightly resting value) is a different quantity and is never used for that.
     case sleepHR = "sleep_hr"
+    /// HR during this person's confirmed exercise sessions (rule exercise-session-2,
+    /// docs/context-watchdog/EXERCISE_SESSION.md): one value per session day with the within-session scale. The live
+    /// reference for session minutes; never a rest series.
+    case exerciseSessionHR = "exercise_session_hr"
+    /// HR in the recovery after a confirmed exercise session (last movement until return or the cap). The live
+    /// reference for recovery minutes.
+    case exerciseRecoveryHR = "exercise_recovery_hr"
 
     /// Body position of a posture stratum (nil for every other series).
     public var posture: LBPosture? {
@@ -80,7 +87,8 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
              .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR, .awakeSeatedHRVLn,
              .awakeUprightHR, .awakeUprightHRVLn:
             return .awakeRest
-        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR:
+        case .awakeActiveHR, .awakeActiveHRVLn, .awakeActiveSpO2Mean, .walkingHR,
+             .exerciseSessionHR, .exerciseRecoveryHR:
             return .awakeActive
         case .sleepHR:
             return .sleep
@@ -96,7 +104,8 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
     public var biometricFamily: String {
         switch self {
         case .sleepRHR, .awakeRestHR, .awakeActiveHR, .continuousHR,
-             .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR, .walkingHR, .sleepHR: return "hr"
+             .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR, .walkingHR, .sleepHR,
+             .exerciseSessionHR, .exerciseRecoveryHR: return "hr"
         case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn,
              .awakeSupineHRVLn, .awakeSeatedHRVLn, .awakeUprightHRVLn: return "hrv"
         case .sleepResp: return "resp"
@@ -231,6 +240,12 @@ public enum LBSeries: String, Equatable, Sendable, CaseIterable, Codable {
                                 dailyMetricColumn: nil, condensedSection: "v2.3", unit: "ms")
         case .walkingHR:
             return LBPlanSeries(series: self, planName: "Steady walking heart rate", context: .awakeActive,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .exerciseSessionHR:
+            return LBPlanSeries(series: self, planName: "Exercise session heart rate", context: .awakeActive,
+                                dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
+        case .exerciseRecoveryHR:
+            return LBPlanSeries(series: self, planName: "Post-exercise recovery heart rate", context: .awakeActive,
                                 dailyMetricColumn: nil, condensedSection: "v2.3", unit: "bpm")
         case .sleepHR:
             return LBPlanSeries(series: self, planName: "Sleep heart rate (all stages)", context: .sleep,
@@ -1131,6 +1146,8 @@ public enum LongitudinalBaseline {
         case .sleepHR: return (30, 130, 2)
         case .awakeRestHR, .awakeSupineHR, .awakeSeatedHR, .awakeUprightHR: return (35, 160, 3)
         case .walkingHR: return (50, 190, 4)
+        case .exerciseSessionHR: return (50, 220, 6)
+        case .exerciseRecoveryHR: return (40, 190, 4)
         case .awakeActiveHR: return (40, 200, 4)
         case .continuousHR: return (35, 190, 5)
         case .sleepHRVLn, .awakeRestHRVLn, .awakeActiveHRVLn, .continuousHRVLn,

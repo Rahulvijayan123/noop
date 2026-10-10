@@ -443,7 +443,13 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
         let deviceId = "evict-active-seg-dev-\(UUID().uuidString)"
         let now: Int64 = 1_800_000_000
         let day = Int64(86_400)
-        defer { _ = store.deleteFiles(sessionId); store.remove(id: sessionId) }
+        // Everything up to now has reached the server (the object lane's watermark): age alone decides here.
+        let uploadedThrough = store.uploadedThrough
+        store.uploadedThrough = { _ in now }
+        defer {
+            store.uploadedThrough = uploadedThrough
+            _ = store.deleteFiles(sessionId); store.remove(id: sessionId)
+        }
         // A continuous-capture session that started more than a month ago and is STILL active.
         store.start(id: sessionId, deviceId: deviceId, fromMs: (now - 35 * day) * 1_000)
         // One expired second (31 days ago), one a day old, and one right now — all in the SAME
@@ -465,6 +471,103 @@ final class RawDataAcquisitionFixesTests: XCTestCase {
                                         toTs: now - 31 * day).isEmpty, "expired segment evicted")
         XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now - day, toTs: now - day).count, 1)
         XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now, toTs: now).count, 1)
+    }
+
+    // MARK: - D7: raw IMU is kept until it is uploaded
+
+    private func isolatedImuStore() -> ImuSessionFileStore {
+        let directory = FileManager.default.temporaryDirectory
+            .appendingPathComponent("noop-imu-retention-\(UUID().uuidString)", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: directory) }
+        return ImuSessionFileStore(directory: directory, defaults: isolatedDefaults())
+    }
+
+    func testRetentionKeepsRawImuTheObjectLaneHasNotUploaded() throws {
+        let store = isolatedImuStore()
+        let sessionId = "evict-unuploaded"
+        let completedId = "evict-unuploaded-done"
+        let deviceId = "strap-a"
+        let otherDevice = "strap-b"
+        let now: Int64 = 1_800_000_000
+        let day = Int64(86_400)
+        var watermark: Int64? = nil
+        store.uploadedThrough = { _ in watermark }
+        store.uploadProtectionEnabled = { true }
+        store.start(id: sessionId, deviceId: deviceId, fromMs: (now - 40 * day) * 1_000)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now - 35 * day)), receivedAtMs: 1_000), 1)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now)), receivedAtMs: 2_000), 1)
+        XCTAssertNil(store.flushPendingFor(deviceId: deviceId))
+        // A completed Raw Data session from five weeks ago, never uploaded either.
+        store.register(id: completedId, deviceId: otherDevice, fromMs: (now - 36 * day) * 1_000,
+                       toMs: (now - 36 * day + 60) * 1_000)
+        XCTAssertEqual(store.append(deviceId: otherDevice, frame: frame(baseTs: Int(now - 36 * day)), receivedAtMs: 3_000), 1)
+        XCTAssertNil(store.flushPendingFor(deviceId: otherDevice))
+
+        let policy = ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1_073_741_824)
+        var evicted = store.evictExpired(now: now, policy: policy)
+        XCTAssertFalse(evicted.contains(completedId), "a session not uploaded is kept however old")
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now - 35 * day, toTs: now - 35 * day).count, 1,
+                       "an expired segment the lane has not uploaded is kept")
+        XCTAssertEqual(store.readRecords(deviceId: otherDevice, fromTs: now - 36 * day, toTs: now - 36 * day).count, 1)
+
+        // The lane's receipted cursor passes them: now they may go.
+        watermark = now - 30 * day
+        evicted = store.evictExpired(now: now, policy: policy)
+        XCTAssertTrue(evicted.contains(completedId))
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: now - 35 * day, toTs: now - 35 * day).isEmpty)
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now, toTs: now).count, 1, "the live bucket stays")
+
+        // A build with no cloud to upload to evicts by age alone, as before.
+        store.uploadProtectionEnabled = { false }
+        watermark = nil
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now - 33 * day)), receivedAtMs: 4_000), 1)
+        XCTAssertNil(store.flushPendingFor(deviceId: deviceId))
+        _ = store.evictExpired(now: now, policy: policy)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: now - 33 * day, toTs: now - 33 * day).isEmpty)
+    }
+
+    func testOnlyTheHardCeilingEvictsRawImuThatWasNeverUploadedAndSaysSo() throws {
+        let store = isolatedImuStore()
+        let sessionId = "evict-ceiling"
+        let deviceId = "strap-c"
+        let now: Int64 = 1_800_000_000
+        let day = Int64(86_400)
+        var faults: [String] = []
+        store.uploadedThrough = { _ in nil }
+        store.uploadProtectionEnabled = { true }
+        store.onUnuploadedEviction = { faults.append($0) }
+        store.start(id: sessionId, deviceId: deviceId, fromMs: (now - 3 * day) * 1_000)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now - 2 * day)), receivedAtMs: 1_000), 1)
+        XCTAssertEqual(store.append(deviceId: deviceId, frame: frame(baseTs: Int(now)), receivedAtMs: 2_000), 1)
+        XCTAssertNil(store.flushPendingFor(deviceId: deviceId))
+
+        // Under the ceiling nothing that was not uploaded goes, even past the size cap.
+        let roomy = ImuRetentionPolicy(maxAgeDays: 1, maxTotalBytes: 1, hardCeilingBytes: 1 << 40)
+        _ = store.evictExpired(now: now, policy: roomy)
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now - 2 * day, toTs: now - 2 * day).count, 1)
+        XCTAssertTrue(faults.isEmpty)
+
+        // Over it, the oldest goes anyway (never the bucket being written), loudly.
+        let tight = ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1, hardCeilingBytes: 1)
+        _ = store.evictExpired(now: now, policy: tight)
+        XCTAssertTrue(store.readRecords(deviceId: deviceId, fromTs: now - 2 * day, toTs: now - 2 * day).isEmpty)
+        XCTAssertEqual(store.readRecords(deviceId: deviceId, fromTs: now, toTs: now).count, 1)
+        XCTAssertEqual(faults.count, 1)
+        XCTAssertTrue(faults.first?.contains("NOT been uploaded") == true)
+        XCTAssertEqual(ImuRetentionPolicy(maxAgeDays: 30, maxTotalBytes: 1_000).hardCeilingBytes, 4_000,
+                       "the default ceiling is four times the size cap")
+    }
+
+    func testUploadWatermarksOnlyMoveForward() {
+        let marks = ImuUploadWatermarks(defaults: isolatedDefaults())
+        XCTAssertNil(marks.uploadedThrough(localDeviceId: "My-Whoop"))
+        marks.record(localDeviceId: "My-Whoop", through: 100)
+        marks.record(localDeviceId: "my-whoop", through: 50)
+        XCTAssertEqual(marks.uploadedThrough(localDeviceId: "my-whoop"), 100)
+        XCTAssertTrue(ImuRetentionPolicy.isUploaded(endTs: 100, uploadedThrough: 100))
+        XCTAssertFalse(ImuRetentionPolicy.isUploaded(endTs: 101, uploadedThrough: 100))
+        XCTAssertFalse(ImuRetentionPolicy.isUploaded(endTs: 1, uploadedThrough: nil))
+        XCTAssertTrue(ImuRetentionPolicy.isUploaded(endTs: nil, uploadedThrough: nil), "no data is nothing to keep")
     }
 
     // MARK: - P3: stop-rollback on .alreadyInFlight must not kill the other capture

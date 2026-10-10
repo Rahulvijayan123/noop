@@ -127,6 +127,9 @@ struct VerificationLane {
     }
     /// created_at watermark of the last processed page (per-process cursor).
     private var reconcileCursor: String?
+    /// False once anything in the current sweep (head page through the empty page that wraps the
+    /// cursor) recorded an error.
+    private var sweepClean = true
 
     mutating func reconcile(budget: Int) {
         let afterCursor = reconcileCursor != nil
@@ -139,12 +142,20 @@ struct VerificationLane {
         } catch {
             stats.failed += 1
             stats.lastError = "reconcile scan: \(error)"
+            sweepClean = false
             return
         }
         guard !rows.isEmpty else {
             // Page exhausted: wrap the cursor so the next cycle rescans from
             // the oldest (new arrivals + recovered deferred objects).
             reconcileCursor = nil
+            // A sweep that ended in a clean, empty scan retires the lane's last error: the heartbeat
+            // writes `lastError` on every beat, so one transient failure (a scan timeout) would
+            // otherwise read as a lane failing forever (as 282721cae fixed for scoring). An error
+            // recorded during this sweep is kept until a later sweep comes back clean; the debt path
+            // below re-records its own failures in the same cycle.
+            if sweepClean { clearError() }
+            sweepClean = true
             return
         }
         for row in rows {
@@ -177,6 +188,7 @@ struct VerificationLane {
             case .digestMismatch(let reason):
                 stats.digestMismatch += 1
                 stats.lastError = "digest mismatch \(objectId): \(reason)"
+                sweepClean = false
                 if Self.isDeterministicMismatch(reason) {
                     // Deterministically-unverifiable (e.g. no expected digest
                     // recorded): record the quarantine durably so a restart stops
@@ -198,7 +210,13 @@ struct VerificationLane {
         } catch {
             stats.failed += 1
             stats.lastError = "reconcile \(objectId): \(error)"
+            sweepClean = false
         }
+    }
+
+    /// Retire the heartbeat's last error (and only that: the failure counters keep their history).
+    private mutating func clearError() {
+        stats.lastError = nil
     }
 
     private enum ReconcileOutcome {

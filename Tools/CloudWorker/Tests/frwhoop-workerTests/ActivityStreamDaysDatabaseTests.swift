@@ -448,6 +448,38 @@ final class ActivityStreamDaysDatabaseTests: XCTestCase {
         XCTAssertEqual(lane.stats.lastStreamDayError, before)
     }
 
+    // MARK: - Workout mode (docs/context-watchdog/WORKOUTS.md)
+
+    /// A workout logged in workout mode reaches the lane's exercise list with its type's stored sport name (so the
+    /// decoder reads the type's kind), in place of the session record the live tracker wrote at the same start; a
+    /// deleted one does not.
+    func testLoggedWorkoutsJoinTheExerciseListByType() throws {
+        let f = try makeFixture()
+        let start = f.dayStart + 10 * 3_600
+        _ = try f.db.query("""
+            insert into public.sessions(user_id, device_id, kind, start_at, end_at, summary) values
+              ($1::uuid, $2::uuid, 'manual_workout', to_timestamp($3::bigint + 20), to_timestamp($3::bigint + 2700),
+               '{"sport":"Other"}'),
+              ($1::uuid, $2::uuid, 'workout', to_timestamp($3::bigint + 7200), to_timestamp($3::bigint + 9000),
+               '{"sport":"Running"}')
+            """, [f.user, f.device, String(start)])
+        _ = try f.db.query("""
+            insert into public.user_workouts(user_id, client_id, device_id, workout_type, started_at, ended_at,
+                                             client_updated_at, deleted_at) values
+              ($1::uuid, gen_random_uuid(), $2::uuid, 'indoor_cycling', to_timestamp($3::bigint),
+               to_timestamp($3::bigint + 2700), now(), null),
+              ($1::uuid, gen_random_uuid(), $2::uuid, 'yoga', to_timestamp($3::bigint + 12000),
+               to_timestamp($3::bigint + 13000), now(), now())
+            """, [f.user, f.device, String(start)])
+        let lane = makeLane(f.db)
+        let spans = try lane.daySpans(userId: f.user, deviceId: f.device, dayBounds: (f.dayStart, f.dayEnd))
+        XCTAssertEqual(spans.exercise.map(\.start), [start, start + 7200])
+        XCTAssertEqual(spans.exercise.map(\.sport), ["Indoor cycle", "Running"])
+        XCTAssertEqual(WorkoutKind(sport: spans.exercise[0].sport), .cycling)
+        let logged = try lane.dayLoggedWorkouts(userId: f.user, deviceId: f.device, from: f.dayStart, to: f.dayEnd)
+        XCTAssertEqual(logged.map(\.typeId), ["indoor_cycling"], "the deleted one is not logged")
+    }
+
     // MARK: - The midnight lookback (audit D2-11)
 
     /// The decode warms up on the half hour before midnight, so it reads the night and the workout that

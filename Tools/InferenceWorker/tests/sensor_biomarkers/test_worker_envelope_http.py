@@ -154,15 +154,16 @@ def test_run_aware_envelope_reaches_every_family(sidecar, monkeypatch):
     levels = [row["pulse_amplitude_median_au"] for row in pulse["run_amplitudes"]["listed"]]
     assert levels[1] / levels[0] == pytest.approx(1.5, rel=0.05)
     assert pulse["measurements"]["pulse_width50_median_ms"]["value"] > 0
-    # No weights on this machine: missing artifacts, never a silent drop.
-    assert stages["tremor"]["reason"] == "artifact_unavailable"
-    assert stages["arm_swing"]["reason"] == "artifact_unavailable"
+    # No weights on this machine: the model is unavailable, never a silent drop (and never
+    # confused with missing input, which reads no_verified_input).
+    assert stages["tremor"]["reason"] == "model_unavailable"
+    assert stages["arm_swing"]["reason"] == "model_unavailable"
     rhythm = stages["rhythm_shadow"]
-    assert rhythm["status"] == "withheld" and rhythm["reason"] == "artifact_unavailable"
+    assert rhythm["status"] == "withheld" and rhythm["reason"] == "model_unavailable"
     assert rhythm["release_tier"] == "shadow"
     assert envelope["raw_scores"] is None
 
-    # /v1/providers names the same states per family.
+    # /v1/providers names the adapter state per family (what is missing: the artifact).
     providers = {p["provider_id"]: p for p in _get(base, "/v1/providers")["providers"]}
     aggregate = providers["sensor.biomarkers.v1"]
     assert aggregate["readiness"]["ready"] is True

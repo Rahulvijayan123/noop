@@ -90,6 +90,11 @@ final class CoachContextPromptTests: XCTestCase {
         XCTAssertTrue(prompt.contains("never mention these tools"))
         XCTAssertFalse(prompt.contains(knee), "the prompt names chats by short ref, never by UUID")
         XCTAssertFalse(prompt.contains("Still open"), "open loops only on a new chat's first turn")
+        XCTAssertTrue(prompt.contains("HOW TO USE IT:") && prompt.contains("\n" + CoachContextPrompt.memoryPrecedence),
+                      "saved memories (which the user may have corrected) win over older chat history")
+        XCTAssertTrue(CoachContextPrompt.memoryPrecedence.contains("go by the saved memory"))
+        XCTAssertFalse(CoachPrompt.system(memories: [memory(1, "User runs")], imageContext: "", userAge: 30, now: now)
+            .contains(CoachContextPrompt.memoryPrecedence), "the single-thread prompt keeps its exact output")
     }
 
     func testSummaryOnlyForThreadsLongerThanTheWindow() {

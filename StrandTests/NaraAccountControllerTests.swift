@@ -22,6 +22,8 @@ final class NaraAccountControllerTests: XCTestCase {
     private var uploadsOn = true
     private var protectedData = true
     private var configured = true
+    private var syncStatus: FakeSyncStatus!
+    private var chatWipes: ChatWipeLog!
 
     override func setUp() async throws {
         defaults = isolatedDefaults()
@@ -34,6 +36,8 @@ final class NaraAccountControllerTests: XCTestCase {
         uploadsOn = true
         protectedData = true
         configured = true
+        syncStatus = FakeSyncStatus()
+        chatWipes = ChatWipeLog()
         makeControllerStack()
     }
 
@@ -47,7 +51,9 @@ final class NaraAccountControllerTests: XCTestCase {
             setUploadsFlag: { [unowned self] in self.uploadsOn = $0 },
             protectedDataAvailable: { [unowned self] in self.protectedData },
             now: { [clock] in clock!.now },
-            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) })
+            sleep: { _ in try? await Task.sleep(nanoseconds: 3_600_000_000_000) },
+            fetchSyncStatus: { [syncStatus] owner in syncStatus!.reply(owner) })
+        controller.removeLocalChats = { [chatWipes] owner in chatWipes!.record(owner) }
     }
 
     private func signIn(_ owner: String) async {
@@ -334,15 +340,30 @@ final class NaraAccountControllerTests: XCTestCase {
         XCTAssertEqual(server.calls.count, calls)
     }
 
-    // MARK: always-on sync
+    // MARK: mandatory sync
 
-    func testARestoredSessionWithAnOldOptOutSyncsAgain() async throws {
+    func testSyncCannotBeTurnedOffWhileSignedIn() async throws {
         await controller.start()
         await signIn(ownerA)
         let identity = try XCTUnwrap(store.identity(forOwner: ownerA))
-        let calls = server.calls.count
+        XCTAssertTrue(controller.syncIsMandatory, "no policy from the server yet means required")
 
-        // Relaunch with the opt-out an older build could store, the session restored from storage.
+        let applied = controller.setUploadsEnabled(false)
+        await controller.settle()
+
+        XCTAssertFalse(applied, "a signed-in account cannot switch sync off")
+        XCTAssertTrue(uploadsOn, "and nothing was stored that says it is off")
+        XCTAssertEqual(controller.bootstrap, .ready)
+        XCTAssertEqual(runtime.runningScope, identity.scope, "the account's uploads keep running")
+    }
+
+    func testARestoredSessionWithNoUploadSettingIsSynced() async throws {
+        await controller.start()
+        await signIn(ownerA)
+        let first = try XCTUnwrap(store.identity(forOwner: ownerA))
+
+        // A reinstall: the Keychain (session and credential) survives, the preferences do not, so the upload
+        // flag is gone and nothing says the person ever chose to sync. Restoring the session is enough.
         uploadsOn = false
         runtime = FakeRuntime()
         backend = FakeAuthBackend()
@@ -351,14 +372,80 @@ final class NaraAccountControllerTests: XCTestCase {
         makeControllerStack()
         await controller.start()
 
-        XCTAssertTrue(uploadsOn, "a signed-in account always syncs")
+        XCTAssertTrue(uploadsOn, "restoring a signed-in session turns uploads on")
+        XCTAssertEqual(controller.bootstrap, .ready)
+        XCTAssertEqual(runtime.runningScope, first.scope)
+    }
+
+    func testARestoredSessionAfterAReinstallIsSyncedUnderANewLink() async throws {
+        await controller.start()
+        await signIn(ownerA)
+
+        // The whole preference domain is gone (a reinstall), only the Keychain is left.
+        uploadsOn = false
+        defaults = isolatedDefaults()
+        store = CloudPushIdentityStore(defaults: defaults, secrets: secrets)
+        runtime = FakeRuntime()
+        backend = FakeAuthBackend()
+        backend.stored = FakeAuthBackend.session(userId: ownerA)
+        backend.tokenResult = .success("jwt-for-\(ownerA)")
+        makeControllerStack()
+        await controller.start()
+
+        XCTAssertTrue(uploadsOn)
+        XCTAssertEqual(controller.bootstrap, .ready)
+        XCTAssertEqual(runtime.runningScope?.ownerId, ownerA, "the restored account uploads again at once")
+    }
+
+    func testSigningOutStopsUploadsAndNothingRestartsThem() async throws {
+        await controller.start()
+        await signIn(ownerA)
+        XCTAssertNotNil(runtime.runningScope)
+
+        await signOut()
+        controller.refresh()
+        await controller.settle()
+
+        XCTAssertNil(runtime.runningScope, "sign-out is what stops uploads")
+        XCTAssertFalse(controller.syncIsMandatory, "nobody is signed in to sync")
+        XCTAssertNil(store.current())
+        XCTAssertEqual(controller.bootstrap, .idle)
+    }
+
+    func testAPolicyFromTheServerThatDoesNotRequireSyncBringsTheSwitchBack() async throws {
+        server.grantSyncPolicy = CloudSyncPolicy(required: false, staleAfterHours: 24)
+        await controller.start()
+        await signIn(ownerA)
+        let identity = try XCTUnwrap(store.identity(forOwner: ownerA))
+        XCTAssertFalse(controller.syncIsMandatory, "the provisioning reply's policy was kept for the account")
+        XCTAssertFalse(CloudSyncPolicyStore(defaults: defaults).policy(forOwner: ownerA).required)
+        let calls = server.calls.count
+
+        XCTAssertTrue(controller.setUploadsEnabled(false))
+        await controller.settle()
+        XCTAssertEqual(controller.bootstrap, .paused)
+        XCTAssertNil(runtime.runningScope)
+        XCTAssertEqual(store.identity(forOwner: ownerA), identity)
+
+        // A relaunch with the setting off stays off under a relaxed policy (the old opt-in behaviour).
+        runtime = FakeRuntime()
+        backend = FakeAuthBackend()
+        backend.stored = FakeAuthBackend.session(userId: ownerA)
+        backend.tokenResult = .success("jwt-for-\(ownerA)")
+        makeControllerStack()
+        await controller.start()
+        XCTAssertEqual(controller.bootstrap, .paused)
+        XCTAssertFalse(uploadsOn)
+
+        XCTAssertTrue(controller.setUploadsEnabled(true))
+        await controller.settle()
         XCTAssertEqual(controller.bootstrap, .ready)
         XCTAssertEqual(runtime.runningScope, identity.scope)
         XCTAssertEqual(server.calls.count, calls, "the stored credential is reused")
     }
 
     func testSyncStatusComesFromTheRunningTransportOnly() async throws {
-        let status = CloudSyncStatus(pendingRecords: 12, oldestPendingAt: clock.now, queuedBatches: 1,
+        let status = CloudUploadQueueStatus(pendingRecords: 12, oldestPendingAt: clock.now, queuedBatches: 1,
                                      inFlight: 0, lastAttemptAt: nil, lastError: "receiver status 503")
         runtime.reportedSyncStatus = status
         await controller.start()
@@ -378,7 +465,7 @@ final class NaraAccountControllerTests: XCTestCase {
     func testSyncStatusIsUpToDateOnlyWhenNothingIsWaiting() {
         var stats = CloudJournalStats.empty
         let now = Date(timeIntervalSince1970: 1_700_000_000)
-        let drained = CloudSyncStatus(stats: stats, inFlight: 0, lastAttemptAtMs: 1_699_999_990_000,
+        let drained = CloudUploadQueueStatus(stats: stats, inFlight: 0, lastAttemptAtMs: 1_699_999_990_000,
                                       lastError: nil, now: now)
         XCTAssertTrue(drained.isUpToDate)
         XCTAssertNil(drained.oldestPendingAt)
@@ -387,11 +474,92 @@ final class NaraAccountControllerTests: XCTestCase {
         stats.pendingRecords = 4
         stats.oldestPendingAgeSeconds = 60
         stats.uploadedBatches = 1
-        let waiting = CloudSyncStatus(stats: stats, inFlight: 1, lastAttemptAtMs: nil, lastError: nil, now: now)
+        let waiting = CloudUploadQueueStatus(stats: stats, inFlight: 1, lastAttemptAtMs: nil, lastError: nil, now: now)
         XCTAssertFalse(waiting.isUpToDate)
         XCTAssertEqual(waiting.oldestPendingAt, now.addingTimeInterval(-60))
         XCTAssertEqual(waiting.queuedBatches, 1)
         XCTAssertEqual(waiting.inFlight, 1)
+    }
+
+    func testTheServerMakingSyncRequiredAgainTurnsAPausedAccountBackOn() async throws {
+        server.grantSyncPolicy = CloudSyncPolicy(required: false, staleAfterHours: 24)
+        await controller.start()
+        await signIn(ownerA)
+        controller.setUploadsEnabled(false)
+        await controller.settle()
+        XCTAssertEqual(controller.bootstrap, .paused)
+
+        syncStatus.set(CloudSyncStatus(policy: .init(required: true, staleAfterHours: 24), health: nil), for: ownerA)
+        await controller.refreshSyncStatus()
+        await controller.settle()
+
+        XCTAssertTrue(controller.syncIsMandatory)
+        XCTAssertTrue(uploadsOn)
+        XCTAssertEqual(controller.bootstrap, .ready)
+        XCTAssertNotNil(runtime.runningScope)
+    }
+
+    func testTheServersViewOfTheAccountsUploadsIsPublishedAndClearedOnSignOut() async throws {
+        await controller.start()
+        let last = Date(timeIntervalSince1970: 1_791_000_000)
+        syncStatus.set(CloudSyncStatus(policy: .assumed,
+                                       health: CloudSyncHealth(required: true, lastUploadAt: last, stale: true)),
+                       for: ownerA)
+        await signIn(ownerA)
+        await controller.refreshSyncStatus()
+
+        XCTAssertEqual(controller.syncHealth, CloudSyncHealth(required: true, lastUploadAt: last, stale: true),
+                       "the account screen can say \"Not syncing since …\"")
+        XCTAssertTrue(syncStatus.asked.allSatisfy { $0 == ownerA }, "asked for the signed-in account only")
+
+        await signOut()
+        XCTAssertNil(controller.syncHealth, "a signed-out phone shows no account's sync state")
+    }
+
+    // MARK: Sana data on session end
+
+    func testAnInvoluntarySessionEndKeepsTheAccountsUnsentTurns() async throws {
+        await controller.start()
+        await signIn(ownerA)
+
+        server.provisionFaults = [CloudReceiverError.sessionRejected]
+        clock.advance(by: 340 * 86_400)
+        controller.refresh()
+        await controller.settle()
+
+        XCTAssertEqual(auth.phase, .signedOut)
+        XCTAssertNil(runtime.runningScope)
+        XCTAssertTrue(chatWipes.owners.isEmpty,
+                      "a session the person did not end keeps their Sana outbox for the next sign-in")
+    }
+
+    func testARefreshThatEndsTheSessionKeepsTheAccountsUnsentTurns() async throws {
+        await controller.start()
+        await signIn(ownerA)
+
+        backend.emit(.ended)
+        for _ in 0..<100 where auth.phase != .signedOut { try await Task.sleep(nanoseconds: 10_000_000) }
+        controller.refresh()
+        await controller.settle()
+
+        XCTAssertEqual(auth.phase, .signedOut)
+        XCTAssertNil(runtime.runningScope)
+        XCTAssertTrue(chatWipes.owners.isEmpty)
+    }
+
+    func testSigningOutAndARetiredAccountStillDeleteTheAccountsSanaData() async throws {
+        await controller.start()
+        await signIn(ownerA)
+        await signOut()
+        XCTAssertEqual(chatWipes.owners, [ownerA], "an explicit sign-out deletes them, as before")
+
+        await signIn(ownerB)
+        server.provisionFaults = [CloudReceiverError.accountRetired]
+        clock.advance(by: 340 * 86_400)
+        controller.refresh()
+        await controller.settle()
+        XCTAssertEqual(auth.phase, .signedOut)
+        XCTAssertEqual(chatWipes.owners, [ownerA, ownerB], "an account the server retired leaves with its data")
     }
 
     // MARK: on-device history

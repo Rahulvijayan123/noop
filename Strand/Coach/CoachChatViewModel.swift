@@ -30,8 +30,23 @@ import WhoopStore
 //              refused delete leaves the chat usable),
 //              renameThread(id:title:) async, moveThread(id:folderId:) async, setPinned(id:_:) async,
 //              createFolder(name:) async, renameFolder(id:name:) async, deleteFolder(id:) async.
-//   Memory     refreshMemories() async (up to 200), editMemory(_:content:) async -> CoachMemoryEditOutcome,
-//              forget(_:) async, forgetAllMemories() async.
+//   Memory     refreshMemories() async (up to 200), forget(_:) async, forgetAllMemories() async,
+//              edit(_:content:topic:importance:) async -> CoachMemoryEditOutcome (the user's correction, stored on the
+//              server and put in place in every cached manifest), addMemory(content:topic:) async (a fact in the
+//              user's own words). A fresh manifest with a newer `memoryRevision` drops every older cached one, so a
+//              change made on another phone never reaches a prompt from this phone's cache.
+
+/// How an edit (or an added fact) from the memory sheet ended.
+enum CoachMemoryEditOutcome: Equatable, Sendable {
+    /// Stored; the list, the cached manifests and the starters follow.
+    case saved
+    /// Another phone (or Sana) changed it first: the list now shows the stored version, to edit again.
+    case changedElsewhere
+    /// Forgotten meanwhile; it is gone from the list.
+    case gone
+    /// Not saved, with what to tell the user.
+    case failed(String)
+}
 
 struct CoachChatMessage: Identifiable, Equatable {
     enum Role: String { case user, assistant }
@@ -161,13 +176,6 @@ enum CoachThreadPhase: Equatable {
     case loading, ready
 }
 
-/// How an edit of one memory ended: `changed` means the server had a newer or no version and the list was reloaded.
-enum CoachMemoryEditOutcome: Equatable, Sendable {
-    case saved
-    case changed(String)
-    case failed(String)
-}
-
 /// Drives the coach conversations: safety screens, the photo pipeline, the streaming tool loop, the open thread,
 /// memory, and persistence to the user's cloud project.
 @MainActor
@@ -273,6 +281,9 @@ final class CoachChatViewModel: ObservableObject {
     private let reopensLastChat: Bool
     private var deletedThreads = Set<String>()
     private var manifestCache: [String: CoachContextManifest] = [:]
+    /// The newest `memoryRevision` a fresh manifest carried this session. Every user change to memory (an edit, a
+    /// forget, an added fact, on any phone) moves it, so a cached manifest from before it may quote a fact that changed.
+    private var newestMemoryRevision: Int?
     /// Outside questions waiting for the reply in progress. A plain prompt carries no screen context and no memory.
     private var queuedPrompts: [CoachHandoff] = []
     /// First answers whose title the server could not make yet (the thread was not saved): asked from
@@ -412,6 +423,7 @@ final class CoachChatViewModel: ObservableObject {
         connection = .checking
         memories = []
         manifestCache = [:]
+        newestMemoryRevision = nil
         queuedPrompts = []
         deletedThreads = []
         pendingTitles = [:]
@@ -550,43 +562,83 @@ final class CoachChatViewModel: ObservableObject {
     func forget(_ memory: CoachMemory) async {
         do {
             try await api.deleteMemory(id: memory.id)
-            memories.removeAll { $0.id == memory.id }
-            // A cached manifest must never put a forgotten fact back into a prompt.
-            manifestCache = manifestCache.mapValues { $0.removingMemory(id: memory.id) }
-            local?.updateManifests { $0.removingMemory(id: memory.id) }
-            // The cached starter set may quote it too: the local chips show until a fresh set arrives.
-            local?.removeSuggestions()
-            if messages.isEmpty { showStarters() }
+            // A cached manifest must never put a forgotten fact back into a prompt, and the cached starter set may
+            // quote it too: the local chips show until a fresh set arrives.
+            dropMemoryEverywhere(id: memory.id)
         } catch {
             errorMessage = Self.userFacing(error)
         }
     }
 
-    /// The user's rewrite of one memory. On success the row is replaced in place; when the server says it changed
-    /// or is gone the list is reloaded, and any other failure leaves everything as it was for the editor to retry.
-    func editMemory(_ memory: CoachMemory, content: String) async -> CoachMemoryEditOutcome {
-        let text = content.trimmingCharacters(in: .whitespacesAndNewlines)
-        do {
-            let reply = try await api.updateMemory(id: memory.id, content: text)
-            // The reply has no `pinned`, and an older row may lack the optional fields: keep what the list knew.
-            let saved = CoachMemory(id: memory.id, content: reply.content, topic: reply.topic, importance: reply.importance,
-                                    createdAt: reply.createdAt ?? memory.createdAt, updatedAt: reply.updatedAt ?? memory.updatedAt,
-                                    source: reply.source ?? memory.source, confirmations: reply.confirmations ?? memory.confirmations,
-                                    pinned: reply.pinned ?? memory.pinned)
-            if let index = memories.firstIndex(where: { $0.id == memory.id }) { memories[index] = saved }
-            manifestCache = manifestCache.mapValues { $0.replacingMemory(saved) }
-            local?.updateManifests { $0.replacingMemory(saved) }
-            return .saved
-        } catch let error as CoachRouteError where error.status == 409 || error.status == 404 {
+    /// The user's correction of a memory from the memory sheet: stored on the server (guarded by the version the list
+    /// showed), then put in place in the list and in every cached manifest, in memory and on disk, so no prompt from
+    /// this phone quotes the old text; the cached starters may quote it too, so they go. The text is screened like any
+    /// stored line that goes back into a prompt. 409 (changed elsewhere first) refetches the list; 404 (forgotten
+    /// elsewhere) drops it everywhere, as a forget does.
+    func edit(_ memory: CoachMemory, content: String, topic: String, importance: Int? = nil) async -> CoachMemoryEditOutcome {
+        let text = CoachModelText.collapsed(content)
+        if let problem = Self.memoryProblem(text) { return .failed(problem) }
+        let topic = CoachMemory.topics.contains(topic) ? topic : memory.topic
+        if text == memory.content, topic == memory.topic, importance == nil || importance == memory.importance { return .saved }
+        guard let version = memory.version else {
+            // A row from a server without edits (it sends no versions): nothing to guard the edit with.
             await refreshMemories()
-            return .changed(error.status == 409
-                ? String(localized: "Sana updated this memory while you were editing. The list now shows the latest version.")
-                : String(localized: "This memory is no longer saved. The list has been refreshed."))
-        } catch let error as CoachRouteError where error.status == 400 {
-            return .failed(String(localized: "Sana couldn't save that. Keep it under 500 characters and try again."))
+            return .failed("This memory can't be edited yet. You can forget it and tell Sana the right fact.")
+        }
+        do {
+            let saved = try await api.updateMemory(id: memory.id, content: text == memory.content ? nil : text,
+                                                   topic: topic == memory.topic ? nil : topic,
+                                                   importance: importance == memory.importance ? nil : importance, version: version)
+            let row = memory.updated(from: saved)
+            if let idx = memories.firstIndex(where: { $0.id == memory.id }) { memories[idx] = row } else { memories.insert(row, at: 0) }
+            manifestCache = manifestCache.mapValues { $0.replacingMemory(row) }
+            local?.updateManifests { $0.replacingMemory(row) }
+            local?.removeSuggestions()
+            if messages.isEmpty { showStarters() }
+            return .saved
+        } catch let error as CoachRouteError where error.status == 409 {
+            await refreshMemories()
+            return .changedElsewhere
+        } catch let error as CoachRouteError where error.status == 404 {
+            dropMemoryEverywhere(id: memory.id)
+            return .gone
         } catch {
             return .failed(Self.userFacing(error))
         }
+    }
+
+    /// A fact the user adds in the memory sheet, kept in their own words (the server folds it into a row that already
+    /// says it).
+    func addMemory(content: String, topic: String) async -> CoachMemoryEditOutcome {
+        let text = CoachModelText.collapsed(content)
+        if let problem = Self.memoryProblem(text) { return .failed(problem) }
+        do {
+            _ = try await api.saveMemory(content: text, topic: CoachMemory.topics.contains(topic) ? topic : "general",
+                                         importance: 3, byUser: true)
+            await refreshMemories()
+            return .saved
+        } catch {
+            return .failed(Self.userFacing(error))
+        }
+    }
+
+    /// Why a memory text can't be stored as written, or nil: empty, over the server's bound, or a line the prompt
+    /// screen would leave out (`CoachSafety.screenStored`).
+    static func memoryProblem(_ text: String) -> String? {
+        if text.isEmpty { return "Write the fact Sana should remember." }
+        // UTF-16 units, as the server counts.
+        if text.utf16.count > CoachMemory.maxLength { return "Keep it under \(CoachMemory.maxLength) characters." }
+        if CoachSafety.screenStored(text) { return "Sana can't keep this as written. Try saying it as a plain fact about you." }
+        return nil
+    }
+
+    /// A memory forgotten (here or on another phone) leaves the list, every cached manifest and the starters.
+    private func dropMemoryEverywhere(id: String) {
+        memories.removeAll { $0.id == id }
+        manifestCache = manifestCache.mapValues { $0.removingMemory(id: id) }
+        local?.updateManifests { $0.removingMemory(id: id) }
+        local?.removeSuggestions()
+        if messages.isEmpty { showStarters() }
     }
 
     func forgetAllMemories() async {
@@ -829,7 +881,8 @@ final class CoachChatViewModel: ObservableObject {
         let thread = features.threads ? threadId : nil
         Task { [weak self] in
             guard let self, self.ownerId == owner, owner != nil else { return }
-            guard (try? await self.api.saveMemory(content: content, topic: "health", importance: 3, threadId: thread)) != nil,
+            // An automatic note: the server skips it when the user forgot (or reworded) what it says.
+            guard (try? await self.api.saveMemory(content: content, topic: "health", importance: 3, threadId: thread, auto: true)) != nil,
                   self.ownerId == owner else { return }
             self.memoriesStale = true
             await self.refreshMemories()
@@ -1178,8 +1231,21 @@ final class CoachChatViewModel: ObservableObject {
         }
     }
 
+    /// Caches a fresh manifest. One that carries a newer `memoryRevision` than any seen this session means memory
+    /// changed (on this phone or another): every cached manifest from before it is dropped, in memory and on disk,
+    /// since it may quote a fact that was since edited or forgotten. A late answer older than the newest seen is not
+    /// cached at all.
     private func store(_ manifest: CoachContextManifest, threadId: String) {
         guard !deletedThreads.contains(threadId) else { return }
+        if let revision = manifest.memoryRevision {
+            if let newest = newestMemoryRevision, revision < newest { return }
+            if newestMemoryRevision.map({ revision > $0 }) ?? true {
+                newestMemoryRevision = revision
+                let older: (CoachContextManifest) -> Bool = { ($0.memoryRevision ?? Int.min) < revision }
+                manifestCache = manifestCache.filter { !older($0.value) }
+                local?.removeManifests(where: older)
+            }
+        }
         manifestCache[threadId] = manifest
         local?.saveManifest(manifest, threadId: threadId)
     }

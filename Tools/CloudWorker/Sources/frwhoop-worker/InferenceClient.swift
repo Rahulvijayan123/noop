@@ -38,7 +38,12 @@ import FoundationNetworking
 /// Withheld reasons the candidate contract accepts (implementation plan,
 /// "Shared contracts" -> withheld reasons). The three `isClientFailure` cases are
 /// the ones THIS client produces; the rest are provider verdicts carried through
-/// from the sidecar response.
+/// from the sidecar response. It mirrors the sidecar's `WithheldReason` enum
+/// (Tools/InferenceWorker contract.py) member for member, including the HRV
+/// adapter's `unresolved_adjacency` extension: a verdict missing here would be
+/// stored as `provider_error`, i.e. as a fault of ours instead of the data's.
+/// The SQL whitelist in `physiology_record_candidate_result` lists the same set
+/// (20261009140000_candidate_withheld_unresolved_adjacency.sql).
 enum CandidateWithheldReason: String, Codable, CaseIterable {
     case blockedInput = "blocked_input"
     case blockedArtifact = "blocked_artifact"
@@ -49,6 +54,9 @@ enum CandidateWithheldReason: String, Codable, CaseIterable {
     case providerError = "provider_error"
     case timeout
     case notReady = "not_ready"
+    /// HRV: a burst boundary could not be resolved from observation identity, so
+    /// the interval series is withheld rather than spliced (a data verdict).
+    case unresolvedAdjacency = "unresolved_adjacency"
 
     /// True for the reasons the Swift client itself settles (never a provider
     /// verdict). Used by the tests to prove the taxonomy is closed.
@@ -56,7 +64,7 @@ enum CandidateWithheldReason: String, Codable, CaseIterable {
         switch self {
         case .providerError, .timeout, .notReady: return true
         case .blockedInput, .blockedArtifact, .blockedLicense, .unverified,
-             .insufficientCoverage, .artifactFraction: return false
+             .insufficientCoverage, .artifactFraction, .unresolvedAdjacency: return false
         }
     }
 }

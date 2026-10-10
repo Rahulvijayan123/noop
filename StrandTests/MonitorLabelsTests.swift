@@ -40,7 +40,7 @@ final class MonitorLabelsTests: XCTestCase {
     func testVerdictsAreSentenceCase() {
         XCTAssertEqual(MonitorLabels.verdict("IN RANGE"), "In range")
         XCTAssertEqual(MonitorLabels.verdict("OFF"), "Off usual")
-        XCTAssertEqual(MonitorLabels.verdict("WEAK SIGNAL"), "Weak signal")
+        XCTAssertEqual(MonitorLabels.verdict("NOT RECENT"), "Not recent")
         XCTAssertEqual(MonitorLabels.verdict("NOT ENOUGH NIGHTS"), "Not enough nights")
         XCTAssertEqual(MonitorLabels.verdict("BUILDING"), "Building")
         XCTAssertEqual(MonitorLabels.verdictTone("IN RANGE"), .positive)

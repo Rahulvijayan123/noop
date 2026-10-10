@@ -81,3 +81,61 @@ Deno.test('anomaly candidates: POST is not allowed', async () => {
   const res = await handleScoresRequest(req, { rest: fakeRest([], []), cfg });
   assertEquals(res.status, 405);
 });
+
+// Opt-in windows (20261009150200): every half-hour window the service judged or withheld in a range, with the
+// canonical reason and the minute-level context mix. Old fields and old callers are unchanged.
+
+const WINDOW = {
+  start_ts: '2026-10-07T21:00:00+00:00', end_ts: '2026-10-07T21:30:00+00:00', usable: false,
+  reason: { code: 'context_not_comparable', subcode: 'movement', certainty: 'inferred', legacy: 'activity' },
+  context: { kind: 'rest', mix_basis: 'measurement_context_minutes', minutes: 30,
+    mix: { session: 1, recovery: 0, active: 0, no_session: 0, unknown: 0, asleep: 0, off_wrist: 0,
+      activity: { walking: 1 }, quality: { good: 1 } } },
+  models: [{ model: 'none', channel_group: 'all', score: null, p: null, usable: false,
+    reason: { code: 'context_not_comparable', subcode: 'movement', certainty: 'inferred', legacy: 'activity' } }],
+};
+
+function windowsRest(rpcCalls: Array<{ fn: string; args: any }>) {
+  const rest = fakeRest([row(5)], []);
+  rest.rpc = async (fn: string, args: any) => {
+    rpcCalls.push({ fn, args });
+    return [WINDOW];
+  };
+  return rest;
+}
+
+Deno.test('anomaly candidates: windows_from / windows_to add the windows with canonical reasons and context', async () => {
+  const calls: Array<{ fn: string; args: any }> = [];
+  const res = await handleScoresRequest(get('since=0&windows_from=1791406800&windows_to=1791414000'),
+    { rest: windowsRest(calls), cfg });
+  assertEquals(res.status, 200, await res.clone().text());
+  const body = await res.json();
+  assertEquals(body.candidates.map((c: any) => c.result_revision), [5], 'candidates unchanged');
+  assertEquals(body.cursor, 5);
+  assertEquals(body.windows, [WINDOW]);
+  assertEquals(body.reason_codes_version, 'data-reason-1');
+  assertEquals(calls, [{ fn: 'anomaly_windows_read_v1', args: { p_user: USER, p_device: DEVICE,
+    p_from: new Date(1791406800 * 1000).toISOString(), p_to: new Date(1791414000 * 1000).toISOString() } }]);
+});
+
+Deno.test('anomaly candidates: without a windows range the response and the reads are what they were', async () => {
+  const calls: Array<{ fn: string; args: any }> = [];
+  const res = await handleScoresRequest(get('since=0'), { rest: windowsRest(calls), cfg });
+  const body = await res.json();
+  assertEquals(Object.keys(body).sort(), ['candidates', 'cursor', 'identity']);
+  assertEquals(calls.length, 0, 'no window read unless asked');
+});
+
+Deno.test('anomaly candidates: a malformed windows range is 400', async () => {
+  for (const q of ['windows_from=10', 'windows_to=10', 'windows_from=10&windows_to=10', 'windows_from=a&windows_to=20',
+                   `windows_from=0&windows_to=${3 * 86400 + 1}`]) {
+    let threw = '';
+    try { parseAnomalyCandidatesQuery(new URLSearchParams(q)); } catch (e: any) { threw = e.code; }
+    assertEquals(threw, 'invalid_windows_range', q);
+  }
+  assertEquals(parseAnomalyCandidatesQuery(new URLSearchParams(`windows_from=0&windows_to=${3 * 86400}`)).windows,
+    { from: new Date(0).toISOString(), to: new Date(3 * 86400 * 1000).toISOString() });
+  const res = await handleScoresRequest(get('windows_from=20&windows_to=10'), { rest: windowsRest([]), cfg });
+  assertEquals(res.status, 400);
+  assertEquals((await res.json()).error, 'invalid_windows_range');
+});

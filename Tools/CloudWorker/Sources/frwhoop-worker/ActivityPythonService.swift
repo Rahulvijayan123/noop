@@ -799,7 +799,8 @@ final class ActivityPythonService {
     /// model was up, claimed jobs and failed every one of them.) An explicit `model_available: false` also
     /// counts as unavailable, and neither signal can override the other into "available".
     static let unavailableModelStatuses: Set<String> = ["model_missing", "missing", "hart_unavailable",
-                                                        "inertia_unavailable", "eldernet_unavailable"]
+                                                        "inertia_unavailable", "eldernet_unavailable",
+                                                        "recgym_unavailable"]
 
     static func parsePing(_ obj: [String: Any]) -> PingStatus {
         let ok = (obj["ok"] as? Bool) ?? false

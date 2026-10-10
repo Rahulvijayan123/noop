@@ -11,17 +11,16 @@ import Foundation
 /// * Temperature / respiration: the sleep references while asleep. Awake values have no reference (room, clothing,
 ///   talking dominate), so nothing is drawn.
 /// * SpO₂: sleep mean while asleep, awake-rest mean while awake still.
-/// * No expectation (nil) while vigorous, during recovery (30 min after vigorous, 10 min after walking — the Layer 1
-///   steady-state rule), for 2 minutes after a posture / sleep transition, in unknown context, or when the matching
-///   reference is not yet established. A person's baseline has to be learned before it can be drawn; until then the
+/// * Exercise session / recovery (rule exercise-session-2): the person's own session and recovery HR references.
+/// * No expectation (nil) while moving, while settling for a resting reference (2 min after an isolated movement
+///   minute, 10 min after a movement bout or walking), for 2 minutes after a posture / sleep transition, in unknown
+///   context, or when the matching reference is not yet established ("learning"). A person's baseline has to be learned before it can be drawn; until then the
 ///   Watchdog shows the measurement without an expected band.
 ///
 /// Scale per minute = √(between-day² + within-day²) of the reference (within-day unknown → assumed equal to the
 /// between-day spread: conservative). HRV references are on ln: center e^c, half-width e^c·sinh(s).
 public enum WatchdogExpectation {
     public static let version = "baseline-\(LongitudinalBaseline.V2.paramSet)"
-    static let recoveryAfterEffortS = 30 * 60
-    static let recoveryAfterWalkingS = 10 * 60
 
     static func series(kind: WatchdogMinuteContextKind, posture: LBPosture?, channel: String) -> [LBSeries] {
         switch (kind, channel) {
@@ -37,13 +36,13 @@ public enum WatchdogExpectation {
         }
     }
 
-    /// True when a still minute is not yet at steady state (or the context is not one with a reference).
+    /// True when a still minute is not yet at steady state for a resting reference: a transition, or the resolver's
+    /// settle (2 min after an isolated movement minute, 10 min after a movement bout or walking). Exercise sessions
+    /// and their recovery have their own references and need no settle.
     static func settling(_ c: WatchdogMinuteContext) -> Bool {
         if c.recentTransition { return true }
         guard c.kind == .awakeStill else { return false }
-        if let e = c.sinceEffortS, e < recoveryAfterEffortS { return true }
-        if let w = c.sinceWalkingS, w < recoveryAfterWalkingS { return true }
-        return false
+        return c.settling
     }
 
     public struct Track: Equatable, Sendable {

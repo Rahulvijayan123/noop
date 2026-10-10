@@ -181,7 +181,7 @@ Deno.test('coach memories: GET keeps the original order and default limit, skips
   assertEquals(body.memories.length, 50);
   assert(body.memories.every((m: any, i: number, a: any[]) => i === 0 || a[i - 1].importance >= m.importance));
   assert(!body.memories.some((m: any) => m.id === retired.id || m.content === 'Theirs'));
-  assertEquals(Object.keys(body.memories[0]).sort(), ['confirmations', 'content', 'createdAt', 'id', 'importance', 'source', 'topic', 'updatedAt']);
+  assertEquals(Object.keys(body.memories[0]).sort(), ['confirmations', 'content', 'createdAt', 'id', 'importance', 'source', 'topic', 'updatedAt', 'version']);
   assertEquals((await h.json('memories?limit=200')).body.memories.length, 60);
   assertEquals((await h.json('memories?limit=5000')).body.memories.length, 60);
   h.db.memory(USER, 'Knee pain on stairs', { topic: 'injury' });
@@ -298,35 +298,133 @@ Deno.test('coach memories: a save that updates a row is version-guarded; when an
   assertEquals([again.kept, again.memory.content], [true, 'User has a sore left knee and ices it after runs']);
 });
 
-Deno.test("coach memories: PATCH edits the owner's memory, version-guarded and audited as the user's", async () => {
+// ------------------------------------------------------------------------------------------------
+// Edits from the memory sheet, facts the user adds there, and automatic saves (PATCH, source:'user', auto:true)
+// ------------------------------------------------------------------------------------------------
+
+const patch = (h: any, id: string, body: unknown, token = 'noop_personal') => h.json(`memories/${id}`, { method: 'PATCH', body, token });
+const stateOf = (h: any, user = USER) => h.db.rows('coach_user_state').find((s: any) => s.user_id === user);
+
+Deno.test('coach memories: PATCH edits the stored row in place, version-guarded, and every read returns the new text', async () => {
   const h = await harness();
-  const run = (await save(h, { content: 'User runs on Tuesdays', topic: 'routine', importance: 2 })).body.memory;
-  const edit = (id: string, body: unknown, token = 'noop_personal') => h.json(`memories/${id}`, { method: 'PATCH', body, token });
+  const swim = (await save(h, { content: 'User swims on Tuesdays', topic: 'routine', importance: 3 })).body.memory;
+  assertEquals([swim.version, swim.source], [1, 'tool']);
+  Object.assign(stateOf(h), { suggestions: [{ text: 'Plan my Tuesday swim' }], suggestions_fingerprint: 'f', suggestions_at: '2026-10-09T08:00:00Z' });
+  const revision = stateOf(h).memory_revision;
 
-  const res = await edit(run.id, { content: '  User runs on Tuesdays and Fridays ' });
-  assertEquals(res.status, 200);
-  assertEquals([res.body.memory.id, res.body.memory.content, res.body.memory.topic, res.body.memory.importance],
-    [run.id, 'User runs on Tuesdays and Fridays', 'routine', 2]);
-  assertEquals(h.db.activeMemories().map((m) => [m.content, m.version]), [['User runs on Tuesdays and Fridays', 2]]);
-  const event = h.db.rows('coach_memory_events').find((e) => e.op === 'update')!;
-  assertEquals([event.actor, event.before.content, event.after.content], ['user', 'User runs on Tuesdays', 'User runs on Tuesdays and Fridays']);
-  const call = h.db.rpcCalls.find((c) => c.name === 'coach_memory_apply_v1' && c.args.p_ops[0].op === 'update')!;
-  assertEquals(call.args.p_ops[0].expect_version, 1);
+  const edited = await patch(h, swim.id, { content: ' User swims  on\nThursdays\u0000 ', version: 1 });
+  assertEquals(edited.status, 200);
+  assertEquals([edited.body.memory.id, edited.body.memory.content, edited.body.memory.version, edited.body.memory.source, edited.body.memory.topic],
+    [swim.id, 'User swims on Thursdays', 2, 'user', 'routine'], 'stored text is screened (NUL dropped, one line) and the row is the user\'s own');
+  // The store itself changed: one row, the new text, and nothing that still says Tuesdays.
+  assertEquals(h.db.rows('coach_memory_items').filter((m: any) => m.user_id === USER).map((m: any) => [m.id, m.content, m.version, m.source]),
+    [[swim.id, 'User swims on Thursdays', 2, 'user']]);
+  const event = h.db.rows('coach_memory_events').find((e: any) => e.op === 'update' && e.memory_id === swim.id);
+  assertEquals([event.actor, event.reason, event.tokens, event.before.content, event.after.content],
+    ['user', 'user_edit', memoryTokens('User swims on Tuesdays'), undefined, 'User swims on Thursdays'], 'an edit tombstone, without the old text');
+  assert(!JSON.stringify(h.db.rows('coach_memory_events')).includes('Tuesdays'), 'no event keeps the old wording');
+  const call = h.db.rpcCalls.find((c: any) => c.name === 'coach_memory_apply_v1' && c.args.p_ops[0].op === 'update')!;
+  assertEquals([call.args.p_actor, call.args.p_ops[0].expect_version], ['user', 1]);
+  assertEquals(stateOf(h).memory_revision, revision + 1, 'a routine fact of importance 3 still moves the revision when the user edits it');
+  assertEquals([stateOf(h).suggestions, stateOf(h).suggestions_fingerprint], [[], null], 'the cached starters may quote the old wording');
 
-  assertEquals((await edit(run.id, { content: 'Hijack' }, 'noop_other')).status, 404, "another owner's memory is not found");
-  assertEquals(h.db.activeMemories()[0].content, 'User runs on Tuesdays and Fridays');
-  for (const bad of [{ content: '' }, { content: 'x'.repeat(501) }, {}]) assertEquals((await edit(run.id, bad)).status, 400);
-  assertEquals((await edit('not-a-uuid', { content: 'x' })).status, 400);
+  assertEquals((await h.json('memories')).body.memories.map((m: any) => [m.content, m.version]), [['User swims on Thursdays', 2]]);
+  assertEquals((await h.json('memories?q=swim')).body.memories.map((m: any) => [m.content, m.version]), [['User swims on Thursdays', 2]]);
+  const manifest = (await h.json('context', { method: 'POST', body: { question: 'When do I swim?' } })).body;
+  assertEquals(manifest.memories.map((m: any) => [m.content, m.version, m.source]), [['User swims on Thursdays', 2, 'user']]);
+  assertEquals(manifest.memoryRevision, revision + 1);
 
+  // Another writer got there first: 409 with the row as it is now; nothing written.
+  const stale = await patch(h, swim.id, { content: 'User swims on Fridays', version: 1 });
+  assertEquals([stale.status, stale.body.error, stale.body.memory.content, stale.body.memory.version], [409, 'version_conflict', 'User swims on Thursdays', 2]);
+  // Importance or topic alone: no tombstone (the text did not change).
+  assertEquals((await patch(h, swim.id, { importance: 5, version: 2 })).body.memory.importance, 5);
+  assertEquals((await patch(h, swim.id, { topic: 'Training', version: 3 })).body.memory.topic, 'training');
+  assertEquals(h.db.rows('coach_memory_events').filter((e: any) => e.reason === 'user_edit').length, 1);
+  assertEquals(h.db.activeMemories()[0].version, 4);
+
+  for (const bad of [{ version: 4 }, { content: '', version: 4 }, { content: ' \u0000 ', version: 4 }, { content: 'x'.repeat(501), version: 4 },
+    { topic: 'nonsense', version: 4 }, { importance: '5', version: 4 }, { content: 'User swims', version: '4' }, { content: 'User swims' }, [1]]) {
+    assertEquals((await patch(h, swim.id, bad)).status, 400, JSON.stringify(bad));
+  }
+  assertEquals((await patch(h, 'not-a-uuid', { content: 'x', version: 1 })).status, 400);
+  assertEquals((await patch(h, crypto.randomUUID(), { content: 'x', version: 1 })).status, 404);
+  assertEquals((await patch(h, swim.id, { content: 'Mine now', version: 4 }, 'noop_other')).status, 404, "another owner's row is not found");
+  const retired = h.db.memory(USER, 'User used to run ultras', { retired_at: '2026-10-01T00:00:00Z', retired_reason: 'merged' });
+  assertEquals((await patch(h, retired.id, { content: 'User runs ultras', version: 1 })).status, 404);
+  await h.json(`memories/${swim.id}`, { method: 'DELETE' });
+  assertEquals((await patch(h, swim.id, { content: 'User swims on Mondays', version: 4 })).status, 404, 'a forgotten memory stays forgotten');
+  assertEquals(h.db.activeMemories(), []);
+});
+
+Deno.test('coach memories: a PATCH that races another writer answers 409 or 404 from the row as it is after the write', async () => {
+  const h = await harness();
+  const goal = (await save(h, { content: "User's marathon goal is 3:45", topic: 'goal' })).body.memory;
   const rpc = h.rest.rpc;
   h.rest.rpc = async (name: string, args: any) => {
-    if (name === 'coach_memory_apply_v1' && args.p_ops?.[0]?.op === 'update' && args.p_actor === 'user') {
-      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'update', id: run.id, content: 'User runs on Fridays' }], p_actor: 'curator' });
+    if (name === 'coach_memory_apply_v1' && args.p_actor === 'user' && args.p_ops?.[0]?.op === 'update') {
+      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'update', id: goal.id, content: "User's marathon goal is 3:40" }], p_actor: 'tool' });
     }
     return await rpc(name, args);
   };
-  assertEquals((await edit(run.id, { content: 'User runs daily' })).status, 409, 'a change made after the read is never overwritten');
-  h.rest.rpc = rpc;
-  await h.json(`memories/${run.id}`, { method: 'DELETE' });
-  assertEquals((await edit(run.id, { content: 'User runs daily' })).status, 404, 'a forgotten memory cannot be edited back');
+  const raced = await patch(h, goal.id, { content: "User's marathon goal is 3:30", version: 1 });
+  assertEquals([raced.status, raced.body.memory.content, raced.body.memory.version], [409, "User's marathon goal is 3:40", 2]);
+  h.rest.rpc = async (name: string, args: any) => {
+    if (name === 'coach_memory_apply_v1' && args.p_actor === 'user' && args.p_ops?.[0]?.op === 'update') {
+      await rpc('coach_memory_apply_v1', { p_user: USER, p_ops: [{ op: 'forget', id: goal.id }], p_actor: 'user' });
+    }
+    return await rpc(name, args);
+  };
+  assertEquals((await patch(h, goal.id, { content: "User's marathon goal is 3:30", version: 2 })).status, 404);
+});
+
+Deno.test('coach memories: an automatic save never brings back a forgotten fact or an edit\'s old wording, nor rewords the user\'s own', async () => {
+  const h = await harness();
+  const dog = (await save(h, { content: 'User has a dog named Max', topic: 'lifestyle' })).body.memory;
+  await h.json(`memories/${dog.id}`, { method: 'DELETE' });
+  for (const content of ['User has a dog named Max', 'User has a dog']) {
+    const res = await save(h, { content, topic: 'lifestyle', auto: true });
+    assertEquals([res.status, res.body], [200, { skipped: 'forgotten' }], content);
+  }
+  assertEquals(h.db.activeMemories(), []);
+
+  // An edit's old wording is a tombstone too.
+  const swim = (await save(h, { content: 'User swims on Tuesdays', topic: 'routine' })).body.memory;
+  await patch(h, swim.id, { content: 'User swims on Thursdays', version: 1 });
+  assertEquals((await save(h, { content: 'User swims on Tuesdays', topic: 'routine', auto: true })).body, { skipped: 'forgotten' });
+  // A note that says more about the user's own memory confirms it; it never rewords it.
+  const more = (await save(h, { content: 'User swims on Thursdays at the lake', topic: 'routine', auto: true })).body;
+  assertEquals([more.deduped, more.updated, more.memory.content, more.memory.confirmations], [true, undefined, 'User swims on Thursdays', 2]);
+  assertEquals(h.db.activeMemories().map((m: any) => [m.content, m.source, m.version]), [['User swims on Thursdays', 'user', 2]]);
+  // Anything else is saved as before (the "Ask Sana" note from a metric screen).
+  const note = (await save(h, { content: 'Wants to understand their heart rate variability (asked Sana from the HRV page)', topic: 'health', auto: true })).body;
+  assertEquals([note.kept, note.memory.source], [true, 'tool']);
+
+  // The explicit paths keep today's contract: Sana's save_memory and the user's own add save a forgotten fact again,
+  // and save_memory may still update the user's row when the user restates it in a chat.
+  assertEquals((await save(h, { content: 'User has a dog named Max', topic: 'lifestyle' })).body.kept, true);
+  const tool = (await save(h, { content: 'User swims on Thursdays at the lake', topic: 'routine' })).body;
+  assertEquals([tool.updated, tool.memory.content, tool.memory.source], [true, 'User swims on Thursdays at the lake', 'user']);
+});
+
+Deno.test('coach memories: a fact the user adds in the memory sheet is theirs: source user, the revision moves, a restatement rewords', async () => {
+  const h = await harness();
+  const revision = () => stateOf(h)?.memory_revision ?? 0;
+  const added = (await save(h, { content: 'User is allergic to peanuts', topic: 'health', importance: 4, source: 'user' })).body;
+  assertEquals([added.kept, added.memory.source, added.memory.version], [true, 'user', 1]);
+  const add = h.db.rows('coach_memory_events').find((e: any) => e.op === 'add' && e.memory_id === added.memory.id);
+  assertEquals(add.actor, 'user');
+  const goal = (await save(h, { content: "User's marathon goal is 3:45", topic: 'goal', importance: 3 })).body.memory;
+  const before = revision();
+  // The user restates a stored fact with a new figure: the row takes the user's words, the old wording a tombstone.
+  const restated = (await save(h, { content: "User's marathon goal is 3:30", topic: 'goal', source: 'user' })).body;
+  assertEquals([restated.updated, restated.memory.id, restated.memory.content, restated.memory.source, restated.memory.version],
+    [true, goal.id, "User's marathon goal is 3:30", 'user', 2]);
+  const edit = h.db.rows('coach_memory_events').find((e: any) => e.op === 'update' && e.memory_id === goal.id);
+  assertEquals([edit.actor, edit.reason, edit.tokens], ['user', 'user_edit', memoryTokens("User's marathon goal is 3:45")]);
+  assertEquals(revision(), before + 1, 'an importance-3 goal still moves it when the user changes it');
+  // Saying what is already stored confirms it.
+  assertEquals((await save(h, { content: 'User is allergic to peanuts', topic: 'health', source: 'user' })).body.deduped, true);
+  assertEquals(revision(), before + 2);
+  assertEquals(h.db.activeMemories().length, 2);
 });

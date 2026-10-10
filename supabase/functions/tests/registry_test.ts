@@ -13,6 +13,7 @@ import {
   recordTimestamp,
 } from '../_shared/registry.ts';
 import { OBJECT_LANE_STREAMS } from '../_shared/keys.ts';
+import { syncPolicyFromEnv } from '../_shared/syncPolicy.ts';
 
 const OBJECT_LANE_PATH = '/functions/v1/push/objects';
 
@@ -128,6 +129,24 @@ Deno.test('capabilities: the objectLane block appears only alongside the streams
     objectLane: lane,
   });
   assert.equal(v11.objectLane, undefined, 'a 1.1 sender must not be told about the object lane');
+});
+
+Deno.test('capabilities: every version carries the sync policy, injected or from the environment', () => {
+  const lane = { endpoint: OBJECT_LANE_PATH, maxObjectBytes: 1024, urlTtlSec: 900 };
+  const relaxed = { required: false, staleAfterHours: 72 };
+  for (const version of ['1.0', '1.1', '1.2', '1.3', '1.5']) {
+    for (const objectLane of [lane, null]) {
+      const injected = capabilitiesBody({ receiverStateId: 'r', streams: advertisedStreams(version), protocolVersion: version,
+        objectLane, syncPolicy: relaxed });
+      assert.deepEqual(injected.syncPolicy, relaxed, `${version}`);
+      assert.notEqual(injected.syncPolicy, relaxed, 'the reply carries its own copy');
+      const defaulted = capabilitiesBody({ receiverStateId: 'r', streams: advertisedStreams(version), protocolVersion: version, objectLane });
+      assert.deepEqual(defaulted.syncPolicy, syncPolicyFromEnv(), `${version}: omitted, the environment decides`);
+    }
+  }
+  // Exactly the two documented keys, whatever the caller hands in.
+  const extra = capabilitiesBody({ receiverStateId: 'r', streams: [], syncPolicy: { required: true, staleAfterHours: 24, x: 1 } as any });
+  assert.deepEqual(Object.keys(extra.syncPolicy).sort(), ['required', 'staleAfterHours']);
 });
 
 Deno.test('negotiateProtocol picks the newest mutually-supported version or refuses', () => {

@@ -107,6 +107,8 @@ const SHARED_REFERENCE_POLICIES = [
   "physiology_feature_defaults.read_versions",
   "physiology_feature_manifests.physiology_feature_manifest_read",
   "physiology_feature_qualifications.read_versions",
+  // The workout-mode catalogue (20261009170000_user_workouts.sql): the same types for every account.
+  "workout_types.workout_types_read",
 ];
 
 /**
@@ -115,6 +117,10 @@ const SHARED_REFERENCE_POLICIES = [
  * function runs under the caller's row-level security.
  */
 const CLIENT_CALLABLE_FUNCTIONS = [
+  // Already shipped, missing from this list (INTEGRATION_HANDOFF.md): an invoker lookup under the caller's RLS
+  // (20261004150000_activity_context_canonical_class.sql) and the owner's own day values, keyed by auth.uid()
+  // (20261008000000_metric_insights.sql).
+  "activity_context_at",
   "continue_legacy_physiology_sleep_override",
   "daily_metrics_steps_recompute",
   "day_bounds",
@@ -132,6 +138,9 @@ const CLIENT_CALLABLE_FUNCTIONS = [
   "get_sync_revision",
   "hr_series_occupied_buckets",
   "local_calendar_date",
+  "metric_insight_day_values_v1",
+  // The caller's own sync health (20261009110000_account_sync_health.sql): keyed by auth.uid(), takes no owner.
+  "my_sync_health_v1",
   "noop_keep_device_owner",
   "physiology_feature_is_canonical",
   "physiology_owned_sleep_overrides",
@@ -201,6 +210,40 @@ const SERVICE_ONLY_FUNCTIONS = [
   "coach_thread_publish_v1",
   "coach_memory_apply_v1",
   "coach_consolidation_claim_v1",
+  // Account sync health (20261009110000_account_sync_health.sql): any account's upload recency, for the coach
+  // status route and operators.
+  "account_sync_health_v1",
+  // Measurement context per minute (20261009130100_measurement_context_minutes.sql): the scores route's read, the
+  // builder, its pg_cron tick and the operator backfill (internal schema, never exposed through PostgREST).
+  "measurement_context_minutes_read_v1",
+  // The phone's per-minute optical evidence (20261009130200_measurement_context_quality_minutes.sql).
+  "measurement_context_quality_upsert_v1",
+  "build_measurement_context_minutes",
+  "build_measurement_context_minutes_v1",
+  "backfill_measurement_context_minutes",
+  "measurement_context_tick_v1",
+  "measurement_context_discover_v1",
+  "measurement_context_process_v1",
+  "measurement_context_quality_v1",
+  "exercise_session_spans_v2",
+  // Phone Watchdog episodes (20261009150000_watchdog_episodes.sql): the scores route's write and read.
+  "watchdog_episodes_upsert_v1",
+  "watchdog_episodes_read_v1",
+  // Strap placement resolution (20261009150100_placement_device_resolution.sql): the scores route's read.
+  "placement_resolved_read_v1",
+  // The anomaly windows behind GET scores/anomaly-candidates (20261009150200_anomaly_windows_read.sql).
+  "anomaly_windows_read_v1",
+  // RecGym exercise windows, shadow (20261009160000_activity_exercise_windows.sql): the worker's fenced publish
+  // and its retention.
+  "publish_activity_exercise_windows",
+  "prune_activity_exercise_windows",
+  // Workout mode (20261009170000_user_workouts.sql): the scores route's write and read, the pipelines' logged-workout
+  // list, the catalogue lookup and the measurement-context builder's seam (internal schema).
+  "user_workouts_upsert_v1",
+  "user_workouts_read_v1",
+  "logged_workouts_v1",
+  "workout_type_for_sport",
+  "measurement_context_logged_workouts_v1",
 ];
 
 Deno.test({
@@ -279,7 +322,7 @@ Deno.test({
           select coalesce(jsonb_agg(has_function_privilege('anon', p.oid, 'EXECUTE')
             or has_function_privilege('authenticated', p.oid, 'EXECUTE')), '[]')
           from pg_proc p join pg_namespace n on n.oid = p.pronamespace
-          where n.nspname = 'public' and p.proname = '${name}'`);
+          where n.nspname in ('public', 'internal') and p.proname = '${name}'`);
         assert.ok(reachable.length > 0, `${name} no longer exists; update the reviewed list`);
         assert.ok(reachable.every((value) => value === false), `${name} is executable by a client`);
       }

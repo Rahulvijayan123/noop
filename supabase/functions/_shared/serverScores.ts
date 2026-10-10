@@ -10,6 +10,19 @@ import {
   submitExposureEvents,
 } from './physiologyContext.ts';
 import { GROUND_TRUTH_LABELS_MAX_BODY_BYTES, submitGroundTruthLabels } from './groundTruthLabels.ts';
+import { REASON_CODES_VERSION } from './reasonCodes.ts';
+import {
+  parseContextMinutesQuery, QUALITY_MINUTES_MAX_BODY_BYTES, readContextMinutes, submitQualityMinutes,
+} from './measurementContext.ts';
+import {
+  WATCHDOG_EPISODES_MAX_BODY_BYTES,
+  parseWatchdogEpisodesQuery,
+  readWatchdogEpisodes,
+  submitWatchdogEpisodes,
+} from './watchdogEpisodes.ts';
+import {
+  USER_WORKOUTS_MAX_BODY_BYTES, parseUserWorkoutsQuery, readUserWorkouts, submitUserWorkouts,
+} from './userWorkouts.ts';
 import type { PushFunctionConfig } from './config.ts';
 import type { SupabaseRest } from './rest.ts';
 
@@ -246,13 +259,25 @@ export async function readSensorBiomarkers({ rest, userId, deviceId, days }: {
 }
 
 /**
- * `GET /anomaly-candidates?since=<result_revision>[&limit=<1..200>]`: anomaly windows published by the VPS model
- * service (TimesFM 3.0 forecast + UniTS reconstruction; supabase/migrations/20261007180000_anomaly_service.sql)
- * for the credential's owner and the resolved device, oldest change first, after the caller's cursor. A candidate
- * is NOT an alert: the phone's verification stage decides (WatchdogVerifier.swift). Retracted rows are returned so
- * the phone can drop them. `cursor` is the newest result_revision returned (or the caller's `since` when none).
+ * `GET /anomaly-candidates?since=<result_revision>[&limit=<1..200>][&windows_from=<unix>&windows_to=<unix>]`: anomaly
+ * windows published by the VPS model service (TimesFM 3.0 forecast + UniTS reconstruction;
+ * supabase/migrations/20261007180000_anomaly_service.sql) for the credential's owner and the resolved device, oldest
+ * change first, after the caller's cursor. A candidate is NOT an alert: the phone's verification stage decides
+ * (WatchdogVerifier.swift). Retracted rows are returned so the phone can drop them. `cursor` is the newest
+ * result_revision returned (or the caller's `since` when none).
+ *
+ * Opt-in (20261009150200): with `windows_from` / `windows_to` (both, at most 3 days) the response also carries
+ * `windows`, every half-hour window the service judged or withheld that starts in the range, oldest first:
+ * `{start_ts, end_ts, usable, reason, context: {kind, mix_basis, minutes, mix}, models: [{model, channel_group,
+ * score, p, usable, reason}]}`. `reason` is canonical (contracts/reason-codes.json data-reason-1:
+ * `{code, certainty, subcode?, legacy}`, `legacy` the service's own value), null for a scored window; `context.mix`
+ * the shares of the window's minutes in an exercise session / recovery / an unconfirmed active period / neither /
+ * unknown, asleep, off the wrist, per activity class and quality class (measurement_context_minutes; null with
+ * `mix_basis: none` when no minute row exists), and `reason_codes_version` names the vocabulary. Without the
+ * parameters the response is unchanged.
  */
 export const ANOMALY_CANDIDATES_MAX_ROWS = 200;
+const ANOMALY_WINDOWS_MAX_RANGE_SECONDS = 3 * 86_400;
 
 export function parseAnomalyCandidatesQuery(params: URLSearchParams) {
   const since = params.get('since') ?? '0';
@@ -261,11 +286,20 @@ export function parseAnomalyCandidatesQuery(params: URLSearchParams) {
   if (!/^\d{1,3}$/.test(limit) || Number(limit) < 1 || Number(limit) > ANOMALY_CANDIDATES_MAX_ROWS) {
     throw fail('invalid_limit', 400);
   }
-  return { since: Number(since), limit: Number(limit) };
+  const from = params.get('windows_from');
+  const to = params.get('windows_to');
+  if (from == null && to == null) return { since: Number(since), limit: Number(limit) };
+  if (from == null || to == null || !/^\d{1,10}$/.test(from) || !/^\d{1,10}$/.test(to)
+      || Number(to) <= Number(from) || Number(to) - Number(from) > ANOMALY_WINDOWS_MAX_RANGE_SECONDS) {
+    throw fail('invalid_windows_range', 400);
+  }
+  return { since: Number(since), limit: Number(limit), windows: {
+    from: new Date(Number(from) * 1000).toISOString(), to: new Date(Number(to) * 1000).toISOString() } };
 }
 
-export async function readAnomalyCandidates({ rest, userId, deviceId, since, limit }: {
-  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; since: number; limit: number;
+export async function readAnomalyCandidates({ rest, userId, deviceId, since, limit, windows }: {
+  rest: Pick<SupabaseRest, 'select'> & Partial<Pick<SupabaseRest, 'rpc'>>; userId: string; deviceId: string;
+  since: number; limit: number; windows?: { from: string; to: string };
 }) {
   const rows = (await rest.select('anomaly_candidates',
     `user_id=eq.${userId}&device_id=eq.${deviceId}&result_revision=gt.${since}` +
@@ -274,7 +308,53 @@ export async function readAnomalyCandidates({ rest, userId, deviceId, since, lim
     `&order=result_revision.asc&limit=${limit}`)) ?? [];
   const list = rows as Array<Record<string, unknown>>;
   const cursor = list.reduce((m, r) => Math.max(m, Number(r.result_revision) || 0), since);
-  return { candidates: list, cursor };
+  if (!windows) return { candidates: list, cursor };
+  const read = await rest.rpc!('anomaly_windows_read_v1', {
+    p_user: userId, p_device: deviceId, p_from: windows.from, p_to: windows.to,
+  });
+  return { candidates: list, cursor, windows: Array.isArray(read) ? read : [], reason_codes_version: REASON_CODES_VERSION };
+}
+
+/** `GET /exercise-windows`: at most a day per request, at most this many windows per page. */
+export const EXERCISE_WINDOWS_MAX_RANGE_SECONDS = 86_400;
+export const EXERCISE_WINDOWS_MAX_ROWS = 5_000;
+
+/**
+ * `GET /exercise-windows?deviceId=<id>&from=<unix s>&to=<unix s>[&limit=<n>]`: the RecGym exercise head's SHADOW windows
+ * (20261009160000_activity_exercise_windows.sql) that start in [from, to), oldest first, owner and device from the
+ * credential. `to - from` is at most a day; a full page carries `next_from` to continue from. Every row says its
+ * release (`release_mode`, always shadow), the placement the strap was declared at and whether the wrist-trained
+ * model supports it. For inspection only: nothing in the app decodes, scores or alerts on these rows.
+ */
+export function parseExerciseWindowsQuery(params: URLSearchParams) {
+  const from = params.get('from');
+  const to = params.get('to');
+  const limit = params.get('limit') ?? String(EXERCISE_WINDOWS_MAX_ROWS);
+  if (from == null || to == null || !/^\d{1,10}$/.test(from) || !/^\d{1,10}$/.test(to)
+      || Number(to) <= Number(from) || Number(to) - Number(from) > EXERCISE_WINDOWS_MAX_RANGE_SECONDS) {
+    throw fail('invalid_range', 400);
+  }
+  if (!/^\d{1,5}$/.test(limit) || Number(limit) < 1 || Number(limit) > EXERCISE_WINDOWS_MAX_ROWS) {
+    throw fail('invalid_limit', 400);
+  }
+  return { from: Number(from), to: Number(to), limit: Number(limit) };
+}
+
+export async function readExerciseWindows({ rest, userId, deviceId, from, to, limit }: {
+  rest: Pick<SupabaseRest, 'select'>; userId: string; deviceId: string; from: number; to: number; limit: number;
+}) {
+  const iso = (t: number) => encodeURIComponent(new Date(t * 1000).toISOString());
+  const rows = ((await rest.select('activity_exercise_windows',
+    `user_id=eq.${userId}&device_id=eq.${deviceId}&window_start=gte.${iso(from)}&window_start=lt.${iso(to)}`
+    + '&select=window_start,window_s,model_id,model_version,weights_sha256,scaler_version,preprocessing_version,'
+    + 'placement,placement_supported,placement_reason,top_class,top_p,p_null,probs,input_sha256,release_mode,'
+    + `input_revision,result_revision,computed_at&order=window_start.asc&limit=${limit}`)) ?? []) as Array<Record<string, any>>;
+  const windows: Array<Record<string, any>> = rows.map((r) => ({ ...r, release_mode: 'shadow',
+    input_revision: String(r.input_revision), result_revision: String(r.result_revision) }));
+  const last = windows.at(-1);
+  const nextFrom = windows.length === limit && last
+    ? Math.floor(Date.parse(String(last.window_start)) / 1000) + 1 : null;
+  return { windows, next_from: nextFrom, release_mode: 'shadow' };
 }
 
 const GAIT_WINDOWS_HEAD = 'day,mode,model_version,hop_s,window_s,gait_threshold,n_windows,n_gait,n_prefiltered,'
@@ -372,6 +452,25 @@ export async function readGaitWindows({ rest, userId, deviceId, days, known, aut
   return out;
 }
 
+/**
+ * `GET /placement?deviceId=<id>`: the strap's resolved placement timeline (20261009150100): the declarations on the
+ * strap, its aliases and the installations provably bound to it (the phone's own `installation:<source>:my-whoop`
+ * declarations included), later declaration winning, plus the owner's device-less declarations (`scope: account`).
+ * Each piece names the device it was declared on (external id) and what it means for a wrist-trained model
+ * (`wrist_model_reason`: none for wrist, `placement_unsupported` confirmed for bicep / other, `placement_unknown`
+ * for unknown). Null when no deviceId was asked for; the device resolves like every other route's.
+ */
+export async function readResolvedPlacement({ rest, userId, sourceId, externalDeviceId }: {
+  rest: Pick<SupabaseRest, 'select' | 'rpc'>; userId: string; sourceId: string; externalDeviceId: string | null;
+}) {
+  if (externalDeviceId == null) return null;
+  if (!isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
+  const deviceId = await findNoopDevice({ rest, userId, sourceId, externalDeviceId });
+  if (!deviceId) throw fail('device_registration_pending', 409);
+  const intervals = await rest.rpc('placement_resolved_read_v1', { p_user: userId, p_device: deviceId });
+  return { device_id: externalDeviceId, intervals: Array.isArray(intervals) ? intervals : [] };
+}
+
 async function boundedBody(req: Request, maxBytes = 8192): Promise<any> {
   const bytes = new Uint8Array(await req.arrayBuffer());
   if (bytes.length > maxBytes) throw fail('payload_too_large', 413);
@@ -440,6 +539,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isSeries = req.method === 'GET' && route === '/series';
   const isActivityWindows = req.method === 'GET' && route === '/activity-windows';
   const isGaitWindows = req.method === 'GET' && route === '/gait-windows';
+  // RecGym exercise windows, shadow only (20261009160000): one device, a time range.
+  const isExerciseWindows = req.method === 'GET' && route === '/exercise-windows';
   const isDiagnostics = req.method === 'GET' && route === '/diagnostics';
   const isRegister = req.method === 'POST' && route === '/devices';
   const isOverride = req.method === 'POST' && route === '/sleep-overrides';
@@ -459,10 +560,23 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
   const isAnomalyCandidates = req.method === 'GET' && route === '/anomaly-candidates';
   // Metric explanations (20261008000000_metric_insights.sql): account-level, no device.
   const isInsights = req.method === 'POST' && route === '/insights';
+  // Per-minute measurement context (20261009130100): one device (deviceId) or every device of the owner.
+  const isContextMinutes = req.method === 'GET' && route === '/context-minutes';
+  // The phone's per-minute optical evidence (20261009130200); device_id in the body, like /placement.
+  const isQualityMinutes = req.method === 'POST' && route === '/quality-minutes';
+  // Phone Watchdog episodes + annotations (20261009150000): POST with device_id in the body like /placement; GET
+  // for one device (deviceId) or every device of the owner, like /context-minutes.
+  const isWatchdogEpisodesPost = req.method === 'POST' && route === '/watchdog-episodes';
+  const isWatchdogEpisodesGet = req.method === 'GET' && route === '/watchdog-episodes';
+  // Workout mode (20261009170000): the wearer's logged workouts. POST with device_id in the body like /watchdog-episodes;
+  // GET for one device (deviceId) or every device of the owner.
+  const isWorkoutsPost = req.method === 'POST' && route === '/workouts';
+  const isWorkoutsGet = req.method === 'GET' && route === '/workouts';
   if (!isRead && !isDays && !isSeries && !isActivityWindows && !isGaitWindows && !isDiagnostics && !isRegister && !isOverride
       && !isComputeSubmit && !isComputeRead && !isPlacementPost && !isPlacementGet && !isStretchFeedback
       && !isContext && !isContextHistory && !isExposurePost && !isExposureGet && !isGroundTruthLabels
-      && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights) {
+      && !isSensorBiomarkers && !isAnomalyCandidates && !isInsights && !isContextMinutes && !isQualityMinutes
+      && !isWatchdogEpisodesPost && !isWatchdogEpisodesGet && !isExerciseWindows && !isWorkoutsPost && !isWorkoutsGet) {
     return Response.json({ error: 'method_not_allowed' }, { status: 405 });
   }
   if (!rest.configured) return Response.json({ error: 'service_role_unconfigured' }, { status: 503 });
@@ -499,16 +613,21 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     }
     const requestBody = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
         || isPlacementGet || isContext || isContextHistory || isExposureGet || isSensorBiomarkers
-        || isAnomalyCandidates
+        || isAnomalyCandidates || isContextMinutes || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? null : await boundedBody(req, isStretchFeedback ? STRETCH_FEEDBACK_MAX_BODY_BYTES
         : isExposurePost ? EXPOSURE_MAX_BODY_BYTES
-        : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES : undefined);
+        : isGroundTruthLabels ? GROUND_TRUTH_LABELS_MAX_BODY_BYTES
+        : isQualityMinutes ? QUALITY_MINUTES_MAX_BODY_BYTES
+        : isWatchdogEpisodesPost ? WATCHDOG_EPISODES_MAX_BODY_BYTES
+        : isWorkoutsPost ? USER_WORKOUTS_MAX_BODY_BYTES : undefined);
     const externalDeviceId = isRead || isDays || isSeries || isActivityWindows || isGaitWindows || isDiagnostics || isComputeRead
-        || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates
+        || isContext || isContextHistory || isSensorBiomarkers || isAnomalyCandidates || isContextMinutes
+        || isWatchdogEpisodesGet || isExerciseWindows || isWorkoutsGet
       ? url.searchParams.get('deviceId')
       : (isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet || isGroundTruthLabels
         || isInsights) ? null
-      : isPlacementPost ? (requestBody?.device_id ?? null)
+      : (isPlacementPost || isQualityMinutes || isWatchdogEpisodesPost || isWorkoutsPost)
+        ? (requestBody?.device_id ?? null)
       : requestBody?.deviceId;
     // Placement is owner-scoped: GET takes no device, and a POST without device_id is a
     // user-level declaration (the RPC's NULL device scope). Stretch feedback and ground-truth labels
@@ -516,6 +635,7 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     // request-level device.
     if (!isPlacementGet && !isStretchFeedback && !isExposurePost && !isExposureGet && !isGroundTruthLabels
         && !isInsights && !(isPlacementPost && externalDeviceId == null)
+        && !((isContextMinutes || isWatchdogEpisodesGet || isWorkoutsGet) && externalDeviceId == null)
         && !isSafeExternalDeviceId(externalDeviceId)) throw fail('invalid_device_id', 400);
     const lookup = { userId: user.id, sourceId: user.sourceId, externalDeviceId };
     // Placement resolves its own device scope inside the handlers (POST with device_id,
@@ -523,7 +643,8 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
     const deviceId = isRegister
       ? await createNoopDeviceResolver({ rest })(lookup)
       : (isPlacementPost || isPlacementGet || isStretchFeedback || isExposurePost || isExposureGet
-        || isGroundTruthLabels || isInsights) ? null
+        || isGroundTruthLabels || isInsights
+        || ((isContextMinutes || isWatchdogEpisodesGet || isWorkoutsGet) && externalDeviceId == null)) ? null
       : await findNoopDevice({ rest, ...lookup });
     const project = _cfg.supabaseUrl.replace(/\/+$/,'');
     const identity = { userId: user.id, sourceId: user.sourceId, deviceId, externalDeviceId, project };
@@ -566,6 +687,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       if (!deviceId) throw fail('device_registration_pending', 409);
       const query = parseAnomalyCandidatesQuery(url.searchParams);
       const page = await readAnomalyCandidates({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isExerciseWindows) {
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const query = parseExerciseWindowsQuery(url.searchParams);
+      const page = await readExerciseWindows({ rest, userId: user.id, deviceId, ...query });
       return Response.json({ ...page, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isGaitWindows) {
@@ -628,6 +755,50 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
       // every other score route, no new auth path.
       const outcome = await submitStretchFeedback({ rest, userId: user.id, sourceId: user.sourceId, body: requestBody });
       return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isQualityMinutes) {
+      // Owner from the credential, device the caller's own (findNoopDevice; the RPC checks both again).
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const outcome = await submitQualityMinutes({ rest, userId: user.id, deviceId, body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWatchdogEpisodesPost) {
+      // The phone's Watchdog journal for the strap it names (findNoopDevice: the canonical strap device, alias-aware);
+      // owner and uploading installation from the credential. The RPC checks owner and device again.
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const outcome = await submitWatchdogEpisodes({ rest, userId: user.id, sourceId: user.sourceId, deviceId,
+        body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWatchdogEpisodesGet) {
+      if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
+      const query = parseWatchdogEpisodesQuery(url.searchParams);
+      const read = await readWatchdogEpisodes({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...(externalDeviceId != null ? { device_id: externalDeviceId } : {}), ...read },
+        { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWorkoutsPost) {
+      // The wearer's logged workouts for the strap the body names (findNoopDevice: the canonical strap device, alias-
+      // aware); owner and uploading installation from the credential. The RPC checks owner, device and types again.
+      if (!deviceId) throw fail('device_registration_pending', 409);
+      const outcome = await submitUserWorkouts({ rest, userId: user.id, sourceId: user.sourceId, deviceId,
+        body: requestBody });
+      return Response.json(outcome, { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isWorkoutsGet) {
+      if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
+      const query = parseUserWorkoutsQuery(url.searchParams);
+      const read = await readUserWorkouts({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...(externalDeviceId != null ? { device_id: externalDeviceId } : {}), ...read },
+        { headers: { 'cache-control': 'no-store' } });
+    }
+    if (isContextMinutes) {
+      // The owner's per-minute measurement context: the credential's owner, and the caller's own device when one
+      // is named (findNoopDevice; the RPC checks both again), else every device of the owner.
+      if (externalDeviceId != null && !deviceId) throw fail('device_registration_pending', 409);
+      const query = parseContextMinutesQuery(url.searchParams);
+      const minutes = await readContextMinutes({ rest, userId: user.id, deviceId, ...query });
+      return Response.json({ ...minutes, identity }, { headers: { 'cache-control': 'no-store' } });
     }
     if (isContext || isContextHistory) {
       // One device-day's context document, or the device's episodes/bouts/daily values over a range. The
@@ -703,7 +874,12 @@ export async function handleScoresRequest(req: Request, { rest, cfg: _cfg, fetch
         source: r.source,
         revision: r.revision,
       }));
-      return Response.json({ intervals }, { headers: { 'cache-control': 'no-store' } });
+      // `deviceId` (optional): the strap's placement as every server lane now reads it
+      // (20261009150100 placement_resolved_read_v1).
+      const resolved = await readResolvedPlacement({ rest, userId: user.id, sourceId: user.sourceId,
+        externalDeviceId: url.searchParams.get('deviceId') });
+      return Response.json({ intervals, ...(resolved ? { resolved } : {}) },
+        { headers: { 'cache-control': 'no-store' } });
     }
     if (isOverride) {
       if (!deviceId) throw fail('device_registration_pending', 409);

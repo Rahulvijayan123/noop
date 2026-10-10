@@ -25,7 +25,8 @@ import WhoopProtocol
 /// (`saturated_delta`); a record whose delta count is not 24 is withheld
 /// (`unsupported_native_rate`) and the DETECTED rate is reported, never
 /// assumed; empty slots and dark blocks (drive == 0 when an optical config is
-/// carried) are withheld (`artifact_unavailable`). Emitted seconds use the one
+/// carried) are withheld (`no_verified_input`; stored documents written before
+/// 2026-10-09 say `artifact_unavailable` for the same seconds). Emitted seconds use the one
 /// grid `ppgGrid` names (docs/model-integration/ppg-transport.md).
 ///
 /// This module also builds the sidecar request input (CONTRACTS §4): for a
@@ -70,7 +71,15 @@ enum SensorBiomarkerInputs {
     static let reasonMissingPpgAnchor = "missing_ppg_anchor"
     static let reasonUnsupportedNativeRate = "unsupported_native_rate"
     static let reasonSaturatedDelta = "saturated_delta"
-    static let reasonArtifactUnavailable = "artifact_unavailable"
+    /// No verified input reached the calculation (an empty slot, a dark control block, a day or a
+    /// modality with no verified object). Canonical `no_verified_input` (contracts/reason-codes.json).
+    static let reasonNoVerifiedInput = "no_verified_input"
+    /// The model the sidecar was asked to run did not answer for a family it was sent. Canonical
+    /// `model_unavailable`.
+    static let reasonModelUnavailable = "model_unavailable"
+    /// What both of the above were stored as before 2026-10-09. Still read (old day documents keep it);
+    /// never written.
+    static let legacyReasonArtifactUnavailable = "artifact_unavailable"
 
     // MARK: - Object kinds
 
@@ -821,9 +830,9 @@ enum SensorBiomarkerInputs {
     }
 
     /// Reconstruct one record into a second. Order of resolution (fail-closed):
-    /// empty slot → `artifact_unavailable`; delta count ≠ 24 →
+    /// empty slot → `no_verified_input`; delta count ≠ 24 →
     /// `unsupported_native_rate` (detected, never assumed); drive == 0 dark
-    /// block → `artifact_unavailable`; missing anchor → `missing_ppg_anchor`;
+    /// block → `no_verified_input`; missing anchor → `missing_ppg_anchor`;
     /// any i16-rail delta or a reconstruction outside ±2^19 →
     /// `saturated_delta`; otherwise the second is emitted on `grid`.
     ///
@@ -840,9 +849,9 @@ enum SensorBiomarkerInputs {
                       outOfDomain: outOfDomain, deltaCount: record.samples.count, darkBlock: isDark,
                       format: record.format)
         }
-        if record.samples.isEmpty { return second([], reasonArtifactUnavailable, dark: dark) }
+        if record.samples.isEmpty { return second([], reasonNoVerifiedInput, dark: dark) }
         if record.samples.count != ppgDeltasPerRecord { return second([], reasonUnsupportedNativeRate, dark: dark) }
-        if dark { return second([], reasonArtifactUnavailable, dark: true) }
+        if dark { return second([], reasonNoVerifiedInput, dark: true) }
         guard let base = record.baseCode else { return second([], reasonMissingPpgAnchor) }
         let deltas = record.samples.map(Int.init)
         let saturated = deltas.contains { $0 == Int(Int16.min) || $0 == Int(Int16.max) }

@@ -190,7 +190,7 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertThrowsError(try SensorBiomarkerInputs.parseObjectRows([badKind], userId: "U", deviceId: "D")) { e in
             XCTAssertEqual(e as? SensorBiomarkerInputs.ResolutionError, .unknownKind("rawBatch"))
         }
-        // No rows -> empty resolution (the lane answers artifact_unavailable), not an error.
+        // No rows -> empty resolution (the lane answers no_verified_input), not an error.
         let empty = try SensorBiomarkerInputs.parseObjectRows([], userId: "U", deviceId: "D")
         XCTAssertTrue(empty.isEmpty)
     }
@@ -282,7 +282,9 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         XCTAssertEqual(reconstruction.seconds.count, 11)
         XCTAssertEqual(reconstruction.reasonCounts[SensorBiomarkerInputs.reasonMissingPpgAnchor], 9)
         XCTAssertEqual(reconstruction.reasonCounts[SensorBiomarkerInputs.reasonUnsupportedNativeRate], 1)
-        XCTAssertEqual(reconstruction.reasonCounts[SensorBiomarkerInputs.reasonArtifactUnavailable], 1)
+        XCTAssertEqual(reconstruction.reasonCounts[SensorBiomarkerInputs.reasonNoVerifiedInput], 1)
+        XCTAssertNil(reconstruction.reasonCounts[SensorBiomarkerInputs.legacyReasonArtifactUnavailable],
+                     "the legacy reason is never written")
         XCTAssertTrue(reconstruction.runs.isEmpty, "no emitted seconds -> no runs")
         XCTAssertNil(reconstruction.nativeRateHz, "25-delta records make the native rate unverified")
     }
@@ -551,10 +553,10 @@ final class SensorBiomarkerInputsTests: XCTestCase {
         let inputs = records.map { ppgInput(from: $0) }
         let reconstruction = SensorBiomarkerInputs.reconstructPPG(records: inputs)
         let empty = try XCTUnwrap(reconstruction.seconds.first { $0.ts == 1008 })
-        XCTAssertEqual(empty.withheldReason, SensorBiomarkerInputs.reasonArtifactUnavailable)
+        XCTAssertEqual(empty.withheldReason, "no_verified_input")
         XCTAssertEqual(empty.deltaCount, 0)
         let dark = try XCTUnwrap(reconstruction.seconds.first { $0.ts == 1011 })
-        XCTAssertEqual(dark.withheldReason, SensorBiomarkerInputs.reasonArtifactUnavailable)
+        XCTAssertEqual(dark.withheldReason, "no_verified_input")
         XCTAssertTrue(dark.darkBlock, "drive == 0 marks the block dark")
         XCTAssertTrue(dark.samples.isEmpty, "a dark block is never a pulsatile channel")
     }

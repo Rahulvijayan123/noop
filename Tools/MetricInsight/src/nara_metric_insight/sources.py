@@ -220,11 +220,14 @@ class Sources:
         return self._get("exposures", load)
 
     def memory(self) -> list[dict[str, Any]]:
-        """Per-user coach memory (service-only table): explicit owner filter, read only."""
+        """Per-user coach memory (service-only table): explicit owner filter, read only. Active rows only: a memory
+        the curator retired, a consolidation merged away or the cap evicted is no longer one Sana uses (the inputs
+        fingerprint, internal.metric_insight_inputs, reads the same rows)."""
         def load() -> list[dict[str, Any]]:
             def read(cur):
                 cur.execute(
                     "select topic, content, importance from public.coach_memory_items where user_id = %s "
+                    "and retired_at is null "
                     "order by importance desc, created_at desc, id limit %s", (self.user_id, MEMORY_ITEMS))
                 return list(cur.fetchall())
             return self.db.service(read, read_only=True)

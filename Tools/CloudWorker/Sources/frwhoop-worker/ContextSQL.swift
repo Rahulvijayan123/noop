@@ -274,8 +274,24 @@ enum ContextSQL {
          order by (x.value ->> 'ts')::bigint, coalesce(x.value ->> 'kind', ''), c.result_revision
         """
 
-    /// Placement records in effect anywhere in the read window: the device's own and the owner's device-less
-    /// (user-level) declarations. Nothing before the first record is invented.
+    /// Placement in effect anywhere in the read window, resolved for the strap (20261009150100,
+    /// `internal.placement_intervals_for_device_v1`): the declarations on the strap, its aliases and the installation
+    /// devices provably bound to it (the phone declares under its installation-scoped local id) as non-overlapping
+    /// device pieces, later declaration winning, and the owner's device-less declarations as `user_level`. Nothing
+    /// before the first record is invented.
+    static let placementsResolved = """
+        select extract(epoch from effective_start)::bigint::text as s,
+               coalesce(extract(epoch from effective_end)::bigint::text, '') as e,
+               placement, source, revision::text as revision,
+               ceil(extract(epoch from recorded_at))::bigint::text as at,
+               (scope = 'account')::text as user_level
+          from internal.placement_intervals_for_device_v1($1::uuid, $2::uuid, to_timestamp($3::bigint),
+                                                          to_timestamp($4::bigint))
+         order by effective_start, (scope = 'account') desc, revision, recorded_at, interval_id
+        """
+
+    /// The read before the resolver (a database without 20261009150100): the device's own and the owner's
+    /// device-less (user-level) declarations only.
     static let placements = """
         select extract(epoch from effective_start)::bigint::text as s,
                coalesce(extract(epoch from effective_end)::bigint::text, '') as e,

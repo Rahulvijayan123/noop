@@ -88,6 +88,18 @@ import FoundationNetworking
 //                                FRWHOOP_ACTIVITY_LEASE_SECONDS); the child gets --timeout 5 s below it
 //   FRWHOOP_ELDERNET_JOB_BUDGET_SECONDS wall time ElderNet may spend per job, readiness check and chunks together
 //                                (default 600); once used, ElderNet is stopped for that job (job_time_budget)
+//   FRWHOOP_EXERCISE_ENABLED     1/true/yes/on also asks a FOURTH Python child (`activity_context.recgym.serve`) for
+//                                RecGym gym-exercise windows on every raw-IMU chunk, stored in
+//                                activity_exercise_windows (default OFF; SHADOW ONLY: no decode, canonical value or
+//                                exercise-session rule reads them; Tools/ActivityContext/RECGYM.md §6)
+//   FRWHOOP_EXERCISE_WEIGHTS_PATH the staged checkpoint (/opt/frwhoop-models/current/recgym/e085ac0e/
+//                                wrist_-_imu_only_best.pt), passed as --weights-path (required when enabled)
+//   FRWHOOP_EXERCISE_MODE        shadow (the only value accepted; anything else keeps the head off)
+//   FRWHOOP_EXERCISE_MODEL_VERSION / FRWHOOP_EXERCISE_WEIGHTS_SHA256 pins (enforced when set): a child serving
+//                                anything else is refused for the job
+//   FRWHOOP_EXERCISE_PYTHON / _TIMEOUT_SECONDS / _JOB_BUDGET_SECONDS / _THREADS as ElderNet's (defaults: the activity
+//                                python, 60 s clamped to a third of the lease, 300 s, 1 thread)
+//   FRWHOOP_EXERCISE_RETENTION_DAYS windows older than this are pruned (default 14)
 //   FRWHOOP_SENSOR_BIOMARKERS_ENABLED  "1" runs the sensor-biomarker lane (default OFF; exactly "1", and
 //                                the lane only runs when enabled, "sensor" is not in DISABLE_LANES, AND
 //                                FRWHOOP_INFERENCE_URL is set). Needs 20261007140000_sensor_biomarkers.sql;
@@ -188,6 +200,7 @@ struct WorkerConfig {
     let sensorLeaseSeconds: Int
     let inertia: InertiaSettings
     let eldernet: ElderNetSettings
+    let exercise: ExerciseSettings
     let disabledLanes: Set<String>
     let legacyQuietSeconds: Int
     let legacyMaxDeferSeconds: Int
@@ -287,6 +300,8 @@ struct WorkerConfig {
         self.inertia = InertiaSettings.fromEnvironment(environment, activityPython: self.activityPython,
                                                        leaseSeconds: self.activityLeaseSeconds)
         self.eldernet = ElderNetSettings.fromEnvironment(environment, activityPython: self.activityPython,
+                                                         leaseSeconds: self.activityLeaseSeconds)
+        self.exercise = ExerciseSettings.fromEnvironment(environment, activityPython: self.activityPython,
                                                          leaseSeconds: self.activityLeaseSeconds)
         self.disabledLanes = Set(
             (environment["FRWHOOP_DISABLE_LANES"] ?? "")
@@ -594,6 +609,11 @@ var activity = ActivityLane(
                       expectedWeightsDigest: config.eldernet.weightsSHA256, gaitPrior: config.eldernet.gaitPrior,
                       jobBudgetSeconds: config.eldernet.jobBudgetSeconds)
     },
+    exercise: config.exercise.serviceConfig(activityHome: config.activityHome).map {
+        ExerciseStage(service: ActivityPythonService(config: $0), expectedModelVersion: config.exercise.modelVersion,
+                      expectedWeightsSHA256: config.exercise.weightsSHA256, jobBudgetSeconds: config.exercise.jobBudgetSeconds,
+                      retentionDays: config.exercise.retentionDays)
+    },
     cache: config.activityEnabled && config.activityImu ? ActivityLocalCache(path: config.activityCacheDir) : nil)
 for warning in config.inertia.warnings {
     FileHandle.standardError.write("frwhoop-worker: inertia: \(warning)\n".data(using: .utf8)!)
@@ -617,6 +637,18 @@ if let why = config.eldernet.configurationError {
             + "upstream \(config.eldernet.upstreamDir ?? "-"), "
             + "pinned \(config.eldernet.modelVersion ?? "no") / \(config.eldernet.weightsSHA256 ?? "no"), "
             + "timeout \(config.eldernet.timeoutSeconds) s, job budget \(config.eldernet.jobBudgetSeconds) s)\n").data(using: .utf8)!)
+}
+for warning in config.exercise.warnings {
+    FileHandle.standardError.write("frwhoop-worker: exercise: \(warning)\n".data(using: .utf8)!)
+}
+if let why = config.exercise.configurationError {
+    FileHandle.standardError.write("frwhoop-worker: exercise stays off: \(why)\n".data(using: .utf8)!)
+} else if config.exercise.enabled {
+    FileHandle.standardError.write(
+        ("frwhoop-worker: exercise shadow enabled (weights \(config.exercise.weightsPath ?? "-"), "
+            + "pinned \(config.exercise.modelVersion ?? "no") / \(config.exercise.weightsSHA256 ?? "no"), "
+            + "timeout \(config.exercise.timeoutSeconds) s, job budget \(config.exercise.jobBudgetSeconds) s, "
+            + "retention \(config.exercise.retentionDays) d)\n").data(using: .utf8)!)
 }
 
 // MARK: - Candidate (shadow/active) inference lane wiring
@@ -852,6 +884,24 @@ if activityState.read().enabled {
                     $0.counters["eldernet_windows_dropped"] = activity.stats.eldernetWindowsDropped
                     $0.counters["eldernet_rows_pruned"] = activity.stats.eldernetRowsPruned
                     $0.counters["eldernet_prune_failures"] = activity.stats.eldernetPruneFailures
+                }
+                // Only with the exercise head on, likewise.
+                if activity.exercise != nil {
+                    $0.counters["exercise_jobs"] = activity.stats.exerciseJobs
+                    $0.counters["exercise_chunks"] = activity.stats.exerciseChunks
+                    $0.counters["exercise_chunks_reused"] = activity.stats.exerciseChunksReused
+                    $0.counters["exercise_chunks_already_published"] = activity.stats.exerciseChunksAlreadyPublished
+                    $0.counters["exercise_windows"] = activity.stats.exerciseWindows
+                    $0.counters["exercise_failures"] = activity.stats.exerciseFailures
+                    $0.counters["exercise_unavailable"] = activity.stats.exerciseUnavailable
+                    $0.counters["exercise_pin_refused"] = activity.stats.exercisePinRefused
+                    $0.counters["exercise_budget_exhausted"] = activity.stats.exerciseBudgetExhausted
+                    $0.counters["exercise_stored"] = activity.stats.exerciseStored
+                    $0.counters["exercise_windows_stored"] = activity.stats.exerciseWindowsStored
+                    $0.counters["exercise_fenced"] = activity.stats.exerciseFenced
+                    $0.counters["exercise_rejected"] = activity.stats.exerciseRejected
+                    $0.counters["exercise_rows_pruned"] = activity.stats.exerciseRowsPruned
+                    $0.counters["exercise_prune_failures"] = activity.stats.exercisePruneFailures
                 }
                 if activity.inertia != nil || activity.eldernet != nil {
                     $0.counters["expert_selections"] = activity.stats.expertSelections

@@ -37,9 +37,19 @@ final class WatchdogService {
     private var lastWindowFamily: DeviceFamily?
     /// WRIST_OFF seconds already closed by sustained HR recovery.
     private var recoveredOffs: Set<Int> = []
+    /// Per-minute movement evidence (4 h) for the exercise-session context.
+    private let exerciseEvidence = WatchdogExerciseEvidence()
+    /// Episode lineage and phone-only optical evidence to the account.
+    private let serverSync = WatchdogServerSync()
 
     /// Live ring retention: the window plus a margin for a tick that runs late.
     private static let ringSeconds = WatchdogConfig.contextSeconds + 5 * 60
+
+    /// A re-decode rewrote the stored activity-context intervals from `unix` on (nil = not known where): the exercise
+    /// evidence re-reads those minutes on the next tick (HART-fused intervals land 5–80 minutes late).
+    func activityIntervalsRewritten(from unix: Int?) {
+        exerciseEvidence.intervalsRewritten(from: unix)
+    }
 
     func start(on model: AppModel) {
         self.model = model
@@ -113,11 +123,32 @@ final class WatchdogService {
         if Task.isCancelled { return false }
         let promptEvals = model.baseline.watchdogPromptEvaluations(days: days)
         let prompt = UniTSPrompt.from(evaluations: promptEvals)
-        let window: Result<WatchdogWindow, WatchdogUnavailable>
+        var window: Result<WatchdogWindow, WatchdogUnavailable>
         if inject == nil {
             window = await loadWindow(model: model, now: now)
         } else {
             window = .failure(.empty)
+        }
+        if Task.isCancelled { return false }
+        // Workout mode: a workout left running past the cap ends at the cap before this tick reads the log.
+        model.autoEndOverdueWorkout(now: Date(timeIntervalSince1970: TimeInterval(now)))
+        // Exercise-session context (rule exercise-session-2) from 4 h of movement evidence: a session that began
+        // before this window, or before a relaunch, is still known. Selects references; never mutes a check. A
+        // workout the wearer logged is a session from its first minute (WatchdogExerciseContext).
+        if inject == nil, case .success(var built) = window, let store = await model.repo.storeHandle() {
+            let ids = model.repo.rawPhysiologyReadIds(store: store)
+            let repo = model.repo
+            let history = await exerciseEvidence.history(store: store, readIds: ids, key: key, now: now) { from, to in
+                await repo.storedActivityContext(from: from - 600, to: to).intervals.map(\.storeRow)
+            }
+            let logged = model.workoutMode.spans(from: now - WatchdogExerciseContext.historySeconds, to: now + 60,
+                                                 now: now)
+            built.exercise = WatchdogExerciseContext.build(
+                minutes: history, windowStart: built.startUnix, seqLen: built.hr.count, nowUnix: now,
+                evaluations: promptEvals, hrMax: Double(model.profile.hrMax),
+                hrMaxFromFormula: model.profile.hrMaxOverride <= 0, routine: model.baseline.exerciseRoutine,
+                logged: logged)
+            window = .success(built)
         }
         if Task.isCancelled { return false }
         let sessions = await model.repo.watchdogSleepSessions(from: now - 20 * 3600, to: now + 3600, limit: 40)
@@ -191,6 +222,21 @@ final class WatchdogService {
             // Awaited, so the outcome is persisted before this tick (and a background task) completes.
             let delivery = await WatchdogNotifier.deliver(result)
             applyDelivery(delivery, result: result, queuedAt: now, key: key, liveAlerts: liveAlerts, model: model)
+        }
+        // Lineage to the account (throttled inside; nothing advances until the server accepted it).
+        let serverDevice = model.hostedReadCandidates.first
+        await serverSync.syncEpisodes(rows: model.baseline.episodeLedger, annotations: model.baseline.episodeAnnotations,
+                                      localDeviceId: key, serverDeviceId: serverDevice, now: now)
+        // Workout-mode edits that a user action could not send (offline) are retried here (throttled inside).
+        model.syncWorkoutMode()
+        if let store = await model.repo.storeHandle() {
+            // Not awaited: a first run reads up to six days of aux records and must not lengthen the tick.
+            let ids = model.repo.rawPhysiologyReadIds(store: store)
+            let sync = serverSync
+            Task { @MainActor in
+                await sync.syncQualityMinutes(store: store, readIds: ids, localDeviceId: key,
+                                              serverDeviceId: serverDevice, now: now)
+            }
         }
         return true
     }

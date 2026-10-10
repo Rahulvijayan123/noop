@@ -78,6 +78,9 @@ struct ActivityLane {
     /// ElderNet gait quality (shadow / candidate), or nil when off (`FRWHOOP_ELDERNET_ENABLED`). Never part of the
     /// readiness gate; its failures never fail a job (`ActivityGaitQuality.swift`).
     var eldernet: ElderNetStage? = nil
+    /// RecGym exercise recognition (shadow only), or nil when off (`FRWHOOP_EXERCISE_ENABLED`). Never part of the
+    /// readiness gate; its failures never fail a job (`ActivityExerciseWindows.swift`).
+    var exercise: ExerciseStage? = nil
     /// Downloaded objects and serve answers kept on this host (see `ActivityLocalCache`); nil turns it off.
     /// Only HART answers are cached: Inertia and ElderNet are asked for every chunk, cached HART or not.
     var cache: ActivityLocalCache? = nil
@@ -209,6 +212,30 @@ struct ActivityLane {
         var eldernetRowsPruned = 0
         var eldernetPruneFailures = 0
         var lastElderNetPruneError: String?
+        /// RecGym exercise windows (only move when the stage is configured). Failures are counted per chunk or per
+        /// job start and never reach the HART path.
+        var exerciseJobs = 0
+        var exerciseChunks = 0
+        /// Chunks answered from `ExerciseStage.responses` (counted in `exerciseChunks` too).
+        var exerciseChunksReused = 0
+        /// Chunks whose windows a committed publish of this process already carried: neither asked nor sent again.
+        var exerciseChunksAlreadyPublished = 0
+        var exerciseWindows = 0
+        var exerciseFailures = 0
+        var exerciseUnavailable = 0
+        var exercisePinRefused = 0
+        var exerciseBudgetExhausted = 0
+        var lastExerciseError: String?
+        var lastExerciseErrorKind: String?
+        /// Committed publishes, and the windows they carried.
+        var exerciseStored = 0
+        var exerciseWindowsStored = 0
+        var exerciseFenced = 0
+        var exerciseRejected = 0
+        var lastExercisePublishError: String?
+        var exerciseRowsPruned = 0
+        var exercisePruneFailures = 0
+        var lastExercisePruneError: String?
         /// The shared release policy (ActivityExpertSelection) per raw-IMU job: jobs it decided for, and jobs whose
         /// published decode some expert channel shaped (only a production-released expert can; none is today).
         var expertSelections = 0
@@ -270,6 +297,8 @@ struct ActivityLane {
     static let gaitWindowsPruneIntervalSeconds: TimeInterval = 6 * 3600
     /// Joint candidate retention, on the same cadence.
     var lastCandidateDaysPruneAt: Date?
+    /// Exercise-window retention, on the same cadence.
+    var lastExerciseWindowsPruneAt: Date?
 
     enum ActivityError: Error, CustomStringConvertible {
         /// A deterministic input violation: bounded retry through the fail
@@ -332,6 +361,7 @@ struct ActivityLane {
         pruneCacheIfDue()
         pruneMotionHeadsIfDue()
         pruneGaitWindowsIfDue()
+        pruneExerciseWindowsIfDue()
         pruneCandidateDaysIfDue()
     }
 
@@ -361,11 +391,12 @@ struct ActivityLane {
     /// `loaded_digest`), the policy version and the last job's selection digest: the heartbeat's
     /// `meta.lanes[].identity`. Empty entries are left out; a child that was never pinged reports nothing.
     var identity: [String: String] {
-        Self.identity(service: service, inertia: inertia, eldernet: eldernet, selectionDigest: stats.lastSelectionDigest)
+        Self.identity(service: service, inertia: inertia, eldernet: eldernet, selectionDigest: stats.lastSelectionDigest,
+                      exercise: exercise)
     }
 
     static func identity(service: ActivityPythonService, inertia: InertiaStage?, eldernet: ElderNetStage?,
-                         selectionDigest: String?) -> [String: String] {
+                         selectionDigest: String?, exercise: ExerciseStage? = nil) -> [String: String] {
         var out = ["expert_policy": ActivityExpertSelection.policy]
         func add(_ name: String, _ service: ActivityPythonService) {
             for (k, v) in service.loadedIdentity { out["\(name).\(k)"] = v }
@@ -374,6 +405,7 @@ struct ActivityLane {
         add("hart", service)
         if let inertia { add("inertia", inertia.service); out["inertia.mode"] = inertia.mode.rawValue }
         if let eldernet { add("eldernet", eldernet.service); out["eldernet.mode"] = eldernet.mode.rawValue }
+        if let exercise { add("recgym", exercise.service); out["recgym.mode"] = ActivityReleaseMode.shadow.rawValue }
         if let selectionDigest { out["selection_digest"] = selectionDigest }
         return out
     }
@@ -424,6 +456,27 @@ struct ActivityLane {
                     ("frwhoop-worker: eldernet retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
             }
             stats.lastElderNetPruneError = why
+        }
+    }
+
+    /// Exercise-window retention: while the stage is configured, delete windows older than its retention, at most
+    /// once per `gaitWindowsPruneIntervalSeconds`. Best effort: a failure (a database without the migration, say) is
+    /// counted and logged once, never thrown.
+    mutating func pruneExerciseWindowsIfDue(now: Date = Date()) {
+        guard let exercise else { return }
+        if let last = lastExerciseWindowsPruneAt, now.timeIntervalSince(last) < Self.gaitWindowsPruneIntervalSeconds { return }
+        lastExerciseWindowsPruneAt = now
+        do {
+            stats.exerciseRowsPruned += try ActivityExerciseWindows.prune(db: db, keepDays: exercise.retentionDays)
+            stats.lastExercisePruneError = nil
+        } catch {
+            stats.exercisePruneFailures += 1
+            let why = ActivityContextDays.safeReason(error)
+            if stats.lastExercisePruneError != why {
+                FileHandle.standardError.write(
+                    ("frwhoop-worker: exercise-window retention prune failed (nothing else affected): \(why)\n").data(using: .utf8)!)
+            }
+            stats.lastExercisePruneError = why
         }
     }
 
@@ -830,6 +883,10 @@ struct ActivityLane {
         //     the activity day job), so those evidence channels stay nil server-side.
         let hrSamples = try loadHrSamples(user: job.userId, device: job.deviceId,
                                           dayStart: dayBounds.start, dayEnd: dayBounds.end)
+        //     The HR stream's upload watermark: an epoch past it has HR that may not be uploaded yet,
+        //     so its absence is `awaiting_upload` (unknown), never sensor dropout or off-wrist.
+        let hrUploadedThrough = try loadHrUploadedThrough(user: job.userId, device: job.deviceId,
+                                                          from: dayBounds.start)
 
         // 5. Inference per run, outside any transaction, lease renewed around
         //    the long work. Windows are collected per run and folded ONCE
@@ -839,7 +896,7 @@ struct ActivityLane {
         let requests = runs.lazy.flatMap { Self.runRequests(timeline: timeline, run: $0) }
         let db = self.db, token = job.leaseToken, lease = leaseSeconds
         let inferred = try Self.inferChunks(
-            requests, service: service, inertia: inertia, eldernet: eldernet,
+            requests, service: service, inertia: inertia, eldernet: eldernet, exercise: self.exercise, device: job.deviceId,
             versions: Self.resolvedVersions(reportedModel: service.reportedModelVersion,
                                             reportedPreprocessing: service.reportedPreprocessingVersion),
             cache: cache,
@@ -885,7 +942,8 @@ struct ActivityLane {
             preprocessingVersion: versions.preprocessing,
             dataThrough: dataThrough,
             wearIntervals: wearIntervals,
-            hrSamples: hrSamples)
+            hrSamples: hrSamples,
+            hrUploadedThrough: hrUploadedThrough)
         // The publish RPC validates `p_payload ->> 'day'` against the job's
         // day (20261003120000_activity_context.sql), so the C10 document is
         // stamped with the job day before it is sealed.
@@ -893,10 +951,12 @@ struct ActivityLane {
 
         // 6b. ActivityContext v2: the same windows plus their IMU features and the day's stored
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
-        let context = try buildContextDayAndInput(
+        var context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise,
             transitionVersion: transitionVersions, gaitWindows: expertGaitWindows, selection: selection)
+        context.loggedWorkouts = try dayLoggedWorkouts(userId: job.userId, deviceId: job.deviceId,
+                                                       from: dayBounds.start, to: dayBounds.end)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
@@ -919,13 +979,19 @@ struct ActivityLane {
                                        motionCandidate: motionHeads?.candidate, gaitCandidate: gaitWindows?.candidate,
                                        stats: &stats)
             : nil
+        // 6g. RecGym exercise windows (shadow only): the chunks this process has not published yet.
+        // (`self.exercise`: `exercise` here is the day's workout records.)
+        let exerciseWindows = self.exercise.flatMap {
+            Self.exerciseWindowsPayload(job: job, dayBounds: dayBounds, stage: $0, collector: inferred.exercise,
+                                        stats: &stats)
+        }
         let durationMS = Int(Date().timeIntervalSince(started) * 1000)
 
         // 7–8. Fenced publish, then the scoring re-dirty.
         return try publishDay(job: job, payloadText: payloadText, dayDocument: context.built,
                               durationMS: durationMS, dayBounds: dayBounds, windowsPayload: windowsPayload,
                               motionHeads: motionHeads?.payload, gaitWindows: gaitWindows?.payload,
-                              candidateDay: candidateDay)
+                              candidateDay: candidateDay, exerciseWindows: exerciseWindows)
     }
 
     /// What step 5 produced: the HART windows and versions exactly as before, plus the Inertia and ElderNet
@@ -938,6 +1004,8 @@ struct ActivityLane {
         var transitionVersion: String = "none"
         var motionHeads = MotionHeadsCollector()
         var gaitQuality = GaitQualityCollector()
+        /// The RecGym exercise child's answers per chunk (shadow only).
+        var exercise = ExerciseCollector()
         /// The HART child's own optional ElderNet gait windows (distinct from `gaitQuality`, the standalone
         /// ElderNet service's collector).
         var expertGaitWindows: [ActivityGaitWindow] = []
@@ -972,7 +1040,8 @@ struct ActivityLane {
     /// job for a day's worth of request timeouts.
     static func inferChunks<Requests: Sequence>(
         _ requests: Requests, service: ActivityPythonService,
-        inertia: InertiaStage?, eldernet: ElderNetStage? = nil, versions start: (model: String, preprocessing: String),
+        inertia: InertiaStage?, eldernet: ElderNetStage? = nil, exercise: ExerciseStage? = nil, device: String = "",
+        versions start: (model: String, preprocessing: String),
         cache: ActivityLocalCache? = nil,
         stats: inout Stats, renew: () throws -> Bool) throws -> ChunkInference
         where Requests.Element == ActivityPythonService.RunRequest {
@@ -982,7 +1051,7 @@ struct ActivityLane {
         // there is nothing to key them by.
         let cacheable = !(service.reportedModelVersion ?? "").isEmpty
         var inertiaReady = false
-        var inertiaSpent = 0.0, eldernetSpent = 0.0
+        var inertiaSpent = 0.0, eldernetSpent = 0.0, exerciseSpent = 0.0
         if let inertia {
             stats.inertiaJobs += 1
             guard try renew() else {
@@ -1018,6 +1087,25 @@ struct ActivityLane {
                 noteElderNetFailure(&stats, kind: down.kind, message: down.message)
             } else {
                 eldernetReady = true
+            }
+        }
+        var exerciseReady = false
+        if let exercise {
+            stats.exerciseJobs += 1
+            guard try renew() else {
+                throw PostgresClient.Error(message: "activity lease lost during inference",
+                                           sqlstate: "55000", kind: .stale)
+            }
+            let started = Date()
+            let down = exercise.begin()
+            exerciseSpent += Date().timeIntervalSince(started)
+            if let down {
+                if down.kind == ExerciseStage.pinMismatchKind { stats.exercisePinRefused += 1 }
+                else { stats.exerciseUnavailable += 1 }
+                out.exercise.stopped = down.kind
+                noteExerciseFailure(&stats, kind: down.kind, message: down.message)
+            } else {
+                exerciseReady = true
             }
         }
         for request in requests {
@@ -1160,8 +1248,100 @@ struct ActivityLane {
                     noteElderNetFailure(&stats, kind: kind, message: message)
                 }
             }
+
+            // RecGym exercise windows for the same chunk, the same way (its own lease renewal, nothing it does can
+            // throw). A chunk whose windows this process already published under the same answer key is skipped.
+            if exerciseReady, let exercise {
+                try inferExerciseChunk(request, stage: exercise, device: device, spent: &exerciseSpent,
+                                       collector: &out.exercise, stats: &stats, renew: renew)
+            }
         }
         return out
+    }
+
+    /// One chunk of the exercise stage (see `inferChunks`). Throws only for a lost lease, like the other stages.
+    static func inferExerciseChunk(_ request: ActivityPythonService.RunRequest, stage: ExerciseStage, device: String,
+                                   spent: inout Double, collector: inout ExerciseCollector, stats: inout Stats,
+                                   renew: () throws -> Bool) throws {
+        guard collector.stopped == nil else { return }
+        if spent >= stage.jobBudgetSeconds {
+            collector.stopped = Self.jobTimeBudgetKind
+            stats.exerciseBudgetExhausted += 1
+            noteExerciseFailure(&stats, kind: Self.jobTimeBudgetKind,
+                                message: "\(String(format: "%.1f", spent)) s used of the "
+                                    + "\(String(format: "%.1f", stage.jobBudgetSeconds)) s per-job budget")
+            return
+        }
+        let stamp = stage.service.cacheStamp
+        let key = stamp == nil ? nil : stage.cacheKey(request)
+        if let key, stage.published.value(ExerciseStage.publishedKey(device: device, key: key)) == true {
+            collector.alreadyPublished += 1
+            stats.exerciseChunksAlreadyPublished += 1
+            return
+        }
+        collector.chunks += 1
+        stats.exerciseChunks += 1
+        if let key, let cached = stage.responses.value(key),
+           collector.answered.first.map({ $0.response.model == cached.model }) ?? true {
+            collector.answered.append(.init(start: request.startTs, end: request.endTs, key: key, response: cached))
+            stats.exerciseChunksReused += 1
+            stats.exerciseWindows += cached.windows.count
+            return
+        }
+        // A lost lease ends the job exactly as it does before the HART call.
+        guard try renew() else {
+            throw PostgresClient.Error(message: "activity lease lost during inference", sqlstate: "55000", kind: .stale)
+        }
+        let started = Date()
+        let outcome = stage.infer(request)
+        spent += Date().timeIntervalSince(started)
+        switch outcome {
+        case .ok(let response):
+            if let first = collector.answered.first, first.response.model != response.model {
+                collector.failedChunks += 1
+                collector.failureKinds["model_changed", default: 0] += 1
+                collector.stopped = "model_changed"
+                stats.exerciseFailures += 1
+                noteExerciseFailure(&stats, kind: "model_changed", message: "the model changed during a job")
+            } else {
+                collector.answered.append(.init(start: request.startTs, end: request.endTs, key: key, response: response))
+                stats.exerciseWindows += response.windows.count
+                if let key, let stamp, stage.service.answerMatches(stamp, replyDigest: nil) {
+                    stage.responses.store(response, key: key)
+                }
+            }
+        case .failed(let kind, let message, let stop):
+            collector.failedChunks += 1
+            collector.failureKinds[kind, default: 0] += 1
+            if stop { collector.stopped = kind }
+            stats.exerciseFailures += 1
+            if kind == ExerciseStage.pinMismatchKind { stats.exercisePinRefused += 1 }
+            noteExerciseFailure(&stats, kind: kind, message: message)
+        }
+    }
+
+    /// Record an exercise-stage failure and say why on stderr, once per distinct kind in a row.
+    static func noteExerciseFailure(_ stats: inout Stats, kind: String, message: String) {
+        if stats.lastExerciseErrorKind != kind {
+            FileHandle.standardError.write(
+                ("frwhoop-worker: exercise \(kind) (HART path unaffected): \(message)\n").data(using: .utf8)!)
+        }
+        stats.lastExerciseErrorKind = kind
+        stats.lastExerciseError = String("\(kind): \(message)".prefix(240))
+    }
+
+    /// The exercise payload for this job, or nil (nothing new, or the encoding failed: counted, never thrown).
+    static func exerciseWindowsPayload(job: ActivityJob, dayBounds: (start: Int, end: Int), stage: ExerciseStage,
+                                       collector: ExerciseCollector, stats: inout Stats) -> ActivityExerciseWindows.Built? {
+        do {
+            return try ActivityExerciseWindows.payload(day: job.day, dayBounds: dayBounds, device: job.deviceId,
+                                                       inputRevision: job.inputRevision, collector: collector,
+                                                       stage: stage)
+        } catch {
+            stats.exerciseRejected += 1
+            stats.lastExercisePublishError = ActivityContextDays.safeReason(error)
+            return nil
+        }
     }
 
     /// Record an ElderNet failure and say why on stderr, once per distinct kind in a row.
@@ -1228,7 +1408,10 @@ struct ActivityLane {
                                                         gaitPrior: eldernet.gaitPrior,
                                                         authority: context.selection.flatMap {
                                                             ActivityCandidateDays.authority($0, gait: eldernet)
-                                                        }), candidate)
+                                                        },
+                                                        workouts: LoggedWorkouts.gaitContext(
+                                                            workouts: context.loggedWorkouts,
+                                                            windows: gait.windows)), candidate)
         } catch {
             stats.eldernetShadowFailures += 1
             stats.lastElderNetShadowError = ActivityContextDays.safeReason(error)
@@ -1366,7 +1549,8 @@ struct ActivityLane {
                              dayDocument: ActivityContextDays.Built?, durationMS: Int,
                              dayBounds: (start: Int, end: Int), windowsPayload: String? = nil,
                              motionHeads: String? = nil, gaitWindows: String? = nil,
-                             candidateDay: String? = nil) throws -> Bool {
+                             candidateDay: String? = nil,
+                             exerciseWindows: ActivityExerciseWindows.Built? = nil) throws -> Bool {
         try db.beginTransaction(.readCommitted)
         do {
             var windowsStored = false
@@ -1430,6 +1614,23 @@ struct ActivityLane {
                     stats.lastElderNetShadowError = why
                 }
             }
+            var exerciseStored = false
+            if let exerciseWindows {
+                switch try ActivityExerciseWindows.publish(
+                    db: db, token: job.leaseToken, revision: job.inputRevision, payload: exerciseWindows.text) {
+                case .stored:
+                    exerciseStored = true
+                case .fenced:
+                    stats.exerciseFenced += 1
+                case .rejected(let why):
+                    stats.exerciseRejected += 1
+                    if stats.lastExercisePublishError != why {
+                        FileHandle.standardError.write(
+                            ("frwhoop-worker: exercise windows skipped (publishes unaffected): \(why)\n").data(using: .utf8)!)
+                    }
+                    stats.lastExercisePublishError = why
+                }
+            }
             var candidateStored = false
             if let candidateDay {
                 switch try ActivityCandidateDays.publish(
@@ -1458,6 +1659,12 @@ struct ActivityLane {
                 if motionHeadsStored { stats.inertiaShadowStored += 1 }
                 if gaitStored { stats.eldernetShadowStored += 1 }
                 if candidateStored { stats.candidateDaysStored += 1 }
+                if exerciseStored, let exerciseWindows {
+                    stats.exerciseStored += 1
+                    stats.exerciseWindowsStored += exerciseWindows.windows
+                    // Only now (committed) are these chunks published; a rollback above leaves them to the next job.
+                    for key in exerciseWindows.publishedKeys { exercise?.published.store(true, key: key) }
+                }
                 _ = try? db.callFunctionForJSON(
                     "SELECT public.scoring_dirty_span($1::uuid,$2::uuid,$3::bigint,$4::bigint)::text",
                     [job.userId, job.deviceId, String(dayBounds.start), String(dayBounds.end)])
@@ -1503,6 +1710,9 @@ struct ActivityLane {
         /// and the lookback input that warmed it up, so a comparison decode can start from the same place.
         var config: ActivityDecoderConfig = ActivityDecoderConfig()
         var lookback: ActivityContextTrackInput? = nil
+        /// Workout mode's logged workouts in the day, for the expert rows' context (the ElderNet gait row labels its
+        /// windows against them). Empty when none was logged or the database predates workout mode.
+        var loggedWorkouts: [LoggedWorkout] = []
     }
 
     mutating func buildContextDayAndInput(
@@ -1760,11 +1970,20 @@ struct ActivityLane {
     /// `ActivityContextDays.lookbackSeconds` before it, so the warm-up decode knows about a night or a workout
     /// that ended just before midnight instead of decoding those minutes as awake and idle (audit D2-11). The
     /// day decode and its fingerprint clip spans to the day themselves.
+    /// The exercise list merges workout mode's typed log into the session records (`LoggedWorkouts.merge`), so the
+    /// epochs' `exercise_session` and the decoder's workout kind see a logged workout, a running one included.
     func daySpans(userId: String, deviceId: String, dayBounds: (start: Int, end: Int)) throws
         -> (nights: [ActivityContextDays.Night], exercise: [(start: Int, end: Int, sport: String)]) {
         let from = dayBounds.start - ActivityContextDays.lookbackSeconds
+        let sessions = try loadWorkouts(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end)
+        let logged = try dayLoggedWorkouts(userId: userId, deviceId: deviceId, from: from, to: dayBounds.end)
         return (try loadPublishedNights(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end),
-                try loadWorkouts(user: userId, device: deviceId, dayStart: from, dayEnd: dayBounds.end))
+                LoggedWorkouts.merge(sessions: sessions, logged: logged))
+    }
+
+    /// Workout mode's logged workouts overlapping `[from, to)` (none on a database without 20261009170000).
+    func dayLoggedWorkouts(userId: String, deviceId: String, from: Int, to: Int) throws -> [LoggedWorkout] {
+        try LoggedWorkouts.load(db: db, user: userId, device: deviceId, from: from, to: to)
     }
 
     private func loadPublishedNights(user: String, device: String,
@@ -1903,6 +2122,16 @@ struct ActivityLane {
         }
     }
 
+    /// The newest HR second the server holds for the device at or after `from` (the HR stream's upload
+    /// watermark), or nil when there is none. A primary-key range probe: max(ts) under (user, device).
+    private func loadHrUploadedThrough(user: String, device: String, from: Int) throws -> Int? {
+        let rows = try db.query("""
+            select max(ts)::text as ts from public.noop_hr_samples
+            where user_id=$1::uuid and device_id=$2::uuid and ts >= $3::bigint
+            """, [user, device, String(from)])
+        return rows.first.flatMap { Int($0["ts"] ?? "") }
+    }
+
     // MARK: - Wear-signal-quality classification (feat/wear-signal-quality V1)
 
     /// IMU window motion bars for the wear-signal-quality fold. Derived from the lane's real
@@ -1977,10 +2206,17 @@ struct ActivityLane {
     /// charging, battery telemetry, RTC-reset and stream-absence evidence. PPG waveform rows are
     /// not stored or loaded by the activity lane, so `ppgSqi` is always nil here (PpgSqi is
     /// computed on the phone, where the v26 waveform exists).
+    ///
+    /// `hrUploadedThrough` is the upload watermark of the HR stream: the newest `noop_hr_samples` second
+    /// the server holds for this device when the job runs (nil: the newest loaded sample). An epoch that
+    /// ends after it has HR that may simply not be uploaded yet, so absence there is unknown
+    /// (canonical reason `awaiting_upload`, contracts/reason-codes.json), never "HR absent" — which the
+    /// engine would read as sensor dropout or off-wrist.
     static func wearSignalEvidence(epochStart: Int, epochEnd: Int,
                                    wearIntervals: [WearInterval],
                                    recoveryCompletion: Int?,
                                    hrSamples: [HRSample],
+                                   hrUploadedThrough: Int? = nil,
                                    imuMotion: (high: Bool?, quiet: Bool?) = (nil, nil)) -> WearSignalEvidence {
         var durableOffActive: Bool?
         var sustainedHrRecoveryMet: Bool?
@@ -1998,7 +2234,8 @@ struct ActivityLane {
             }
         }
         // No sample with a plausible bpm in the epoch is a real observation only when the day has an
-        // HR stream at all: an empty stream (not uploaded yet) stays unknown, never "HR absent".
+        // HR stream at all and the epoch lies at or before the stream's upload watermark: an empty stream
+        // or a not-yet-uploaded tail stays unknown (`awaiting_upload`), never "HR absent".
         // hrSamples is sorted ascending, so a binary search finds the epoch's first sample.
         var hrPresent: Bool?
         if !hrSamples.isEmpty {
@@ -2013,7 +2250,12 @@ struct ActivityLane {
                 if (30...220).contains(hrSamples[i].bpm) { present = true; break }
                 i += 1
             }
-            hrPresent = present
+            if present {
+                hrPresent = true
+            } else if !Self.hrAwaitingUpload(epochEnd: epochEnd, hrSamples: hrSamples,
+                                             hrUploadedThrough: hrUploadedThrough) {
+                hrPresent = false
+            }
         }
         return WearSignalEvidence(
             durableOffActive: durableOffActive,
@@ -2023,6 +2265,19 @@ struct ActivityLane {
             imuQuiet: imuMotion.quiet)
     }
 
+    /// Canonical reason (contracts/reason-codes.json, family pipeline, inferred on the server) for an epoch
+    /// whose heart rate is past the HR stream's upload watermark.
+    static let hrAwaitingUploadReason = "awaiting_upload"
+
+    /// Whether the epoch `[.., epochEnd)` reaches past the HR upload watermark: its last second is newer
+    /// than the newest HR second the server holds (`hrUploadedThrough`, else the newest loaded sample).
+    /// With no HR at all there is no watermark and the caller already treats the stream as unknown.
+    static func hrAwaitingUpload(epochEnd: Int, hrSamples: [HRSample], hrUploadedThrough: Int?) -> Bool {
+        let loaded = hrSamples.last?.ts
+        guard let through = [loaded, hrUploadedThrough].compactMap({ $0 }).max() else { return true }
+        return epochEnd - 1 > through
+    }
+
     /// Thread one `WearSignalTemporalState` through a day's epochs in time order and classify each
     /// with `WearSignalQualityEngine`, returning epochs with `wearSignal` set. Additive: the
     /// existing three-state `wear` (from the `WearInterval` enrichment) is left UNCHANGED. When no
@@ -2030,7 +2285,8 @@ struct ActivityLane {
     static func applyWearSignal(epochs: [ActivityEpoch],
                                 windows: [ActivityPythonService.WindowPrediction],
                                 wearIntervals: [WearInterval],
-                                hrSamples: [HRSample]) -> [ActivityEpoch] {
+                                hrSamples: [HRSample],
+                                hrUploadedThrough: Int? = nil) -> [ActivityEpoch] {
         guard !epochs.isEmpty else { return epochs }
         let completions = Self.recoveryCompletions(wearIntervals: wearIntervals, hrSamples: hrSamples)
         let ordered = epochs.sorted { $0.startTs < $1.startTs }
@@ -2065,7 +2321,7 @@ struct ActivityLane {
                 epochStart: e.startTs, epochEnd: e.endTs,
                 wearIntervals: wearIntervals,
                 recoveryCompletion: covering.map { completions[$0.start] ?? nil } ?? nil,
-                hrSamples: hrSamples, imuMotion: motion)
+                hrSamples: hrSamples, hrUploadedThrough: hrUploadedThrough, imuMotion: motion)
             let result = WearSignalQualityEngine.classify(evidence, state: &state, epochStart: e.startTs)
             // `.unknown` is the engine's abstention (no evidence resolved a state) and is NOT
             // emitted: an absent `wsq` already means "no wear-signal decision" to every consumer,
@@ -2437,7 +2693,8 @@ struct ActivityLane {
                                  preprocessingVersion: String,
                                  dataThrough: Int,
                                  wearIntervals: [WearInterval] = [],
-                                 hrSamples: [HRSample] = []) throws -> [String: Any] {
+                                 hrSamples: [HRSample] = [],
+                                 hrUploadedThrough: Int? = nil) throws -> [String: Any] {
         let sleepSessions = sleepIntervals.map { Self.sleepSession(from: $0) }
         let exerciseSessions = exerciseIntervals.map { Self.exerciseSession(from: $0) }
         let shared = windows.compactMap {
@@ -2454,7 +2711,7 @@ struct ActivityLane {
         // the existing three-state `wear` enrichment (which stays untouched).
         let classified = Self.applyWearSignal(
             epochs: build.epochs, windows: windows,
-            wearIntervals: wearIntervals, hrSamples: hrSamples)
+            wearIntervals: wearIntervals, hrSamples: hrSamples, hrUploadedThrough: hrUploadedThrough)
         return try activityDocument(epochs: classified,
                                     sleepIntervals: sleepIntervals,
                                     dayStart: dayStart, dayEnd: dayEnd,

@@ -12,7 +12,7 @@ import {
   readOptionalJson, Refs, sameFamily, sanitizeLine, sanitizeTitle, SMALL_BODY_BYTES, takeUtilityUnits, tokenSet,
   tokensNearMatch, TRANSIENT, tsKey, uuidOf, jaccard,
 } from './coach_llm.ts';
-import { activeMemories, applyMemoryOps, versionGuard } from './coach_memory.ts';
+import { activeMemories, applyMemoryOps, isUserRow, loadTombstones, versionGuard } from './coach_memory.ts';
 import { loadThread, QUIET_MS, summaryDue } from './coach_store.ts';
 
 const REGENERABLE = new Set(['none', 'fallback', 'legacy']);
@@ -535,6 +535,9 @@ function mergeAllowed(content: string, members: PoolMemory[], guard: GuardContex
  * update whose new text fully restates a memory saved in this chat (or that is itself such a memory, restating an
  * older one) becomes that merge too, so one fact never ends up in two rows. Updates, retires and merges carry the
  * version each row was read at, so a row another writer changed or forgot meanwhile is left alone (`stale`).
+ * A row in the user's own words (source 'user') may be confirmed or have its importance moved, nothing else: an
+ * update of its text, a retire or a merge that touches it is dropped, and an add that would supersede it is too
+ * (coach_memory_apply_v1 refuses the same with `user_edited`).
  */
 export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], guard: GuardContext, threadId: string | null = null): any[] {
   const out: any[] = [];
@@ -551,8 +554,8 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
   };
   // An update of `row` to `content`, or a merge when that content also restates a memory saved in this chat.
   const update = (row: PoolMemory, content: string, importance: number | null) => {
-    const fold = threadId ? pool.find((p) => !p.pending && p.id !== row.id && !touched.has(p.id) && sameFamily(p.topic, row.topic)
-      && (savedHere(p, threadId) || savedHere(row, threadId)) && covers(content, p.content)) : undefined;
+    const fold = threadId ? pool.find((p) => !p.pending && p.id !== row.id && !touched.has(p.id) && !isUserRow(p)
+      && sameFamily(p.topic, row.topic) && (savedHere(p, threadId) || savedHere(row, threadId)) && covers(content, p.content)) : undefined;
     if (fold) return merge([row, fold], content, importance != null ? { importance } : {});
     out.push({ op: 'update', id: row.id, content, ...(importance != null ? { importance } : {}), ...versionGuard(row) });
     row.content = content;
@@ -572,7 +575,9 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
       if (dup) {
         const row = dup.row;
         if (row.pending || touched.has(row.id)) continue;
-        if (dup.kind === 'supersede' || dup.kind === 'longer') {
+        // The user's wording stands: a restatement that says more confirms it; one that changes it is dropped.
+        if (isUserRow(row) && dup.kind === 'supersede') continue;
+        if ((dup.kind === 'supersede' || dup.kind === 'longer') && !isUserRow(row)) {
           update(row, content, Math.max(row.importance, importance));
         } else {
           out.push({ op: 'confirm', id: row.id });
@@ -595,6 +600,7 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
         out.push({ op: 'confirm', id: row.id });
         touched.add(row.id);
       } else if (content && !sameText) {
+        if (isUserRow(row)) continue;
         update(row, content, importance);
       } else {
         out.push({ op: 'update', id: row.id, ...(importance != null ? { importance } : {}), ...versionGuard(row) });
@@ -605,7 +611,7 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
     } else if (op.op === 'merge') {
       const ids = [...new Set((Array.isArray(op.refs) ? op.refs : []).map((r: unknown) => refs.resolve(r)))];
       const members = ids.map((id) => byId(id as string | undefined)).filter((m): m is PoolMemory => !!m && !touched.has(m.id));
-      if (members.length < 2 || members.length !== ids.length) continue;
+      if (members.length < 2 || members.length !== ids.length || members.some(isUserRow)) continue;
       const content = cleanMemory(op.content);
       if (!content || !mergeAllowed(content, members, guard)) continue;
       merge(members, content, op);
@@ -617,7 +623,7 @@ export function resolveCuratorOps(raw: unknown, refs: Refs, pool: PoolMemory[], 
     } else if (op.op === 'retire') {
       // Retiring needs a contradiction in the user's own words: at least the memory's subject must come up.
       const row = byId(refs.resolve(op.ref));
-      if (!row || touched.has(row.id) || !mentions(row.content, guard.userTokens)) continue;
+      if (!row || touched.has(row.id) || isUserRow(row) || !mentions(row.content, guard.userTokens)) continue;
       out.push({ op: 'retire', id: row.id, reason: clip(collapse(op.reason), 120) || 'contradicted', tokens: memoryTokens(row.content), ...versionGuard(row) });
       touched.add(row.id);
       pool.splice(pool.indexOf(row), 1);
@@ -639,14 +645,6 @@ async function memoryCandidates(d: CoachDeps, userId: string, threadId: string, 
   for (const r of Array.isArray(ranked?.memories) ? ranked.memories : []) add(real.find((p) => p.id === r.id));
   real.forEach(add);
   return [...chosen.values()];
-}
-
-async function loadTombstones(d: CoachDeps, userId: string): Promise<Set<string>[]> {
-  const since = new Date(d.now() - 365 * 86_400_000).toISOString();
-  const rows = await d.rest.select('coach_memory_events',
-    `user_id=eq.${userId}&op=eq.forget&created_at=gte.${enc(since)}&order=created_at.desc&limit=1000&select=tokens`);
-  return rows.map((r: any) => new Set<string>((Array.isArray(r.tokens) ? r.tokens : []).filter((t: unknown) => typeof t === 'string')))
-    .filter((s: Set<string>) => s.size > 0);
 }
 
 export async function runMaintain(d: CoachDeps, userId: string, threadId: string): Promise<MaintainResult> {
@@ -799,6 +797,10 @@ const consolidationSystem = () => [
 const DEDUPE_NOTE = 'These memories were picked because some of them look alike. Merge the ones that state the same fact (or one fact '
   + 'in pieces) and leave the others alone; they may be different facts that only share words.';
 
+/**
+ * The consolidator's merges and retires, each restating only its members and carrying its version guards. A row in
+ * the user's own words is never merged or retired (it may still be the memory that covers a retired duplicate).
+ */
 export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): any[] {
   const out: any[] = [];
   const used = new Set<string>();
@@ -809,7 +811,7 @@ export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): 
       const ids = [...new Set((Array.isArray(op.refs) ? op.refs : []).map((r: unknown) => refs.resolve(r)).filter((id: unknown): id is string => !!id))];
       if (ids.length < 2 || ids.some((id) => used.has(id))) continue;
       const members = ids.map((id) => byId.get(id)).filter(Boolean);
-      if (members.length < 2) continue;
+      if (members.length < 2 || members.some(isUserRow)) continue;
       const content = cleanMemory(op.content);
       if (!content) continue;
       // The merged text may only restate its members.
@@ -821,7 +823,7 @@ export function resolveConsolidationOps(raw: unknown, refs: Refs, rows: any[]): 
     } else if (op.op === 'retire') {
       const id = refs.resolve(op.ref);
       const row = id ? byId.get(id) : undefined;
-      if (!row || used.has(row.id)) continue;
+      if (!row || used.has(row.id) || isUserRow(row)) continue;
       // Only a row another surviving memory already covers.
       const mine = tokenSet(row.content);
       const covered = rows.some((r) => r.id !== row.id && !used.has(r.id) && tokensNearMatch(mine, tokenSet(r.content)));

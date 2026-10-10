@@ -968,6 +968,50 @@ final class ContextLaneDatabaseTests: XCTestCase {
         XCTAssertEqual(loaded.placements.map(\.scope), ["account", "device"])
     }
 
+    /// 20261009150100: the phone declares placement under its installation-scoped device, never the strap. A
+    /// declaration on an installation device whose installation uploaded to this strap reaches the strap's context
+    /// as a device record; one on an installation that never uploaded here is not read.
+    func testPlacementDeclaredOnABoundInstallationDeviceReachesTheStrap() throws {
+        let resolver = try db.query("""
+            select (to_regprocedure('internal.placement_intervals_for_device_v1(uuid,uuid,timestamptz,timestamptz)')
+                    is not null)::text as present
+            """, []).first?["present"]
+        guard resolver.map(isTrue) == true else {
+            throw XCTSkip("apply 20261009150100_placement_device_resolution.sql to the scratch database")
+        }
+        let o = try makeOwner()
+        let windows = try XCTUnwrap(ContextInputs.windows(day: day, timezoneId: "UTC"))
+        let bound = UUID().uuidString.lowercased(), boundSource = UUID().uuidString.lowercased()
+        let stranger = UUID().uuidString.lowercased(), strangerSource = UUID().uuidString.lowercased()
+        for (device, source) in [(bound, boundSource), (stranger, strangerSource)] {
+            _ = try db.query("""
+                insert into public.devices(id, user_id, source_kind, external_device_id)
+                values ($1::uuid, $2::uuid, 'noop_push', 'installation:' || $3 || ':my-whoop')
+                """, [device, o.user, source])
+        }
+        _ = try db.query("""
+            insert into public.noop_upload_receipts(id, user_id, source_id, device_id, auth_mode, lane, stream, batch_id,
+              body_sha256, accepted_status, accepted_at)
+            values (gen_random_uuid(), $1::uuid, $2::uuid, $3::uuid, 'installation', 'inline', 'hr', gen_random_uuid(),
+              repeat('d', 64), 'accepted', to_timestamp($4::bigint))
+            """, [o.user, boundSource, o.device, String(dayStart)])
+        func place(_ device: String, _ placement: String, start: Int, revision: Int) throws {
+            _ = try db.query("""
+                insert into public.placement_intervals(owner, device_id, placement, effective_start, source, revision)
+                values ($1::uuid, $2::uuid, $3, to_timestamp($4::bigint), 'user', $5::bigint)
+                """, [o.user, device, placement, String(start), String(revision)])
+        }
+        try place(bound, "bicep", start: dayStart - 86_400, revision: 1)
+        try place(stranger, "wrist", start: dayStart, revision: 2)
+        let loaded = try ContextInputs.load(db: db, job: contextJob(o, mode: .retrospective,
+                                                             claimedAt: Int(Date().timeIntervalSince1970)),
+                                            windows: windows)
+        XCTAssertEqual(loaded.placements.map(\.placement), ["bicep"])
+        XCTAssertEqual(loaded.placements.map(\.scope), ["device"])
+        XCTAssertEqual(loaded.placements.first?.start, dayStart - 86_400)
+        XCTAssertFalse(loaded.unavailable.contains("placement_unavailable"))
+    }
+
     /// R1 (lead addendum): a transient failure of an optional read (here a lock timeout on the HART epochs, which
     /// the publish never writes, so only the read can fail) ends the job instead of publishing a document that says
     /// the input is "unavailable"; the queue keeps the job, and the retry after the lock is gone publishes it with

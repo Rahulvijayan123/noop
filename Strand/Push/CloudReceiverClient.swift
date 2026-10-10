@@ -134,6 +134,8 @@ public struct CloudInstallationGrant: Equatable, Sendable {
     public let expiresAt: Date?
     /// Present unless the presented credential is still valid (`reused`). Never logged.
     public let installationToken: String?
+    /// The server's sync policy for the account (`syncPolicy` in the reply), or nil from a server that sends none.
+    public var syncPolicy: CloudSyncPolicy? = nil
 }
 
 /// The negotiated capability document plus the negotiated protocol version.
@@ -234,7 +236,8 @@ public struct CloudReceiverClient: Sendable {
         if let token, !token.hasPrefix("noop_") { throw CloudReceiverError.malformedResponse }
         let expiry = (object["expiresAt"] as? String).flatMap(Self.parseDate)
         return CloudInstallationGrant(userId: userId, sourceId: echoedSource, tokenId: tokenId, action: action,
-                                      expiresAt: expiry, installationToken: token)
+                                      expiresAt: expiry, installationToken: token,
+                                      syncPolicy: CloudSyncPolicy.parse(object["syncPolicy"]))
     }
 
     // MARK: - Account recovery

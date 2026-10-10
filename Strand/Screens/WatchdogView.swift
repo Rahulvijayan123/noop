@@ -555,6 +555,7 @@ struct WatchdogPage: View {
             "Each vital's band is wider while Watchdog is still learning it. A vital needs about 14 good still minutes before its own band is used; until then Watchdog shows the reading without calling it in range or off.",
             "An alert opens when the whole half-hour stays unlike your usual, not from one reading. Watchdog is separate from Charge and is not a diagnosis.",
         ]
+        if let line = WatchdogEventCopy.exerciseLine(store.watchdogResult?.exercise) { out.append(line) }
         if let note = store.activityContextNote, !note.isEmpty { out.append(note) }
         return out
     }
@@ -990,16 +991,20 @@ private struct WatchdogEventSheet: View {
     }
 
     private var contextRows: [(String, String)] {
-        [("Movement", WatchdogEventCopy.activity(row.activityLabel) ?? "Not known"),
-         ("Pattern", WatchdogEventCopy.eventLabel(row.eventLabel) ?? "Not labelled"),
-         ("Notification", WatchdogEventCopy.delivery(row.notifyDelivery))]
+        var rows = [("Movement", WatchdogEventCopy.activity(row.activityLabel) ?? "Not known"),
+                    ("Pattern", WatchdogEventCopy.eventLabel(row.eventLabel) ?? "Not labelled")]
+        if let comparison = WatchdogEventCopy.exerciseComparison(row.exercise) {
+            rows.append(("Compared with", comparison))
+        }
+        rows.append(("Notification", WatchdogEventCopy.delivery(row.notifyDelivery)))
+        return rows
     }
 
     private var checkRows: [(String, String)] {
         // `offMinutes` keeps one stamp per live check that found the half-hour off usual, so this counts
         // checks, not minutes.
         var rows = [("Checks off usual", "\(row.offMinutes.count)")]
-        if row.unavailableMinutes > 0 { rows.append(("Checks without data", "\(row.unavailableMinutes)")) }
+        if row.unavailableMinutes > 0 { rows.append(("Minutes without data", "\(row.unavailableMinutes)")) }
         return rows
     }
 

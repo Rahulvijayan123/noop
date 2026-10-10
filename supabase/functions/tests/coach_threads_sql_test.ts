@@ -22,9 +22,15 @@ import { memoryTokens } from '../_shared/coach_llm.ts';
 // 10. the maintenance lease (claim / publish, and the memory_reset fence against forgets after the claim),
 //     coach_memory_apply_v1 (with its version guards and the forget of merged rows), the consolidation claim
 //     and the utility quota;
-// 11. internal.coach_memory_tokens, the tombstone tokens SQL writes itself, against the edge function's memoryTokens.
+// 11. internal.coach_memory_tokens, the tombstone tokens SQL writes itself, against the edge function's memoryTokens;
+// 12. 20261009120000_coach_memory_user_edits.sql, which re-creates coach_memory_apply_v1 and coach_memories_ranked_v1:
+//     the user's edits (source 'user', edit tombstones without the old text, the revision on every user op), the lock
+//     that keeps the curator and the consolidator from rewording, retiring or merging a user row, user rows evicted
+//     last, edit tombstones kept like forget tombstones, and `version` in the ranked rows. Every re-apply below applies
+//     both files in order, as production does.
 
 const MIGRATION = '20261007160000_coach_threads_memory.sql';
+const USER_EDITS = '20261009120000_coach_memory_user_edits.sql';
 const MINUTE = 60_000;
 const HOUR = 60 * MINUTE;
 const DAY = 24 * HOUR;
@@ -47,8 +53,10 @@ const U_FENCE = '30000000-0000-4000-8000-00000000000d';
 const U_GUARD = '30000000-0000-4000-8000-00000000000e';
 const U_SHELL = '30000000-0000-4000-8000-00000000000f';
 const U_HYST = '30000000-0000-4000-8000-000000000010';
+const U_EDIT = '30000000-0000-4000-8000-000000000011';
+const U_LOCK = '30000000-0000-4000-8000-000000000012';
 const EXTRA_USERS = [U_LEGACY, U_PRUNE, U_SEARCH, U_DROP, U_RANK, U_APPLY, U_CAP, U_CONS, U_QUOTA, U_POOL, U_REFUSAL,
-  U_DELETE, U_FENCE, U_GUARD, U_SHELL, U_HYST];
+  U_DELETE, U_FENCE, U_GUARD, U_SHELL, U_HYST, U_EDIT, U_LOCK];
 
 /** The eleven public RPCs of the migration, by signature. */
 const RPC_SIGNATURES = [
@@ -100,13 +108,15 @@ type Message = { id?: string; user: string; thread?: string | null; role?: strin
 Deno.test('coach threads and memory: schema, privileges, backfill, triggers and every RPC', async (t) => {
   const db = await startLocalPostgres({ coachMemory: true });
   const apply = async () => {
-    const path = new URL(`../../migrations/${MIGRATION}`, import.meta.url);
-    const result = await new Deno.Command('/opt/homebrew/bin/psql', {
-      args: ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', db.base, '-U', 'edge_test', '-d', 'postgres',
-        '-f', decodeURIComponent(path.pathname)],
-      stdout: 'piped', stderr: 'piped', clearEnv: true,
-    }).output();
-    if (!result.success) throw new Error(`apply failed: ${new TextDecoder().decode(result.stderr).slice(-2000)}`);
+    for (const file of [MIGRATION, USER_EDITS]) {
+      const path = new URL(`../../migrations/${file}`, import.meta.url);
+      const result = await new Deno.Command('/opt/homebrew/bin/psql', {
+        args: ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', db.base, '-U', 'edge_test', '-d', 'postgres',
+          '-f', decodeURIComponent(path.pathname)],
+        stdout: 'piped', stderr: 'piped', clearEnv: true,
+      }).output();
+      if (!result.success) throw new Error(`apply ${file} failed: ${new TextDecoder().decode(result.stderr).slice(-2000)}`);
+    }
   };
   const one = async (statement: string) => (await db.sql(statement)).trim();
   const json = async (statement: string) => JSON.parse((await db.sql(statement)) || 'null');
@@ -940,7 +950,7 @@ Deno.test('coach threads and memory: schema, privileges, backfill, triggers and 
       assert.equal(marathon.total, 6, 'retired rows are not counted');
       assert.deepEqual(marathon.topics, { goal: 1, health: 2, injury: 2, training: 1 });
       assert.deepEqual(Object.keys(marathon.memories[0]).sort(), ['confirmations', 'content', 'created_at', 'id', 'importance',
-        'pinned', 'source', 'topic', 'updated_at']);
+        'pinned', 'source', 'topic', 'updated_at', 'version']);
       const plain = await ranked(null);
       assert.deepEqual(plain.memories.map((m: any) => keyOf(m.id)), ['inj1', 'inj2', 'inj3', 'lift', 'inj4', 'goal']);
       assert.deepEqual((await ranked('', 2)).memories.map((m: any) => keyOf(m.id)), ['inj1', 'inj2']);
@@ -1183,10 +1193,11 @@ Deno.test('coach threads and memory: schema, privileges, backfill, triggers and 
       assert.equal(tombstone.before.content, undefined);
       assert.equal(await count(`public.coach_memory_events where memory_id = '${pref.id}'
         and (before ? 'content' or after ? 'content')`), 0, 'no event keeps the forgotten content');
+      assert.equal(await revision(U_APPLY), 4, 'every op the user applies moves the revision, whatever the row');
       await applyOps(U_APPLY, [{ op: 'forget', id: shoes.id, tokens: ['trail', 'shoe'] }], 'user');
       assert.deepEqual(await json(`select to_jsonb(tokens) from public.coach_memory_events where memory_id = '${shoes.id}' and op = 'forget'`),
         ['trail', 'shoe']);
-      assert.equal(await revision(U_APPLY), 3);
+      assert.equal(await revision(U_APPLY), 5);
       // Ownership, unknown ops, bad content and a bad actor.
       const [ofB] = await applyOps(USER_B, [{ op: 'add', content: 'User B fact', topic: 'goal', importance: 2 }]);
       assert.deepEqual(results(await applyOps(U_APPLY, [{ op: 'update', id: ofB.id, content: 'hijacked' },
@@ -1319,6 +1330,115 @@ Deno.test('coach threads and memory: schema, privileges, backfill, triggers and 
       assert.equal(await count(`public.coach_memory_events where user_id = '${U_CAP}' and op = 'forget'`), 3);
       assert.equal(await count(`public.coach_memory_events where user_id = '${U_CAP}' and op = 'confirm' and memory_id = '${fact}'`), 1,
         'the newest event survives');
+    });
+
+    await t.step('memory_apply_v1 (user edits): source user, an edit tombstone without the old text, the revision on every user op', async () => {
+      const results = (ops: any[]) => ops.map((op) => [op.op, op.applied, op.reason ?? null]);
+      const [swim, tea] = (await applyOps(U_EDIT, [
+        { op: 'add', content: 'User swims on Tuesdays', topic: 'routine', importance: 3, source: 'tool' },
+        { op: 'add', content: 'User drinks green tea', topic: 'nutrition', importance: 2, source: 'curator' }])).map((op: any) => op.id);
+      assert.equal(await revision(U_EDIT), 0, 'routine rows from the tool do not move it');
+
+      // The user's edit, guarded by the version the sheet read.
+      assert.deepEqual(results(await applyOps(U_EDIT, [{ op: 'update', id: swim, content: 'User swims on Thursdays',
+        expect_version: 1 }], 'user')), [['update', true, null]]);
+      const edited = await memory(swim);
+      assert.deepEqual([edited.content, edited.source, edited.version, edited.topic, edited.importance],
+        ['User swims on Thursdays', 'user', 2, 'routine', 3]);
+      assert.equal(await revision(U_EDIT), 1, 'a user edit moves the revision whatever the topic and importance');
+      const tomb = await json(`select to_jsonb(e) from public.coach_memory_events e where memory_id = '${swim}' and op = 'update'`);
+      assert.deepEqual([tomb.actor, tomb.reason, tomb.tokens, tomb.before.content, tomb.before.version, tomb.after.content, tomb.after.source],
+        ['user', 'user_edit', memoryTokens('User swims on Tuesdays'), undefined, 1, 'User swims on Thursdays', 'user'],
+        'the database tokenises the old text itself when the caller sends none');
+      assert.equal(await count(`public.coach_memory_events where memory_id = '${swim}'
+        and (coalesce(before::text, '') like '%Tuesdays%' or coalesce(after::text, '') like '%Tuesdays%')`), 0,
+        'no event keeps the old wording');
+      // The tokens the edge function sends are kept as they are; a stale version or a gone row writes nothing.
+      assert.deepEqual(results(await applyOps(U_EDIT, [
+        { op: 'update', id: swim, content: 'User swims on Thursdays at the lake', tokens: ['swim', 'thursday'], expect_version: 2 },
+        { op: 'update', id: swim, content: 'User swims on Fridays', expect_version: 2 },
+        { op: 'update', id: uuid(), content: 'User swims on Fridays', expect_version: 1 }], 'user')),
+        [['update', true, null], ['update', false, 'stale'], ['update', false, 'stale']]);
+      assert.deepEqual(await json(`select jsonb_agg(to_jsonb(tokens) order by id) from public.coach_memory_events
+        where memory_id = '${swim}' and op = 'update' and reason = 'user_edit'`), [memoryTokens('User swims on Tuesdays'), ['swim', 'thursday']]);
+      // Importance or topic only: still the user's change (the revision moves), but no tombstone (the text stayed).
+      await applyOps(U_EDIT, [{ op: 'update', id: swim, importance: 4, expect_version: 3 }], 'user');
+      assert.deepEqual([(await memory(swim)).importance, (await memory(swim)).version, await revision(U_EDIT)], [4, 4, 3]);
+      assert.equal(await count(`public.coach_memory_events where memory_id = '${swim}' and reason = 'user_edit'`), 2);
+
+      // Every read returns the stored text and its version.
+      const ranked = await rpc('coach_memories_ranked_v1', { p_user: U_EDIT, p_query: 'swim' });
+      assert.deepEqual(ranked.memories.map((m: any) => [m.content, m.version, m.source]).slice(0, 1),
+        [['User swims on Thursdays at the lake', 4, 'user']]);
+      const manifest = await rpc('coach_context_manifest_v1', { p_user: U_EDIT, p_thread: null, p_query: 'When do I swim?' });
+      assert.deepEqual(manifest.memories.find((m: any) => m.id === swim)?.content, 'User swims on Thursdays at the lake');
+      assert.equal(manifest.memory_revision, 3);
+
+      // The curator and the consolidator may confirm a user row and move its importance; nothing else.
+      for (const actor of ['curator', 'consolidator']) {
+        assert.deepEqual(results(await applyOps(U_EDIT, [
+          { op: 'update', id: swim, content: 'User swims on Tuesdays' },
+          { op: 'update', id: swim, topic: 'training', expect_version: 4 },
+          { op: 'retire', id: swim, reason: 'contradicted' },
+          { op: 'merge', keep_id: tea, ids: [swim], content: 'User drinks green tea and swims' },
+          { op: 'merge', keep_id: swim, ids: [tea], content: 'User swims on Thursdays at the lake' },
+          { op: 'confirm', id: swim }], actor)),
+          [['update', false, 'user_edited'], ['update', false, 'user_edited'], ['retire', false, 'user_edited'],
+            ['merge', false, 'user_edited'], ['merge', false, 'user_edited'], ['confirm', true, null]], actor);
+      }
+      assert.deepEqual(results(await applyOps(U_EDIT, [{ op: 'update', id: swim, importance: 3, expect_version: 4 },
+        { op: 'update', id: swim, content: 'User swims on Thursdays at the lake', topic: 'routine' }], 'curator')),
+        [['update', true, null], ['update', true, null]], 'the same text and topic is no rewording');
+      const locked = await memory(swim);
+      assert.deepEqual([locked.content, locked.topic, locked.importance, locked.source, locked.confirmations, locked.retired_at],
+        ['User swims on Thursdays at the lake', 'routine', 3, 'user', 3, null]);
+      assert.deepEqual([(await memory(tea)).retired_at, (await memory(tea)).content], [null, 'User drinks green tea']);
+      assert.equal(await revision(U_EDIT), 3, 'no pass op on these rows moves it');
+      // Sana's save path (the user asked in a chat) still updates it, and the row stays the user's.
+      assert.deepEqual(results(await applyOps(U_EDIT, [{ op: 'update', id: swim, content: 'User swims on Thursdays and Sundays',
+        expect_version: 6 }], 'tool')), [['update', true, null]]);
+      assert.deepEqual([(await memory(swim)).content, (await memory(swim)).source], ['User swims on Thursdays and Sundays', 'user']);
+      assert.equal(await count(`public.coach_memory_events where memory_id = '${swim}' and reason = 'user_edit'`), 2,
+        'only the user\'s own edits leave a tombstone');
+
+      // Every other user op moves the revision too.
+      const [note] = await applyOps(U_EDIT, [{ op: 'add', content: 'User likes podcasts', topic: 'general', importance: 1, source: 'user' }], 'user');
+      assert.deepEqual([(await memory(note.id)).source, await revision(U_EDIT)], ['user', 4]);
+      await applyOps(U_EDIT, [{ op: 'confirm', id: tea }], 'user');
+      assert.equal(await revision(U_EDIT), 5);
+      await applyOps(U_EDIT, [{ op: 'forget', id: note.id }], 'user');
+      assert.equal(await revision(U_EDIT), 6);
+      await applyOps(U_EDIT, [{ op: 'confirm', id: tea }], 'tool');
+      assert.equal(await revision(U_EDIT), 6, 'the tool confirming a minor row does not');
+    });
+
+    await t.step('memory_apply_v1 (user edits): edit tombstones are kept like forget tombstones; the cap evicts user rows last', async () => {
+      // Retention: past the newest 1,000 events an edit tombstone stays for 365 days, like a forget tombstone; a user
+      // update without tokens (importance only) is an ordinary event.
+      const [kept] = await applyOps(U_LOCK, [{ op: 'add', content: 'User naps after lunch', topic: 'sleep' }]);
+      await db.sql(`insert into public.coach_memory_events (user_id, memory_id, op, actor, tokens, reason, created_at)
+          values ('${U_LOCK}', '${kept.id}', 'update', 'user', '{nap,lunch}', 'user_edit', now() - interval '10 days'),
+                 ('${U_LOCK}', '${kept.id}', 'update', 'user', '{nap,old}', 'user_edit', now() - interval '400 days'),
+                 ('${U_LOCK}', '${kept.id}', 'update', 'user', null, null, now() - interval '9 days');
+        insert into public.coach_memory_events (user_id, op, actor, created_at)
+          select '${U_LOCK}', 'confirm', 'tool', now() - interval '2 days' + n * interval '1 millisecond' from generate_series(1, 1005) n;`);
+      await applyOps(U_LOCK, [{ op: 'confirm', id: kept.id }]);
+      assert.deepEqual(await json(`select jsonb_agg(to_jsonb(tokens)) from public.coach_memory_events
+        where user_id = '${U_LOCK}' and op = 'update' and actor = 'user'`), [['nap', 'lunch']]);
+
+      // The cap: the user's own row has the lowest score but outlasts every other row.
+      const mine = uuid();
+      await db.sql(`delete from public.coach_memory_items where user_id = '${U_LOCK}';
+        insert into public.coach_memory_items (user_id, content, topic, importance)
+          select '${U_LOCK}', 'Fact number ' || n, 'general', 3 from generate_series(1, 199) n;
+        insert into public.coach_memory_items (id, user_id, content, topic, importance, source, created_at, updated_at, last_confirmed_at)
+          values ('${mine}', '${U_LOCK}', 'User keeps a paper training log', 'general', 1, 'user', now() - interval '300 days',
+                  now() - interval '300 days', now() - interval '300 days');`);
+      const result = await applyOps(U_LOCK, [{ op: 'add', content: 'User swims on Fridays', topic: 'routine', importance: 3 }]);
+      const evicted = result.find((r: any) => r.op === 'evict');
+      assert.ok(evicted && evicted.id !== mine);
+      assert.equal((await memory(mine)).retired_at, null);
+      assert.equal(await count(`public.coach_memory_items where user_id = '${U_LOCK}' and retired_at is null`), 200);
     });
 
     await t.step('consolidation_claim_v1: due by size or age, one holder at a time', async () => {

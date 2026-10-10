@@ -21,10 +21,10 @@ Flow:
 
 Gating (CONTRACTS.md reason vocabulary):
     * FRWHOOP_PARADIGMA_ENABLED != "1"          -> family_disabled (standalone: not registered)
-    * missing/mismatched pinned artifacts       -> artifact_unavailable (standalone: not registered)
+    * missing/mismatched pinned artifacts       -> model_unavailable (standalone: not registered)
     * missing subprocess python                 -> runtime_unavailable (standalone: not registered)
     * native IMU rate < 50 Hz                   -> unsupported_native_rate
-    * no IMU                                    -> artifact_unavailable (no_verified_imu_objects)
+    * no IMU                                    -> no_verified_input (no_verified_imu_objects)
     * no eligible run / no windows              -> not_enough_valid_data
     * watch_side not left/right                 -> arm_swing only: unknown_wrist_placement
     * device_orientation not screen_up/down     -> arm_swing only: unknown_orientation
@@ -310,7 +310,7 @@ def _decode_imu(raw: Mapping[str, Any]) -> tuple[dict, dict[str, dict]]:
     """
     imu = raw.get("imu")
     if not isinstance(imu, Mapping) or not imu:
-        raise _ImuError("artifact_unavailable", family="both", detail="no_verified_imu_objects")
+        raise _ImuError("no_verified_input", family="both", detail="no_verified_imu_objects")
     rate = imu.get("sampling_rate_hz")
     try:
         rate = float(rate)
@@ -323,7 +323,7 @@ def _decode_imu(raw: Mapping[str, Any]) -> tuple[dict, dict[str, dict]]:
         raise _ImuError("preprocessing_unverified", family="both")
     segments = imu.get("segments")
     if not isinstance(segments, list) or not segments:
-        raise _ImuError("artifact_unavailable", family="both", detail="no_verified_imu_objects")
+        raise _ImuError("no_verified_input", family="both", detail="no_verified_imu_objects")
 
     parsed: list[dict] = []
     for index, seg in enumerate(segments):

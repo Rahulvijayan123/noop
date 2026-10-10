@@ -1,11 +1,13 @@
 // Sana's durable memories (docs/COACH_MEMORY.md §3 coach_memory_apply_v1 and §4 memories routes).
 //
 // Every write goes through coach_memory_apply_v1, which audits it in coach_memory_events, enforces the cap of
-// 200 active rows (soft eviction) and keeps tombstones for forgotten facts. Reads ignore retired rows. A save
-// that near-duplicates an active row (same topic family, §6) confirms or updates that row instead of adding.
+// 200 active rows (soft eviction) and keeps tombstones for forgotten facts and for the old wording of the user's
+// own edits. Reads ignore retired rows. A save that near-duplicates an active row (same topic family, §6) confirms
+// or updates that row instead of adding. A row the user edited or added (source 'user') is the user's wording: the
+// curator, the consolidator and automatic saves never reword it.
 import {
-  clampInt, collapse, type CoachDeps, fail, findNearDuplicate, iso, jaccard, memoryTokens, memoryTopic, MEMORY_TOPICS,
-  readJson, sameFamily, SMALL_BODY_BYTES, tokenSet, toolOverlap, tsKey, uuidOf, wordTokens,
+  clampInt, collapse, type CoachDeps, enc, fail, findNearDuplicate, isObject, iso, jaccard, memoryTokens, memoryTopic,
+  MEMORY_TOPICS, readJson, sameFamily, SMALL_BODY_BYTES, tokenSet, tokensNearMatch, toolOverlap, tsKey, uuidOf, wordTokens,
 } from './coach_llm.ts';
 
 const DEFAULT_LIST = 50;
@@ -16,6 +18,29 @@ export const MEMORY_COLUMNS = 'id,content,topic,importance,created_at,updated_at
 
 /** The `expect_version` guard of an update or retire (coach_memory_apply_v1 answers `stale` when it moved). */
 export const versionGuard = (r: any) => (Number.isInteger(Number(r?.version)) && r?.version != null ? { expect_version: Number(r.version) } : {});
+
+/** A row in the user's own words (edited or added in the memory sheet): only the user rewords it. */
+export const isUserRow = (r: any) => r?.source === 'user';
+
+/**
+ * Token sets of the tombstones from the last 365 days: forgotten facts, and the old wording of the user's own edits
+ * (an `update` event by the user that keeps `tokens`, §3). The curator never learns one again, and neither does an
+ * automatic save.
+ */
+export async function loadTombstones(d: CoachDeps, userId: string): Promise<Set<string>[]> {
+  const since = new Date(d.now() - 365 * 86_400_000).toISOString();
+  const rows = await d.rest.select('coach_memory_events',
+    `user_id=eq.${userId}&or=(op.eq.forget,and(op.eq.update,actor.eq.user))&created_at=gte.${enc(since)}`
+    + '&order=created_at.desc&limit=1000&select=tokens');
+  return rows.map((r: any) => new Set<string>((Array.isArray(r.tokens) ? r.tokens : []).filter((t: unknown) => typeof t === 'string')))
+    .filter((s: Set<string>) => s.size > 0);
+}
+
+/** The text near-matches a tombstone (§6 `tokensNearMatch`). */
+export function nearTombstone(content: string, tombstones: Set<string>[]): boolean {
+  const mine = tokenSet(content);
+  return tombstones.some((t) => tokensNearMatch(mine, t));
+}
 
 /** Forgetting one memory also drops the cached starters, which may quote it. Best effort. */
 async function dropStarterCache(d: CoachDeps, userId: string): Promise<void> {
@@ -34,6 +59,7 @@ export function publicMemory(r: any) {
     ...(r.source != null ? { source: r.source } : {}),
     ...(r.confirmations != null ? { confirmations: Number(r.confirmations) } : {}),
     ...(r.pinned != null ? { pinned: r.pinned === true } : {}),
+    ...(r.version != null ? { version: Number(r.version) } : {}),
   };
 }
 
@@ -48,16 +74,34 @@ export async function applyMemoryOps(d: CoachDeps, userId: string, ops: unknown[
   return Array.isArray(result) ? result : [];
 }
 
+const MAX_MEMORY_CHARS = 500;
+
+/**
+ * A memory's text, screened as every other stored text is: NUL characters (which PostgreSQL refuses) dropped, and
+ * whitespace collapsed, since a memory is one line of the prompt's remembered block. 1..500 characters.
+ */
+function memoryText(v: unknown): string {
+  const content = collapse(typeof v === 'string' ? v.replace(/\u0000/g, '') : '');
+  if (!content || content.length > MAX_MEMORY_CHARS) throw fail('invalid_memory', 400);
+  return content;
+}
+
+const importanceInput = (v: unknown) => Math.max(1, Math.min(5, Math.round(v as number)));
+
 function memoryInput(body: any) {
-  const content = typeof body?.content === 'string' ? body.content.trim() : '';
-  if (!content || content.length > 500) throw fail('invalid_memory', 400);
-  const importance = Number.isFinite(body.importance) ? Math.max(1, Math.min(5, Math.round(body.importance))) : 3;
+  const content = memoryText(body?.content);
+  const importance = Number.isFinite(body.importance) ? importanceInput(body.importance) : 3;
   return { content, importance, topic: memoryTopic(body.topic) };
 }
 
 export async function memoriesRoute(req: Request, userId: string, tail: string[], d: CoachDeps): Promise<Response> {
   if (req.method === 'GET') return await listMemories(req, userId, d);
   if (req.method === 'POST') return await saveMemory(req, userId, d);
+  if (req.method === 'PATCH' && tail[0]) {
+    const id = uuidOf(tail[0]);
+    if (!id) throw fail('invalid_id', 400);
+    return await editMemory(req, userId, id, d);
+  }
   if (req.method === 'DELETE') {
     if (tail[0]) {
       const id = uuidOf(tail[0]);
@@ -73,37 +117,7 @@ export async function memoriesRoute(req: Request, userId: string, tail: string[]
     }
     return Response.json({ deleted: true });
   }
-  if (req.method === 'PATCH' && tail[0]) return await editMemory(req, userId, tail[0], d);
   return Response.json({ error: 'method_not_allowed' }, { status: 405 });
-}
-
-/**
- * The person's own edit of one active memory: new text, and optionally a topic or importance. Guarded by the row's
- * version, so an edit never overwrites a change the curator made after the list was read (409 `stale`).
- */
-async function editMemory(req: Request, userId: string, rawId: string, d: CoachDeps): Promise<Response> {
-  const id = uuidOf(rawId);
-  if (!id) throw fail('invalid_id', 400);
-  const body = await readJson(req, SMALL_BODY_BYTES);
-  const content = typeof body?.content === 'string' ? body.content.trim() : '';
-  if (!content || content.length > 500) throw fail('invalid_memory', 400);
-  const [row] = await d.rest.select('coach_memory_items',
-    `user_id=eq.${userId}&id=eq.${id}&retired_at=is.null&select=${MEMORY_COLUMNS}`);
-  if (!row) throw fail('not_found', 404);
-  const topic = typeof body?.topic === 'string' ? memoryTopic(body.topic) : row.topic;
-  const importance = Number.isFinite(body?.importance)
-    ? Math.max(1, Math.min(5, Math.round(body.importance))) : Number(row.importance ?? 3);
-  const [res] = await applyMemoryOps(d, userId,
-    [{ op: 'update', id, content, topic, importance, ...versionGuard(row) }], 'user');
-  if (!res?.applied) {
-    if (res?.reason === 'stale') throw fail('stale', 409);
-    if (res?.reason === 'invalid_content') throw fail('invalid_memory', 400);
-    throw fail('not_found', 404);
-  }
-  // The cached starters may quote the old text.
-  await dropStarterCache(d, userId);
-  const stamp = new Date(d.now()).toISOString();
-  return Response.json({ memory: publicMemory({ ...row, content, topic, importance, updated_at: stamp }) });
 }
 
 /** coach_memory_apply_v1 takes at most 100 ops per call. */
@@ -165,34 +179,51 @@ export function saveTarget(content: string, topic: string, active: any[]): { row
   return best && { row: best.row, update: best.update };
 }
 
+/**
+ * POST memories. Three callers: Sana's save_memory tool (the user asked it to remember, or shared a critical fact),
+ * the user adding a fact in the memory sheet (`source: 'user'`), and an automatic note nobody asked for (`auto: true`,
+ * the "Ask Sana" handoff from a screen). The first two are explicit, so a near-match of a forgotten fact is still
+ * saved; an automatic note that near-matches a tombstone (a forgotten fact, or the old wording of an edit) is not, and
+ * never rewords a row in the user's own words. Duplicates are never added: the matching row is updated or confirmed.
+ * An update is guarded by the row's version; when another writer moved it first, the match is redone once.
+ */
 async function saveMemory(req: Request, userId: string, d: CoachDeps): Promise<Response> {
   const body = await readJson(req, SMALL_BODY_BYTES);
   const input = memoryInput(body);
   const threadId = uuidOf(body?.threadId);
-  // The user asked for this explicitly, so a near-match of a forgotten fact is still saved; duplicates are not.
-  // The update is guarded by the row's version; when another writer moved it first, the match is redone once.
+  const byUser = body?.source === 'user';
+  const auto = !byUser && body?.auto === true;
+  const actor = byUser ? 'user' : 'tool';
+  if (auto && nearTombstone(input.content, await loadTombstones(d, userId))) return Response.json({ skipped: 'forgotten' });
   for (let attempt = 0; attempt < 2; attempt++) {
     const target = saveTarget(input.content, input.topic, await activeMemories(d, userId));
     if (!target) break;
     const { row } = target;
-    if (target.update) {
+    if (target.update && !(auto && isUserRow(row))) {
       const importance = Math.max(Number(row.importance ?? 3), input.importance);
       const topic = row.topic === 'general' ? input.topic : row.topic;
+      // The user's own rewording leaves the old wording's tokens behind as an edit tombstone (§3).
+      const tokens = byUser ? { tokens: memoryTokens(row.content) } : {};
       const [res] = await applyMemoryOps(d, userId,
-        [{ op: 'update', id: row.id, content: input.content, topic, importance, ...versionGuard(row) }], 'tool', threadId);
+        [{ op: 'update', id: row.id, content: input.content, topic, importance, ...tokens, ...versionGuard(row) }], actor, threadId);
       if (res?.applied) {
         const stamp = new Date(d.now()).toISOString();
-        return Response.json({ memory: publicMemory({ ...row, content: input.content, topic, importance, updated_at: stamp }), deduped: true, updated: true });
+        const version = row.version != null ? { version: Number(row.version) + 1 } : {};
+        const source = byUser ? { source: 'user' } : {};
+        return Response.json({
+          memory: publicMemory({ ...row, content: input.content, topic, importance, updated_at: stamp, ...version, ...source }), deduped: true, updated: true,
+        });
       }
       if (res?.reason !== 'stale') break;
     } else {
-      const [res] = await applyMemoryOps(d, userId, [{ op: 'confirm', id: row.id }], 'tool', threadId);
+      const [res] = await applyMemoryOps(d, userId, [{ op: 'confirm', id: row.id }], actor, threadId);
       if (res?.applied) {
         return Response.json({ memory: publicMemory({ ...row, confirmations: Number(row.confirmations ?? 1) + 1 }), deduped: true });
       }
     }
   }
-  const results = await applyMemoryOps(d, userId, [{ op: 'add', ...input, source: 'tool' }], 'tool', threadId);
+  const source = byUser ? 'user' : 'tool';
+  const results = await applyMemoryOps(d, userId, [{ op: 'add', ...input, source }], actor, threadId);
   const added = results.find((r) => r?.op === 'add' && r.applied && r.id);
   if (!added) throw fail('memory_not_saved', 502);
   // Past the cap the lowest-scoring row is evicted, which may be the one just saved.
@@ -200,9 +231,57 @@ async function saveMemory(req: Request, userId: string, d: CoachDeps): Promise<R
   const [row] = await d.rest.select('coach_memory_items', `user_id=eq.${userId}&id=eq.${added.id}&select=${MEMORY_COLUMNS}`);
   const stamp = new Date(d.now()).toISOString();
   return Response.json({
-    memory: publicMemory(row ?? { id: added.id, ...input, created_at: stamp, updated_at: stamp, source: 'tool', confirmations: 1 }),
+    memory: publicMemory(row ?? { id: added.id, ...input, created_at: stamp, updated_at: stamp, source, confirmations: 1, version: 1 }),
     kept,
   });
+}
+
+/**
+ * PATCH memories/<id> `{content?, topic?, importance?, version}`: the user's own edit from the memory sheet, guarded
+ * by the version the sheet read. 409 `version_conflict` (with the current row) when another writer changed it first,
+ * 404 when it is forgotten or retired. The row becomes source 'user', so no curator or consolidation pass rewords,
+ * merges or retires it again (confirming it and moving its importance stay allowed); a changed text leaves the old
+ * wording's tokens as an edit tombstone, so neither the curator nor an automatic save learns it again. The cached
+ * starters go too, since one may quote the old wording. Returns `{memory}` as it now reads, `version` included.
+ */
+async function editMemory(req: Request, userId: string, id: string, d: CoachDeps): Promise<Response> {
+  const body = await readJson(req, SMALL_BODY_BYTES);
+  if (!isObject(body)) throw fail('invalid_memory', 400);
+  const version = Number.isInteger(body.version) && body.version >= 1 ? Number(body.version) : null;
+  if (version == null) throw fail('invalid_memory', 400);
+  const op: Record<string, unknown> = { op: 'update', id, expect_version: version };
+  if ('content' in body) op.content = memoryText(body.content);
+  if ('topic' in body) {
+    const topic = typeof body.topic === 'string' ? body.topic.trim().toLowerCase() : '';
+    if (!MEMORY_TOPICS.has(topic)) throw fail('invalid_memory', 400);
+    op.topic = topic;
+  }
+  if ('importance' in body) {
+    if (typeof body.importance !== 'number' || !Number.isFinite(body.importance)) throw fail('invalid_memory', 400);
+    op.importance = importanceInput(body.importance);
+  }
+  if (!('content' in op || 'topic' in op || 'importance' in op)) throw fail('invalid_memory', 400);
+
+  const current = async () =>
+    (await d.rest.select('coach_memory_items', `user_id=eq.${userId}&id=eq.${id}&retired_at=is.null&select=${MEMORY_COLUMNS}`))[0];
+  const conflict = (row: any) => Response.json({ error: 'version_conflict', memory: publicMemory(row) }, { status: 409 });
+  const row = await current();
+  if (!row) throw fail('memory_not_found', 404);
+  if (Number(row.version) !== version) return conflict(row);
+  if (typeof op.content === 'string') op.tokens = memoryTokens(row.content);
+  const [res] = await applyMemoryOps(d, userId, [op], 'user');
+  if (!res?.applied) {
+    if (res?.reason === 'invalid_content') throw fail('invalid_memory', 400);
+    // Another writer got there between the read and the write: forgotten or retired (404), or changed (409).
+    const now = await current();
+    if (!now) throw fail('memory_not_found', 404);
+    if (res?.reason === 'stale') return conflict(now);
+    throw fail('memory_not_saved', 502);
+  }
+  await dropStarterCache(d, userId);
+  const saved = await current();
+  if (!saved) throw fail('memory_not_found', 404);
+  return Response.json({ memory: publicMemory(saved) });
 }
 
 /** Newest-confirmed first; ties by id. */

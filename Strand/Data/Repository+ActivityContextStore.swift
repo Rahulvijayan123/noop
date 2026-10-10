@@ -64,9 +64,15 @@ extension Repository {
                 let parts = token.split(separator: ":").compactMap { Int($0) }
                 return parts.count == 2 && parts[1] > day.start && parts[0] < day.end
             }.sorted().joined(separator: ",")
+        // Workout mode's logged workouts the decode reads (`withLoggedWorkouts`). A running one is named by its start
+        // and type only, so it moves the fingerprint when it starts, changes type or stops, not every minute. With no
+        // logged workout the witness is unchanged, so no existing fingerprint moves.
+        let logged = WorkoutModeStore.shared.spans(from: day.start, to: day.end, now: Int(Date().timeIntervalSince1970))
+            .map { "\($0.startUnix)-\($0.open ? "open" : String($0.endUnix))-\($0.typeId)" }.joined(separator: ",")
         return ActivityContextMaterialization.inputFingerprint(store: witness, encoderRevisions: encoder,
                                                                gaitRevisions: gait, configTag: configTag,
-                                                               dismissedWorkouts: dismissed)
+                                                               dismissedWorkouts: logged.isEmpty ? dismissed
+                                                                   : dismissed + "|logged:" + logged)
     }
 
     /// One saved day as a reader should take it.

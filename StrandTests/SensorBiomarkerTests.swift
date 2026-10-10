@@ -719,6 +719,7 @@ final class SensorBiomarkerTests: XCTestCase {
         let cases: [(String?, String)] = [
             (nil, "Not enough usable data."),
             ("unknown_wrist_placement", "The strap's wrist placement wasn't verified."),
+            ("placement_unsupported", "This measurement needs the strap on the wrist; it was set as worn elsewhere."),
             ("unknown_orientation", "The strap's orientation wasn't verified."),
             ("insufficient_eligible_time", "Not enough eligible time was recorded."),
             ("unsupported_native_rate", "The sensor's native sample rate isn't supported for this measurement."),
@@ -726,7 +727,10 @@ final class SensorBiomarkerTests: XCTestCase {
             ("saturated_delta", "Part of the pulse waveform was saturated."),
             ("unverified_sample_clock", "The sensor's sample timing couldn't be verified."),
             ("preprocessing_unverified", "The signal preprocessing couldn't be verified."),
-            ("artifact_unavailable", "No verified sensor data was available."),
+            ("no_verified_input", "No verified sensor data reached this measurement."),
+            ("model_unavailable", "The model for this measurement isn't available."),
+            // Legacy (stored before 2026-10-09): either cause, so neither is claimed.
+            ("artifact_unavailable", "This measurement couldn't be computed for this day."),
             ("unverified_optical_dc", "The optical baseline couldn't be verified."),
             ("not_enough_valid_data", "Not enough usable data."),
         ]

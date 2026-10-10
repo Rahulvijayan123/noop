@@ -35,7 +35,7 @@ owner, one metric and one analysis night (no tool accepts a user, device or date
 | `sleep_context`, `workout_context`, `activity_context` | scores, context documents | sleep timing and duration, exertion windows, daily activity |
 | `recent_events` | `exposure_events` | what the person logged (medications are never named) |
 | `data_quality` | scores + context | tracked, measured and missing nights |
-| `user_context` | `coach_memory_items` (explicit owner filter) | notes the person gave the coach |
+| `user_context` | `coach_memory_items` (explicit owner filter, active rows only) | notes the person gave the coach |
 | `chat_history` | placeholder | not connected (coach transcripts exist in `coach_messages`; connecting them is a product decision) |
 | `health_records` | placeholder | not connected (no EHR, conditions or labs on the server) |
 | `previous_insight` | `metric_insights` | the previous explanation's headline |

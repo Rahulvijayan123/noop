@@ -11,7 +11,7 @@ here (``imu.py``, ``ppg.py``); the research and shadow families (tremor,
 arm_swing: ParaDigMa; rhythm_shadow: DeepBeat/SiamAF) are reached through the
 optional-family seam (``optional.py``), which calls the same implementation the
 standalone providers use. Every requested family gets a stage: a disabled flag
-(``family_disabled``), missing weights or runtime (``artifact_unavailable`` /
+(``family_disabled``), missing weights or runtime (``model_unavailable`` /
 ``runtime_unavailable``) and a broken adapter (``adapter_broken``) are told
 apart, never dropped silently.
 """
@@ -303,7 +303,7 @@ class SensorBiomarkersProvider:
                 for fam in ("movement", "oscillation"):
                     if fam in families:
                         stages.append(family_document(
-                            family=fam, status="withheld", reason="artifact_unavailable",
+                            family=fam, status="withheld", reason="no_verified_input",
                             measurements={}, reason_counts={"no_verified_imu_objects": 1}))
                 imu_grid = None
             else:
@@ -324,7 +324,7 @@ class SensorBiomarkersProvider:
                 for fam in ("ppg_quality", "pulse_shape", "perfusion_research"):
                     if fam in families:
                         stages.append(family_document(
-                            family=fam, status="withheld", reason="artifact_unavailable",
+                            family=fam, status="withheld", reason="no_verified_input",
                             measurements={}, reason_counts={"no_verified_ppg_objects": 1}))
                 ppg_segments = None
             else:

@@ -1,4 +1,5 @@
 import Foundation
+import Network
 import NoopPush
 import WhoopProtocol
 import WhoopStore
@@ -50,11 +51,13 @@ public enum CloudCapture {
         let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
         var streams = extractStreams([frame], deviceClockRef: ref.device, wallClockRef: ref.wall,
                                      family: family)
+        // Read before the ledger drops seconds already sent: a beat's fill flag depends on its second's rate.
+        let secondBpm = Self.bpmBySecond(streams.hr)
         if let ledger = journalLedger { streams = freshHeartRates(streams, deviceId: deviceId, ledger: ledger) }
         let records = rows(from: streams, provenance: .live, family: family,
                            wallClockRef: ref.wall, deviceClockRef: ref.device,
                            receivedAtMs: receivedAtMs, characteristic: characteristic,
-                           deviceId: deviceId)
+                           deviceId: deviceId, sameSecondBpm: secondBpm)
         guard !records.isEmpty else { return .nothingToRecord }
         runtime.submit(records)
         return nil
@@ -67,7 +70,9 @@ public enum CloudCapture {
     /// This path is included deliberately: it is the always-on stream and it does NOT pass through the
     /// proprietary raw outbox, so a journal that only watched custom frames would miss the most
     /// reliable input the app has. Its rows go through `StandardHRMapping`, the same mapping the local
-    /// store uses, so contact transitions are recorded identically on both sides.
+    /// store uses, and contact is journaled by the store's rule too: only when it changes, per strap
+    /// (`StandardHRMapping.shouldRecordContact`, via `CloudContactLedger`). Every reading used to be sent,
+    /// about 86,000 rows a day per strap saying the same thing (95% of one account's server event rows).
     @discardableResult
     public static func recordStandardHR(hr: Int,
                                         rr: [Int],
@@ -82,7 +87,8 @@ public enum CloudCapture {
         let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
         let records = standardHRRecords(hr: hr, rr: rr, contact: contact, family: family, at: ts,
                                         deviceId: deviceId, receivedAtMs: receivedAtMs,
-                                        characteristic: characteristic, ledger: journalLedger)
+                                        characteristic: characteristic, ledger: journalLedger,
+                                        contactLedger: journalContactLedger)
         guard !records.isEmpty else { return .nothingToRecord }
         runtime.submit(records)
         return nil
@@ -90,7 +96,8 @@ public enum CloudCapture {
 
     /// The journal rows for one standard Heart Rate Measurement. With a ledger, the heart-rate row is
     /// left out when the journal already holds that second (see `CloudHeartRateLedger`); the R-R rows
-    /// are not affected, the receiver already keeps those apart by beat.
+    /// are not affected, the receiver already keeps those apart by beat. With a contact ledger, the contact
+    /// row is left out unless the strap's contact state changed (see `CloudContactLedger`).
     static func standardHRRecords(hr: Int,
                                   rr: [Int],
                                   contact: StandardHRContact?,
@@ -99,19 +106,24 @@ public enum CloudCapture {
                                   deviceId: String,
                                   receivedAtMs: Int,
                                   characteristic: String,
-                                  ledger: CloudHeartRateLedger?) -> [CloudJournalRecord] {
+                                  ledger: CloudHeartRateLedger?,
+                                  contactLedger: CloudContactLedger? = nil) -> [CloudJournalRecord] {
         let acceptedHR = (30...220).contains(hr)
         let acceptedRR = rr.filter { (250...3000).contains($0) }
         let source: RRSourceChannel? = family == .whoop5 ? .whoop5Standard
             : (family == .whoop4 ? .whoop4Standard : nil)
-        var streams = StandardHRMapping.samples(fromHR: hr, rr: acceptedRR, contact: contact, at: ts)
+        let changedContact = contact.flatMap { state in
+            contactLedger.map { $0.claim(state, deviceId: deviceId) ? state : nil } ?? state
+        }
+        var streams = StandardHRMapping.samples(fromHR: hr, rr: acceptedRR, contact: changedContact, at: ts)
         if !acceptedHR { streams.hr = [] }
         streams.rr = acceptedRR.map { RRInterval(ts: ts, rrMs: $0, srcChannel: source) }
+        let secondBpm = Self.bpmBySecond(streams.hr)
         if let ledger { streams = freshHeartRates(streams, deviceId: deviceId, ledger: ledger) }
         return rows(from: streams, provenance: .live, family: family,
                     wallClockRef: nil, deviceClockRef: nil,
                     receivedAtMs: receivedAtMs, characteristic: characteristic,
-                    deviceId: deviceId)
+                    deviceId: deviceId, sameSecondBpm: secondBpm)
     }
 
     // MARK: - strap history offload
@@ -139,19 +151,37 @@ public enum CloudCapture {
                                      clockRef: ClockRef?) async -> Int {
         // Same master-switch gate as `record(frame:)` (D1). Returns 0 so the caller retries the
         // window on the next pass instead of treating it as fully sent.
-        guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else { return 0 }
+        guard CloudPushSettings.isEnabled, let runtime = CloudPushRuntime.sharedIfRunning else {
+            // The offload is banked locally either way, and the strap is trimmed on that. Note its span so the
+            // seeders send it once the runtime is back (D2); before, it never reached the cloud.
+            noteMissedHistory(streams, localDeviceId: deviceId, gaps: .shared)
+            return 0
+        }
         let deviceId = CloudStrapSerialStore.shared.cloudId(forLocalId: deviceId)
+        let secondBpm = Self.bpmBySecond(streams.hr)
         let fresh = journalLedger.map { freshHeartRates(streams, deviceId: deviceId, ledger: $0) } ?? streams
         let alreadyHeld = streams.hr.count - fresh.hr.count
         let receivedAtMs = Int(Date().timeIntervalSince1970 * 1000)
         let records = await Task.detached(priority: .utility) {
             rows(from: fresh, provenance: .history, family: family,
                  wallClockRef: clockRef?.wall, deviceClockRef: clockRef?.device,
-                 receivedAtMs: receivedAtMs, characteristic: nil, deviceId: deviceId)
+                 receivedAtMs: receivedAtMs, characteristic: nil, deviceId: deviceId,
+                 sameSecondBpm: secondBpm)
         }.value
         guard !records.isEmpty else { return alreadyHeld }
         let committed = await runtime.submitDurably(records)
         return committed > 0 ? committed + alreadyHeld : 0
+    }
+
+    /// Note the strap seconds an offload chunk covers as a capture gap for `localDeviceId` (the id the store
+    /// banked it under, which is the id the seeders read by).
+    static func noteMissedHistory(_ streams: Streams, localDeviceId: String, gaps: CloudCaptureGaps) {
+        let seconds = streams.hr.map(\.ts) + streams.rr.map(\.ts) + streams.gravity.map(\.ts)
+            + streams.skinTemp.map(\.ts) + streams.events.map(\.ts) + streams.steps.map(\.ts)
+            + streams.sleepState.map(\.ts) + streams.v18Aux.map(\.ts) + streams.resp.map(\.ts)
+            + streams.spo2.map(\.ts) + streams.battery.map(\.ts)
+        guard let from = seconds.min(), let to = seconds.max() else { return }
+        gaps.noteMissedHistory(deviceId: localDeviceId, from: from, to: to + 1)
     }
 
     // MARK: - heart-rate seconds
@@ -160,6 +190,20 @@ public enum CloudCapture {
     /// being sent, so nothing may be counted as sent).
     private static var journalLedger: CloudHeartRateLedger? {
         CloudJournal.isStaging ? CloudHeartRateLedger.shared : nil
+    }
+
+    /// The contact ledger capture consults, or nil while the journal is not taking records (a transition
+    /// claimed but never journaled would be lost).
+    private static var journalContactLedger: CloudContactLedger? {
+        CloudJournal.isStaging ? CloudContactLedger.shared : nil
+    }
+
+    /// Each second's first heart rate, for the R-R fill flag. Taken before the ledger drops seconds.
+    static func bpmBySecond(_ samples: [HRSample]) -> [Int: Int] {
+        var out: [Int: Int] = [:]
+        out.reserveCapacity(samples.count)
+        for sample in samples where out[sample.ts] == nil { out[sample.ts] = sample.bpm }
+        return out
     }
 
     /// `streams` with only the heart-rate samples whose second the journal does not hold. The seconds
@@ -179,6 +223,9 @@ public enum CloudCapture {
     /// The receiver's registry requires every declared data column on a record, so absent optional
     /// values are sent as explicit JSON nulls rather than omitted — an omitted column is a rejection,
     /// and "unknown" is not the same as "zero".
+    ///
+    /// `sameSecondBpm` is each second's heart rate as the capture saw it before any of it was filtered, for the
+    /// R-R fill flag; nil reads it from `streams.hr`.
     static func rows(from streams: Streams,
                      provenance: CloudProvenance,
                      family: DeviceFamily?,
@@ -186,9 +233,11 @@ public enum CloudCapture {
                      deviceClockRef: Int?,
                      receivedAtMs: Int,
                      characteristic: String?,
-                     deviceId: String?) -> [CloudJournalRecord] {
+                     deviceId: String?,
+                     sameSecondBpm: [Int: Int]? = nil) -> [CloudJournalRecord] {
         var out: [CloudJournalRecord] = []
         let familyName = family.map { String(describing: $0) }
+        let bpmBySecond = sameSecondBpm ?? Self.bpmBySecond(streams.hr)
 
         func make(_ stream: CloudStreamKind, _ key: [String: PushJSONValue],
                   _ data: [String: PushJSONValue], strapTs: Int?) -> CloudJournalRecord? {
@@ -212,12 +261,15 @@ public enum CloudCapture {
             let key: [String: PushJSONValue] = ["ts": .int(Int64(rr.ts)),
                                                 "rrMs": .int(Int64(rr.rrMs)),
                                                 "seq": .int(Int64(rr.seq))]
+            // The value the local store writes for the same beat: 1 for a WHOOP 5 500 ms fill beat (#2371, the
+            // store's `whoop5RrFillFlagSQL`, here before the beat is on disk), NULL otherwise. The store never
+            // writes 0, so neither does the upload. Sent as null before, so the server never left a fill out.
+            let suspect = WhoopStore.isWhoop5FillBeat(rrMs: rr.rrMs, srcChannel: rr.srcChannel,
+                                                       sameSecondBpm: bpmBySecond[rr.ts])
             let data: [String: PushJSONValue] = [
                 "ord": rr.ord.map { .int(Int64($0)) } ?? .null,
                 "srcChannel": rr.srcChannel.map { .int(Int64($0.rawValue)) } ?? .null,
-                // The local decoder does not flag suspect beats on this path; null means "not
-                // assessed", which is the honest value rather than a fabricated `false`.
-                "tsSuspect": .null,
+                "tsSuspect": suspect ? .int(1) : .null,
             ]
             if let record = make(.rrInterval, key, data, strapTs: rr.ts) { out.append(record) }
         }
@@ -397,6 +449,34 @@ final class CloudHeartRateLedger: @unchecked Sendable {
     private static func key(_ deviceId: String?) -> String { (deviceId ?? "").lowercased() }
 }
 
+/// The last standard-BLE contact state the cloud journal was given, per device.
+///
+/// Contact is a state, not a measurement: the local store records only its changes
+/// (`StandardHRMapping.shouldRecordContact`, `Collector`), and the journal now does the same. In memory and
+/// reset when the runtime starts or stops, so every run opens with the strap's current state, as every
+/// local session does.
+final class CloudContactLedger: @unchecked Sendable {
+    static let shared = CloudContactLedger()
+
+    private let lock = NSLock()
+    private var last: [String: StandardHRContact] = [:]
+
+    /// Whether `contact` should be journaled for `deviceId`: true when it differs from the last state given
+    /// (or none was), which it then becomes.
+    func claim(_ contact: StandardHRContact, deviceId: String?) -> Bool {
+        let key = (deviceId ?? "").lowercased()
+        lock.lock(); defer { lock.unlock() }
+        guard StandardHRMapping.shouldRecordContact(previous: last[key], current: contact) else { return false }
+        last[key] = contact
+        return true
+    }
+
+    func reset() {
+        lock.lock(); defer { lock.unlock() }
+        last.removeAll()
+    }
+}
+
 /// Process-wide owner of the cloud runtime.
 ///
 /// One place decides whether the cloud path is on, and one place owns the objects that must be shared
@@ -450,17 +530,27 @@ public final class CloudPushRuntime: @unchecked Sendable {
     /// The D2 retry: restarts the cloud path when protected data becomes available after a locked
     /// launch. Cancelled on `stop()` so a disabled/signed-out runtime never re-activates.
     private var _reactivationTask: Task<Void, Never>?
+    /// Watches for the network coming back, so batches that stalled offline are put back in line at once
+    /// instead of at the next launch. Lives while an account's runtime runs.
+    private var _pathMonitor: NWPathMonitor?
+    private var _pathWasSatisfied = true
+    /// When `captureGaps` was last told the journal is live (see `CloudCaptureGaps.heartbeatSeconds`); 0 until
+    /// this run's start has been noted, so a commit that lands first cannot hide the gap the start records.
+    private var _liveNotedAt = 0
 
     private let journalSource: CloudJournal
     private let journalDirectory: URL?
     private let identityStore: CloudPushIdentityStore
     private let bundleIdentifier: String?
+    /// Where the spans this runtime was not running for are recorded, for the seeders to replay.
+    let captureGaps: CloudCaptureGaps
 
     private init() {
         journalSource = .shared
         journalDirectory = nil
         identityStore = .shared
         bundleIdentifier = Bundle.main.bundleIdentifier
+        captureGaps = .shared
     }
 
     /// A runtime over its own journal, directory and credential store. The app only ever uses `shared`; this
@@ -473,6 +563,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
         self.journalDirectory = journalDirectory
         self.identityStore = identityStore
         self.bundleIdentifier = bundleIdentifier
+        captureGaps = CloudCaptureGaps(defaults: identityStore.defaults)
     }
 
     /// The running runtime, or nil when cloud mode is off. Read from the BLE path, so it is a plain
@@ -586,6 +677,7 @@ public final class CloudPushRuntime: @unchecked Sendable {
             self?.appIsActiveValue ?? true
         }
         CloudHeartRateLedger.shared.reset()
+        CloudContactLedger.shared.reset()
         // Object lane (CONTRACTS C1): the rawImuSession binary table is uploaded through the
         // NoopPush object lane, never the NDJSON journal. A failure to open the durable progress
         // store disables only the object lane for this account (rows stay local) — it must not
@@ -636,10 +728,18 @@ public final class CloudPushRuntime: @unchecked Sendable {
             await coordinator.setOnCredentialRejected { [weak self] status in
                 self?.credentialRejected(scope: scope, status: status)
             }
-            await journal.setCommitObserver { [weak coordinator] _ in coordinator?.kick() }
+            await journal.setCommitObserver { [weak coordinator, weak self] _ in
+                coordinator?.kick()
+                self?.noteJournalLive()
+            }
             do {
                 try await journal.activate(configuration: configuration, policy: policy, directory: journalDirectory)
                 await Self.activateLedgerFromJournalTail(journal)
+                // Records an earlier source of this account still holds go out under this one (D4), and the
+                // span the runtime was down for is noted for the seeders to replay (D2).
+                await Self.adoptEarlierSources(journal: journal, payloadDirectory: payloadDirectory)
+                self.captureGaps.noteRuntimeStarted()
+                self.markLiveNoted()
             } catch {
                 // A protected-data failure (locked phone before the first unlock) is not fatal: records
                 // already staged stay staged and are committed on the next activation attempt. The claim
@@ -652,8 +752,68 @@ public final class CloudPushRuntime: @unchecked Sendable {
                 return
             }
             await coordinator.start()
+            self.startPathMonitor(for: coordinator)
         }
     }
+
+    /// Carry an earlier source's unacknowledged records onto the running one and delete the payload files of
+    /// the batches that were dissolved for it (see `CloudJournal.adoptOtherSources`).
+    static func adoptEarlierSources(journal: CloudJournal, payloadDirectory: URL) async {
+        guard let adopted = try? await journal.adoptOtherSources() else { return }
+        for batch in adopted.batches {
+            try? FileManager.default.removeItem(at: payloadDirectory.appendingPathComponent("\(batch.batchId).ndjson.gz"))
+            if !batch.filePath.isEmpty { try? FileManager.default.removeItem(atPath: batch.filePath) }
+        }
+    }
+
+    /// Tell `captureGaps` the journal is live, at most every `CloudCaptureGaps.heartbeatSeconds`. Called after
+    /// each commit, so it only advances while records are actually being journaled.
+    private func noteJournalLive() {
+        let seconds = Int(Date().timeIntervalSince1970)
+        lock.lock()
+        let due = _liveNotedAt > 0 && seconds - _liveNotedAt >= CloudCaptureGaps.heartbeatSeconds
+        if due { _liveNotedAt = seconds }
+        lock.unlock()
+        if due { captureGaps.noteLive(now: seconds) }
+    }
+
+    private func startWasNoted() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return _liveNotedAt > 0
+    }
+
+    private func markLiveNoted() {
+        lock.lock()
+        _liveNotedAt = Int(Date().timeIntervalSince1970)
+        lock.unlock()
+    }
+
+    /// Follow the network for the running coordinator: when it comes back after being unavailable, work that
+    /// stalled meanwhile is put back in line (`CloudTransportCoordinator.recoverStalledWork`).
+    private func startPathMonitor(for coordinator: CloudTransportCoordinator) {
+        let monitor = NWPathMonitor()
+        monitor.pathUpdateHandler = { [weak self, weak coordinator] path in
+            guard let self else { return }
+            let satisfied = path.status == .satisfied
+            self.lock.lock()
+            let cameBack = satisfied && !self._pathWasSatisfied
+            self._pathWasSatisfied = satisfied
+            self.lock.unlock()
+            if cameBack, let coordinator { Task { await coordinator.recoverStalledWork() } }
+        }
+        lock.lock()
+        guard _coordinator === coordinator else {
+            lock.unlock()
+            return
+        }
+        _pathMonitor?.cancel()
+        _pathMonitor = monitor
+        _pathWasSatisfied = true
+        lock.unlock()
+        monitor.start(queue: Self.pathQueue)
+    }
+
+    private static let pathQueue = DispatchQueue(label: "noop.cloud.path", qos: .utility)
 
     private func releaseClaim() {
         lock.lock()
@@ -670,6 +830,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
             _scope = nil
             _deviceId = nil
             takeObjectLaneLocked()?.cancel()
+            _pathMonitor?.cancel()
+            _pathMonitor = nil
+            _liveNotedAt = 0
         }
     }
 
@@ -725,10 +888,13 @@ public final class CloudPushRuntime: @unchecked Sendable {
         lock.lock()
         appIsActive = active
         let journal = _journal
+        let coordinator = _coordinator
         lock.unlock()
         guard let journal else { return }
         let target = Self.sealTargetSeconds(sceneActive: active)
         Task { await journal.setActiveTargetSeconds(target) }
+        // A foreground is a fresh attempt for anything that stalled while the phone was offline.
+        if active, let coordinator { Task { await coordinator.recoverStalledWork() } }
     }
 
     var appIsActiveValue: Bool {
@@ -819,8 +985,13 @@ public final class CloudPushRuntime: @unchecked Sendable {
     /// Stop serving the running account. Records already captured are committed first, under the scope they
     /// were stamped with; nothing new is accepted afterwards, and no credential outlives the call.
     public func stop() async {
+        let wasLive = startWasNoted()
         let (coordinator, journal) = beginStop()
+        // The journal was live up to now; whatever is captured from here until the next start is a gap. A run
+        // whose start was never noted (stopped while still activating) leaves the earlier mark alone.
+        if coordinator != nil, wasLive { captureGaps.noteLive() }
         CloudHeartRateLedger.shared.reset()
+        CloudContactLedger.shared.reset()
         await coordinator?.stop()
         await journal?.deactivate()
         finishStop()
@@ -838,6 +1009,9 @@ public final class CloudPushRuntime: @unchecked Sendable {
         takeObjectLaneLocked()?.cancel()
         _reactivationTask?.cancel()
         _reactivationTask = nil
+        _pathMonitor?.cancel()
+        _pathMonitor = nil
+        _liveNotedAt = 0
         return taken
     }
 
@@ -981,6 +1155,19 @@ public final class CloudPushRuntime: @unchecked Sendable {
                 drained += 1
             }
         }
+        // IMU retention evicts only what the server holds (D7): hand it the receipted cursor of each strap.
+        await Self.publishImuWatermarks(devices: devices, progress: progress, into: .shared)
+    }
+
+    /// Copy each strap's receipted raw-IMU cursor (`rowId` is the second) to `ImuUploadWatermarks`, under the
+    /// local id the IMU store files the strap under.
+    static func publishImuWatermarks(devices: [(localId: String, cloudId: String)],
+                                     progress: PushProgressStore, into marks: ImuUploadWatermarks) async {
+        for device in devices {
+            guard let cursor = try? await progress.binaryCursor(table: .rawImuSession, deviceId: device.cloudId)
+            else { continue }
+            marks.record(localDeviceId: device.localId, through: cursor.rowId)
+        }
     }
 
     /// The anchored PPG half of a lane pass: only with the flag on and a receiver that negotiated 1.5, for the
@@ -1109,32 +1296,57 @@ public final class CloudPushRuntime: @unchecked Sendable {
     }
 }
 
-/// One-time cloud upload of strap history that was banked locally before the offload was journaled.
+/// Cloud upload of strap history the journal did not take when it was banked.
 ///
 /// Earlier builds kept the overnight offload only in the local store, so the server never received a
-/// night to score. This replays a bounded recent span of those rows through the same history encoding
-/// the Backfiller now uses, oldest hour first, and persists its cursor per account, source and device so an
-/// interrupted pass resumes where it stopped. It runs only for the account that owns the on-device history
-/// (see `CloudLocalDataBinding`): another account signing in on the same phone never replays it. Re-sending a row is harmless: the receiver keys rows by
-/// identity, so a row the Backfiller already journaled is a no-op the second time. Heart rate is the
-/// exception the ledger covers: a second the journal already holds is skipped here too, because a copy
-/// with a different bpm is a conflict on the receiver, not a no-op.
+/// night to score. The first run for an account, source and device replays a bounded recent span of those
+/// rows through the same history encoding the Backfiller now uses, oldest hour first. After that it replays
+/// what the runtime missed while it was down (sync off, signed out, paused, blocked, a relaunch before it was
+/// back), as `CloudCaptureGaps` recorded it, each gap once and no further back than the gaps' replay window, so
+/// a resumed sync catches up without sending again what was journaled live. Progress is kept per account,
+/// source and device so an interrupted pass resumes where it stopped. It runs only for the account that owns the
+/// on-device history (see `CloudLocalDataBinding`): another account signing in on the same phone never replays
+/// it. Re-sending a row is harmless: the receiver keys rows by identity, so a row the Backfiller already
+/// journaled is a no-op the second time. Heart rate is the exception the ledger covers: a second the journal
+/// already holds is skipped here too, because a copy with a different bpm is a conflict on the receiver, not a
+/// no-op.
 public enum CloudHistorySeeder {
     static let lookbackSeconds = 48 * 3600
     static let windowSeconds = 3600
 
     struct Progress: Codable, Equatable {
+        /// The first-run span, `[cursor, until)`.
         var cursor: Int
         var until: Int
+        /// The newest capture gap (`CloudCaptureGaps`) replayed in full. Nil in progress an earlier build saved:
+        /// it then starts from the gaps recorded from now on.
+        var gapSeq: Int?
+        /// A gap replay that stopped part-way: the gap and the next second to read.
+        var gapResume: GapResume?
+    }
+
+    struct GapResume: Codable, Equatable {
+        var seq: Int
+        var next: Int
+    }
+
+    /// What one window's replay came to.
+    enum WindowOutcome: Equatable {
+        /// The journal committed this many records.
+        case sent(Int)
+        /// Nothing to send in the window.
+        case empty
+        /// The window could not be read, or the journal took nothing: stop and retry it on the next run.
+        case failed
     }
 
     static func defaultsKey(scope: CloudDataScope, deviceId: String) -> String {
         "noop.cloud.historySeed.v2.\(scope.ownerId).\(scope.sourceId).\(deviceId.lowercased())"
     }
 
-    /// Replay what is left of the seed span. Returns the number of records the journal committed on
-    /// this pass; 0 once the span is done. A window whose rows the journal did not take is retried on
-    /// the next call rather than skipped.
+    /// Replay what is left of the seed span and of the capture gaps. Returns the number of records the journal
+    /// committed on this pass; 0 once everything is done. A window whose rows the journal did not take is
+    /// retried on the next call rather than skipped.
     ///
     /// `cloudDeviceId` replays the rows stored under `deviceId` as another device's uploads. The server
     /// scores each uploaded device on its own, so once a strap adopts its serial id, the hours banked
@@ -1146,27 +1358,73 @@ public enum CloudHistorySeeder {
                                    family: DeviceFamily?,
                                    defaults: UserDefaults = .standard,
                                    now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
-        guard let scope = CloudPushRuntime.sharedIfRunning?.runningScope,
+        guard let runtime = CloudPushRuntime.sharedIfRunning, let scope = runtime.runningScope,
               CloudLocalDataBinding.isOwner(scope.ownerId, defaults: defaults) else { return 0 }
         let uploadId = cloudDeviceId ?? deviceId
-        let key = defaultsKey(scope: scope, deviceId: uploadId)
-        var progress = defaults.data(forKey: key).flatMap { try? JSONDecoder().decode(Progress.self, from: $0) }
-            ?? Progress(cursor: now - lookbackSeconds, until: now)
+        return await replay(key: defaultsKey(scope: scope, deviceId: uploadId), deviceId: deviceId,
+                            lookbackSeconds: lookbackSeconds, windowSeconds: windowSeconds,
+                            defaults: defaults, gaps: runtime.captureGaps, now: now) { from, to in
+            guard let streams = await readWindow(store: store, deviceId: deviceId, from: from, to: to) else {
+                return .failed
+            }
+            guard rowCount(streams) > 0 else { return .empty }
+            let taken = await CloudCapture.recordHistory(streams, deviceId: uploadId, family: family, clockRef: nil)
+            return taken > 0 ? .sent(taken) : .failed
+        }
+    }
+
+    /// The seeders' shared loop: the first-run span (`lookbackSeconds` back from the first run), then every
+    /// capture gap for `deviceId` not replayed yet, oldest first, in `windowSeconds` windows. `send` gets an
+    /// inclusive window of strap seconds. Progress is saved after every window under `key`.
+    static func replay(key: String, deviceId: String, lookbackSeconds: Int, windowSeconds: Int,
+                       defaults: UserDefaults, gaps: CloudCaptureGaps, now: Int,
+                       send: (_ from: Int, _ to: Int) async -> WindowOutcome) async -> Int {
+        func save(_ progress: Progress) {
+            if let data = try? JSONEncoder().encode(progress) { defaults.set(data, forKey: key) }
+        }
+        var progress: Progress
+        if let stored = defaults.data(forKey: key).flatMap({ try? JSONDecoder().decode(Progress.self, from: $0) }) {
+            progress = stored
+        } else {
+            // Saved at once: the gaps recorded from here on are this seeder's to replay, even when this first run
+            // stops before its first window.
+            progress = Progress(cursor: now - lookbackSeconds, until: now, gapSeq: gaps.latestSeq, gapResume: nil)
+            save(progress)
+        }
+        if progress.gapSeq == nil {
+            progress.gapSeq = gaps.latestSeq
+            save(progress)
+        }
         var committed = 0
         while progress.cursor < progress.until, !Task.isCancelled {
             let from = progress.cursor
             let to = min(from + windowSeconds, progress.until)
-            guard let streams = await readWindow(store: store, deviceId: deviceId, from: from, to: to - 1) else {
-                break
-            }
-            if rowCount(streams) > 0 {
-                let taken = await CloudCapture.recordHistory(streams, deviceId: uploadId, family: family,
-                                                            clockRef: nil)
-                guard taken > 0 else { break }
-                committed += taken
+            switch await send(from, to - 1) {
+            case .failed: return committed
+            case .empty: break
+            case .sent(let n): committed += n
             }
             progress.cursor = to
-            if let data = try? JSONEncoder().encode(progress) { defaults.set(data, forKey: key) }
+            save(progress)
+        }
+        for gap in gaps.pending(after: progress.gapSeq ?? 0, deviceId: deviceId, now: now) {
+            var next = gap.from
+            if let resume = progress.gapResume, resume.seq == gap.seq { next = max(gap.from, resume.next) }
+            while next < gap.to {
+                if Task.isCancelled { return committed }
+                let to = min(next + windowSeconds, gap.to)
+                switch await send(next, to - 1) {
+                case .failed: return committed
+                case .empty: break
+                case .sent(let n): committed += n
+                }
+                next = to
+                progress.gapResume = GapResume(seq: gap.seq, next: next)
+                save(progress)
+            }
+            progress.gapSeq = gap.seq
+            progress.gapResume = nil
+            save(progress)
         }
         return committed
     }
@@ -1199,12 +1457,13 @@ public enum CloudHistorySeeder {
     }
 }
 
-/// One-time cloud upload of the SpO₂ strap estimates this install banked before they were journaled.
+/// Cloud upload of the SpO₂ strap estimates the journal did not take when they were banked.
 ///
 /// Earlier builds kept the strap's `@82` byte only in the local store, so the server never saw a reading.
-/// This replays the recent nights' in-band readings (a few hundred per night) through the same encoding the
-/// offload now uses, and keeps its cursor per owner and device so an interrupted pass resumes. Re-sending a
-/// reading is harmless: the receiver keys event rows by `(ts, kind)`.
+/// The first run replays the recent nights' in-band readings (a few hundred per night) through the same
+/// encoding the offload now uses; later runs replay the capture gaps (`CloudCaptureGaps`), exactly as
+/// `CloudHistorySeeder` does. The cursor is kept per owner and device so an interrupted pass resumes.
+/// Re-sending a reading is harmless: the receiver keys event rows by `(ts, kind)`.
 public enum CloudSpo2Seeder {
     static let lookbackSeconds = 14 * 86_400
     static let windowSeconds = 6 * 3600
@@ -1215,7 +1474,7 @@ public enum CloudSpo2Seeder {
         "noop.cloud.spo2Seed.v2.\(scope.ownerId).\(scope.sourceId).\(sourceDeviceId.lowercased()).\(uploadDeviceId.lowercased())"
     }
 
-    /// Returns the number of records the journal committed on this pass; 0 once the span is done. A window
+    /// Returns the number of records the journal committed on this pass; 0 once everything is done. A window
     /// whose rows the journal did not take is retried on the next call rather than skipped.
     ///
     /// `deviceId` is the local namespace the readings are stored under. `cloudDeviceId` replays them as
@@ -1228,32 +1487,22 @@ public enum CloudSpo2Seeder {
                                    family: DeviceFamily?,
                                    defaults: UserDefaults = .standard,
                                    now: Int = Int(Date().timeIntervalSince1970)) async -> Int {
-        guard let scope = CloudPushRuntime.sharedIfRunning?.runningScope,
+        guard let runtime = CloudPushRuntime.sharedIfRunning, let scope = runtime.runningScope,
               CloudLocalDataBinding.isOwner(scope.ownerId, defaults: defaults) else { return 0 }
         let uploadId = cloudDeviceId ?? deviceId
         let key = defaultsKey(scope: scope, sourceDeviceId: deviceId, uploadDeviceId: uploadId)
-        var progress = defaults.data(forKey: key)
-            .flatMap { try? JSONDecoder().decode(CloudHistorySeeder.Progress.self, from: $0) }
-            ?? CloudHistorySeeder.Progress(cursor: now - lookbackSeconds, until: now)
-        var committed = 0
-        while progress.cursor < progress.until, !Task.isCancelled {
-            let from = progress.cursor
-            let to = min(from + windowSeconds, progress.until)
-            guard let aux = try? await store.v18AuxSamples(deviceId: deviceId, from: from, to: to - 1,
-                                                          limit: 200_000) else { break }
+        return await CloudHistorySeeder.replay(key: key, deviceId: deviceId, lookbackSeconds: lookbackSeconds,
+                                               windowSeconds: windowSeconds, defaults: defaults,
+                                               gaps: runtime.captureGaps, now: now) { from, to in
+            guard let aux = try? await store.v18AuxSamples(deviceId: deviceId, from: from, to: to,
+                                                          limit: 200_000) else { return .failed }
             var streams = Streams()
             streams.v18Aux = aux.filter { sample in
                 sample.auxByte82.map { Spo2StrapEstimate.band.contains($0) } ?? false
             }
-            if !streams.v18Aux.isEmpty {
-                let taken = await CloudCapture.recordHistory(streams, deviceId: uploadId, family: family,
-                                                            clockRef: nil)
-                guard taken > 0 else { break }
-                committed += taken
-            }
-            progress.cursor = to
-            if let data = try? JSONEncoder().encode(progress) { defaults.set(data, forKey: key) }
+            guard !streams.v18Aux.isEmpty else { return .empty }
+            let taken = await CloudCapture.recordHistory(streams, deviceId: uploadId, family: family, clockRef: nil)
+            return taken > 0 ? .sent(taken) : .failed
         }
-        return committed
     }
 }

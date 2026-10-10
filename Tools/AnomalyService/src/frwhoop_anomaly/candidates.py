@@ -2,9 +2,12 @@
 
 * Windows are 30-minute wall-clock blocks (:00 / :30), scored once complete (end ≤ newest data − 5 min).
 * A window is USABLE when ≥ 70 % of its minutes have HR on ≥ 30 s AND ≥ 70 % are still or asleep (not "recovery":
-  still minutes within 30 min of vigorous / 10 min of walking). Activity-dominated, recovering, off-wrist or poorly
-  measured windows are withheld with a reason (the phone's activity and quality
-  checks would fail them anyway; the models are not asked to explain exercise).
+  still minutes within 30 min of vigorous / 10 min of walking) AND none of its minutes is in an exercise session,
+  its recovery, or an unconfirmed active period (rule exercise-session-2, features.with_sessions). Activity-dominated,
+  recovering, off-wrist or poorly measured windows are withheld with a reason (the phone's activity and quality
+  checks would fail them anyway; the models are not asked to explain exercise): a window touching a session or an
+  active period is "activity", one touching a session's recovery "recovery" (canonical
+  context_not_comparable/movement and /recovery, reasons.py). An active period has no recovery after it.
 * Context bucket: "sleep" when ≥ 50 % of the minutes are asleep, else "rest". Calibration references are per bucket.
 * Each model's window p: per-channel empirical p against the user's own reference, Bonferroni over channels
   (calibration.MultiChannel). A model FLAGS a window at p < ALPHA (1e-3) — the "window" rule — or when the mean of
@@ -15,6 +18,7 @@
 * A candidate = a run of consecutive flagged windows (either model). channels = channels with per-channel p < 0.01 in
   any flagging model; direction = sign of the strongest such channel's directional z. severity "strong" when both
   models flag and min p < 1e-4. candidate_key = "anomaly:<first window start>" (stable across re-scores).
+  local_day = the person's calendar day of the first window's start in the zone effective then (features.local_day).
 """
 
 from __future__ import annotations
@@ -24,9 +28,12 @@ import datetime as dt
 
 import numpy as np
 
-from .features import TARGETS
+from . import reasons
+from .features import EXERCISE, EXERCISE_ACTIVE, EXERCISE_RECOVERY, TARGETS, local_day
 
 WINDOW_S = 1800
+MIX_KEYS = ("still", "asleep", "recovery", "walking", "active", "off", "unknown", EXERCISE, EXERCISE_RECOVERY,
+            EXERCISE_ACTIVE)
 ALPHA = 1e-3
 STRONG = 1e-4
 CHANNEL_ALPHA = 0.01
@@ -55,7 +62,7 @@ def windows(frame, lo: int, hi: int) -> list[Window]:
     if len(idx) < 25:
       continue
     ctx = np.asarray(frame.context[idx]).astype(str)
-    mix = {k: float(np.mean(ctx == k)) for k in ("still", "asleep", "recovery", "walking", "active", "off", "unknown")}
+    mix = {k: float(np.mean(ctx == k)) for k in MIX_KEYS}
     quality = float(np.mean(frame.data["hr_n"][idx] >= 30))
     restful = mix["still"] + mix["asleep"]
     withheld = None
@@ -63,6 +70,10 @@ def windows(frame, lo: int, hi: int) -> list[Window]:
       withheld = "off_wrist"
     elif quality < MIN_QUALITY:
       withheld = "low_hr_coverage"
+    elif mix[EXERCISE] > 0 or mix[EXERCISE_ACTIVE] > 0:
+      withheld = "activity"
+    elif mix[EXERCISE_RECOVERY] > 0:
+      withheld = "recovery"
     elif restful < MIN_RESTFUL:
       withheld = "activity" if (mix["walking"] + mix["active"] + mix["recovery"]) > 0.15 else "context_unknown"
     out.append(Window(start=s, minute_idx=idx, usable=withheld is None, withheld=withheld,
@@ -104,7 +115,8 @@ class ModelWindowResult:
 
 
 def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions: dict[str, str],
-                    tz_offset_s: int = 0) -> list[dict]:
+                    tz_history: list[tuple[float, str]] | None = None) -> list[dict]:
+  """tz_history: the person's [(effective_at unix, IANA zone)] (features.timezone_history); None = UTC."""
   by_start: dict[int, list[ModelWindowResult]] = {}
   for model, rs in results.items():
     for r in rs:
@@ -144,13 +156,12 @@ def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions
     channels = [CHANNEL_NAMES[TARGETS[j]] for j in sorted(chan_idx)]
     minp = min(model_p.values()) if model_p else 1.0
     start, end = run[0], run[-1] + WINDOW_S
-    local_day = dt.datetime.fromtimestamp(start + tz_offset_s, tz=dt.timezone.utc).date().isoformat()
     first = by_start[run[0]][0].window
     out.append({
       "candidate_key": f"anomaly:{start}",
       "start_ts": dt.datetime.fromtimestamp(start, tz=dt.timezone.utc).isoformat(),
       "end_ts": dt.datetime.fromtimestamp(end, tz=dt.timezone.utc).isoformat(),
-      "local_day": local_day,
+      "local_day": local_day(start, tz_history),
       "channels": channels or ["HR"],
       "flagged_by": flagged_by,
       "model_p": model_p,
@@ -165,25 +176,40 @@ def form_candidates(results: dict[str, list[ModelWindowResult]], frame, versions
                   "rules": sorted({r.rule for r in flagging if r.rule}),
                   "evidence_from": dt.datetime.fromtimestamp(min([r.evidence_from or r.window.start for r in flagging]),
                                                              tz=dt.timezone.utc).isoformat()},
-      "quality": {"hr_coverage": float(np.mean(frame.data["hr_n"][first.minute_idx] >= 30))},
+      "quality": _quality(frame, first.minute_idx),
       "model_versions": versions,
       "status": "candidate",
     })
   return out
 
 
+def _quality(frame, idx: np.ndarray) -> dict:
+  """Window quality summary: HR coverage, plus the strap's link and contact states where they were reported."""
+  q = {"hr_coverage": float(np.mean(frame.data["hr_n"][idx] >= 30))}
+  for key, name in (("link_down", "link_down_share"), ("contact_lost", "contact_not_detected_share")):
+    v = frame.data.get(key)
+    if v is not None and np.isfinite(v[idx]).any():
+      q[name] = float(np.nanmean(v[idx]))
+  return q
+
+
 def window_score_rows(results: dict[str, list[ModelWindowResult]], withheld: list[Window]) -> list[dict]:
+  """Published window rows. `withheld_reason` keeps the service's own values; `reason_code` / `reason_certainty`
+  carry the canonical data reason (contracts/reason-codes.json) for the same row."""
   rows = []
   iso = lambda t: dt.datetime.fromtimestamp(t, tz=dt.timezone.utc).isoformat()
+  def row(**kw) -> dict:
+    code, certainty = reasons.canonical(kw["withheld_reason"])
+    return kw | {"reason_code": code, "reason_certainty": certainty}
   for model, rs in results.items():
     for r in rs:
-      rows.append({"window_start": iso(r.window.start), "window_end": iso(r.window.start + WINDOW_S),
-                   "channel_group": "all", "model": model,
-                   "score": float(np.nanmax(r.channel_scores)) if np.isfinite(r.channel_scores).any() else None,
-                   "p": r.p_eff, "context_kind": r.window.bucket, "usable": True,
-                   "withheld_reason": "calibrating" if r.calibrating else None})
+      rows.append(row(window_start=iso(r.window.start), window_end=iso(r.window.start + WINDOW_S),
+                      channel_group="all", model=model,
+                      score=float(np.nanmax(r.channel_scores)) if np.isfinite(r.channel_scores).any() else None,
+                      p=r.p_eff, context_kind=r.window.bucket, usable=True,
+                      withheld_reason="calibrating" if r.calibrating else None))
   for w in withheld:
-    rows.append({"window_start": iso(w.start), "window_end": iso(w.start + WINDOW_S), "channel_group": "all",
-                 "model": "none", "score": None, "p": None, "context_kind": w.bucket, "usable": False,
-                 "withheld_reason": w.withheld})
+    rows.append(row(window_start=iso(w.start), window_end=iso(w.start + WINDOW_S), channel_group="all",
+                    model="none", score=None, p=None, context_kind=w.bucket, usable=False,
+                    withheld_reason=w.withheld))
   return rows

@@ -41,6 +41,16 @@ extension WhoopStore {
     /// ledger can compare it with the Kotlin twin: `WHOOP5_RR_FILL_FLAG_SQL`.
     static let whoop5RrFillFlagSQL = "UPDATE rrInterval SET tsSuspect = 1 WHERE deviceId = :deviceId AND ts >= :fromTs AND ts <= :toTs AND rrMs = 500 AND srcChannel IN (5, 7) AND tsSuspect IS NULL AND EXISTS (SELECT 1 FROM hrSample h WHERE h.deviceId = rrInterval.deviceId AND h.ts = rrInterval.ts AND h.bpm < 100)"
 
+    /// `whoop5RrFillFlagSQL`'s condition for one beat that is not on disk yet: a 500 ms WHOOP 5 beat on a
+    /// scored transport (v18 history or standard BLE) whose second's heart rate is below 100 bpm. A beat whose
+    /// second has no heart rate is not a fill (nothing says it is), exactly as the statement leaves it alone.
+    /// The cloud capture uses it to upload the `tsSuspect` the store writes for the same beat.
+    public static func isWhoop5FillBeat(rrMs: Int, srcChannel: RRSourceChannel?, sameSecondBpm: Int?) -> Bool {
+        guard rrMs == 500, srcChannel == .whoop5Historical || srcChannel == .whoop5Standard,
+              let bpm = sameSecondBpm else { return false }
+        return bpm < 100
+    }
+
     /// Marks every stored fill beat once, in `v47-rr-whoop5-fill`: the condition of `whoop5RrFillFlagSQL`
     /// over the whole table. Kotlin twin: `WHOOP5_RR_FILL_MIGRATION_SQL`.
     static let whoop5RrFillMigrationSQL = "UPDATE rrInterval SET tsSuspect = 1 WHERE rrMs = 500 AND srcChannel IN (5, 7) AND tsSuspect IS NULL AND EXISTS (SELECT 1 FROM hrSample h WHERE h.deviceId = rrInterval.deviceId AND h.ts = rrInterval.ts AND h.bpm < 100)"

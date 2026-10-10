@@ -11,8 +11,8 @@ const decoder = new TextDecoder();
 
 export async function startLocalPostgres({ scalarProjections = false, auxiliaryIdentity = false,
   appendCompatibility = false, installationLifecycle = false, objectRepresentations = false,
-  authProvisioning = false, coachMemory = false, statementTimeoutMs = 0, fullChain = false }:
-  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; coachMemory?: boolean; statementTimeoutMs?: number; fullChain?: boolean } = {}) {
+  authProvisioning = false, coachMemory = false, syncHealth = false, statementTimeoutMs = 0, fullChain = false }:
+  { scalarProjections?: boolean; auxiliaryIdentity?: boolean; appendCompatibility?: boolean; installationLifecycle?: boolean; objectRepresentations?: boolean; authProvisioning?: boolean; coachMemory?: boolean; syncHealth?: boolean; statementTimeoutMs?: number; fullChain?: boolean } = {}) {
   if (!Number.isInteger(statementTimeoutMs) || statementTimeoutMs < 0 || statementTimeoutMs > 600000) {
     throw new Error("invalid_fixture_statement_timeout");
   }
@@ -134,6 +134,21 @@ export async function startLocalPostgres({ scalarProjections = false, auxiliaryI
       // retention prune and coach_search_v1's light pool read the owner's messages newest/oldest first through it.
       await sql(`create index if not exists coach_messages_user_idx on public.coach_messages (user_id, created_at desc);`);
       await apply('20261007160000_coach_threads_memory.sql');
+      // Edits from the memory sheet: the user's own wording, edit tombstones, the revision on every user change.
+      await apply('20261009120000_coach_memory_user_edits.sql');
+    }
+    if (syncHealth) {
+      // Account sync health (20261009110000_account_sync_health.sql; with authProvisioning for installations and
+      // receipts). It also reads Auth's email_confirmed_at / deleted_at, which this auth.users stand-in lacks, and the
+      // deletion freeze from 20260921113000_fleet_admission_retention.sql, whose other objects need the full chain;
+      // both are added here in their production shape.
+      await sql(`alter table auth.users add column if not exists email_confirmed_at timestamptz,
+          add column if not exists deleted_at timestamptz;
+        create table if not exists public.noop_account_retirements(user_id uuid primary key,
+          requested_at timestamptz not null default clock_timestamp());
+        alter table public.noop_account_retirements enable row level security;
+        revoke all on public.noop_account_retirements from anon, authenticated;`);
+      await apply('20261009110000_account_sync_health.sql');
     }
     await sql(`insert into auth.users(id) values ('${USER_A}'),('${USER_B}');`);
     const jwtSecret = 'disposable-edge-test-only-' + crypto.randomUUID();

@@ -157,10 +157,11 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
     // MARK: - Every biometric is a series
 
     func testPlanListsExactlySeventeenBiometrics() {
-        // 18 condensed-plan series + 8 v2.clinical context strata (docs/BASELINE_WATCHDOG_V2.md §3).
-        XCTAssertEqual(LBSeries.allCases.count, 26, LongitudinalBaseline.planCatalogText())
+        // 18 condensed-plan series + 8 v2.clinical context strata (docs/BASELINE_WATCHDOG_V2.md §3) + 2 exercise
+        // strata (session, recovery; docs/context-watchdog/EXERCISE_SESSION.md).
+        XCTAssertEqual(LBSeries.allCases.count, 28, LongitudinalBaseline.planCatalogText())
         let ids = LBSeries.allCases.map(\.rawValue)
-        XCTAssertEqual(Set(ids).count, 26)
+        XCTAssertEqual(Set(ids).count, 28)
         let expected = [
             "sleep_rhr", "sleep_hrv_ln", "sleep_temp", "sleep_resp",
             "sleep_spo2_mean", "sleep_spo2_nadir",
@@ -170,6 +171,7 @@ final class LongitudinalBaselineCatalogTests: XCTestCase {
             "waking_steps", "waking_active_min", "waking_imu_energy",
             "awake_supine_hr", "awake_supine_hrv_ln", "awake_seated_hr", "awake_seated_hrv_ln",
             "awake_upright_hr", "awake_upright_hrv_ln", "walking_hr", "sleep_hr",
+            "exercise_session_hr", "exercise_recovery_hr",
         ]
         XCTAssertEqual(ids, expected, LongitudinalBaseline.planCatalogText())
     }

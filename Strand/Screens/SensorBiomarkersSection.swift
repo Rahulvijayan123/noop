@@ -392,6 +392,10 @@ struct SensorBiomarkersViewModel: Equatable {
         switch reason {
         case "unknown_wrist_placement":
             return String(localized: "The strap's wrist placement wasn't verified.")
+        case "placement_unsupported":
+            // Canonical, confirmed: the wearer declared the strap worn off the wrist (e.g. upper arm), and this
+            // measurement is built for the wrist.
+            return String(localized: "This measurement needs the strap on the wrist; it was set as worn elsewhere.")
         case "unknown_orientation":
             return String(localized: "The strap's orientation wasn't verified.")
         case "insufficient_eligible_time":
@@ -406,8 +410,14 @@ struct SensorBiomarkersViewModel: Equatable {
             return String(localized: "The sensor's sample timing couldn't be verified.")
         case "preprocessing_unverified":
             return String(localized: "The signal preprocessing couldn't be verified.")
+        case "no_verified_input":
+            return String(localized: "No verified sensor data reached this measurement.")
+        case "model_unavailable":
+            return String(localized: "The model for this measurement isn't available.")
         case "artifact_unavailable":
-            return String(localized: "No verified sensor data was available.")
+            // Days published before 2026-10-09 used this one reason for both causes above, so it
+            // claims neither.
+            return String(localized: "This measurement couldn't be computed for this day.")
         case "unverified_optical_dc":
             return String(localized: "The optical baseline couldn't be verified.")
         case "not_enough_valid_data":

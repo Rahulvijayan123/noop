@@ -119,7 +119,9 @@ Also `unique(id, user_id)` and an index on `(user_id, sort_order, created_at)`.
 - Columns:
   - `updated_at`, `last_confirmed_at` (backfilled from `created_at`);
   - `confirmations int default 1`;
-  - `source text default 'tool'`, one of `tool | curator | user | legacy`;
+  - `source text default 'tool'`, one of `tool | curator | user | legacy`. `user` is the user's own wording: a row
+    they edited or added in the memory sheet (`20261009120000_coach_memory_user_edits.sql`, §3). The curator and the
+    consolidator never reword, retire or merge it, and automatic saves never reword it;
   - `source_thread_id uuid`;
   - `version int default 1`;
   - `retired_at timestamptz`, `retired_reason text`;
@@ -136,17 +138,19 @@ Also `unique(id, user_id)` and an index on `(user_id, sort_order, created_at)`.
   - `actor`: `tool | curator | user | consolidator`;
   - `before jsonb`, `after jsonb`, `thread_id uuid`;
   - `reason text ≤ 300`;
-  - `tokens text[]`: the normalised token set, set for `forget` (a tombstone) and for `retire`;
+  - `tokens text[]`: the normalised token set, set for `forget` (a tombstone), for `retire`, and for an `update` by
+    the user that changed the text (an **edit tombstone**, reason `user_edit`: the old wording's tokens, while no
+    event keeps the old text itself);
   - `created_at`.
 - Index `(user_id, created_at desc)`.
-- Each user keeps the newest 1,000 events, except that `forget` events are kept for 365 days.
+- Each user keeps the newest 1,000 events, except that tombstones (`forget` events and edit tombstones) are kept for 365 days.
 
 ### `coach_user_state` (new; one row per user)
 - `user_id` pk
 - `suggestions jsonb default '[]'`, `suggestions_fingerprint text`, `suggestions_at`
 - `recent_searches jsonb default '[]'` (≤ 10 strings, newest first, deduplicated case-insensitively)
 - `consolidated_at`, `consolidation_until`. `consolidation_until` is the lease of both consolidation passes: the count-based one (120 s, through `coach_consolidation_claim_v1`) and the targeted near-duplicate one (30 minutes, §5).
-- `memory_revision bigint default 0`. It is bumped only by add, update, retire, merge or forget of importance ≥ 4 `goal|injury|health|training` rows, or by forget-all. This keeps future fingerprints stable; see the metric-insight branch.
+- `memory_revision bigint default 0`. It is bumped by add, update, retire, merge or forget of importance ≥ 4 `goal|injury|health|training` rows, by forget-all, and by **every op the user applies** (an edit, an added fact, a forget), whatever its topic or importance. The passes' changes to minor rows leave it alone, which keeps fingerprints stable; a user's change moves it so every phone drops its cached context (§7.3).
 - `memory_floor_at timestamptz`. Set by forget-all, to the clock read after its lock. The curator never mines messages older than this.
 - `updated_at`
 
@@ -226,7 +230,7 @@ Eleven: the two utility-quota functions and the nine below.
   score = 3*lex + importance/5.0 + 0.5*exp(-days_since_last_confirmed/120) + 0.2*ln(1+confirmations)
   ```
   `lex = ts_rank_cd(search, q, 1|32) / max(rank over candidates)`. It is 0 when there is no query or no match.
-- Returns `{memories:[{id, content, topic, importance, created_at, updated_at, source, confirmations, pinned}], total, topics:{topic:n}}`.
+- Returns `{memories:[{id, content, topic, importance, created_at, updated_at, source, confirmations, pinned, version}], total, topics:{topic:n}}` (`version` since `20261009120000`, so an edit can be guarded from any list the phone holds).
 
 **`coach_context_manifest_v1(p_user uuid, p_thread uuid default null, p_query text default null) returns jsonb`**
 - Assembled in a single call:
@@ -258,7 +262,7 @@ Writers for one owner are serialised on their `coach_user_state` row (`for updat
 | Op | Fields | Effect |
 |---|---|---|
 | `add` | `content, topic, importance, source` | inserts a row |
-| `update` | `id, content?, topic?, importance?, expect_version?` | `version+1`, `updated_at`, `last_confirmed_at`; the event records before and after |
+| `update` | `id, content?, topic?, importance?, expect_version?, tokens?` | `version+1`, `updated_at`, `last_confirmed_at`; the event records before and after. By actor `user`: the row becomes `source='user'`, and when the text changes the event is an edit tombstone (`tokens` = the caller's tokens of the old text, else `internal.coach_memory_tokens`; reason `user_edit`; `before` without `content`) and the row's earlier events lose their `content` |
 | `confirm` | `id` | `confirmations+1`, `last_confirmed_at = now()`; importance is not raised |
 | `retire` | `id, reason, tokens, expect_version?` | soft-retires the row |
 | `merge` | `keep_id, ids[], content, topic, importance, versions?` | updates the kept row with `confirmations` summed and `version+1`; soft-retires the others with reason `merged` and `merged_into = keep_id` |
@@ -266,7 +270,9 @@ Writers for one owner are serialised on their `coach_user_state` row (`for updat
 | `forget_all` | – | deletes every memory, records one tombstone per row, sets `memory_floor_at`, clears `recent_searches` and `suggestions`, bumps `memory_revision` |
 | `consolidated` | – | ends a consolidation pass: `consolidated_at = now()`, `consolidation_until = null` |
 
-**Version guards**, for ops resolved from an earlier read (the curator and the consolidator always send them):
+**The user's own rows** (`source='user'`): for actor `curator` or `consolidator`, an `update` that changes the text or the topic, a `retire`, and a `merge` whose kept row or any member is a user row are skipped with reason `user_edited`. `confirm` and an importance-only `update` still apply. Actor `tool` (Sana's `save_memory`, which the user asked for) keeps today's contract and may update a user row; the row stays `source='user'`.
+
+**Version guards**, for ops resolved from an earlier read (the curator and the consolidator always send them, and so does an edit from the memory sheet):
 - `update` and `retire` may carry `expect_version: <int>`; `merge` may carry `versions: {"<uuid>": <int>, …}` for `keep_id` and every id.
 - If a guarded row is missing or retired, is at a different version, or its version entry is missing or malformed, the whole op returns `{applied:false, reason:'stale'}`.
 - Without these fields the behaviour is unchanged.
@@ -274,9 +280,9 @@ Writers for one owner are serialised on their `coach_user_state` row (`for updat
 **Clock.** Forget and forget-all stamp their events and `memory_floor_at` with `clock_timestamp()` read after taking the lock, so they sort after every maintenance claim that came before them.
 
 After applying the ops:
-- It enforces the cap of **200 active memories**, evicting the lowest score (importance, recency, confirmations) as a soft retire with reason `evict`.
+- It enforces the cap of **200 active memories**, evicting the lowest score (importance, recency, confirmations) as a soft retire with reason `evict`; user rows go last.
 - It writes the events and purges retired rows older than 30 days.
-- It returns `[{op, id, applied, reason?}]`, plus `{op:'evict', id, applied:true, reason:'cap'}` per evicted row. Reasons for a skipped op: `invalid_content`, `not_found`, `retired`, `stale`, `nothing_to_merge`, `unknown_op`.
+- It returns `[{op, id, applied, reason?}]`, plus `{op:'evict', id, applied:true, reason:'cap'}` per evicted row. Reasons for a skipped op: `invalid_content`, `not_found`, `retired`, `stale`, `nothing_to_merge`, `user_edited`, `unknown_op`.
 
 **`internal.coach_memory_tokens(text)`** is the SQL port of the edge function's `memoryTokens` (§6), with its stemmer `internal.coach_memory_stem`. It supplies the tombstone tokens when the caller sends none: `forget_all`, the merged rows a forget takes along, and older callers. `coach_threads_sql_test.ts` compares the two on a corpus.
 
@@ -307,8 +313,9 @@ After applying the ops:
 | `GET messages?threadId=<uuid>&limit=1..200(60)&cursor=<opaque>` | New: one page of a thread, oldest first. Returns `{messages:[{id, clientId, threadId, role, content, meta, createdAt}], hasMore, nextCursor}`. The cursor encodes `(created_at, id)`. |
 | `POST messages` | Each message may carry `threadId`, plus an optional `threadTitle` for a new thread. Up to 40 messages per call. Goes through `coach_messages_save_v1`. Returns `{saved, rejected:[{clientId, reason}]}`, with 2xx even when some rows were rejected. Values PostgreSQL would refuse are repaired rather than failing the batch (which the outbox would retry forever): NUL characters are stripped from content, title and meta, and `createdAt` is re-rendered as ISO, with an unparseable time or one outside 2000..2200 replaced by now. |
 | `DELETE messages` | No query: `coach_thread_delete_v1(p_user, null)` tombstones and deletes all of the user's threads and messages (the thread-less ones too), then clears the starter cache and the recent searches. `?threadId=`: `coach_thread_delete_v1` for that thread only. Returns `{deleted:true}`. |
-| `GET memories?q=&topic=&limit=` | Without `q`, the default order and the limit of 50 are unchanged. With `q`, ranked through `coach_memories_ranked_v1`. `limit` goes up to 200. Rows gain optional `updatedAt, source, confirmations, pinned`. |
-| `POST memories {content, topic?, importance?, threadId?}` | The save path's match against the active rows: first the §6 near-duplicate rules, then a looser same-family overlap (same subject, word-Jaccard ≥ 0.45) where the new text keeps every token of the old row and says more (an update) or the old row already says everything the new one does (a confirm). The result is an update (`{memory, deduped:true, updated:true}`, version-guarded, and the match is redone once when the op comes back `stale`), a confirm (`{memory, deduped:true}`), or an `add` (`{memory, kept}`). Content that near-matches a tombstone is still saved, because the user asked explicitly. |
+| `GET memories?q=&topic=&limit=` | Without `q`, the default order and the limit of 50 are unchanged. With `q`, ranked through `coach_memories_ranked_v1`. `limit` goes up to 200. Rows gain optional `updatedAt, source, confirmations, pinned, version`. |
+| `POST memories {content, topic?, importance?, threadId?, source?, auto?}` | The text is screened as stored text is (NUL characters dropped, whitespace collapsed to one line, 1..500 characters). The save path's match against the active rows: first the §6 near-duplicate rules, then a looser same-family overlap (same subject, word-Jaccard ≥ 0.45) where the new text keeps every token of the old row and says more (an update) or the old row already says everything the new one does (a confirm). The result is an update (`{memory, deduped:true, updated:true}`, version-guarded, and the match is redone once when the op comes back `stale`), a confirm (`{memory, deduped:true}`), or an `add` (`{memory, kept}`). Three callers: Sana's `save_memory` (no flag; the user asked), so content that near-matches a tombstone is still saved; `source:'user'`, a fact the user adds in the memory sheet, applied as actor `user` (an add is `source='user'`, and an update rewords the row in the user's words and leaves an edit tombstone); and `auto:true`, an automatic note nobody asked for (the "Ask Sana" handoff, §7.4), which answers `{skipped:'forgotten'}` when it near-matches a tombstone (forgotten or edited away, §6) and only confirms, never rewords, a user row. |
+| `PATCH memories/<id> {content?, topic?, importance?, version}` | The user's edit from the memory sheet: op `update` with `expect_version: version`, actor `user`. `version` (an integer) is required and so is at least one field; `content` is screened like `POST`; `topic` must be one of the stored topics. 400 `invalid_memory` for anything else; 404 `memory_not_found` for a missing, retired or forgotten row (or another owner's); 409 `{error:'version_conflict', memory}` (the row as stored now) when another writer changed it first, including between the read and the write. On success the starter cache is cleared (a starter may quote the old text) and the reply is `{memory}` as stored, `version` and `source:'user'` included. |
 | `DELETE memories/<id>` | Op `forget`. When it applies, the starter cache (`suggestions`, `suggestions_fingerprint`, `suggestions_at`) is cleared too, since a starter may quote the forgotten fact. |
 | `DELETE memories` | Op `forget_all`. |
 
@@ -466,6 +473,7 @@ All passes go through `callUtility` (`_shared/coach_llm.ts`).
    - **Update-to-merge fold.** An `update` whose new text covers a same-family memory (≥ 80% of its words and every figure, same subject), where either row was saved by the tool in this chat, becomes a merge of the two. This is what the real model did in the simulator run: it updated the older knee memory to the physio's finding and left the tool's copy beside it.
    - A merge keeps the oldest member. Its importance is never below the strongest member's; a safety member (injury or health, importance ≥ 4) keeps its topic, so a merge never unpins it from the prompt; an unknown topic keeps the kept row's.
    - Every `update` and `retire` carries `expect_version`, and every merge carries `versions` (§3), so a row another writer changed or forgot meanwhile is left alone (`stale`).
+   - A row in the user's own words (`source='user'`) may be confirmed or have its importance moved, nothing else: an `update` of its text, a `retire` or a `merge` touching it is dropped, an `add` that would supersede it is dropped, and one that says more of it confirms it. The update-to-merge fold never folds one in. The consolidation passes never merge or retire it (it may still be the memory that covers a retired duplicate). `coach_memory_apply_v1` refuses the same (`user_edited`).
 8. `coach_thread_publish_v1` applies the summary and the ops together. `curated_through` and `summary_through` advance only for the work that actually ran. A `memory_reset` reply (a forget or forget-all landed after the claim) counts as published with `memoryOps` 0: the summary is kept, the ops are dropped, and `curated_through` stays, so the next pass mines those messages again against the new floor and tombstones.
    Blocked rows are never folded, but they count as handled: when they directly follow the last folded
    message (or lead the pending ones), both cursors move over them and `summary_messages` includes them, even
@@ -528,7 +536,7 @@ All passes go through `callUtility` (`_shared/coach_llm.ts`).
 - (a) it shares less than 40% of its word tokens with the batch's user messages (grounding);
 - (b) it contains transient phrasing (`today|yesterday|tonight|last night|this week|this morning|right now`) or a metric reading (a number followed by `bpm|ms|%|kcal|hrs?|hours|steps`);
 - (c) it matches the sensitive list (self-harm, suicide, eating-disorder behaviours, other people's names, contact details), unless the batch's user text includes "remember";
-- (d) it near-matches a `forget` tombstone from the last 365 days;
+- (d) it near-matches a tombstone from the last 365 days: a `forget`, or an edit tombstone (the old wording of the user's edit), so the curator never learns either again;
 - (e) it would add more than 4 ops.
 
 ## 7. iOS client
@@ -586,7 +594,8 @@ Everything under `Strand/` must build for macOS 13 and iOS 17, so it uses `Obser
 **`CoachAPI.swift`** gains every new route. Model changes:
 - `CoachStoredMessage` gains `var threadId: String? = nil`.
 - `CoachMessageMeta` gains `var followUps: [String]? = nil`, `var blocked: Bool? = nil` and `var imageContext: String? = nil`.
-- `CoachMemory` gains optional `var`s.
+- `CoachMemory` gains optional `var`s; `content`, `topic` and `importance` are `var` and `version` is optional (absent on a server without edits, which hides Edit).
+- `updateMemory(id:content:topic:importance:version:)` (`PATCH memories/<id>`, only the fields given; 409 and 404 reach the caller as `CoachRouteError`); `saveMemory(…, auto:, byUser:)` returns nil when the server skipped an automatic note.
 - Pages decode row by row, dropping rows that fail.
 - `CoachFollowUpsResult` gains `titlePending` (false when absent).
 - `features` is read from `status`.
@@ -673,12 +682,14 @@ New tools, in the core bundle on every turn:
      - a `HOW TO USE IT` paragraph: which tool fits which question; say "at least" when coverage is truncated; facts are captured automatically, so call `save_memory` only when the user asks to remember something or shares a critical fact; never mention the tools or the library.
 - **Screening.** Every memory, summary, open-loop, recall and title line passes `CoachSafety.screenStored(_:)` first: it leaves out prompt injection, leaked system-prompt markers, self-harm and eating-disorder content, but not `screenInput`'s question lists (diagnosis words, PED names, off-topic and under-18 requests), so pinned health facts such as "chest pain on hard intervals" or "an inhaled corticosteroid" reach the prompt.
 - **Manifest fallback.** When the fresh manifest misses the 1.2 s wait, the cached one is used without its `relevant` list and without any other thread's summary or a deleted chat; `updateManifests` keeps the files' order.
+- **Memory revision.** A fresh manifest whose `memoryRevision` is newer than any seen this session drops every older cached manifest, in memory and on disk (`CoachLocalStore.removeManifests(where:)`), and a late answer older than the newest seen is used for its own turn but not cached. Every user change on any phone moves the revision (§2), so a fact edited or forgotten elsewhere does not reach a prompt from this phone's cache.
+- **Precedence.** The library block ends with `CoachContextPrompt.memoryPrecedence`: saved memories are the user's current facts (the user may have corrected them), so when one disagrees with an earlier chat or an older message, the saved memory wins. The single-thread prompt is unchanged.
 - **Leak markers.** `CoachSafety` adds `"context library (queryable"` and `"earlier in this conversation (summary"`.
 
 #### Screen handoff ("Ask Sana" from another screen)
 - **Caller.** A screen sets `AICoachEngine.pendingHandoff = CoachHandoff(prompt:screenContext:memory:)` and calls `NavRouter.openCoach()`. `CoachChatView` consumes it once, like `pendingPrompt`: `queueHandoff(_:)` starts a new chat (after any reply in progress) and sends `prompt` as the user's first message.
 - **Context.** `screenContext` (what the screen showed, ≤ 2,400 characters) is stored on that user message as `meta.screenContext`, so it survives a reload. Each turn of the chat appends `SCREEN CONTEXT:` (`CoachPrompt.screenBlock`) after the other blocks and before the image block; it uses the question's own context, else the latest earlier question in the open thread that has one. A refused question carries none. Empty context leaves both `system(...)` outputs byte-identical. `CoachSafety` adds the leak marker `"opened this chat from a screen in the app"`.
-- **Memory.** When the prompt is sent (not refused), `memory` is saved once with `POST memories` (topic `health`, importance 3, the thread id on a thread-aware server). The save path's dedupe (`saveTarget`) confirms an existing near-duplicate instead of adding it again. The memory names what the person asked about and never quotes a reading.
+- **Memory.** When the prompt is sent (not refused), `memory` is saved once with `POST memories` (topic `health`, importance 3, the thread id on a thread-aware server, `auto: true`). The save path's dedupe (`saveTarget`) confirms an existing near-duplicate instead of adding it again, and as an automatic note it is skipped when the user forgot (or edited away) what it says. The memory names what the person asked about and never quotes a reading.
 - **Server.** No change: `meta` is free-form JSON (≤ 20 KB per message in `coach_store.ts`). The macOS coach (`CoachView`, the user's own key) sends only the prompt; it keeps no cloud memory.
 
 ### 7.5 State snapshot for suggestions
@@ -717,7 +728,8 @@ Values are bands, not raw readings, so the fingerprint stays stable.
   - Date-grouped chats.
   - Date groups and folders are `Section`s inside the lazy stack, so only rows on screen are built; the current thread, the can-switch and searching flags and the sorted folders are read once per redraw.
 - **Context menu on a chat:** Rename (through `store.requestRename`, i.e. the view model), Move to folder (or New folder…), Pin/Unpin, and Delete (with confirmation).
-- **Footer:** "What Sana remembers", a memory sheet that pages with `limit=200`, grouped by topic (`CoachMemory.sections`: injury and health first; pinned, then importance, then the latest change within a topic), with Edit (tap or swipe; `PATCH memories/<id>`, a 409 or 404 reloads the list), Forget and Forget all (drawn in `StrandPalette.statusCritical`, icon and text alike). Its copy says that chats stay in history. `CoachMemorySheet` takes values and closures (`memories`, `isLoading`, `refresh`, `edit`, `forget`, `forgetAll`), not the view model, and is shown with `.equatable()`, so a streaming reply does not redraw its list. Forgetting clears `suggestions.json`, so the local chips show until a fresh set arrives.
+- **Footer:** "What Sana remembers", a memory sheet that pages with `limit=200`, grouped by topic (`CoachMemory.sections`: injury and health first; pinned, then importance, then the latest change within a topic), with Edit (tap, swipe, context menu and accessibility action, on rows that carry a `version`), Forget, Add a memory, and Forget all (drawn in `StrandPalette.statusCritical`, icon and text alike). Its copy says that chats stay in history. A row in the user's own words says "Your words". `CoachMemorySheet` takes values and closures (`memories`, `isLoading`, `refresh`, `forget`, `forgetAll`, `edit`, `add`), not the view model, and is shown with `.equatable()`, so a streaming reply does not redraw its list. Forgetting clears `suggestions.json`, so the local chips show until a fresh set arrives.
+- **Editor** (`CoachMemoryEditor`, a sheet from the memory sheet): the fact and its topic. The text is collapsed to one line and checked as the phone checks any stored line before it reaches a prompt (`CoachChatViewModel.memoryProblem`: not empty, at most 500 UTF-16 units, passing `CoachSafety.screenStored`); Save stays disabled until it passes and differs. `CoachChatViewModel.edit(_:content:topic:importance:)` sends only what changed with the row's `version`; on success it replaces the row in the list, in every cached manifest (in memory and on disk) and drops `suggestions.json`. A 409 re-reads the list and the editor quotes the version now stored ("changed on another device … save again"); a 404 drops the memory everywhere, as a forget does. `addMemory(content:topic:)` posts `source:'user'` and re-reads the list.
 - **Tab swipe:** `RootTabView` suppresses it with `including: (tabPaths[selectedTab].isEmpty && !(selectedTab == 4 && chrome.drawerOpen)) ? .all : .subviews`.
 - **Accessibility:** `.isModal` on the panel, the chat column hidden while the drawer is open, the escape action, and the `.isSelected` trait on the current row.
 - **Identifiers:** `coachThreadRow.<id>`, `coachFolderRow.<id>`, `coachSidebarSearch`, `coachSuggestion.<i>` and `coachFollowUp.<i>`.
@@ -753,8 +765,8 @@ Values are bands, not raw readings, so the fingerprint stays stable.
 
 **Deno, mocked** (over `tests/coach_fake.ts`, which follows the RPC contracts above: claim, publish and its `memory_reset` fence, the version guards, `coach_thread_delete_v1`, the light search, and the shipped refusal texts):
 - `tests/coach_threads_test.ts`: routes and shapes, `needsMaintenance` against the floor, filed chats on the first page, the rollback switch, deletes through the RPC, old-build refusals, the light sidebar search.
-- `tests/coach_memory_test.ts`: tokens (units, distances, half marathon), the subject guard, the near-duplicate and tombstone rules, the save path and its stale retry.
-- `tests/coach_curator_test.ts`: titles, follow-ups (`titlePending`), starters (a forget clears them), and maintenance: the quiet fold, the skipped pass's cursors, the forget mid-pass, the consolidation gate, merge attributes and version guards, the curator merge, the update-to-merge fold (the simulator run), and the targeted consolidation with its 30-minute lease.
+- `tests/coach_memory_test.ts`: tokens (units, distances, half marathon), the subject guard, the near-duplicate and tombstone rules, the save path and its stale retry; `PATCH memories/<id>` (every read returns the edited row, the edit tombstone, the revision, 409/404/400, a write that races another writer), automatic saves against forget and edit tombstones and user rows, facts the user adds.
+- `tests/coach_curator_test.ts`: titles, follow-ups (`titlePending`), starters (a forget clears them), and maintenance: the quiet fold, the skipped pass's cursors, the forget mid-pass, the consolidation gate, merge attributes and version guards, the curator merge, the update-to-merge fold (the simulator run), the targeted consolidation with its 30-minute lease, and rows in the user's own words (confirmed, never reworded, merged or retired; an edit's old wording not learned again).
 - `tests/coach_context_test.ts`: the manifest (`threadCount` without the current chat), search (`noTerms`), recall and its per-chat share.
 - `tests/coach_test.ts`, updated: the prune now happens in the RPC and the memory cap is now 200.
 
@@ -777,7 +789,8 @@ Values are bands, not raw readings, so the fingerprint stays stable.
   - `coach_thread_delete_v1` alone and racing a save in both directions;
   - the light search;
   - the `memory_reset` fence (including a forget-all still running when a claim arrives);
-  - the version guards and the forget of merged rows.
+  - the version guards and the forget of merged rows;
+  - `20261009120000_coach_memory_user_edits.sql` (every re-apply applies both files): the user's edits (`source='user'`, the edit tombstone without the old text, the revision on every user op), the `user_edited` lock against the curator and the consolidator, user rows evicted last, edit tombstones kept like forget tombstones, `version` in the ranked rows.
 - `tests/coach_memory_e2e_test.ts` runs the full HTTP flow over real PostgREST with a scripted fake model:
   the handler on a loopback port, Supabase-Auth installation bearers for two accounts, and an
   OpenAI-compatible stand-in (`tests/coach_e2e_support.ts`) that streams chat answers and recognises every
@@ -788,7 +801,16 @@ Values are bands, not raw readings, so the fingerprint stays stable.
   (the physio / IT band run); a targeted consolidation of a look-alike pair and its 30-minute lease; a
   first-answer title that comes back `titlePending` and is named by the title route once saved; deletes
   racing in-flight saves (the tombstone always wins); an old build's refusals marked blocked by their text
-  and its chats named after their first question; and `COACH_THREADS_DISABLED`.
+  and its chats named after their first question; `COACH_THREADS_DISABLED`; and a memory edited through
+  `PATCH memories/<id>` that the list, `coach_memories_ranked_v1`, `coach_context_manifest_v1` and `POST context`
+  all return as one row with the new text, that a curator pass over a chat restating the old wording does not
+  undo, and whose text (old or new) an automatic save does not bring back once forgotten.
+
+- `tests/coach_memory_pipeline_test.ts` runs the edit path through the real handler on the production database
+  image (`supabase/tests/e2e/pipeline_db.sh`: Supabase's Postgres 17, every migration in production order, PostgREST
+  as hosted): save and PATCH, every read returning the one edited row, a curator pass that keeps it, the
+  `user_edited` lock, forgotten text never restored by an automatic save, a retired memory left out of the metric
+  insights fingerprint, and another account kept out. It skips itself without the pipeline variables.
 
 **Real-model smoke:** `supabase/functions/tests/coach_memory_smoke.ts` runs against Fireworks on synthetic data. It is not part of the default run:
 `deno run -A --no-lock tests/coach_memory_smoke.ts` with `FIREWORKS_AI_API_KEY` set (only that key and the
@@ -806,15 +828,16 @@ prints the `SIMCTL_CHILD_NARA_COACH_URL`, `_TOKEN` and `_OWNER` values for the �
 - `CoachContextPromptTests`: the legacy prompt is byte-identical; blocks; safety screening (pinned health facts reach the prompt); the inclusive `to`.
 - `CoachMetricHistoryTests`
 - `CoachStarterSuggestionsTests`: including the swap rule and the `live` filter.
-- `CoachAPIThreadTests`: a URLProtocol stub on a private session; new routes; lossy decode; an old server returning 404; owner-pinned saves; `titlePending`.
-- `CoachChatViewModelThreadTests`: the launch decision, streaming by id, refusing to switch while generating, queued prompts, deletes (local-only, refused, `thread_deleted`), chips for deleted chats, the rollback to the welcome screen, a refused rename, forget clearing chips, cached manifests, late server starters, maintenance selection, `titlePending`, a turn before the owner is known, sign-out removal and the DEBUG launch arguments.
+- `CoachAPIThreadTests`: a URLProtocol stub on a private session; new routes; lossy decode; an old server returning 404; owner-pinned saves; `titlePending`; the memory edit's wire shape (only what changed, the version, 409/404), `auto` and `source:'user'` saves, a manifest's row replaced by an edit.
+- `CoachChatViewModelThreadTests`: the launch decision, streaming by id, refusing to switch while generating, queued prompts, deletes (local-only, refused, `thread_deleted`), chips for deleted chats, the rollback to the welcome screen, a refused rename, forget clearing chips, cached manifests, late server starters, maintenance selection, `titlePending`, a turn before the owner is known, sign-out removal and the DEBUG launch arguments; memory edits (the list, every cached manifest and the next prompt follow; 409 shows the stored version, 404 drops it everywhere; screened text never sent), facts the user adds, and a newer `memoryRevision` dropping older cached manifests.
 - The Siri hand-off (`PendingIntents.takeCoachQuestion`) has no iOS test target; it was checked with a standalone harness that compiles `StrandiOS/System/NOOPAppIntents.swift` on macOS.
 
 ## 10. Rollout
 
-1. Apply the migration (see `docs/BACKEND.md`).
+1. Apply the migration (see `docs/BACKEND.md`), and `20261009120000_coach_memory_user_edits.sql` after it.
 2. Deploy `coach`.
-3. Ship the app.
+3. Ship the app. An app with editing shows Edit only on rows that carry a `version`, so against a `coach` from
+   before edits it keeps the forget-only sheet.
 
 Old apps keep working: their messages land in `legacy_client` threads, named after their first question, with
 their refusals marked blocked by text. A new app talking to an old server has no `features`, so it stays

@@ -10,26 +10,23 @@ final class CloudHostedBuildTests: XCTestCase {
     private let enabledKey = "noop.cloud.enabled.override"
     private let endpointKey = "noop.cloud.endpoint.override"
     private let activeOwnerKey = "noop.cloud.account.active"
-    private var savedEnabled: Any?
-    private var savedEndpoint: Any?
-    private var savedActiveOwner: Any?
+    private let owner = "c0ffee00-0000-4000-8000-00000000c0de"
+    private var policyKey: String { "noop.cloud.syncPolicy.v1.\(owner)" }
+    private var saved: [String: Any?] = [:]
 
     override func setUp() {
         super.setUp()
         let defaults = UserDefaults.standard
-        savedEnabled = defaults.object(forKey: enabledKey)
-        savedEndpoint = defaults.object(forKey: endpointKey)
-        savedActiveOwner = defaults.object(forKey: activeOwnerKey)
-        defaults.removeObject(forKey: enabledKey)
-        defaults.removeObject(forKey: endpointKey)
-        defaults.removeObject(forKey: activeOwnerKey)
+        for key in [enabledKey, endpointKey, activeOwnerKey, policyKey] {
+            saved[key] = defaults.object(forKey: key)
+            defaults.removeObject(forKey: key)
+        }
     }
 
     override func tearDown() {
         CloudPushSettings.bundleStringOverride = nil
         let defaults = UserDefaults.standard
-        for (key, value) in [(enabledKey, savedEnabled), (endpointKey, savedEndpoint),
-                             (activeOwnerKey, savedActiveOwner)] {
+        for (key, value) in saved {
             if let value { defaults.set(value, forKey: key) } else { defaults.removeObject(forKey: key) }
         }
         super.tearDown()
@@ -92,20 +89,64 @@ final class CloudHostedBuildTests: XCTestCase {
         XCTAssertFalse(CloudPushSettings.isEnabled)
     }
 
-    func testASignedInAccountAlwaysSyncsWhateverWasStored() {
+    func testASignedInAccountIsSyncedAndCannotBeSwitchedOff() {
         configureBuild(hosted: false)
-        UserDefaults.standard.set(false, forKey: enabledKey)
-        UserDefaults.standard.set("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", forKey: activeOwnerKey)
-        XCTAssertTrue(CloudPushSettings.isEnabled, "an opt-out left by an older build does not stop a signed-in account")
+        UserDefaults.standard.set(false, forKey: enabledKey)   // an older build's "off"
+        UserDefaults.standard.set(owner, forKey: activeOwnerKey)
 
+        XCTAssertTrue(CloudPushSettings.signedInSyncIsMandatory, "required until the server says otherwise")
+        XCTAssertTrue(CloudPushSettings.isEnabled, "signed in means synced, whatever an older build stored")
+        XCTAssertFalse(CloudPushSettings.isUserSwitchable, "so no screen offers a switch")
+        XCTAssertFalse(CloudPushSettings.setEnabled(false), "switching off is refused while signed in")
+        XCTAssertTrue(CloudPushSettings.isEnabled)
+
+        // Signing out is what stops it.
         UserDefaults.standard.removeObject(forKey: activeOwnerKey)
-        XCTAssertFalse(CloudPushSettings.isEnabled, "signed out, the stored flag decides as before")
+        XCTAssertFalse(CloudPushSettings.isEnabled)
+        XCTAssertTrue(CloudPushSettings.isUserSwitchable)
     }
 
     func testASignedInAccountInAnUnconfiguredBuildStaysOff() {
         configureBuild(hosted: false, configured: false)
-        UserDefaults.standard.set("aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", forKey: activeOwnerKey)
+        UserDefaults.standard.set(owner, forKey: activeOwnerKey)
         XCTAssertFalse(CloudPushSettings.isEnabled)
+    }
+
+    func testARelaxedPolicyBringsTheOptInBackForThatAccountOnly() {
+        configureBuild(hosted: false)
+        UserDefaults.standard.set(owner, forKey: activeOwnerKey)
+        CloudSyncPolicyStore.shared.record(CloudSyncPolicy(required: false, staleAfterHours: 24), forOwner: owner)
+
+        XCTAssertFalse(CloudPushSettings.signedInSyncIsMandatory)
+        XCTAssertFalse(CloudPushSettings.isEnabled, "a relaxed account is opt-in again")
+        XCTAssertTrue(CloudPushSettings.isUserSwitchable)
+        XCTAssertTrue(CloudPushSettings.setEnabled(true))
+        XCTAssertTrue(CloudPushSettings.isEnabled)
+        XCTAssertTrue(CloudPushSettings.setEnabled(false))
+        XCTAssertFalse(CloudPushSettings.isEnabled)
+        XCTAssertTrue(CloudPushSettings.syncRequired(forOwner: "d0d0d0d0-0000-4000-8000-00000000d0d0"),
+                      "another account's unknown policy is still required")
+    }
+
+    func testTheSyncPolicyIsReadFromEveryReplyThatCarriesIt() throws {
+        XCTAssertEqual(CloudSyncPolicy.parse(["required": false, "staleAfterHours": 48]),
+                       CloudSyncPolicy(required: false, staleAfterHours: 48))
+        XCTAssertEqual(CloudSyncPolicy.parse(["staleAfterHours": 0]), .assumed,
+                       "a missing flag is required, and an impossible window falls back")
+        XCTAssertNil(CloudSyncPolicy.parse("required"))
+        let body = Data(#"{"type":"capabilities","syncPolicy":{"required":true,"staleAfterHours":12}}"#.utf8)
+        XCTAssertEqual(CloudSyncPolicy.parse(replyBody: body), CloudSyncPolicy(required: true, staleAfterHours: 12))
+
+        let status = Data(#"{"ok":true,"configured":true,"syncPolicy":{"required":true,"staleAfterHours":24},"sync":{"required":true,"lastUploadAt":"2026-10-07T00:05:00.123Z","stale":true,"staleAfterHours":24}}"#.utf8)
+        let parsed = try XCTUnwrap(CoachAPI.syncStatus(fromStatusBody: status))
+        XCTAssertEqual(parsed.policy, .assumed)
+        XCTAssertEqual(parsed.health?.stale, true)
+        XCTAssertEqual(parsed.health?.lastUploadAt?.timeIntervalSince1970 ?? 0, 1_791_331_500.123, accuracy: 0.01)
+        XCTAssertNil(CoachAPI.syncStatus(fromStatusBody: Data(#"{"ok":true,"configured":true}"#.utf8)),
+                     "an older server sends neither")
+        let never = Data(#"{"sync":{"required":true,"lastUploadAt":null,"stale":true}}"#.utf8)
+        XCTAssertEqual(CoachAPI.syncStatus(fromStatusBody: never)?.health,
+                       CloudSyncHealth(required: true, lastUploadAt: nil, stale: true))
     }
 
     func testOtherBuildsStillHonourADeveloperEndpointOverride() {

@@ -68,6 +68,27 @@ def test_owner_reads_see_only_the_owner_and_cannot_write(pg, db):
     assert sources.loaded == ["scores", "memory", "device", "context"]
 
 
+def test_memory_is_the_active_rows_sana_uses_and_only_they_move_the_fingerprint(pg, db):
+    seed(pg, USER_A, DEVICE_A, [50, 51, 49])
+    pg.psql(f"insert into public.coach_memory_items(user_id, content, topic, importance) values"
+            f" ('{USER_A}', 'Trains for a marathon', 'goal', 3)")
+
+    def fingerprint() -> str:
+        return pg.psql(f"select fingerprint from internal.metric_insight_inputs('{USER_A}', 'resting_hr')")
+    active = fingerprint()
+    # A retired row (merged away, contradicted, evicted) with the highest importance: neither read nor an input.
+    pg.psql(f"insert into public.coach_memory_items(user_id, content, topic, importance, retired_at, retired_reason)"
+            f" values ('{USER_A}', 'Used to run ultras', 'achievement', 5, now(), 'merged')")
+    sources = Sources(db, USER_A, "resting_hr", ANCHOR, ZoneInfo("UTC"))
+    assert [m["content"] for m in sources.memory()] == ["Trains for a marathon"]
+    assert fingerprint() == active
+    # Retiring the active row takes it out of both too.
+    pg.psql(f"update public.coach_memory_items set retired_at = now(), retired_reason = 'contradicted'"
+            f" where user_id = '{USER_A}' and content = 'Trains for a marathon'")
+    assert Sources(db, USER_A, "resting_hr", ANCHOR, ZoneInfo("UTC")).memory() == []
+    assert fingerprint() != active
+
+
 def _devices(pg) -> None:
     pg.psql(f"insert into public.devices(id, user_id, source_kind, external_device_id) values"
             f" ('{DEVICE_A}', '{USER_A}', 'noop_push', 'whoop-A'), ('{DEVICE_B}', '{USER_B}', 'noop_push', 'whoop-B')"

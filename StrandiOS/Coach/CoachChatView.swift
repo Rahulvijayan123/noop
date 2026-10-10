@@ -142,9 +142,10 @@ struct CoachChatView: View {
             // sheet alone unless the memories themselves changed.
             CoachMemorySheet(memories: vm.memories, isLoading: vm.isLoadingMemories,
                              refresh: { await vm.refreshMemories() },
-                             edit: { await vm.editMemory($0, content: $1) },
                              forget: { await vm.forget($0) },
-                             forgetAll: { await vm.forgetAllMemories() })
+                             forgetAll: { await vm.forgetAllMemories() },
+                             edit: { await vm.edit($0, content: $1, topic: $2) },
+                             add: { await vm.addMemory(content: $0, topic: $1) })
                 .equatable()
         }
         #if DEBUG

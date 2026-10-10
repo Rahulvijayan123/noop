@@ -37,7 +37,7 @@ def test_manifest_has_the_eight_planned_entries(manifest_entries):
     assert ids == ["neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa", "wav2sleep",
                    "no_eeg_sleep_staging", "rr_estimation", "stepcount",
                    "cnn_wrist_model_freeliving",
-                   "paradigma", "deepbeat", "siamaf"]
+                   "paradigma", "deepbeat", "siamaf", "recgym_cnn_transformer"]
 
 
 def test_every_entry_declares_revision_license_rights_status_and_input_contract(manifest_entries):
@@ -76,9 +76,10 @@ def test_only_the_landed_providers_are_wired(manifest_entries):
     assert wired["paradigma"] is True
     assert wired["deepbeat"] is True
     assert wired["siamaf"] is True
+    assert wired["recgym_cnn_transformer"] is True
     assert all(value is False for key, value in wired.items()
                if key not in {"neurokit2", "hypnospy", "sleepecg_wrn_gru_mesa",
-                              "paradigma", "deepbeat", "siamaf"})
+                              "paradigma", "deepbeat", "siamaf", "recgym_cnn_transformer"})
 
 
 def test_blocked_models_stay_blocked(manifest_entries):
@@ -120,7 +121,7 @@ def test_pinned_digests_match_the_research_findings(manifest_entries):
 def test_manifest_summary_exposes_the_capability_fields(manifest_entries):
     state = verify_manifest(load_manifest(MANIFEST_PATH), "/nonexistent", manifest_path=MANIFEST_PATH)
     summary = manifest_summary(state)
-    assert len(summary) == 11
+    assert len(summary) == 12
     assert all("status" in row and "input_contract" in row for row in summary)
 
 
@@ -300,7 +301,23 @@ def test_every_staged_artifact_can_be_produced_and_verified(manifest_entries):
                 assert source["artifact"] in names and source["member"]
             else:
                 pytest.fail(f"{entry['id']}/{artifact['name']}: a staged artifact cannot be {source['kind']}")
-    assert staged == 7
+    assert staged == 9
+
+
+def test_the_recgym_checkpoint_is_a_pinned_member_of_the_pinned_upstream_archive(manifest_entries):
+    """The exercise head's checkpoint (Tools/ActivityContext/activity_context/recgym/weights.py pins the same bytes)."""
+    entry = {e["id"]: e for e in manifest_entries}["recgym_cnn_transformer"]
+    assert entry["status"] == "shadow_eligible" and entry["required_for_readiness"] is False
+    artifacts = {a["name"]: a for a in entry["artifacts"]}
+    archive, member = artifacts["models.zip"], artifacts["wrist_-_imu_only_best.pt"]
+    assert archive["url"] == ("https://raw.githubusercontent.com/MKorp7/HAR_IMU_CNN-Transformer/"
+                              f"{entry['revision']}/models.zip")
+    assert archive["sha256"] == "eb779a1fbf5af2db76c8babbfd3e4d8162d9e677738215db5c03f5c2fe4cdfe8"
+    assert member["source"] == {"kind": "zip_member", "artifact": "models.zip",
+                                "member": "models/wrist_-_imu_only_best.pt"}
+    assert member["sha256"] == "7f0c4adf066bb842eeb0c114e765fd3cf1ca3a7ca6ef6cf5344f5f142651f5d9"
+    assert member["path"] == "recgym/e085ac0e/wrist_-_imu_only_best.pt"
+    assert not any(a["required_for_readiness"] for a in entry["artifacts"])
 
 
 def test_the_sleepecg_artifacts_come_from_the_wheel_not_from_a_url(manifest_entries):

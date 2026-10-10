@@ -1,7 +1,7 @@
 // NOOP push receiver as a Supabase Edge Function — port of the retired Node receiver
 //
 // Routes (path after /functions/v1/push):
-//   GET  /                        capabilities (version negotiation + objectLane advert)
+//   GET  /                        capabilities (version negotiation + objectLane advert + syncPolicy)
 //   POST /                        inline NDJSON batch (gzip optional)
 //   POST /objects                 object-lane intent → presigned B2 PUT
 //   POST /objects/:objectId/complete   byte-count check → release device rows
@@ -48,6 +48,7 @@ import {
 } from '../_shared/tokens.ts';
 import { createEnrollmentService, EnrollmentError } from '../_shared/enrollment.ts';
 import { createInstallationProvisioning } from '../_shared/provisioning.ts';
+import { syncPolicyFromEnv } from '../_shared/syncPolicy.ts';
 import { createAccountRecovery } from '../_shared/accountRecovery.ts';
 import { createNoopDeviceResolver } from '../_shared/devices.ts';
 import { createUploadReceiptStore } from '../_shared/receipts.ts';
@@ -65,6 +66,8 @@ const MAX_INTENT_BYTES = 8 * 1024;
 const OBJECT_LANE_PATH = '/functions/v1/push/objects';
 
 const cfg = pushConfig();
+// Provisioning and capabilities both tell the app that a signed-in account must keep syncing.
+const syncPolicy = syncPolicyFromEnv();
 const rest = createSupabaseRest({ cfg: restConfigFromEnv() });
 const ingestTokenStore = createIngestTokenStore({ rest });
 const enrollmentService = createEnrollmentService({
@@ -81,6 +84,7 @@ const installationProvisioning = createInstallationProvisioning({
   rest,
   supabaseUrl: cfg.supabaseUrl,
   anonKey: cfg.supabaseAnonKey,
+  syncPolicy,
 });
 const accountRecovery = createAccountRecovery({
   rest,
@@ -199,6 +203,7 @@ async function handleCapabilities(req: Request): Promise<Response> {
       streams: advertisedStreams(version, INGEST_ENABLED_STREAMS),
       userId: user.id,
       sourceId: user.sourceId,
+      syncPolicy,
       // Advertised whenever the lane can actually sign a URL. A sender that sees no `objectLane`
       // must keep its raw rows rather than assume they were taken.
       objectLane: pushObjects.configured

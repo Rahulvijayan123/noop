@@ -13,7 +13,7 @@ import { startLocalPostgres, USER_A, USER_B } from './local_postgres.ts';
 //     recompute that only rewrites metadata changes nothing), changed inputs served stale, inputs changing
 //     mid-run (published_superseded, keyed by the claim's inputs so it is never served as fresh);
 //  4. the fingerprint: the whole selected context document (the retrospective one first), exposures inside the
-//     window, coach memory (topic included); another user's data does not move it;
+//     window, coach memory (topic included; only the active rows, 20261009120100); another user's data does not move it;
 //  5. fencing and failure: lost and expired leases, release on a newer revision, backoff, dead letter and its
 //     reset by changed inputs, the daily bound, the 6 h request horizon, payload validation;
 //  6. isolation: owners read only their own insights through PostgREST and never the queue or the RPCs; a
@@ -26,12 +26,17 @@ const DEVICE_B = '44444444-4444-4444-8444-444444444444';
 const USER_C = '55555555-5555-4555-8555-555555555555';
 const USER_D = '66666666-6666-4666-8666-666666666666';
 const MIGRATION = '20261008000000_metric_insights.sql';
+/** The later files that re-create MIGRATION's functions, applied after it every time, in order: the background sweep
+ * (request and claim, plus metric_insight_sweep_v1), and internal.metric_insight_inputs with only the active coach
+ * memories. */
+const FOLLOW_UPS = ['20261008010000_metric_insight_background_sweep.sql', '20261009120100_metric_insight_inputs_active_memories.sql'];
 const PUBLIC_FUNCTIONS: Record<string, string> = {
   metric_insight_request_v1: 'uuid,text',
   metric_insight_claim_v1: 'text,integer',
   metric_insight_renew_v1: 'uuid,integer',
   metric_insight_fail_v1: 'uuid,bigint,text',
   metric_insight_publish_v1: 'uuid,bigint,jsonb',
+  metric_insight_sweep_v1: 'integer',
 };
 // The owner's own hosted day values: callable by an authenticated owner, never by anon (asserted on its own).
 const OWNER_FUNCTIONS: Record<string, string> = { metric_insight_day_values_v1: 'date,date' };
@@ -76,13 +81,15 @@ function payload(over: Record<string, unknown> = {}, insight: Record<string, unk
 Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds and owner isolation', async (t) => {
   const db = await startLocalPostgres({ fullChain: true });
   const apply = async () => {
-    const path = new URL(`../../migrations/${MIGRATION}`, import.meta.url);
-    const result = await new Deno.Command('/opt/homebrew/bin/psql', {
-      args: ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', db.base, '-U', 'edge_test', '-d', 'postgres',
-        '-f', decodeURIComponent(path.pathname)],
-      stdout: 'piped', stderr: 'piped', clearEnv: true,
-    }).output();
-    if (!result.success) throw new Error(`apply failed: ${new TextDecoder().decode(result.stderr).slice(-2000)}`);
+    for (const file of [MIGRATION, ...FOLLOW_UPS]) {
+      const path = new URL(`../../migrations/${file}`, import.meta.url);
+      const result = await new Deno.Command('/opt/homebrew/bin/psql', {
+        args: ['-X', '-qAt', '-v', 'ON_ERROR_STOP=1', '-h', db.base, '-U', 'edge_test', '-d', 'postgres',
+          '-f', decodeURIComponent(path.pathname)],
+        stdout: 'piped', stderr: 'piped', clearEnv: true,
+      }).output();
+      if (!result.success) throw new Error(`apply ${file} failed: ${new TextDecoder().decode(result.stderr).slice(-2000)}`);
+    }
   };
   const json = async (statement: string) => JSON.parse((await db.sql(statement)) || 'null');
   const rpc = (name: string, args: Record<string, unknown>) => db.rest.rpc(name, args);
@@ -358,6 +365,17 @@ Deno.test('metric insights: schema, privileges, caching, fencing, failure bounds
       await db.sql(`update public.coach_memory_items set topic = 'sleep' where user_id = '${USER_A}'`);
       const withMemory = await fingerprint(USER_A);
       assert.notEqual(withMemory, noted, 'a memory item\'s topic is input too');
+      // Only the active rows the worker reads: a retired one (merged away, contradicted, evicted) is no input, and
+      // retiring one is a change.
+      await db.sql(`insert into public.coach_memory_items(user_id, content, topic, importance, retired_at, retired_reason)
+        values ('${USER_A}', 'Used to run ultras', 'achievement', 5, now(), 'merged')`);
+      assert.equal(await fingerprint(USER_A), withMemory, 'a retired memory moved the fingerprint');
+      await db.sql(`update public.coach_memory_items set retired_at = now(), retired_reason = 'contradicted'
+        where user_id = '${USER_A}' and content = 'Trains for a marathon on weekends'`);
+      assert.notEqual(await fingerprint(USER_A), withMemory, 'retiring a memory did not move the fingerprint');
+      await db.sql(`update public.coach_memory_items set retired_at = null, retired_reason = null
+        where user_id = '${USER_A}' and content = 'Trains for a marathon on weekends'`);
+      assert.equal(await fingerprint(USER_A), withMemory);
 
       // The hosted day snapshots (HRV slots by activity) and the activity documents around the night count too.
       await db.sql(`insert into public.scoring_snapshots_v2(user_id, device_id, day, algorithm_version, input_revision,

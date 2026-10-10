@@ -226,6 +226,7 @@ enum WatchdogWindowLoader {
         // Sensor-quality metadata: missing stays empty / nil.
         var quality = WatchdogQualityFeed()
         quality.v18 = WatchdogQualityFeedBuilder.v18Seconds(aux)
+        quality.v18RecordIndex = WatchdogQualityFeedBuilder.v18RecordIndex(aux)
         quality.wristEvents = storedWrist
         quality.liveWristEvents = req.live.wristEvents
         quality.charging = WatchdogQualityFeedBuilder.charging(battery: battery, events: wearEvents,

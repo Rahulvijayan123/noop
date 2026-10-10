@@ -22,7 +22,8 @@ const DEVICE_B = 'dddddddd-dddd-4ddd-8ddd-dddddddddddd';
 const CODE = 'eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee';
 const TOKEN = 'ffffffff-ffff-4fff-8fff-ffffffffffff';
 const FLEET = '11111111-2222-4333-8444-555555555555';
-const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public' };
+// The fixtures are enrollment-code installations (pre-Auth), which the route accepts only with legacy enrollment on.
+const cfg = { supabaseUrl: 'https://test.invalid', supabaseAnonKey: 'fixture-public', allowLegacyEnrollment: true };
 
 const EXTRA_MIGRATIONS = [
   '20261003210000_placement_intervals.sql',
@@ -40,7 +41,8 @@ Deno.test('placement route: owner allow, corrections, invalid deny, cross-owner 
   sanitizeOps: false,
   sanitizeResources: false,
 }, async () => {
-  const db = await startLocalPostgres({ installationLifecycle: true });
+  // authProvisioning: the credential lookup reads noop_ingest_tokens.provisioning_method (20261004120000).
+  const db = await startLocalPostgres({ installationLifecycle: true, authProvisioning: true });
   try {
     const sql = db.sql;
     for (const name of EXTRA_MIGRATIONS) {
