@@ -75,16 +75,34 @@ public enum ActivityStillPosture {
     public static let anchorMinDisplacementM = ActivityVerticalShift.minDisplacementM
     /// A rise anchors standing at ln 3: with the duration prior it commits "Standing" for about the first three still
     /// minutes and fades to unresolved by about ten, matching standing bouts (median 2.2 min, p90 7 min). A drop
-    /// anchors sitting at ln 4 (sitting bouts are long, and the duration prior only adds to it).
-    public static let anchorLeanSeated = log(4.0)
+    /// anchors sitting at ln 5 (sitting bouts are long, and the duration prior only adds to it). Both stay under what
+    /// the upper arm's measured precision supports (Opportunity, vshift-2 acceptance: drop ≈ +2.3, rise ≈ +1.5–1.9).
+    public static let anchorLeanSeated = log(5.0)
     public static let anchorLeanUpright = log(3.0)
     public static let anchorMinQuality = 0.5
 
-    /// The anchor a measured shift sets: > 0 (seated) after a drop, < 0 (upright) after a rise, nil when the shift is
-    /// too small or too poorly measured to say.
-    public static func anchorLean(_ shift: ActivityVerticalShiftEvidence) -> Double? {
-        guard shift.quality >= anchorMinQuality, shift.displacementM.isFinite,
-              abs(shift.displacementM) >= anchorMinDisplacementM else { return nil }
-        return shift.displacementM < 0 ? anchorLeanSeated : -anchorLeanUpright
+    /// Wrist anchors (D-wrist-shift, non-dominant wrist, config D: drop precision ⇒ +2.27, rise ⇒ +1.18 log-odds at a
+    /// calibrated accelerometer, about +1.5 / +0.7 with realistic calibration error), scaled by the shift's quality.
+    public static let wristAnchorLeanSeated = 1.5
+    public static let wristAnchorLeanUpright = 0.7
+
+    /// The anchor a measured shift sets for a strap worn at `placement`: > 0 (seated) after a drop, < 0 (upright)
+    /// after a rise, nil when the shift is too small, too large (a bend), too slow for this placement, an old record
+    /// without its peak velocity on the wrist, or too poorly measured to say.
+    public static func anchorLean(_ shift: ActivityVerticalShiftEvidence,
+                                  placement: ActivityWearPlacement = .bicep) -> Double? {
+        let dh = shift.displacementM
+        guard shift.quality >= max(anchorMinQuality, ActivityVerticalShift.minQuality), dh.isFinite,
+              abs(dh) >= anchorMinDisplacementM, abs(dh) <= ActivityVerticalShift.maxDisplacementM else { return nil }
+        if let v = shift.peakVelocity {
+            guard v.isFinite, (v > 0) == (dh > 0),
+                  abs(v) >= ActivityVerticalShift.minPeakVelocity(for: placement) else { return nil }
+        } else if placement.wristPostureCues {
+            return nil
+        }
+        if placement.wristPostureCues {
+            return dh < 0 ? wristAnchorLeanSeated * shift.quality : -wristAnchorLeanUpright * shift.quality
+        }
+        return dh < 0 ? anchorLeanSeated : -anchorLeanUpright
     }
 }

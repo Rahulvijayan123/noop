@@ -364,8 +364,14 @@ final class WatchdogService {
         let devices = (try? DeviceRegistryStore(dbQueue: store.registryWriter).all()) ?? []
         var registry: [String: (model: String?, brand: String?)] = [:]
         for d in devices { registry[d.id] = (d.model, d.brand) }
-        let placement = WatchdogQualityFeedBuilder.placement(at: now, rows: Self.placementRows(store: store),
+        var placement = WatchdogQualityFeedBuilder.placement(at: now, rows: Self.placementRows(store: store),
                                                              deviceIds: ids)
+        // A placement declared for the account rather than the strap (no device-scoped row) still applies, the way
+        // the activity decoder reads it (`ActivityPlacementCache`): never assumed wrist when the wearer said otherwise.
+        if placement == nil {
+            let declared = ActivityPlacementCache.shared.placement(at: now, deviceId: model.repo.deviceId)
+            if declared != .unknown { placement = declared.rawValue }
+        }
         let from = now - WatchdogConfig.contextSeconds
         // The raw IMU file store is main-confined (the Collector appends on the main actor): read here, convert
         // off the main actor. A logged bicep / other site never reads it.

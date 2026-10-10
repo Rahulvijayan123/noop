@@ -67,6 +67,27 @@ final class ActivityPlacementCache: @unchecked Sendable {
         return placement(at: label.startTs, deviceId: label.deviceId).calibrationKey
     }
 
+    /// The calibration key ("wrist" / "bicep" / "other") each night was worn at, keyed by its `yyyy-MM-dd` wake day,
+    /// read at 04:00 local on that day. nil when no placement was ever declared (nothing to stratify by), so a wearer
+    /// who never set one keeps exactly the baselines they had.
+    func calibrationKeyByNight<S: Sequence>(days: S, deviceId: String) -> [String: String]? where S.Element == String {
+        var own = spans(deviceId: deviceId)
+        if own.isEmpty, let primary = primaryDeviceId { own = spans(deviceId: primary) }
+        guard !own.isEmpty else { return nil }
+        var probe = ActivityDecoderConfig()
+        probe.placements = own
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = .current
+        f.dateFormat = "yyyy-MM-dd"
+        var out: [String: String] = [:]
+        for day in days {
+            guard let start = f.date(from: day) else { continue }
+            out[day] = probe.placement(at: Int(start.timeIntervalSince1970) + 4 * 3_600).calibrationKey
+        }
+        return out
+    }
+
     /// Replace the spans for `deviceId` (nil = user-level). Returns true when they changed.
     @discardableResult
     func set(_ intervals: [PlacementInterval], deviceId: String?) -> Bool {

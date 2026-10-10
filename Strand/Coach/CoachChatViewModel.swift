@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import StrandAnalytics
 import OpenUILang
 import WhoopStore
 
@@ -948,9 +949,10 @@ final class CoachChatViewModel: ObservableObject {
             let manifest = await manifest(for: turn.threadId, fetch: manifestFetch)
             guard !Task.isCancelled else { return }
             let count = max(manifest?.thread?.messageCount ?? 0, messages.filter { $0.id != id }.count)
-            let context = CoachTurnContext(manifest: manifest, memories: memories, coverage: coverage(repo),
+            var context = CoachTurnContext(manifest: manifest, memories: memories, coverage: coverage(repo),
                                            messageCount: count, isFirstTurn: turn.isFirstTurn,
                                            currentThreadId: turn.threadId, refs: refs)
+            context.placement = Self.placementSummary(deviceId: repo.deviceId)
             system = CoachPrompt.system(context: context, imageContext: imageContext,
                                         screenContext: turn.screenContext ?? "", userAge: userAge, interactiveUI: true)
         } else {
@@ -1922,4 +1924,20 @@ extension CoachChatViewModel {
         connection = .online
     }
 }
-#endif
+
+extension CoachChatViewModel {
+    /// "bicep since 2026-10-07; previously wrist" from the declared placements (nil when none was ever declared).
+    static func placementSummary(deviceId: String?) -> String? {
+        let cache = ActivityPlacementCache.shared
+        let spans = cache.spans(deviceId: deviceId ?? cache.primaryDeviceId ?? "")
+        guard let current = spans.filter({ $0.contains(Int(Date().timeIntervalSince1970)) }).max(by: { $0.start < $1.start })
+        else { return nil }
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"; f.locale = Locale(identifier: "en_US_POSIX")
+        var text = "\(current.placement.rawValue) since \(f.string(from: Date(timeIntervalSince1970: TimeInterval(current.start))))"
+        if let previous = spans.filter({ $0.start < current.start && $0.placement != current.placement })
+            .max(by: { $0.start < $1.start }) {
+            text += "; previously \(previous.placement.rawValue)"
+        }
+        return text
+    }
+}

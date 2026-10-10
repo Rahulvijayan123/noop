@@ -19,16 +19,24 @@ public struct ActivityVerticalShiftEvidence: Codable, Equatable, Sendable {
     /// 0…1: how well the measurement held (stillness at both ends, residual drift, sampling).
     public var quality: Double
     public var version: String
+    /// Signed peak vertical velocity inside the movement (m/s); nil in shifts recorded without it. The decoder's
+    /// acceptance is placement-specific: the wrist needs a faster, cleaner movement than the upper arm.
+    public var peakVelocity: Double? = nil
+    /// "burst" (still on both sides) or "onset" (still before, then a long movement such as walking away).
+    public var kind: String? = nil
 
     public init(ts: Int, startTs: Int, displacementM: Double, quality: Double,
-                version: String = ActivityVerticalShift.version) {
+                version: String = ActivityVerticalShift.version, peakVelocity: Double? = nil, kind: String? = nil) {
         self.ts = ts; self.startTs = startTs; self.displacementM = displacementM; self.quality = quality
-        self.version = version
+        self.version = version; self.peakVelocity = peakVelocity; self.kind = kind
     }
 }
 
 public enum ActivityVerticalShift {
-    public static let version = "vshift-1"
+    /// vshift-2: offset candidates dropped (their first pad falls inside the movement and inverts the sign:
+    /// direction 0.02–0.63 on Opportunity), the accelerometer calibrated from still windows before projection, and the
+    /// peak velocity and candidate kind recorded so the decoder can accept per placement.
+    public static let version = "vshift-2"
 
     /// One raw IMU sample: accelerometer in g (gravity included), gyroscope in °/s.
     public struct Sample: Equatable, Sendable {
@@ -61,6 +69,16 @@ public enum ActivityVerticalShift {
     /// Larger than any sit-down (Opportunity p10 −0.61 m): bending or squatting to a low drawer (−0.7 to −0.9 m), not a
     /// change of posture.
     public static let maxDisplacementM = 0.70
+
+    // Per-placement acceptance (D-wrist-shift, Opportunity lower vs upper arm, 4 subjects, 265 transitions each).
+    /// The wrist moves independently of the shoulder (reaching, placing things): only a fast, clean movement counts.
+    /// With peak velocity ≥ 0.5 m/s, no offset candidates and quality ≥ 0.5 the non-dominant wrist reached direction
+    /// accuracy 1.00 and 0.86 precision at 1.4 false events per sit/stand hour (as shipped for the bicep: 0.51 precision,
+    /// 12.4 / h). The upper arm keeps 0.25 m/s: the owner's own bicep sit-downs peaked at 0.26–0.38 m/s.
+    public static func minPeakVelocity(for placement: ActivityWearPlacement) -> Double {
+        placement.wristPostureCues ? 0.50 : minPeakVelocity
+    }
+    public static let minQuality = 0.5
     /// Pad velocity residual (m/s RMS) at which a measurement is worthless (quality 0); half of it gives 0.5.
     static let maxPadVelocity = 0.20
 
@@ -92,9 +110,10 @@ public enum ActivityVerticalShift {
         guard n > Int(2 * padS * fs) + 4 else { return [] }
         guard acc.allSatisfy({ $0.0.isFinite && $0.1.isFinite && $0.2.isFinite }),
               gyr.allSatisfy({ $0.0.isFinite && $0.1.isFinite && $0.2.isFinite }) else { return [] }
+        acc = calibrated(acc, fs: fs)
         let gravity = gravityDirection(acc, gyr, fs: fs)
         var out: [ActivityVerticalShiftEvidence] = []
-        for event in segment(acc, fs: fs) {
+        for event in segmentWithKinds(acc, fs: fs) {
             guard let m = measure(acc, gravity, fs: fs, from: event.0, to: event.1) else { continue }
             guard abs(m.dh) >= minDisplacementM, abs(m.dh) <= maxDisplacementM, abs(m.vpeak) >= minPeakVelocity,
                   (m.dh > 0) == (m.vpeak > 0) else {
@@ -103,7 +122,8 @@ public enum ActivityVerticalShift {
             let quality = max(0, min(1, 1 - m.padVelocity / maxPadVelocity))
             let t0 = startTs + Double(event.0) / fs, t1 = startTs + Double(event.1) / fs
             out.append(ActivityVerticalShiftEvidence(ts: Int(t1.rounded(.up)), startTs: Int(t0.rounded(.down)),
-                                                     displacementM: m.dh, quality: quality))
+                                                     displacementM: m.dh, quality: quality, peakVelocity: m.vpeak,
+                                                     kind: event.2))
         }
         // Overlapping candidates (a burst and an onset of the same movement) keep the better-measured one.
         var kept: [ActivityVerticalShiftEvidence] = []
@@ -115,6 +135,104 @@ public enum ActivityVerticalShift {
             }
         }
         return kept
+    }
+
+    // MARK: Accelerometer calibration
+
+    /// Still windows needed, and the spread of their gravity directions (degrees) needed, for a full per-axis fit;
+    /// with fewer, only the overall gain is corrected.
+    static let calibrationMinWindows = 20, calibrationMinSpreadDeg = 40.0
+
+    /// The run's accelerometer with a per-axis offset and gain fitted so that still windows read 1 g in every
+    /// orientation (Gauss-Newton on |s·(m − o)| = 1, lightly ridged toward identity). A per-axis error makes a·ĝ at
+    /// rest change with orientation, which the double integral turns into a false height change; the wrist changes
+    /// orientation a lot (D-wrist-shift: right-direction precision 0.86 calibrated vs 0.55–0.66 at 40 mg / 2 %).
+    static func calibrated(_ acc: [(Double, Double, Double)], fs: Double) -> [(Double, Double, Double)] {
+        let w = max(1, Int(fs.rounded()))
+        var means: [(Double, Double, Double)] = []
+        var j = 0
+        while j + w <= acc.count {
+            var m = (0.0, 0.0, 0.0), q = (0.0, 0.0, 0.0)
+            for k in j..<(j + w) {
+                let a = acc[k]
+                m.0 += a.0; m.1 += a.1; m.2 += a.2
+                q.0 += a.0 * a.0; q.1 += a.1 * a.1; q.2 += a.2 * a.2
+            }
+            let d = Double(w)
+            m = (m.0 / d, m.1 / d, m.2 / d)
+            let sd = max(0, q.0 / d - m.0 * m.0) + max(0, q.1 / d - m.1 * m.1) + max(0, q.2 / d - m.2 * m.2)
+            if sd.squareRoot() < 0.01 { means.append(m) }
+            j += w
+        }
+        guard means.count >= 3 else { return acc }
+        func norm(_ v: (Double, Double, Double)) -> Double { (v.0 * v.0 + v.1 * v.1 + v.2 * v.2).squareRoot() }
+        // Orientation spread: the largest angle between any still direction and their mean direction.
+        var c = (0.0, 0.0, 0.0)
+        for m in means { let l = norm(m); c.0 += m.0 / l; c.1 += m.1 / l; c.2 += m.2 / l }
+        let cl = max(1e-9, norm(c))
+        var spread = 0.0
+        for m in means {
+            let cosA = (m.0 * c.0 + m.1 * c.1 + m.2 * c.2) / (norm(m) * cl)
+            spread = max(spread, acos(max(-1, min(1, cosA))) * 180 / .pi)
+        }
+        var o = [0.0, 0.0, 0.0], s = [1.0, 1.0, 1.0]
+        if means.count >= calibrationMinWindows, spread >= calibrationMinSpreadDeg {
+            let lam = 1e-3
+            for _ in 0..<50 {
+                var A = [[Double]](repeating: [Double](repeating: 0, count: 6), count: 6)
+                var g = [Double](repeating: 0, count: 6)
+                for m in means {
+                    let mv = [m.0, m.1, m.2]
+                    let d = (0..<3).map { (mv[$0] - o[$0]) * s[$0] }
+                    let r = max(1e-9, (d[0] * d[0] + d[1] * d[1] + d[2] * d[2]).squareRoot())
+                    let res = r - 1
+                    var J = [Double](repeating: 0, count: 6)
+                    for a in 0..<3 { J[a] = -s[a] * d[a] / r; J[3 + a] = (mv[a] - o[a]) * d[a] / r }
+                    for p in 0..<6 { g[p] += J[p] * res; for q in 0..<6 { A[p][q] += J[p] * J[q] } }
+                }
+                let prior = o + s.map { $0 - 1 }
+                for p in 0..<6 { A[p][p] += lam; g[p] += lam * prior[p] }
+                guard let step = solve6(A, g.map { -$0 }) else { break }
+                for a in 0..<3 { o[a] += step[a]; s[a] += step[3 + a] }
+                if step.map(abs).max() ?? 0 < 1e-7 { break }
+            }
+            // An implausible fit (more than 15 % gain or 150 mg offset) is not trusted.
+            if s.contains(where: { abs($0 - 1) > 0.15 }) || o.contains(where: { abs($0) > 0.15 }) {
+                o = [0, 0, 0]; s = [1, 1, 1]
+            }
+        }
+        if o == [0, 0, 0], s == [1, 1, 1] {
+            // Gain only: the median still magnitude reads 1 g.
+            let mags = means.map(norm).sorted()
+            let med = mags[mags.count / 2]
+            guard med > 0.8, med < 1.2 else { return acc }
+            s = [1 / med, 1 / med, 1 / med]
+        }
+        return acc.map { ((($0.0 - o[0]) * s[0]), (($0.1 - o[1]) * s[1]), (($0.2 - o[2]) * s[2])) }
+    }
+
+    /// Solve a 6×6 system by Gaussian elimination with partial pivoting; nil when singular.
+    static func solve6(_ A0: [[Double]], _ b0: [Double]) -> [Double]? {
+        var A = A0, b = b0
+        let n = 6
+        for col in 0..<n {
+            var piv = col
+            for r in (col + 1)..<n where abs(A[r][col]) > abs(A[piv][col]) { piv = r }
+            guard abs(A[piv][col]) > 1e-12 else { return nil }
+            A.swapAt(col, piv); b.swapAt(col, piv)
+            for r in (col + 1)..<n {
+                let f = A[r][col] / A[col][col]
+                for c in col..<n { A[r][c] -= f * A[col][c] }
+                b[r] -= f * b[col]
+            }
+        }
+        var x = [Double](repeating: 0, count: n)
+        for r in stride(from: n - 1, through: 0, by: -1) {
+            var sum = b[r]
+            for c in (r + 1)..<n { sum -= A[r][c] * x[c] }
+            x[r] = sum / A[r][r]
+        }
+        return x
     }
 
     /// Gravity direction in the sensor frame: the gyro propagates it (a world-fixed vector seen from a rotating
@@ -162,6 +280,10 @@ public enum ActivityVerticalShift {
     /// relative stillness on both sides, and the first / last `onsetLengthS` of a longer activity (walking away
     /// after standing up, walking up before sitting down) on the side that is still.
     static func segment(_ acc: [(Double, Double, Double)], fs: Double) -> [(Int, Int)] {
+        segmentWithKinds(acc, fs: fs).map { ($0.0, $0.1) }
+    }
+
+    static func segmentWithKinds(_ acc: [(Double, Double, Double)], fs: Double) -> [(Int, Int, String)] {
         let n = acc.count
         let win = max(1, Int((envelopeWindowS * fs).rounded()))
         // Centred moving SD per axis via prefix sums.
@@ -206,16 +328,17 @@ public enum ActivityVerticalShift {
             return false
         }
         let edge = Int((edgeS * fs).rounded()), onset = Int((onsetLengthS * fs).rounded())
-        var out: [(Int, Int)] = []
+        var out: [(Int, Int, String)] = []
         for (s, t) in runs {
             let dur = Double(t - s) / fs
             guard dur >= minEventS else { continue }
             let pre = stillWindow(s - search - need, s), post = stillWindow(t, t + search + need)
             if dur <= maxEventS {
-                if pre && post { out.append((max(0, s - edge), min(n - 1, t + edge))) }
-            } else {
-                if pre { out.append((max(0, s - edge), min(n - 1, s + onset))) }
-                if post { out.append((max(0, t - onset), min(n - 1, t + edge))) }
+                if pre && post { out.append((max(0, s - edge), min(n - 1, t + edge), "burst")) }
+            } else if pre {
+                // The start of a long movement (standing up and walking away). The END of one is not used: its first
+                // zero-velocity pad lies inside the movement and inverts the sign (vshift-2).
+                out.append((max(0, s - edge), min(n - 1, s + onset), "onset"))
             }
         }
         return out

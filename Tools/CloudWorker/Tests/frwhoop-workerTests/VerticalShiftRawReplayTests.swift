@@ -56,7 +56,10 @@ final class VerticalShiftRawReplayTests: XCTestCase {
                              m?.dh ?? .nan, m?.vpeak ?? .nan, m?.padVelocity ?? .nan))
             }
             for e in ActivityVerticalShift.detect(raw, sampleRateHz: 100, startTs: Double(run.start)) {
-                print(String(format: "RAW   SHIFT %@ dh %+.3f q %.2f", t(Double(e.startTs)), e.displacementM, e.quality))
+                print(String(format: "RAW   SHIFT %@ dh %+.3f vpeak %+.2f q %.2f %@ bicep %@ wrist %@", t(Double(e.startTs)),
+                             e.displacementM, e.peakVelocity ?? .nan, e.quality, e.kind ?? "-",
+                             ActivityStillPosture.anchorLean(e, placement: .bicep).map { String(format: "%+.2f", $0) } ?? "none",
+                             ActivityStillPosture.anchorLean(e, placement: .wrist).map { String(format: "%+.2f", $0) } ?? "none"))
             }
         }
     }
@@ -81,5 +84,31 @@ final class ActivityPlacementReferenceTests: XCTestCase {
         XCTAssertTrue(p.tag.contains("-pl"), "the placement is part of the config tag")
         // Account-level only (no strap pieces): those are read.
         XCTAssertEqual(ActivityContextDays.placementSpans([rows[0]]).first?.placement, .wrist)
+    }
+}
+
+/// hsmm-2.0: the server's skin-temperature baseline folds only nights worn at the scored day's placement.
+final class SkinBaselinePlacementTests: XCTestCase {
+    func testSkinBaselineIsPerPlacement() throws {
+        let day = "2026-10-09"
+        let keys = try XCTUnwrap(DayScorer.baselineDayKeys(before: day))
+        // 60 wrist nights at 34.0 °C, then 30 bicep nights at 32.0 °C, ending the night before `day`.
+        var rows: [[String: String]] = []
+        var placement: [String: String] = [day: "bicep"]
+        for (i, k) in keys.suffix(90).enumerated() {
+            let bicep = i >= 60
+            rows.append(["d": k, "hrv": "50", "rhr": "55", "resp": "15", "st": bicep ? "32.0" : "34.0"])
+            placement[k] = bicep ? "bicep" : "wrist"
+        }
+        let pooled = try DayScorer.foldBaselines(rows: rows, before: day)
+        let split = try DayScorer.foldBaselines(rows: rows, before: day, skinPlacementByDay: placement)
+        XCTAssertEqual(split.skinTemp?.baseline ?? 0, 32.0, accuracy: 0.05, "the bicep night is judged against bicep nights")
+        XCTAssertGreaterThan(pooled.skinTemp?.baseline ?? 0, 32.05, "pooling drags the bicep baseline toward the wrist")
+        // Back on the wrist: the wrist baseline resumes.
+        placement[day] = "wrist"
+        let back = try DayScorer.foldBaselines(rows: rows, before: day, skinPlacementByDay: placement)
+        XCTAssertEqual(back.skinTemp?.baseline ?? 0, 34.0, accuracy: 0.05)
+        // HRV / resting HR are not split.
+        XCTAssertEqual(split.hrv?.baseline, pooled.hrv?.baseline)
     }
 }

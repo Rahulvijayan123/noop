@@ -2310,7 +2310,33 @@ struct DayScorer {
               and day >= $2::date - 120 and day < $2::date
             order by day asc
             """, [userId, day])
-        return try Self.foldBaselines(rows: rows, before: day)
+        return try Self.foldBaselines(rows: rows, before: day,
+                                      skinPlacementByDay: loadSkinPlacement(userId: userId, deviceId: deviceId,
+                                                                            before: day))
+    }
+
+    /// Where the strap was worn on each day of the baseline window and on the scored day (calibration key at 12:00
+    /// UTC of the day), from the placement resolver; nil when nothing was ever declared or the read failed (then the
+    /// skin baseline folds every night together, as before).
+    private func loadSkinPlacement(userId: String, deviceId: String, before day: String) -> [String: String]? {
+        guard var keys = Self.baselineDayKeys(before: day) else { return nil }
+        keys.append(day)
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.timeZone = TimeZone(identifier: "UTC")
+        f.dateFormat = "yyyy-MM-dd"
+        guard let first = keys.first.flatMap(f.date(from:)), let last = f.date(from: day) else { return nil }
+        let from = Int(first.timeIntervalSince1970), to = Int(last.timeIntervalSince1970) + 86_400
+        guard let rows = try? ContextInputs.readPlacements(db: db, read: [userId, deviceId, String(from), String(to)]),
+              !rows.isEmpty else { return nil }
+        var probe = ActivityDecoderConfig()
+        probe.placements = ActivityContextDays.placementSpans(rows)
+        var out: [String: String] = [:]
+        for k in keys {
+            guard let d = f.date(from: k) else { continue }
+            out[k] = probe.placement(at: Int(d.timeIntervalSince1970) + 12 * 3_600).calibrationKey
+        }
+        return out
     }
 
     /// Days of nightly history the server baselines fold.
@@ -2329,7 +2355,8 @@ struct DayScorer {
 
     /// Fold `server_daily_scores` rows (`d`, `hrv`, `rhr`, `resp`, `st`) into the profile baselines, one fold
     /// step per calendar day before `day` (absent day = nil night). Pure, so the gap handling is unit-tested.
-    static func foldBaselines(rows: [[String: String]], before day: String) throws -> AnalyticsEngine.ProfileBaselines {
+    static func foldBaselines(rows: [[String: String]], before day: String,
+                              skinPlacementByDay: [String: String]? = nil) throws -> AnalyticsEngine.ProfileBaselines {
         var byDay: [String: [String: String]] = [:]
         for r in rows { if let d = r["d"] { byDay[d] = r } }
         // A malformed claim day cannot be padded; fold the rows as they came (the old behaviour).
@@ -2338,7 +2365,14 @@ struct DayScorer {
             guard let cfg = Baselines.metricCfg[key] else {
                 throw ScoringError(description: "Baselines.metricCfg missing key \(key)")
             }
-            let values = dayKeys.map { byDay[$0].flatMap { Double($0[col] ?? "") } }
+            var values = dayKeys.map { byDay[$0].flatMap { Double($0[col] ?? "") } }
+            // hsmm-2.0: skin temperature differs by site, so with more than one placement in the window the skin
+            // baseline folds only the nights worn where the scored day is (switching back resumes that place's).
+            if key == "skin_temp", let placement = skinPlacementByDay,
+               Set(dayKeys.compactMap { placement[$0] } + [placement[day]].compactMap { $0 }).count > 1 {
+                let scored = placement[day] ?? "wrist"
+                values = zip(dayKeys, values).map { k, v in (placement[k] ?? "wrist") == scored ? v : nil }
+            }
             return Baselines.foldHistory(values, dayKeys: dayKeys, cfg: cfg)
         }
         return AnalyticsEngine.ProfileBaselines(

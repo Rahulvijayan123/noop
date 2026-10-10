@@ -39,6 +39,8 @@ import Foundation
 //   v_s, v_e  the shift's movement start / end, seconds after t0
 //   v_dh      net vertical displacement of the strap, millimetres (> 0 up)
 //   v_q       measurement quality, per mille
+//   v_vp      signed peak vertical velocity, mm/s, or null (vshift-2)
+//   v_k       candidate kind: 1 burst, 2 onset, or null (vshift-2)
 // Readers drop any window they cannot parse (transition rows included) instead of rejecting the document.
 
 /// One window's output of the learned raw-IMU transition expert (optional, additive over
@@ -202,6 +204,11 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
             doc["v_e"] = vs.map { $0.ts - dayStart }
             doc["v_dh"] = vs.map { $0.displacementM.isFinite ? Int(($0.displacementM * 1000).rounded()) : 0 }
             doc["v_q"] = vs.map { $0.quality.isFinite ? Int((min(1, max(0, $0.quality)) * 1000).rounded()) : 0 }
+            doc["v_vp"] = vs.map { v -> Any in
+                guard let p = v.peakVelocity, p.isFinite, abs(p) < 100 else { return NSNull() }
+                return Int((p * 1000).rounded())
+            }
+            doc["v_k"] = vs.map { v -> Any in v.kind == "burst" ? 1 as Any : (v.kind == "onset" ? 2 as Any : NSNull() as Any) }
         }
         // The transition-expert columns are written only when the set carries transition output, so a
         // day without the expert serializes exactly as it did before the columns existed.
@@ -322,12 +329,16 @@ public struct ActivityEncoderWindowSet: Equatable, Sendable {
               let vq = doc["v_q"] as? [Any], vs.count <= maxWindows,
               [ve.count, dh.count, vq.count].allSatisfy({ $0 == vs.count }) else { return [] }
         let version = doc["v_v"] as? String ?? ActivityVerticalShift.version
+        let vp = (doc["v_vp"] as? [Any]).flatMap { $0.count == vs.count ? $0 : nil }
+        let vk = (doc["v_k"] as? [Any]).flatMap { $0.count == vs.count ? $0 : nil }
         var out: [ActivityVerticalShiftEvidence] = []
         for i in 0..<vs.count {
             guard let start = int(vs[i]), let end = int(ve[i]), end >= start, end - start <= 60,
                   let mm = double(dh[i]), abs(mm) <= 3_000, let q = double(vq[i]), q >= 0, q <= 1000 else { continue }
+            let peak = vp.flatMap { double($0[i]) }.map { $0 / 1000 }
+            let kind = vk.flatMap { int($0[i]) }.map { $0 == 1 ? "burst" : ($0 == 2 ? "onset" : "other") }
             out.append(ActivityVerticalShiftEvidence(ts: t0 + end, startTs: t0 + start, displacementM: mm / 1000,
-                                                     quality: q / 1000, version: version))
+                                                     quality: q / 1000, version: version, peakVelocity: peak, kind: kind))
         }
         return out
     }

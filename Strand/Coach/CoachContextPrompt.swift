@@ -82,6 +82,9 @@ struct CoachTurnContext {
     var currentThreadId: String?
     var refs = CoachThreadRefs()
     var timeZone: TimeZone = .current
+    /// Where the strap is worn now and its recent switches (hsmm-2.0), e.g. "bicep since 2026-10-07; was wrist":
+    /// sitting/standing, skin temperature and the step estimate are calibrated per placement.
+    var placement: String?
 }
 
 // MARK: - Blocks
@@ -203,6 +206,9 @@ enum CoachContextPrompt {
             lines.append(line + ".")
         } else {
             lines.append("• Wearable history on this phone: none synced yet.")
+        }
+        if let p = context.placement {
+            lines.append("• Strap placement: \(p). Sitting/standing detection, the skin-temperature baseline and the step estimate are calibrated per placement; values from before a switch were measured elsewhere on the body.")
         }
         lines.append(howToUse)
         lines.append(memoryPrecedence)

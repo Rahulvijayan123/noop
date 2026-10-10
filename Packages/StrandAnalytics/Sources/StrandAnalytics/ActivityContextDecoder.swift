@@ -672,7 +672,8 @@ public struct ActivityContextDecoder: Sendable {
         // It also begins a new still stretch: the stillness before it was another posture's, and its length must
         // not count toward the new one.
         var measuredShift = false
-        if let shift = obs.verticalShift, let lean = ActivityStillPosture.anchorLean(shift) {
+        if let shift = obs.verticalShift,
+           let lean = ActivityStillPosture.anchorLean(shift, placement: config.placement(at: obs.ts)) {
             tracking.anchor = PostureAnchor(lean: lean, ts: shift.ts)
             measuredShift = true
         }

@@ -48,6 +48,8 @@ final class ActivityVerticalShiftTests: XCTestCase {
         XCTAssertEqual(shifts.count, 1)
         XCTAssertEqual(s.displacementM, 0.40, accuracy: 0.06)
         XCTAssertGreaterThan(s.quality, 0.5)
+        XCTAssertEqual(s.kind, "burst")
+        XCTAssertGreaterThan(s.peakVelocity ?? 0, 0.25)
         XCTAssertLessThan(ActivityStillPosture.anchorLean(s)!, 0, "a rise anchors standing")
         XCTAssertGreaterThanOrEqual(s.startTs, 1_002); XCTAssertLessThanOrEqual(s.ts, 1_008)
     }
@@ -65,6 +67,41 @@ final class ActivityVerticalShiftTests: XCTestCase {
     func testASmallVerticalMovementIsNotAShift() {
         XCTAssertTrue(ActivityVerticalShift.detect(run(vertical: 0.08), sampleRateHz: 100, startTs: 0).isEmpty,
                       "leaning forward a few centimetres is not a change of posture")
+    }
+
+    func testAcceptanceIsPlacementSpecific() {
+        func shift(_ dh: Double, _ v: Double?) -> ActivityVerticalShiftEvidence {
+            ActivityVerticalShiftEvidence(ts: 0, startTs: 0, displacementM: dh, quality: 1, peakVelocity: v)
+        }
+        // The owner's slow bicep sit-down (−0.25 m at −0.26 m/s): accepted on the upper arm, not on a wrist.
+        XCTAssertNotNil(ActivityStillPosture.anchorLean(shift(-0.25, -0.26), placement: .bicep))
+        XCTAssertNil(ActivityStillPosture.anchorLean(shift(-0.25, -0.26), placement: .wrist))
+        // A fast clean drop counts on the wrist, but weaker than on the upper arm.
+        let wrist = ActivityStillPosture.anchorLean(shift(-0.35, -0.65), placement: .wrist)!
+        let bicep = ActivityStillPosture.anchorLean(shift(-0.35, -0.65), placement: .bicep)!
+        XCTAssertGreaterThan(wrist, 0); XCTAssertLessThan(wrist, bicep)
+        XCTAssertLessThan(ActivityStillPosture.anchorLean(shift(0.35, 0.65), placement: .wrist)!, 0)
+        // Velocity against the displacement, or none at all on the wrist: no anchor.
+        XCTAssertNil(ActivityStillPosture.anchorLean(shift(-0.35, 0.6), placement: .bicep))
+        XCTAssertNil(ActivityStillPosture.anchorLean(shift(-0.35, nil), placement: .wrist))
+        XCTAssertNotNil(ActivityStillPosture.anchorLean(shift(-0.35, nil), placement: .bicep))
+    }
+
+    func testAMisCalibratedAccelerometerIsCorrectedFromStillWindows() {
+        // 3 % gain and 40 mg offset on x: still windows in many orientations let the fit recover it.
+        var raw: [ActivityVerticalShift.Sample] = []
+        var t = 0
+        for k in 0..<40 {
+            let th = Double(k) * 0.15, ph = Double(k) * 0.4
+            let u = (sin(th) * cos(ph), sin(th) * sin(ph), cos(th))
+            for _ in 0..<100 {
+                raw.append(.init(ax: u.0 * 1.03 + 0.04, ay: u.1, az: u.2, gx: 0, gy: 0, gz: 0)); t += 1
+            }
+        }
+        var acc = raw.map { ($0.ax, $0.ay, $0.az) }
+        acc = ActivityVerticalShift.calibrated(acc, fs: 100)
+        let norms = acc.map { ($0.0 * $0.0 + $0.1 * $0.1 + $0.2 * $0.2).squareRoot() }
+        XCTAssertLessThan(norms.map { abs($0 - 1) }.max()!, 0.005, "every still orientation reads 1 g after the fit")
     }
 
     func testABendToALowDrawerIsNotASitDown() {
@@ -89,13 +126,14 @@ final class ActivityVerticalShiftTests: XCTestCase {
     func testTheWindowDocumentRoundTripsShifts() throws {
         var set = ActivityEncoderWindowSet(encoderId: "hart", encoderVersion: "t", windows: [
             ActivityWindowPrediction(startTs: 100, endTs: 104, label: .stationary, probs: ["stationary": 1])])
-        set.verticalShifts = [ActivityVerticalShiftEvidence(ts: 130, startTs: 126, displacementM: 0.412, quality: 0.83)]
+        set.verticalShifts = [ActivityVerticalShiftEvidence(ts: 130, startTs: 126, displacementM: 0.412, quality: 0.83,
+                                                            peakVelocity: 0.61, kind: "burst")]
         let doc = set.jsonObject(dayStart: 0)
         let data = try JSONSerialization.data(withJSONObject: doc)
         let back = try XCTUnwrap(ActivityEncoderWindowSet.decode(try JSONSerialization.jsonObject(with: data),
                                                                  encoderId: "hart", encoderVersion: "t"))
         XCTAssertEqual(back.verticalShifts, [ActivityVerticalShiftEvidence(ts: 130, startTs: 126, displacementM: 0.412,
-                                                                           quality: 0.83)])
+                                                                           quality: 0.83, peakVelocity: 0.61, kind: "burst")])
         XCTAssertEqual(back.clipped(from: 0, to: 120).verticalShifts, [])
         XCTAssertEqual(ActivityEncoderWindowSet.merged([back, back])?.verticalShifts.count, 1)
         // A set without shifts serialises exactly as before the block existed.

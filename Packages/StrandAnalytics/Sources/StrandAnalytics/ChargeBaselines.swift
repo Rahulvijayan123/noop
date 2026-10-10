@@ -37,6 +37,12 @@ public enum ChargeBaselines {
         public var respComputed: [String: Double]?
         /// Nightly ABSOLUTE wrist skin temperature (°C) over the WHOLE stored history plus this pass.
         public var skinAbsolute: [String: Double]
+        /// Where the strap was worn each night (`ActivityWearPlacement.calibrationKey`: "wrist" / "bicep" / "other"),
+        /// hsmm-2.0. Skin temperature differs by site (upper-arm skin is not wrist skin), so with more than one
+        /// placement in the history the skin baseline is one fold PER placement: a night is judged only against
+        /// earlier nights worn at the same place, and switching back resumes that place's baseline instead of
+        /// relearning it. nil, or a single placement, folds exactly as before.
+        public var skinPlacementByDay: [String: String]? = nil
         /// Confounders, SDNN days, regimes and per-metric reference epochs.
         public var context: BaselineStandard.Context
         /// Newest day to resolve; defaults to the newest key of any series.
@@ -71,6 +77,32 @@ public enum ChargeBaselines {
         public func baselines(for day: String) -> AnalyticsEngine.ProfileBaselines {
             byDay[day] ?? end
         }
+    }
+
+    /// The skin-temperature fold, stratified by placement when the history holds more than one (see
+    /// `Inputs.skinPlacementByDay`): `before[day]` from the fold of that day's placement, `end` from the fold of the
+    /// placement worn on the newest day.
+    static func skinFold(_ inputs: Inputs, through: String?, context ctx: BaselineStandard.Context)
+        -> (before: [String: BaselineState], end: BaselineState) {
+        let all = BaselineStandard.causalFold(inputs.skinAbsolute, metric: .skinTempAbsolute, through: through,
+                                              context: ctx)
+        guard let placement = inputs.skinPlacementByDay, !placement.isEmpty else { return (all.before, all.end) }
+        func key(_ day: String) -> String { placement[day] ?? "wrist" }
+        let keys = Set(inputs.skinAbsolute.keys.map(key))
+        guard keys.count > 1 else { return (all.before, all.end) }
+        var before: [String: BaselineState] = [:]
+        var ends: [String: BaselineState] = [:]
+        for k in keys {
+            let subset = inputs.skinAbsolute.filter { key($0.key) == k }
+            let fold = BaselineStandard.causalFold(subset, metric: .skinTempAbsolute, through: through, context: ctx)
+            for (day, state) in fold.before where key(day) == k { before[day] = state }
+            ends[k] = fold.end
+        }
+        // A day outside its placement's folded span (before that placement's first night) keeps the pooled as-of
+        // state: still causal, never an end state.
+        for (day, state) in all.before where before[day] == nil { before[day] = state }
+        let newest = through ?? inputs.skinAbsolute.keys.max() ?? ""
+        return (before, ends[key(newest)] ?? all.end)
     }
 
     /// Resolve the causal Charge baselines for every calendar day of the inputs.
@@ -110,8 +142,7 @@ public enum ChargeBaselines {
         let hrv = hierarchical(inputs.hrvMerged, inputs.hrvComputed, .hrvRmssd)
         let rhr = hierarchical(inputs.rhrMerged, inputs.rhrComputed, .restingHR)
         let resp = hierarchical(inputs.respMerged, inputs.respComputed, .respiration)
-        let skin = BaselineStandard.causalFold(inputs.skinAbsolute, metric: .skinTempAbsolute,
-                                               through: through, context: ctx)
+        let skin = skinFold(inputs, through: through, context: ctx)
 
         func profile(hrv h: AsOfBaseline?, rhr r: AsOfBaseline?, resp p: AsOfBaseline?,
                      skin s: BaselineState?) -> AnalyticsEngine.ProfileBaselines {

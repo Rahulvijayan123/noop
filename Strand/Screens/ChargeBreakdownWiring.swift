@@ -57,12 +57,16 @@ enum ChargeBreakdownWiring {
         func series(_ pick: (DailyMetric) -> Double?) -> [String: Double] {
             BaselineStandard.series(days, day: \.day, value: pick)
         }
-        let resolved = ChargeBaselines.asOf(ChargeBaselines.Inputs(
+        var inputs = ChargeBaselines.Inputs(
             hrvMerged: series(\.avgHrv),
             rhrMerged: series { $0.restingHr.map(Double.init) },
             respMerged: series(\.respRateBpm),
             skinAbsolute: series(\.skinTempC),
-            context: context, through: row.day))
+            context: context, through: row.day)
+        // The same per-placement skin baseline the engine scores with.
+        inputs.skinPlacementByDay = ActivityPlacementCache.shared.calibrationKeyByNight(
+            days: inputs.skinAbsolute.keys, deviceId: ActivityPlacementCache.shared.primaryDeviceId ?? "")
+        let resolved = ChargeBaselines.asOf(inputs)
         let baselines = resolved.baselines(for: row.day)
         guard let hrvBase = baselines.hrv, hrvBase.usable else { return nil }
         let drivers = RecoveryScorer.chargeDrivers(

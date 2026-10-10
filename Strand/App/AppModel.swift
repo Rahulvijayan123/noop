@@ -411,22 +411,65 @@ final class AppModel: ObservableObject {
     /// Upload the wear-placement changes that have not reached the server yet, then pull the server's
     /// copy back. Runs when the cloud path comes up and after each placement change, so a change made
     /// offline is retried instead of waiting for the next one (a pending change also blocks every pull).
-    func syncPlacement() async {
-        defer { Task { await refreshActivityPlacements() } }
+    func syncPlacement(source: String = "sync") async {
+        defer { Task { await refreshActivityPlacements(source: source) } }
         guard CloudPushSettings.isEnabled, CloudPushIdentityStore.current() != nil,
               let store = await repo.storeHandle(),
               let placementStore = try? PlacementStore(dbQueue: store.registryWriter) else { return }
         let sync = placementSync(placementStore)
-        _ = try? await sync.pushPending()
-        _ = try? await sync.reconcile()
+        do { _ = try await sync.pushPending() } catch { live.append(log: "Placement sync: push failed: \(error)", domain: .sources) }
+        do { _ = try await sync.reconcile() } catch { live.append(log: "Placement sync: reconcile failed: \(error)", domain: .sources) }
     }
 
-    /// Reload the declared placement the activity decoder reads (hsmm-2.0). A change alters the decoder's cache tag,
-    /// so the activity pages are re-materialised with it.
-    func refreshActivityPlacements() async {
+    /// Reload the declared placement the activity decoder reads (hsmm-2.0). A change switches everything that
+    /// depends on placement: the decoder's posture cues and per-placement calibration (refit here, so the calibration
+    /// of the placement now worn takes over), the skin-temperature baseline stratum and the step-estimate calibration
+    /// (both keyed by placement in the daily analysis), and the Watchdog's channels. The pages are re-derived and the
+    /// switch is logged (`PlacementSwitchLog`, strap log).
+    func refreshActivityPlacements(source: String = "sync") async {
+        let now = Int(Date().timeIntervalSince1970)
+        let dayStart = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
+        let cache = ActivityPlacementCache.shared
+        let before = cache.placement(at: now, deviceId: repo.deviceId)
+        let tagBefore = repo.activityDecoderConfig(forDayStart: dayStart).cacheTag
+        let calibrationBefore = ActivityPersonalProfileStore.shared.adoptedSummary
         guard await repo.refreshActivityPlacements() else { return }
+        let after = cache.placement(at: now, deviceId: repo.deviceId)
+        // The refit fingerprint carries the placement worn now, so this re-selects (and if needed refits) the
+        // calibration for it; it re-materialises the activity pages itself when the adopted set changes.
+        _ = await refitActivityPersonalProfile()
         activityContext.requestMaterialization()
         await repo.refresh()
+        var switched = ["activity_placement_spans", "activity_redecode"]
+        if before.wristPostureCues != after.wristPostureCues { switched.append("activity_posture_cues") }
+        if before.calibrationKey != after.calibrationKey {
+            switched += ["activity_calibration", "posture_heart_rate_model", "skin_temp_baseline", "steps_estimate_calibration"]
+        }
+        // The daily analysis keys the skin-temperature baseline and the step-estimate calibration by the placement each
+        // night / day was worn at: re-score so the stored days and today's Charge use the switched baselines.
+        if !(before == after) { await intelligence.analyzeRecent(force: true, triggerLabel: "placement-switch") }
+        if (before == .wrist) != (after == .wrist) { switched.append("watchdog_skin_temp_and_imu") }
+        let entry = PlacementSwitchLog.Entry(
+            kind: .recalculated, at: Date(), deviceId: repo.deviceId, source: source,
+            from: before.rawValue, to: after.rawValue, switched: switched,
+            calibrationBefore: calibrationBefore, calibrationAfter: ActivityPersonalProfileStore.shared.adoptedSummary,
+            decoderTagBefore: tagBefore, decoderTagAfter: repo.activityDecoderConfig(forDayStart: dayStart).cacheTag,
+            note: before == after ? "placement history changed; the placement worn now is unchanged" : nil)
+        PlacementSwitchLog.shared.append(entry)
+        live.append(log: PlacementSwitchLog.logLine(entry), domain: .sources)
+    }
+
+    /// Record a placement the wearer just declared (Settings), before anything is recalculated.
+    func notePlacementDeclared(from: StrapPlacement?, to: StrapPlacement, change: PlacementChange,
+                               interval: PlacementInterval?) {
+        let dayStart = Int(Calendar.current.startOfDay(for: Date()).timeIntervalSince1970)
+        let entry = PlacementSwitchLog.Entry(
+            kind: .declared, at: Date(), deviceId: repo.deviceId, source: "settings",
+            from: from?.rawValue, to: to.rawValue, effectiveStart: change.effectiveStart, revision: interval?.revision,
+            calibrationBefore: ActivityPersonalProfileStore.shared.adoptedSummary,
+            decoderTagBefore: repo.activityDecoderConfig(forDayStart: dayStart).cacheTag)
+        PlacementSwitchLog.shared.append(entry)
+        live.append(log: PlacementSwitchLog.logLine(entry), domain: .sources)
     }
 
     /// The placement sync for this phone's strap, translating between its local id and the one the cloud
