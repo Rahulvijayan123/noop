@@ -872,8 +872,13 @@ begin
   end loop;
 end $$;
 
+-- Guarded so a database without pg_cron still applies the migration.
 do $$
 begin
+  if to_regclass('cron.job') is null then
+    raise warning 'manual_event_context: pg_cron absent; schedule public.refresh_manual_event_contexts_v1 externally';
+    return;
+  end if;
   if exists (select 1 from cron.job where jobname = 'nara-manual-event-context') then
     perform cron.unschedule('nara-manual-event-context');
   end if;
