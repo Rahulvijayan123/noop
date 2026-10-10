@@ -44,7 +44,7 @@ extension Repository {
 
     /// The materializer's witness of everything a day's decode reads, computed without loading the day: the
     /// store's witness over the raw ids' streams, the sleep sessions (raw and computed ids) and the workouts
-    /// (every namespace the Workouts list reads), the encoder and ElderNet window revisions the decode would
+    /// (every namespace the Workouts list reads), the encoder, ElderNet and motion-head window revisions the decode would
     /// attach (only for a day the active strap owns), the ledger config tag and the dismissed workout spans
     /// overlapping the day. nil when the store cannot answer (the day then gets no fingerprint rule).
     func activityContextInputFingerprint(store: WhoopStore, ids: [String], day: ActivityContextMaterialization.Day,
@@ -53,11 +53,12 @@ extension Repository {
         guard let witness = try? await store.activityContextInputFingerprint(
             streamIds: ids, sleepIds: ids + computed.filter { !ids.contains($0) },
             workoutIds: Self.workoutNamespaces(rawIds: ids), from: day.start, to: day.end) else { return nil }
-        var encoder: [String: String] = [:], gait: [String: String] = [:]
+        var encoder: [String: String] = [:], gait: [String: String] = [:], motion: [String: String] = [:]
         if serverWindowsApply(toDayOwnedBy: ownerId) {
             let utcDays = ActivityEncoderWindowStore.utcDays(from: day.start, to: day.end)
             encoder = ActivityEncoderWindowStore.shared.revisions(days: utcDays)
             gait = GaitWindowStore.shared.revisions(days: utcDays)
+            motion = MotionHeadsWindowStore.shared.revisions(days: utcDays)
         }
         let dismissed = (UserDefaults.standard.stringArray(forKey: WorkoutSource.dismissedDefaultsKey) ?? [])
             .filter { token in
@@ -70,7 +71,8 @@ extension Repository {
         let logged = WorkoutModeStore.shared.spans(from: day.start, to: day.end, now: Int(Date().timeIntervalSince1970))
             .map { "\($0.startUnix)-\($0.open ? "open" : String($0.endUnix))-\($0.typeId)" }.joined(separator: ",")
         return ActivityContextMaterialization.inputFingerprint(store: witness, encoderRevisions: encoder,
-                                                               gaitRevisions: gait, configTag: configTag,
+                                                               gaitRevisions: gait, motionHeadsRevisions: motion,
+                                                               configTag: configTag,
                                                                dismissedWorkouts: logged.isEmpty ? dismissed
                                                                    : dismissed + "|logged:" + logged)
     }

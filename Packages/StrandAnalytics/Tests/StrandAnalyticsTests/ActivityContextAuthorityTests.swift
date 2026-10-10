@@ -2,8 +2,9 @@ import XCTest
 @testable import StrandAnalytics
 
 /// The expert-authority policy (`ActivityExpertSelection`, docs/model-integration/activity-authority.md): shadow and
-/// candidate rows never shape the canonical decode, the joint candidate is the union of its ablations under the shared
-/// budget, ElderNet has one route, and the final-output comparison the candidate rows store.
+/// candidate rows never shape the canonical decode while production rows (ElderNet gait, ActiNet motion heads) with
+/// their pins do, the joint candidate is the union of its ablations under the shared budget, ElderNet has one route,
+/// and the final-output comparison the candidate rows store.
 final class ActivityContextAuthorityTests: XCTestCase {
 
     private let pinVersion = GaitKit.version
@@ -184,6 +185,106 @@ final class ActivityContextAuthorityTests: XCTestCase {
         let stale = ActivityExpertSelection.select(revisions: ["2025-10-09": 8], gaitQuality: [source])
         XCTAssertTrue(stale.canonicalChannels.isEmpty)
         XCTAssertEqual(stale.decisions.first?.reason, "input_revision_mismatch")
+    }
+
+    /// Production ActiNet motion heads, pinned and evaluated at production tier, shape the canonical decode with the
+    /// config built from the row, and the runs they shaped name them; the same windows at candidate never do.
+    func testProductionMotionHeadsShapeTheCanonicalDecode() throws {
+        let (input, walk) = day()
+        let base = ActivityDecoderConfig()
+        let hartAlone = try json(document((input, base)))
+        let bundle = MotionHeadsKit.bundle(kind: .actinet, tier: .production)
+        let source = motionSource(input, walk: walk, mode: .production, bundle: bundle)
+        let selection = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], motionHeads: [source])
+        XCTAssertEqual(selection.canonicalChannels, [.motionHeads])
+        XCTAssertEqual(selection.decision(for: .motionHeads)?.use, .canonical)
+        let canonical = selection.canonical(input, base: base)
+        let config = try XCTUnwrap(canonical.config.motionHeads)
+        XCTAssertEqual(config.mode, .production)
+        XCTAssertEqual(config.expectedBundleSHA256, bundle.bundleSha256)
+        XCTAssertFalse(config.allowStandInEvidenceForTesting)
+        XCTAssertEqual(canonical.input.motionHeads?.releaseMode, .production)
+        XCTAssertNotEqual(canonical.config.cacheTag, base.cacheTag)
+        let doc = document(canonical)
+        XCTAssertEqual(doc.versions.motionHeads, config.provenanceStamp)
+        XCTAssertTrue(config.provenanceStamp?.hasPrefix("actinet:") ?? false)
+        XCTAssertNotEqual(try json(doc), hartAlone)
+        XCTAssertTrue(doc.runs.contains { $0.experts.contains("motion_heads") })
+        // Built twice from the same row: the same config, the same document.
+        let again = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], motionHeads: [source])
+            .canonical(input, base: base)
+        XCTAssertEqual(again.config, canonical.config)
+        XCTAssertEqual(try json(document(again)), try json(doc))
+
+        // A candidate arm of candidate heads uses them but never names them as production evidence.
+        let candidate = ActivityExpertSelection.select(revisions: ["2025-10-09": 7],
+                                                       motionHeads: [motionSource(input, walk: walk, mode: .candidate,
+                                                                                  bundle: bundle)])
+        XCTAssertTrue(candidate.canonicalChannels.isEmpty)
+        let arm = document(candidate.decode(input, base: base, channels: [.motionHeads]))
+        XCTAssertNotNil(arm.versions.motionHeads)
+        XCTAssertFalse(arm.runs.contains { $0.experts.contains("motion_heads") })
+
+        // Production gait and production heads together: both shape the canonical decode.
+        let both = ActivityExpertSelection.select(revisions: ["2025-10-09": 7],
+                                                  gaitQuality: [gaitSource(input, walk: walk, release: .production)],
+                                                  motionHeads: [source])
+        XCTAssertEqual(both.canonicalChannels, [.gaitQuality, .motionHeads])
+        let joint = both.canonical(input, base: base)
+        XCTAssertEqual(joint.config.gaitQuality?.mode, .production)
+        XCTAssertEqual(joint.config.motionHeads?.mode, .production)
+        // Production gait beside candidate heads: only the gait reaches the canonical decode.
+        let mixed = ActivityExpertSelection.select(revisions: ["2025-10-09": 7],
+                                                   gaitQuality: [gaitSource(input, walk: walk, release: .production)],
+                                                   motionHeads: [motionSource(input, walk: walk, mode: .candidate,
+                                                                              bundle: bundle)])
+        XCTAssertEqual(mixed.canonicalChannels, [.gaitQuality])
+        XCTAssertEqual(mixed.candidateChannels, [.gaitQuality, .motionHeads])
+        XCTAssertNil(mixed.canonical(input, base: base).config.motionHeads)
+    }
+
+    /// A row recorded at production is lowered exactly as a candidate one: no pin, a stand-in encoder, a bundle tier
+    /// below production or another input revision keep it out of the canonical decode.
+    func testProductionRowsAreStillLoweredByPinsTierEncoderAndRevision() throws {
+        let (input, walk) = day()
+        let base = ActivityDecoderConfig()
+        let hartAlone = try json(document((input, base)))
+        let cases: [(String, MotionHeadsSource, ActivityExpertSelection.Use, String?)] = [
+            ("unpinned", motionSource(input, walk: walk, mode: .production,
+                                      bundle: MotionHeadsKit.bundle(kind: .actinet, tier: .production), pinned: false),
+             .none, "bundle_sha256_not_pinned"),
+            ("stand-in", motionSource(input, walk: walk, mode: .production,
+                                      bundle: MotionHeadsKit.bundle(kind: .standin, tier: .production)),
+             .none, "encoder_kind_standin"),
+            ("shadow tier", motionSource(input, walk: walk, mode: .production,
+                                         bundle: MotionHeadsKit.bundle(kind: .actinet, tier: .shadow)),
+             .none, "evidence_tier_shadow"),
+            ("candidate tier", motionSource(input, walk: walk, mode: .production,
+                                            bundle: MotionHeadsKit.bundle(kind: .actinet, tier: .candidate)),
+             .candidate, nil),
+            ("other revision", motionSource(input, walk: walk, mode: .production,
+                                            bundle: MotionHeadsKit.bundle(kind: .actinet, tier: .production), revision: 8),
+             .none, "input_revision_mismatch"),
+        ]
+        for (label, source, use, reason) in cases {
+            let s = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], motionHeads: [source])
+            XCTAssertEqual(s.use(of: .motionHeads), use, label)
+            XCTAssertEqual(s.decision(for: .motionHeads)?.reason, reason, label)
+            XCTAssertTrue(s.canonicalChannels.isEmpty, label)
+            let canonical = s.canonical(input, base: base)
+            XCTAssertNil(canonical.config.motionHeads, label)
+            XCTAssertEqual(try json(document(canonical)), hartAlone, label)
+        }
+        // ElderNet the same way: a production row without its pins or π is shadow.
+        for (label, source, reason) in [
+            ("gait unpinned", gaitSource(input, walk: walk, release: .production, pinned: false), "model_not_pinned"),
+            ("gait without prior", gaitSource(input, walk: walk, release: .production, prior: nil), "gait_prior_not_set"),
+        ] {
+            let s = ActivityExpertSelection.select(revisions: ["2025-10-09": 7], gaitQuality: [source])
+            XCTAssertEqual(s.decision(for: .gaitQuality)?.releaseMode, .shadow, label)
+            XCTAssertEqual(s.decision(for: .gaitQuality)?.reason, reason, label)
+            XCTAssertTrue(s.canonicalChannels.isEmpty, label)
+        }
     }
 
     // MARK: - Joint candidate

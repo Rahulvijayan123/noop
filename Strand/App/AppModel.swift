@@ -763,10 +763,10 @@ final class AppModel: ObservableObject {
     /// been uploaded, and every new set re-decodes the day on the phone, so asking more often buys nothing.
     static let activityWindowsRefreshSeconds: TimeInterval = 300
 
-    /// Fetch HART's per-window output and ElderNet's gait windows for yesterday and today (local), so the activity
-    /// decoder on this phone uses them as the shared policy allows. Only for the account that owns this phone's strap
-    /// data: the windows describe its uploads. The two fetches are independent (`ActivityWindowsSync`): either may
-    /// fail without the other being skipped. Returns true when any stored day changed (the caller refreshes the pages
+    /// Fetch HART's per-window output, ElderNet's gait windows and the motion-head windows for yesterday and today
+    /// (local), so the activity decoder on this phone uses them as the shared policy allows. Only for the account that
+    /// owns this phone's strap data: the windows describe its uploads. The fetches are independent
+    /// (`ActivityWindowsSync`): any may fail without the others being skipped. Returns true when any stored day changed (the caller refreshes the pages
     /// that decode).
     @discardableResult
     func syncActivityWindows(now: Date = Date()) async -> Bool {
@@ -793,6 +793,11 @@ final class AppModel: ObservableObject {
             gait: {
                 store.setScope(scope)
                 return try await self.syncGaitWindows(days: days, device: device, scope: scope, account: account,
+                                                      scores: scores)
+            },
+            motionHeads: {
+                store.setScope(scope)
+                return try await self.syncMotionHeads(days: days, device: device, scope: scope, account: account,
                                                       scores: scores)
             }) else { return false }
         guard CloudPushRuntime.shared.runningScope == account, outcome.changed else { return false }
@@ -839,6 +844,29 @@ final class AppModel: ObservableObject {
                 continue
             }
             guard let record = GaitWindowStore.DayRecord(day) else { continue }
+            if store.save(record, scope: scope) { changed = true }
+        }
+        return changed
+    }
+
+    /// The motion-head windows for the same days, the same way: only days the server sent with their bundle are
+    /// stored, each with the release, authority block and input revision its row recorded. Throws when the fetch
+    /// failed.
+    private func syncMotionHeads(days: [String], device: String, scope: ActivityEncoderWindowStore.Scope,
+                                 account: CloudDataScope, scores: ServerScoreRepository) async throws -> Bool {
+        let store = MotionHeadsWindowStore.shared
+        let fetched = try await scores.motionHeads(days: days, deviceId: device, known: store.revisions(days: days))
+        guard CloudPushRuntime.shared.runningScope == account else { return false }
+        var changed = false
+        for day in fetched {
+            if day.unchanged {
+                if day.releaseMode != nil,
+                   store.lowerRelease(day: day.day, to: ActivityReleaseMode(recorded: day.releaseMode), scope: scope) {
+                    changed = true
+                }
+                continue
+            }
+            guard let record = MotionHeadsWindowStore.DayRecord(day) else { continue }
             if store.save(record, scope: scope) { changed = true }
         }
         return changed

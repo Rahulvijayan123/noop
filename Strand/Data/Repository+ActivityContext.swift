@@ -161,8 +161,8 @@ extension Repository {
         // Only for a day the active strap owns: the windows describe that strap's uploads (D5-15).
         let windowsApply = serverWindowsApply(toDayOwnedBy: s.ownerId)
         if windowsApply { input = ActivityPhoneEvidence.attachingEncoderWindows(input) }
-        // Expert evidence (ElderNet's gait windows) only as the shared policy allows for the canonical decode: a
-        // shadow or candidate row leaves the day exactly as without it.
+        // Expert evidence (ElderNet's gait windows, the motion heads) only as the shared policy allows for the canonical
+        // decode: a shadow or candidate row leaves the day exactly as without it.
         let base = activityDecoderConfig(forDayStart: s.start)
         let decode = windowsApply
             ? ActivityPhoneEvidence.canonical(input, base: base)
@@ -177,11 +177,12 @@ extension Repository {
 /// docs/model-integration/activity-authority.md): the stored expert rows become the policy's sources with the release,
 /// pins, prior and input revision each recorded, and the decode the wearer sees is the policy's canonical one. So it
 /// uses the same selected evidence and config as the server's published document, and a shadow or candidate row
-/// (every row today) decodes exactly as no row. There is no experimental preview on the phone; a candidate arm would
-/// have to be decoded and stored apart from this.
+/// decodes exactly as no row. There is no experimental preview on the phone; a candidate arm would have to be decoded
+/// and stored apart from this.
 ///
-/// Motion heads have no phone readback: their rows are shadow/candidate only, so the canonical decode could not use
-/// them (`motionHeads` is always empty here).
+/// ElderNet's gait windows (`GaitWindowStore`) and the ActiNet / Inertia-1 motion heads (`MotionHeadsWindowStore`) are
+/// both read back from the server; a row shapes the canonical decode only when it was released at production with
+/// its pins.
 enum ActivityPhoneEvidence {
     struct Decode {
         var input: ActivityContextTrackInput
@@ -209,10 +210,12 @@ enum ActivityPhoneEvidence {
     /// The policy's selection over what the stores hold for `input`'s span, and its canonical decode.
     static func canonical(_ input: ActivityContextTrackInput, base: ActivityDecoderConfig,
                           encoders: ActivityEncoderWindowStore = .shared,
-                          gait: GaitWindowStore = .shared) -> Decode {
+                          gait: GaitWindowStore = .shared,
+                          motionHeads: MotionHeadsWindowStore = .shared) -> Decode {
         canonical(input, base: base,
                   revisions: encoders.inputRevisions(from: input.dayStart, to: input.dayEnd),
                   gaitQuality: gait.sources(from: input.dayStart, to: input.dayEnd),
+                  motionHeads: motionHeads.sources(from: input.dayStart, to: input.dayEnd),
                   embeddedGaitRelease: encoders.embeddedGaitRelease(from: input.dayStart, to: input.dayEnd))
     }
 
@@ -221,9 +224,10 @@ enum ActivityPhoneEvidence {
     /// for the canonical decode.
     static func canonical(_ input: ActivityContextTrackInput, base: ActivityDecoderConfig,
                           revisions: [String: Int64], gaitQuality: [GaitQualitySource],
+                          motionHeads: [MotionHeadsSource] = [],
                           embeddedGaitRelease: ActivityReleaseMode = .shadow) -> Decode {
         let selection = ActivityExpertSelection.select(
-            revisions: revisions, gaitQuality: gaitQuality, motionHeads: [],
+            revisions: revisions, gaitQuality: gaitQuality, motionHeads: motionHeads,
             embeddedGait: EmbeddedGaitSource(windows: input.gaitWindows, releaseMode: embeddedGaitRelease))
         let decode = selection.canonical(input, base: base)
         return Decode(input: decode.input, config: decode.config, selection: selection)

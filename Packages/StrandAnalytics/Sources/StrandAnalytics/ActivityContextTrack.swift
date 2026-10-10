@@ -546,7 +546,7 @@ public struct ActivityContextRun: Codable, Equatable, Sendable {
     }
 
     /// Canonical order of `experts` (a union keeps it).
-    static let expertOrder = ["encoder", "hart_fine", "transition", "eldernet"]
+    static let expertOrder = ["encoder", "hart_fine", "transition", "eldernet", "motion_heads"]
     static func union(_ a: [String], _ b: [String]) -> [String] {
         let s = Set(a).union(b)
         return expertOrder.filter(s.contains) + s.subtracting(expertOrder).sorted()

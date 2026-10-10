@@ -495,6 +495,72 @@ public actor ServerScoreRepository {
         return model
     }
 
+    // MARK: - motion heads
+
+    /// One UTC day of `GET scores/motion-heads`: the ActiNet / Inertia-1 motion-head windows of one bundle, or
+    /// `unchanged` when the day was listed in `known` at its current revision.
+    public struct MotionHeadsDay: Sendable {
+        public var day: String
+        public var resultRevision: String
+        /// The worker mode the row was written under.
+        public var mode: String
+        public var unchanged: Bool
+        /// The weaker of the row's `release_mode` and its authority block's; nil when neither was sent.
+        public var releaseMode: String? = nil
+        public var inputRevision: Int64? = nil
+        /// The row's `bundle_sha256` column, sent on every row.
+        public var bundleSha256: String? = nil
+        /// The bundle the windows came from (the worker's payload `bundle`), when it decodes strictly and names the
+        /// row's digest; nil when `unchanged` or on an older row without it.
+        public var bundle: MotionHeadsBundleInfo? = nil
+        /// The policy inputs the row was produced under (`authority`); nil = none recorded.
+        public var authority: ActivityExpertAuthority? = nil
+        /// The `mh-col-1` object as it arrived, for the on-disk store; nil when `unchanged` or withheld.
+        public var windowsJSON: String? = nil
+    }
+
+    /// The motion-head windows for up to three UTC days (same `known` rule as `activityWindows`).
+    public func motionHeads(days: [String], deviceId: String,
+                            known: [String: String] = [:]) async throws -> [MotionHeadsDay] {
+        guard let endpoint else { throw ReadError.notConfigured }
+        guard let identity = identity() else { throw ReadError.missingIdentity }
+        guard !days.isEmpty else { return [] }
+        guard let url = Self.windowsURL(endpoint: endpoint, route: "motion-heads", days: days, deviceId: deviceId,
+                                        known: known) else { throw ReadError.malformed("motion-heads endpoint") }
+        let body = try await get(url: url, identity: identity)
+        return Self.motionHeadsDays(from: body)
+    }
+
+    static func motionHeadsDays(from body: [String: Any]) -> [MotionHeadsDay] {
+        ((body["days"] as? [[String: Any]]) ?? []).compactMap { entry in
+            guard let day = entry["day"] as? String,
+                  let revision = (entry["result_revision"] as? String)
+                    ?? (entry["result_revision"] as? NSNumber)?.stringValue else { return nil }
+            let unchanged = (entry["unchanged"] as? Bool) == true
+            let rowSha = entry["bundle_sha256"] as? String
+            func decoded<T: Decodable>(_ type: T.Type, _ value: Any?) -> T? {
+                guard let object = value as? [String: Any],
+                      let data = try? JSONSerialization.data(withJSONObject: object) else { return nil }
+                return try? JSONDecoder().decode(type, from: data)
+            }
+            let authority = decoded(ActivityExpertAuthority.self, entry["authority"])
+            var bundle = unchanged ? nil : decoded(MotionHeadsBundleInfo.self, entry["bundle"])
+            if let b = bundle, let rowSha, b.bundleSha256 != rowSha { bundle = nil }
+            let windowsJSON = unchanged ? nil : (entry["windows"] as? [String: Any]).flatMap { object in
+                (try? JSONSerialization.data(withJSONObject: object)).map { String(decoding: $0, as: UTF8.self) }
+            }
+            let rawAuthority = entry["authority"] as? [String: Any]
+            return MotionHeadsDay(day: day, resultRevision: revision,
+                                  mode: entry["mode"] as? String ?? "shadow",
+                                  unchanged: unchanged,
+                                  releaseMode: weakerRelease(entry["release_mode"], rawAuthority?["release_mode"]),
+                                  inputRevision: revisionNumber(entry["input_revision"])
+                                    ?? revisionNumber(rawAuthority?["input_revision"]),
+                                  bundleSha256: rowSha, bundle: bundle, authority: authority,
+                                  windowsJSON: windowsJSON)
+        }
+    }
+
     // MARK: - intraday series
 
     /// The dense intraday series between two instants (`GET scores/series`), cached under `cacheKey`.

@@ -395,6 +395,9 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
     public var hartFine: Bool?
     public var transitionExpert: Bool?
     public var gaitExpert: Bool?
+    /// Production motion heads (ActiNet / Inertia-1, `ActivityDecoderConfig.motionHeads` in production mode) entered
+    /// the score at this second. Never set by a candidate decode. `true` or absent (nil), like the experts above.
+    public var motionHeads: Bool?
     /// The stationary posture the decoder's LEARNED posture memory leans toward at this second (hsmm-1.9):
     /// `.seatedLikely` or `.uprightStationary` when HART's fine sit / stand rows, Inertia's posture head or an
     /// adopted personal profile have, over the recent past, favoured that posture by at least
@@ -410,12 +413,13 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
     public init(imu: Bool, encoder: Bool, dynAccel: Bool, gravity: Bool, steps: Bool,
                 heartRate: Bool, sleep: Bool, coverage: Double,
                 hartFine: Bool? = nil, transitionExpert: Bool? = nil, gaitExpert: Bool? = nil,
-                learnedPosture: PostureClass? = nil, personalSitStand: Bool? = nil) {
+                learnedPosture: PostureClass? = nil, personalSitStand: Bool? = nil, motionHeads: Bool? = nil) {
         self.imu = imu; self.encoder = encoder; self.dynAccel = dynAccel; self.gravity = gravity
         self.steps = steps; self.heartRate = heartRate; self.sleep = sleep; self.coverage = coverage
         self.hartFine = hartFine; self.transitionExpert = transitionExpert; self.gaitExpert = gaitExpert
         self.learnedPosture = learnedPosture
         self.personalSitStand = personalSitStand
+        self.motionHeads = motionHeads
     }
 
     /// Names of the experts behind this evidence, in a fixed order (provenance for runs and consumers).
@@ -424,6 +428,7 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
         if encoder { out.append(hartFine == true ? "hart_fine" : "encoder") }
         if transitionExpert == true { out.append("transition") }
         if gaitExpert == true { out.append("eldernet") }
+        if motionHeads == true { out.append("motion_heads") }
         if personalSitStand == true { out.append("personal_sitstand") }
         return out
     }
@@ -434,6 +439,7 @@ public struct ActivityEvidenceSummary: Codable, Equatable, Sendable {
         case hartFine = "hart_fine", transitionExpert = "transition_expert", gaitExpert = "gait_expert"
         case learnedPosture = "learned_posture"
         case personalSitStand = "personal_sitstand"
+        case motionHeads = "motion_heads"
     }
 }
 

@@ -262,6 +262,9 @@ struct StretchDetailSheet: View {
                 }
                 .frame(maxWidth: .infinity, alignment: .leading)
             }
+            if let experts = expertsSummary {
+                ActivityExpertsBlock(summary: experts)
+            }
             Text(target.kind == .activityContext
                  ? String(localized: "Read by the activity model")
                  : String(localized: "Worked out from the strap's own signals"))
@@ -272,6 +275,14 @@ struct StretchDetailSheet: View {
                 .foregroundStyle(StrandPalette.textTertiary)
                 .fixedSize(horizontal: false, vertical: true)
         }
+    }
+
+    /// The evidence the activity model used over an activity stretch; nil for a strap stretch (its label is not the
+    /// model's) and when no run inside it recorded any.
+    private var expertsSummary: ActivityExpertsSummary? {
+        guard case .activity(let e) = target else { return nil }
+        let summary = ActivityExpertsSummary.over(start: e.start, end: e.end, runs: input.runs)
+        return summary.hasContent ? summary : nil
     }
 
     /// The facts the written reading is built from: the model's answers, what the strap recorded, the evidence

@@ -511,6 +511,7 @@ public struct ActivityContextDecoder: Sendable {
             if score.specialistOpenedByMotionHeads { motionHeadsReport!.specialistOpenings += 1 }
             if score.motionHeadsPostureOmitted { motionHeadsReport!.postureOmittedSleep += 1 }
         }
+        if score.motionHeadsApplied, motionHeads?.mode == .production { f.evidence.motionHeads = true }
         if gaitQuality != nil, gaitQualityReport != nil {
             if let w = obs.gaitQuality {
                 gaitQualityReport!.windowsIngested += 1

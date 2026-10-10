@@ -117,12 +117,71 @@ final class ActivityPhoneAuthorityTests: XCTestCase {
         return String(decoding: try e.encode(value), as: UTF8.self)
     }
 
+    private func motionStore() -> (store: MotionHeadsWindowStore, directory: URL) {
+        let dir = tempDirectory("motion-heads")
+        let scope = self.scope
+        return (MotionHeadsWindowStore(directory: dir, scope: { scope }), dir)
+    }
+
+    private static let locomotionClasses = ["stationary", "walking", "running", "other"]
+
+    /// A pinned ActiNet bundle with locomotion and posture heads, at `tier`.
+    private func bundle(tier: MotionHeadsEvidenceTier = .production,
+                        kind: MotionHeadsEncoderKind = .actinet) -> MotionHeadsBundleInfo {
+        func spec(_ head: MotionHead, _ classes: [String]) -> MotionHeadSpec {
+            MotionHeadSpec(classOrder: head.classOrder,
+                           prior: Dictionary(uniqueKeysWithValues: classes.map { ($0, 1 / Double(classes.count)) }),
+                           status: Dictionary(uniqueKeysWithValues: classes.map { ($0, .strong) }),
+                           tau: Dictionary(uniqueKeysWithValues: classes.map { ($0, 0.8) }))
+        }
+        return MotionHeadsBundleInfo(
+            encoderId: kind == .standin ? "standin:handcrafted-stats-v1" : "actinet/harnet30-c24-mw/10s@20hz",
+            encoderKind: kind, encoderVersion: "test-1",
+            checkpointSha256: kind == .standin ? nil : String(repeating: "cd", count: 32),
+            headsVersion: "actinet-heads-test", bundleSha256: String(repeating: "ab", count: 32),
+            evidenceTierMax: tier, windowS: 10, hopS: 5,
+            heads: [.locomotion: spec(.locomotion, Self.locomotionClasses),
+                    .posture: spec(.posture, MotionHead.posture.classOrder)],
+            ood: MotionHeadsOODInfo(method: "knn", threshold: 1.25))
+    }
+
+    /// An `mh-col-1` object covering `[from, to)` on a 5-s hop, as the worker writes it: walking during `walk`.
+    private func motionWindowsJSON() throws -> String {
+        let starts = Array(stride(from: from - 10, to: to, by: 5))
+        let walking = starts.map { walk.contains($0 + 5) }
+        let object: [String: Any] = [
+            "format": "mh-col-1", "n": starts.count, "w": 10, "s0": starts[0],
+            "ds": [0] + Array(repeating: 5, count: starts.count - 1),
+            "x": starts.map { _ in 0 }, "mi": walking.map { $0 ? 40 : 5 },
+            "heads": [
+                "locomotion": ["i": walking.map { $0 ? 1 : 0 }, "p": walking.map { $0 ? 85 : 90 }],
+                "posture": ["i": walking.map { $0 ? 2 : 1 }, "p": walking.map { $0 ? 70 : 75 }],
+            ],
+        ]
+        return String(decoding: try JSONSerialization.data(withJSONObject: object), as: UTF8.self)
+    }
+
+    private func motionRecord(mode: String, releaseMode: String? = nil, pinned: Bool = true,
+                              inputRevision: Int64? = 7, tier: MotionHeadsEvidenceTier = .production,
+                              kind: MotionHeadsEncoderKind = .actinet) throws -> MotionHeadsWindowStore.DayRecord {
+        let b = bundle(tier: tier, kind: kind)
+        let authority = try JSONDecoder().decode(ActivityExpertAuthority.self, from: JSONSerialization.data(withJSONObject: [
+            "policy": "expert-authority-1", "channel": "motion_heads", "route": "standalone", "mode": mode,
+            "release_mode": releaseMode ?? mode, "use": "canonical",
+            "pinned_bundle_sha256": pinned ? b.bundleSha256 : NSNull(),
+        ] as [String: Any]))
+        return MotionHeadsWindowStore.DayRecord(day: day, resultRevision: "51", mode: mode, bundle: b,
+                                                windowsJSON: try motionWindowsJSON(), releaseMode: releaseMode,
+                                                inputRevision: inputRevision, authority: authority)
+    }
+
     /// The phone's decode of the span from the stores, exactly as `Repository.activityContext(from:)` runs it.
-    private func phoneDecode(encoders: ActivityEncoderWindowStore, gait: GaitWindowStore)
+    private func phoneDecode(encoders: ActivityEncoderWindowStore, gait: GaitWindowStore,
+                             motion: MotionHeadsWindowStore? = nil)
         -> (document: ActivityContextDayDocument, decode: ActivityPhoneEvidence.Decode) {
         let attached = ActivityPhoneEvidence.attachingEncoderWindows(input(), store: encoders)
         let decode = ActivityPhoneEvidence.canonical(attached, base: ActivityDecoderConfig(), encoders: encoders,
-                                                     gait: gait)
+                                                     gait: gait, motionHeads: motion ?? motionStore().store)
         let document = ActivityContextDayBuilder.update(cached: nil, input: decode.input, now: to,
                                                         config: decode.config).document
         return (document, decode)
@@ -178,7 +237,6 @@ final class ActivityPhoneAuthorityTests: XCTestCase {
     }
 
     func testAProductionRowWithItsPinsShapesTheCanonicalDecode() throws {
-        // No server can record production today; this shows the path the policy would open when one does.
         let encoders = try encoderStore()
         XCTAssertTrue(encoders.save(try hartRecord(embeddedGait: false, inputRevision: 7), scope: scope))
         let baseline = try json(phoneDecode(encoders: encoders, gait: gaitStore().store).document)
@@ -194,6 +252,112 @@ final class ActivityPhoneAuthorityTests: XCTestCase {
         stale.save(try gaitRecord(mode: "production", releaseMode: "production", pinned: true, prior: 0.085,
                                   inputRevision: 6), scope: scope)
         XCTAssertEqual(try json(phoneDecode(encoders: encoders, gait: stale).document), baseline)
+    }
+
+    func testProductionMotionHeadsShapeThePhonesDecodeAndShadowOrCandidateNever() throws {
+        let encoders = try encoderStore()
+        XCTAssertTrue(encoders.save(try hartRecord(embeddedGait: false, inputRevision: 7), scope: scope))
+        let baseline = phoneDecode(encoders: encoders, gait: gaitStore().store)
+        let baselineJSON = try json(baseline.document)
+
+        let production = motionStore().store
+        XCTAssertTrue(production.save(try motionRecord(mode: "production", releaseMode: "production"), scope: scope))
+        let sources = production.sources(from: from, to: to)
+        XCTAssertEqual(sources.count, 1)
+        XCTAssertEqual(sources.first?.mode, .production)
+        XCTAssertEqual(sources.first?.expectedBundleSHA256, String(repeating: "ab", count: 32))
+        XCTAssertEqual(sources.first?.inputRevision, 7)
+        XCTAssertEqual(sources.first?.day, day)
+        let decoded = phoneDecode(encoders: encoders, gait: gaitStore().store, motion: production)
+        XCTAssertEqual(decoded.decode.selection.canonicalChannels, [.motionHeads])
+        XCTAssertEqual(decoded.decode.config.motionHeads?.mode, .production)
+        XCTAssertNotEqual(decoded.decode.config.cacheTag, baseline.decode.config.cacheTag)
+        XCTAssertNotNil(decoded.document.versions.motionHeads)
+        XCTAssertNotEqual(try json(decoded.document), baselineJSON)
+
+        let rows: [(String, MotionHeadsWindowStore.DayRecord)] = [
+            ("shadow", try motionRecord(mode: "shadow")),
+            ("candidate", try motionRecord(mode: "candidate")),
+            ("production demoted by the route", try motionRecord(mode: "production", releaseMode: "candidate")),
+            ("production, unpinned", try motionRecord(mode: "production", pinned: false)),
+            ("production, candidate tier", try motionRecord(mode: "production", tier: .candidate)),
+            ("production, other revision", try motionRecord(mode: "production", inputRevision: 6)),
+        ]
+        for (name, record) in rows {
+            let motion = motionStore().store
+            XCTAssertTrue(motion.save(record, scope: scope), name)
+            XCTAssertEqual(motion.sources(from: from, to: to).count, 1, name)
+            let d = phoneDecode(encoders: encoders, gait: gaitStore().store, motion: motion)
+            XCTAssertTrue(d.decode.selection.canonicalChannels.isEmpty, name)
+            XCTAssertNil(d.decode.config.motionHeads, name)
+            XCTAssertEqual(try json(d.document), baselineJSON, name)
+        }
+
+        // A demotion the route reports on an unchanged day lowers the stored row in place, never raises it.
+        XCTAssertFalse(production.lowerRelease(day: day, to: .production, scope: scope))
+        XCTAssertTrue(production.lowerRelease(day: day, to: .candidate, scope: scope))
+        XCTAssertEqual(production.sources(from: from, to: to).first?.mode, .candidate)
+        XCTAssertEqual(production.revisions(days: [day]), [day: "51"])
+        XCTAssertEqual(try json(phoneDecode(encoders: encoders, gait: gaitStore().store, motion: production).document),
+                       baselineJSON)
+    }
+
+    func testMotionHeadsRouteParsing() throws {
+        let b = bundle()
+        let bundleObject = try JSONSerialization.jsonObject(with: JSONEncoder().encode(b))
+        let windows = try JSONSerialization.jsonObject(with: Data(try motionWindowsJSON().utf8))
+        let authority: [String: Any] = ["policy": "expert-authority-1", "channel": "motion_heads",
+                                        "route": "standalone", "mode": "production", "release_mode": "production",
+                                        "use": "canonical", "reason": NSNull(), "input_revision": "7",
+                                        "pinned_bundle_sha256": b.bundleSha256]
+        func row(_ day: String, _ extra: [String: Any]) -> [String: Any] {
+            ["day": day, "mode": "production", "bundle_id": b.headsVersion, "encoder_id": b.encoderId,
+             "encoder_kind": "actinet", "evidence_tier_max": "production", "bundle_sha256": b.bundleSha256,
+             "window_s": 10, "hop_s": 5, "n_windows": 300, "n_ood": 0, "input_revision": "7",
+             "release_mode": "production", "result_revision": "51", "computed_at": "2026-10-05T12:00:00Z"]
+                .merging(extra) { $1 }
+        }
+        let body: [String: Any] = ["days": [
+            row("2026-10-04", ["authority": authority, "bundle": bundleObject, "summary": ["n_windows": 300],
+                               "windows": windows]),
+            // An older row: no bundle in its payload.
+            row("2026-10-05", ["authority": NSNull(), "bundle": NSNull(), "summary": [:], "windows": windows]),
+            // Unchanged at the stored revision, demoted since.
+            row("2026-10-06", ["unchanged": true, "release_mode": "candidate"]),
+            // A bundle that names another digest than the row.
+            row("2026-10-07", ["authority": authority, "bundle": bundleObject, "windows": windows,
+                               "bundle_sha256": String(repeating: "ef", count: 32)]),
+        ]]
+        let days = ServerScoreRepository.motionHeadsDays(from: body)
+        XCTAssertEqual(days.map(\.day), ["2026-10-04", "2026-10-05", "2026-10-06", "2026-10-07"])
+
+        let full = days[0]
+        XCTAssertEqual(full.bundle, b)
+        XCTAssertEqual(full.authority?.pinnedBundleSHA256, b.bundleSha256)
+        XCTAssertEqual(full.releaseMode, "production")
+        XCTAssertEqual(full.inputRevision, 7)
+        let record = try XCTUnwrap(MotionHeadsWindowStore.DayRecord(full))
+        XCTAssertEqual(record.recordedRelease, .production)
+        let store = motionStore().store
+        XCTAssertTrue(store.save(record, scope: scope))
+        XCTAssertFalse(store.save(record, scope: scope), "the same row is not stored twice")
+        XCTAssertEqual(store.sources(from: from, to: to).first?.track.windows.count, (to - from) / 5)
+
+        XCTAssertNil(days[1].bundle)
+        XCTAssertNil(MotionHeadsWindowStore.DayRecord(days[1]), "a row without its bundle is skipped")
+        XCTAssertTrue(days[2].unchanged)
+        XCTAssertEqual(days[2].releaseMode, "candidate")
+        XCTAssertNil(MotionHeadsWindowStore.DayRecord(days[2]))
+        XCTAssertNil(days[3].bundle)
+
+        let endpoint = try XCTUnwrap(URL(string: "https://example.test/functions/v1/scores"))
+        let url = try XCTUnwrap(ServerScoreRepository.windowsURL(endpoint: endpoint, route: "motion-heads",
+                                                                 days: ["2026-10-04"], deviceId: "whoop-1",
+                                                                 known: ["2026-10-04": "51"]))
+        let items = URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        XCTAssertTrue(url.path.hasSuffix("/scores/motion-heads"))
+        XCTAssertEqual(items.first { $0.name == "authority" }?.value, "1")
+        XCTAssertEqual(items.first { $0.name == "known" }?.value, "2026-10-04:51")
     }
 
     func testEmbeddedGaitWindowsInHartRecordsStayOutOfTheCanonicalDecode() throws {
@@ -395,6 +559,13 @@ final class ActivityPhoneAuthorityTests: XCTestCase {
         let other = ActivityWindowsSync(minimumInterval: 300)
         let reversed = await other.run(hart: { true }, gait: { throw FetchFailed() })
         XCTAssertEqual(reversed, .init(hartChanged: true, gaitChanged: false, hartFailed: false, gaitFailed: true))
+
+        // The motion-head fetch runs whatever became of the other two.
+        let third = ActivityWindowsSync(minimumInterval: 300)
+        let motion = await third.run(hart: { throw FetchFailed() }, gait: { throw FetchFailed() },
+                                     motionHeads: { true })
+        XCTAssertEqual(motion, .init(hartFailed: true, gaitFailed: true, motionHeadsChanged: true))
+        XCTAssertEqual(motion?.changed, true)
     }
 
     func testOnePassAtATime() async {

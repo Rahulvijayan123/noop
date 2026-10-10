@@ -195,14 +195,16 @@ public enum ActivityContextMaterialization {
     }
 
     /// The materializer's input fingerprint for a day: the store's witness over the day's streams, sleep and
-    /// workouts, the encoder and gait window revisions the decode would attach, the decoder config tag and the
-    /// dismissed workout spans. Revisions are folded in sorted-key order, so an unchanged set never reads as
-    /// changed.
+    /// workouts, the encoder, gait and motion-head window revisions the decode would attach, the decoder config tag
+    /// and the dismissed workout spans. Revisions are folded in sorted-key order, so an unchanged set never reads as
+    /// changed; motion-head revisions only when there are any, so a day without them keeps its fingerprint.
     public static func inputFingerprint(store: String, encoderRevisions: [String: String] = [:],
-                                        gaitRevisions: [String: String] = [:], configTag: String,
+                                        gaitRevisions: [String: String] = [:],
+                                        motionHeadsRevisions: [String: String] = [:], configTag: String,
                                         dismissedWorkouts: String = "") -> String {
         func revs(_ r: [String: String]) -> String { r.keys.sorted().map { "\($0)=\(r[$0]!)" }.joined(separator: ",") }
-        return "\(store)|enc[\(revs(encoderRevisions))]|gait[\(revs(gaitRevisions))]|cfg[\(configTag)]|dis[\(dismissedWorkouts)]"
+        let motion = motionHeadsRevisions.isEmpty ? "" : "|mh[\(revs(motionHeadsRevisions))]"
+        return "\(store)|enc[\(revs(encoderRevisions))]|gait[\(revs(gaitRevisions))]\(motion)|cfg[\(configTag)]|dis[\(dismissedWorkouts)]"
     }
 
     /// Whether the stored day already is this document: written by the current rules, from the same

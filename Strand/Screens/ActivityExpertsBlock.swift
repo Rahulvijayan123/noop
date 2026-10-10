@@ -3,7 +3,7 @@ import StrandDesign
 import StrandAnalytics
 
 /// Which evidence sources the activity decoder used over a stretch, and what ElderNet read from the raw
-/// motion: shown inside "What the model made of it" so a reading is traceable to its sources.
+/// motion: shown inside the stretch sheet's "How this was read" so a reading is traceable to its sources.
 struct ActivityExpertsSummary: Equatable {
     struct Gait: Equatable {
         var probability: Double
@@ -16,7 +16,10 @@ struct ActivityExpertsSummary: Equatable {
     var detail: ActivityDetail?
     var gait: Gait?
 
-    private static let order = ["encoder", "hart_fine", "transition", "eldernet"]
+    /// Whether any run recorded an expert, a specific reading or a gait reading.
+    var hasContent: Bool { !experts.isEmpty || detail != nil || gait != nil }
+
+    private static let order = ["encoder", "hart_fine", "transition", "eldernet", "motion_heads"]
 
     /// The runs overlapping [start, end), weighted by the seconds they overlap it.
     static func over(start: Int, end: Int, runs: [ActivityContextRun]) -> ActivityExpertsSummary {
@@ -63,6 +66,7 @@ struct ActivityExpertsSummary: Equatable {
         case "hart_fine": return String(localized: "Full activity breakdown")
         case "transition": return String(localized: "Position-change expert")
         case "eldernet": return String(localized: "ElderNet gait")
+        case "motion_heads": return String(localized: "ActiNet motion heads")
         default: return expert
         }
     }
