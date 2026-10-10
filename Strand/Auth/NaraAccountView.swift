@@ -604,6 +604,8 @@ public struct NaraAccountView: View {
             }
         case .ready:
             StatePill("Connected", tone: .positive)
+        case .paused:
+            StatePill("Sync off", tone: .neutral)
         case .retrying:
             StatePill("Retrying", tone: .warning)
         case .blocked:

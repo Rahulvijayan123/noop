@@ -22,7 +22,7 @@ public enum CloudPushSettings {
     public static let sourceRevisionInfoKey = "NOOPSourceRevision"
     public static let finalHostedComputeInfoKey = "NOOPFinalHostedCompute"
 
-    /// Set on sign-in; only consulted while nobody is signed in. Absent means "follow the build".
+    /// User-facing opt-out / manual override. Absent means "follow the build".
     private static let enabledOverrideKey = "noop.cloud.enabled.override"
     private static let endpointOverrideKey = "noop.cloud.endpoint.override"
 
@@ -123,7 +123,6 @@ public enum CloudPushSettings {
     public static var isEnabled: Bool {
         guard isConfigured else { return false }
         if isHostedComputeBuild { return true }
-        if CloudPushIdentityStore.currentOwnerId() != nil { return true }
         let defaults = UserDefaults.standard
         // Read on the BLE path: the stored flag (which the account layer sets on every bind) answers first, and
         // the policy is only looked up when it does not already say on.
