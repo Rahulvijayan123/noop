@@ -3,7 +3,10 @@ exercise every path of the Layer 1 context strata - sleep HR, awake rest, lying 
 the HRV strata; the settling rules (bout start, 10 min after walking, 30 min after vigorous, the walking
 on-transient); missing HRV, pre-v49 rows, low class confidence, posture disagreement, off-wrist and thin HR, unknown
 intensity; coverage gates; none / provisional / established references and staleness - plus minute contexts for the
-per-minute expectation.
+per-minute expectation. Since lb-context-3 also: confirmed exercise sessions and their recovery (rule
+exercise-session-2: a gym block of arm exercise motion between still minutes), an unconfirmed short movement period
+(`active`, settling after it), vehicle rides (never rest) and still stretches whose posture alternates between unknown
+and seated (an unknown posture no longer breaks the bout).
 
 The expected results come from the app, never from the port. After changing the cases (or Layer 1):
     python scripts/make_layer1_context_cases.py
@@ -22,9 +25,10 @@ from pathlib import Path
 OUT = Path(__file__).resolve().parents[1] / "tests" / "data" / "layer1_context_cases.json"
 DAY0 = 20600          # epoch day of the first invented day (2026-05-26)
 # Row: start, end, activityClass, confidence, evidenceQuality, posture, locomotion, sleepState, wearState,
-#      intensity, hrSamples, hrMean, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount
+#      intensity, hrSamples, hrMean, rmssd, rrBeats, rrDiffSqSumMs2, rrDiffCount, detail, armBehavior
 FIELDS = ("startTs", "endTs", "activityClass", "confidence", "evidenceQuality", "posture", "locomotion", "sleepState",
-          "wearState", "intensity", "hrSamples", "hrMean", "rmssd", "rrBeats", "rrDiffSqSumMs2", "rrDiffCount")
+          "wearState", "intensity", "hrSamples", "hrMean", "rmssd", "rrBeats", "rrDiffSqSumMs2", "rrDiffCount",
+          "detail", "armBehavior")
 
 
 class Tape:
@@ -37,7 +41,7 @@ class Tape:
 
   def run(self, start, minutes, step_s, cls, *, conf=0.85, evq=0.75, posture=None, loco="stationary",
           sleep="awake", wear="on_wrist", intensity=0.1, hr=(65, 2.5), rmssd=(45, 0.12), hrv="v49", hr_cover=0.97,
-          gap_every=0):
+          gap_every=0, detail=None, arm=None):
     """Contiguous intervals of `step_s` seconds from `start` for `minutes` minutes. hrv: v49 (components), pre (only
     rmssd + rrBeats), none (no beats)."""
     rng = self.rng
@@ -58,7 +62,7 @@ class Tape:
         row_rm = None; sq = 0.0; count = 0; beats = 0
       self.rows.append([t, e, cls, conf, evq, posture, loco, sleep, wear,
                         None if intensity is None else round(intensity * rng.uniform(0.8, 1.2), 2),
-                        n_hr, mean if n_hr else None, row_rm, beats, sq, count])
+                        n_hr, mean if n_hr else None, row_rm, beats, sq, count, detail, arm])
       k += 1
       t = e + (90 if gap_every and k % gap_every == 0 else 0)   # a > 60 s gap ends a bout
     return end
@@ -105,14 +109,44 @@ class Tape:
     if profile.get("brisk"):
       t = self.run(max(t, self.t(d, 17)), 10, 300, "brisk_walking", loco="brisk_walking", intensity=1.2, hr=(118, 4),
                    hrv="none")
+    # Gym: one-minute rows alternating arm exercise motion and still minutes at a working HR (a confirmed session:
+    # >= 15 strong minutes), then seated while HR comes back (its recovery), then seated at rest.
+    if profile.get("gym"):
+      t = max(t, self.t(d, 17, 20))
+      for k in range(40):
+        strong = k % 2 == 0
+        t = self.run(t, 1, 60, "light_activity" if strong else "stationary", intensity=0.3 if strong else 0.1,
+                     arm="exercise_motion" if strong else None, hr=(profile["gym"], 4), hrv="none")
+      t = self.run(t, 12, 120, "sitting", posture="seated_likely", hr=(rest_mu + 22, 3), hrv=hrv)
+      t = self.run(t, 30, 300, "sitting", posture="seated_likely", hr=(rest_mu + 2, 2), hrv=hrv)
     # Evening: pre-v49 rows (RMSSD only) and rows without beats, seated.
     t = self.run(max(t, self.t(d, 19)), 40, 600, "sitting", posture="seated_likely", hr=(rest_mu - 1, 2.5), hrv="pre")
     t = self.run(t, 25, 300, "sitting", posture="seated_likely", hr=(rest_mu - 1, 2.5), hrv="none")
+    # A short movement period: 8 strong minutes between weak ones at a working HR (qualifies, never confirmed: phase
+    # `active`), then seated in 2-minute rows (nothing within 10 minutes of its end is steady state).
+    if profile.get("short_active"):
+      t = max(t, self.t(d, 19, 50))
+      for k in range(16):
+        strong = k % 2 == 0
+        t = self.run(t, 1, 60, "light_activity", intensity=0.3, arm="exercise_motion" if strong else None,
+                     hr=(100, 3), hrv="none")
+      t = self.run(t, 20, 120, "sitting", posture="seated_likely", hr=(rest_mu, 2.5), hrv=hrv)
     # An implausible interval mean (ignored by the day mean) and a long steady walk.
     t = self.run(max(t, self.t(d, 20)), 5, 300, "sitting", posture="seated_likely", hr=(25, 0.1), hrv="none")
     if profile.get("long_walk"):
-      self.run(max(t, self.t(d, 21)), 30, 180, "walking", loco="walking", intensity=0.8, hr=(profile["long_walk"], 3),
-               hrv="none")
+      t = self.run(max(t, self.t(d, 21)), 30, 180, "walking", loco="walking", intensity=0.8,
+                   hr=(profile["long_walk"], 3), hrv="none")
+    # A ride: seated and still, but in a vehicle (never rest).
+    if profile.get("vehicle"):
+      t = self.run(max(t, self.t(d, 21, 35)), 20, 300, "sitting", posture="seated_likely", detail="in_vehicle",
+                   hr=(rest_mu + 3, 2), hrv=hrv)
+    # Still in one-minute rows whose posture alternates between unknown and seated: one bout, settled after 120 s.
+    if profile.get("alternating", True):
+      t = max(t, self.t(d, 22))
+      for k in range(30):
+        seated = k % 2 == 1
+        t = self.run(t, 1, 60, "sitting" if seated else "stationary", posture="seated_likely" if seated else None,
+                     hr=(rest_mu + 1, 2), hrv=hrv)
 
 
 def thin_day(tape, d, *, rest_hr=64, walk_hr=98):
@@ -128,18 +162,21 @@ def thin_day(tape, d, *, rest_hr=64, walk_hr=98):
 
 
 def minutes_for(tape, d):
-  """Minute contexts on day d: every (kind, posture), the settling rules and a transition."""
+  """Minute contexts on day d: every (kind, posture), the settle (resolver flag) and a transition. Columns: minute,
+  kind, posture, sinceEffortS, sinceWalkingS, recentTransition, day, settling."""
   base = tape.t(d, 12)
   out = []
-  specs = [("asleep", None, None, None, False), ("awake_still", None, None, None, False),
-           ("awake_still", "supine", None, None, False), ("awake_still", "seated", None, None, False),
-           ("awake_still", "upright", None, None, False), ("walking", None, None, None, False),
-           ("active", None, None, None, False), ("unknown", None, None, None, False),
-           ("awake_still", "seated", 20 * 60, None, False), ("awake_still", "seated", 31 * 60, None, False),
-           ("awake_still", "upright", None, 5 * 60, False), ("awake_still", "supine", None, 11 * 60, False),
-           ("asleep", None, None, None, True), ("walking", None, None, 0, True)]
-  for i, (kind, posture, eff, walk, trans) in enumerate(specs):
-    out.append([base + 60 * i, kind, posture, eff, walk, trans, d])
+  specs = [("asleep", None, None, None, False, False), ("awake_still", None, None, None, False, False),
+           ("awake_still", "supine", None, None, False, False), ("awake_still", "seated", None, None, False, False),
+           ("awake_still", "upright", None, None, False, False), ("walking", None, None, None, False, False),
+           ("active", None, None, None, False, False), ("unknown", None, None, None, False, False),
+           ("exercise_session", None, 0, None, False, False), ("recovery", None, 120, None, False, False),
+           ("awake_still", "seated", 60, None, False, True), ("awake_still", "seated", 31 * 60, None, False, False),
+           ("awake_still", "upright", None, 5 * 60, False, True), ("awake_still", "supine", None, 11 * 60, False, False),
+           ("asleep", None, 60, None, False, True), ("recovery", None, 300, None, False, True),
+           ("asleep", None, None, None, True, False), ("walking", None, None, 0, True, False)]
+  for i, (kind, posture, eff, walk, trans, settle) in enumerate(specs):
+    out.append([base + 60 * i, kind, posture, eff, walk, trans, d, settle])
   return out
 
 
@@ -158,7 +195,9 @@ def case_full():
       skip = ("upright",)
     if i % 11 == 6:
       skip = ("supine", "walk")
-    tape.day(d, {"run": i % 3 != 0, "brisk": i % 5 == 0, "long_walk": 100 + (i % 4) if i % 2 else 0},
+    tape.day(d, {"run": i % 3 != 0, "brisk": i % 5 == 0, "long_walk": 100 + (i % 4) if i % 2 else 0,
+                 "gym": 118 + (i % 5) if i % 4 == 1 else 0, "short_active": i % 3 == 1, "vehicle": i % 2 == 0,
+                 "alternating": i % 7 != 3},
              sleep_mu=54 + 0.04 * i, rest_mu=66 + (i % 6) * 0.3, short_seated=(i % 13 == 7),
              hrv="pre" if i < 3 else "v49", skip=skip)
   as_of = [DAY0, DAY0 + 9, DAY0 + 13, DAY0 + 16, DAY0 + 22, DAY0 + 30, DAY0 + 38, DAY0 + 44]
@@ -172,7 +211,8 @@ def case_short():
     if i == 4:
       thin_day(tape, DAY0 + i, walk_hr=44)
       continue
-    tape.day(DAY0 + i, {"run": i % 2 == 0, "brisk": True, "long_walk": 45 if i == 3 else 99},
+    tape.day(DAY0 + i, {"run": i % 2 == 0, "brisk": True, "long_walk": 45 if i == 3 else 99,
+                        "gym": 125 if i in (1, 5) else 0, "short_active": i == 2, "vehicle": i == 3},
              hrv=("pre", "none", "v49")[i % 3], short_seated=i in (2, 5), skip=("upright",) if i == 1 else ())
   as_of = [DAY0 + 3, DAY0 + 7, DAY0 + 12, DAY0 + 15, DAY0 + 23]
   return {"name": "short_edge_rows", "tz_offset_s": 0, "rows": tape.rows, "as_of": as_of,

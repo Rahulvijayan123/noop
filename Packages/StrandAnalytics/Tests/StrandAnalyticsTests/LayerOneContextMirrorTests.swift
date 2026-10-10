@@ -14,11 +14,11 @@ import WhoopStore
 final class LayerOneContextMirrorTests: XCTestCase {
     static let series: [LBSeries] = [
         .sleepHR, .awakeRestHR, .awakeRestHRVLn, .awakeSupineHR, .awakeSupineHRVLn, .awakeSeatedHR,
-        .awakeSeatedHRVLn, .awakeUprightHR, .awakeUprightHRVLn, .walkingHR,
+        .awakeSeatedHRVLn, .awakeUprightHR, .awakeUprightHRVLn, .walkingHR, .exerciseSessionHR, .exerciseRecoveryHR,
     ]
     static let kinds: [(WatchdogMinuteContextKind, LBPosture?)] = [
         (.asleep, nil), (.awakeStill, nil), (.awakeStill, .supine), (.awakeStill, .seated), (.awakeStill, .upright),
-        (.walking, nil), (.active, nil), (.unknown, nil),
+        (.walking, nil), (.active, nil), (.exerciseSession, nil), (.recovery, nil), (.unknown, nil),
     ]
 
     private static var dataDir: URL {
@@ -68,12 +68,13 @@ final class LayerOneContextMirrorTests: XCTestCase {
         func int(_ i: Int) -> Int { (a[i] as! NSNumber).intValue }
         func dbl(_ i: Int) -> Double { (a[i] as! NSNumber).doubleValue }
         func optDbl(_ i: Int) -> Double? { (a[i] as? NSNumber)?.doubleValue }
-        func optStr(_ i: Int) -> String? { a[i] as? String }
+        func optStr(_ i: Int) -> String? { i < a.count ? a[i] as? String : nil }
         return ActivityContextIntervalRow(
             startTs: int(0), endTs: int(1), activityClass: a[2] as! String, confidence: dbl(3),
-            evidenceQuality: dbl(4), posture: optStr(5), locomotion: optStr(6), sleepState: a[7] as! String,
-            wearState: a[8] as! String, intensity: optDbl(9), hrSamples: int(10), hrMean: optDbl(11),
-            rmssd: optDbl(12), rrBeats: int(13), rrDiffSqSumMs2: dbl(14), rrDiffCount: int(15))
+            evidenceQuality: dbl(4), posture: optStr(5), locomotion: optStr(6), armBehavior: optStr(17),
+            sleepState: a[7] as! String, wearState: a[8] as! String, intensity: optDbl(9), hrSamples: int(10),
+            hrMean: optDbl(11), rmssd: optDbl(12), rrBeats: int(13), rrDiffSqSumMs2: dbl(14), rrDiffCount: int(15),
+            detail: optStr(16))
     }
 
     private static func json(_ x: Double?) -> Any { x.map { $0 as Any } ?? NSNull() }
@@ -145,7 +146,8 @@ final class LayerOneContextMirrorTests: XCTestCase {
                         kind: WatchdogMinuteContextKind(rawValue: m[1] as! String)!,
                         posture: (m[2] as? String).flatMap(LBPosture.init(rawValue:)),
                         sinceEffortS: (m[3] as? NSNumber)?.intValue, sinceWalkingS: (m[4] as? NSNumber)?.intValue,
-                        recentTransition: (m[5] as! NSNumber).boolValue)
+                        recentTransition: (m[5] as! NSNumber).boolValue,
+                        settling: (m[7] as! NSNumber).boolValue)
                 }
             var perChannel: [String: Any] = [:]
             for channel in ["HR", "HRV"] {

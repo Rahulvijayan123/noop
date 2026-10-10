@@ -103,7 +103,8 @@ class SwiftMirror(unittest.TestCase):
                            np.array([m[2] for m in minutes], dtype=object),
                            np.array([np.nan if m[3] is None else m[3] for m in minutes], dtype=float),
                            np.array([np.nan if m[4] is None else m[4] for m in minutes], dtype=float),
-                           np.array([m[5] for m in minutes], dtype=bool))
+                           np.array([m[5] for m in minutes], dtype=bool),
+                           np.array([m[7] for m in minutes], dtype=bool))
       days = np.full(len(minutes), day)
       for channel, rec in exp["track"][str(day)].items():
         t = L.track(channel.lower(), mc, days, refs, allow_provisional=False)
@@ -122,23 +123,37 @@ class SwiftMirror(unittest.TestCase):
 
 class MinuteContextRules(unittest.TestCase):
   def test_settling_after_effort_walking_and_transitions(self):
-    m = T0 + 60 * np.arange(50)
-    kinds = ["walking"] * 3 + ["awake_still"] * 15 + ["active"] * 2 + ["awake_still"] * 30
-    postures = [None] * 3 + ["seated"] * 8 + ["upright"] * 7 + [None] * 2 + ["seated"] * 30
+    m = T0 + 60 * np.arange(60)
+    kinds = (["walking"] * 3 + ["awake_still"] * 15 + ["active"] * 3 + ["awake_still"] * 20 + ["active"]
+             + ["awake_still"] * 18)
+    postures = [None] * 3 + ["seated"] * 8 + ["upright"] * 7 + [None] * 3 + ["seated"] * 39
     mc = L.resolve_transitions(m, kinds, postures)
     settle = L.settling(mc)
-    # Walking ends at minute 3: still minutes are settling while < 10 min since (minutes 3..12), and the kind change
-    # at minute 3 and the posture change at 11 are transitions for 3 minutes.
+    # Walking ends at minute 3: still minutes settle while < 10 min since (minutes 3..12), and the kind change at
+    # minute 3 and the posture change at 11 are transitions for 3 minutes.
     self.assertEqual(mc.since_walking[3], 0.0)
     self.assertTrue(settle[3:13].all())
     self.assertTrue(mc.transition[11] and mc.transition[13] and not mc.transition[14])
     self.assertTrue(settle[13])                  # past the walking settle, still inside the posture transition
     self.assertFalse(settle[14])
-    # Effort at 18-19: 30 minutes of settling after its end.
-    self.assertEqual(mc.since_effort[20], 0.0)
-    self.assertTrue(settle[20:50].all())
+    # A bout (3 active minutes at 18-20): 10 minutes of settle after its end, then steady state.
+    self.assertEqual(mc.since_effort[21], 0.0)
+    self.assertTrue(settle[21:31].all())
+    self.assertFalse(settle[31:41].any())
+    # An isolated active minute at 41: 2 minutes (both also a transition), then steady state from minute 45.
+    self.assertTrue(mc.settling[42] and mc.settling[43] and not mc.settling[44])
+    self.assertFalse(settle[45:].any())
     self.assertTrue(np.isnan(mc.since_effort[0]))
     self.assertEqual(list(mc.posture[:3]), [None] * 3)
+
+  def test_exercise_contexts_use_their_own_series_and_never_settle(self):
+    self.assertEqual(L.series_for("exercise_session", None, "hr"), ("exercise_session_hr",))
+    self.assertEqual(L.series_for("recovery", "seated", "hr"), ("exercise_recovery_hr",))
+    self.assertEqual(L.series_for("recovery", None, "hrv"), ())
+    m = T0 + 60 * np.arange(30)
+    kinds = ["exercise_session"] * 20 + ["recovery"] * 10
+    mc = L.resolve_transitions(m, kinds, [None] * 30)
+    self.assertFalse(L.settling(mc)[23:].any())   # recovery right after the session: no settle, past the transition
 
   def test_kind_and_posture_select_the_series(self):
     self.assertEqual(L.series_for("awake_still", "seated", "hr"), ("awake_seated_hr", "awake_rest_hr"))
@@ -254,7 +269,7 @@ class SqliteIntervals(unittest.TestCase):
       old = T0 - 30 * 86400
       for dev, start in (("a", old), ("a", T0), ("b", T0)):
         c.execute(f"insert into activityContextInterval values(?,?,?,'sitting',0.9,0.8,'seated_likely','stationary',"
-                  f"'awake','on_wrist',0.1,590,70.5,40.0,700,1120000.0,700,null)", (dev, start, start + 600))
+                  f"'awake','on_wrist',0.1,590,70.5,40.0,700,1120000.0,700,null,null,null)", (dev, start, start + 600))
       c.commit(); c.close()
       mtime = os.path.getmtime(path)
       tl = load_whoop_sqlite(path, "a", T0, T0 + 600, 0)

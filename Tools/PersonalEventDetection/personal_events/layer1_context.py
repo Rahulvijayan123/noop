@@ -5,8 +5,10 @@ while asleep; awake still by posture (supine / seated / upright, falling back to
 HRV uses the awake ln(RMSSD) strata. This module reproduces that expectation from the phone's stored activity-context
 intervals (`activityContextInterval`), faithfully to the Swift:
 
-* daily stratum values: `LongitudinalBaseline.ContextMaterializer.observations`
-  (Packages/StrandAnalytics/Sources/StrandAnalytics/LongitudinalBaselineContext.swift:36-249) with the range check of
+* daily stratum values: `LongitudinalBaseline.ContextMaterializer.observations` (`lb-context-3`,
+  Packages/StrandAnalytics/Sources/StrandAnalytics/LongitudinalBaselineContext.swift), including its exercise
+  sessions (rule exercise-session-2, exercise_session.py) and their recovery, which never count as rest, with the
+  range check of
   `LongitudinalBaseline.observation` and the coverage gate `applyCoverageGate` (LongitudinalBaseline.swift:1901-1990);
 * the daily reference: `LongitudinalBaseline.evaluate` with replay (T-60 ... T-8 window, median, small-sample MAD with
   trim, AR(1) n_eff with Kendall bias correction, Student-t predictive scale, shown from 4 days, established at 14,
@@ -40,7 +42,8 @@ from pathlib import Path
 
 import numpy as np
 
-UNAVAILABLE_SERVER = "personal context baselines are computed on the phone and not yet available to the server"
+MATERIALIZER = "lb-context-3"
+UNAVAILABLE_SERVER = "the phone has not uploaded its activity-context intervals for this strap yet"
 
 # --------------------------------------------------------------------------------------------- shared statistics
 
@@ -93,8 +96,8 @@ class SeriesDef:
     return self.channel == "hrv"
 
 
-def _hr(key, lo, hi, floor, k, need, required=False):
-  return SeriesDef(key, "hr", lo, hi, floor, k, 7, 14, need, required)
+def _hr(key, lo, hi, floor, k, need, required=False, n_established=14):
+  return SeriesDef(key, "hr", lo, hi, floor, k, 7, n_established, need, required)
 
 
 def _hrv(key, need, required=False):
@@ -113,20 +116,25 @@ SERIES = {s.key: s for s in (
   _hr("awake_upright_hr", 35, 160, 3, 2.0, 15),
   _hrv("awake_upright_hrv_ln", 15),
   _hr("walking_hr", 50, 190, 4, 2.2, 10),
+  # Session days, not calendar days: established after 8 (LongitudinalBaseline.params(for:)); no coverage gate.
+  _hr("exercise_session_hr", 50, 220, 6, 2.6, 0, n_established=8),
+  _hr("exercise_recovery_hr", 40, 190, 4, 2.4, 0, n_established=8),
 )}
 SERIES_KEYS = tuple(SERIES)
 # Human names of the strata (LBSeries.planRow), for reports.
 STRATUM_NAMES = {"sleep_hr": "asleep", "awake_rest_hr": "awake rest", "awake_rest_hrv_ln": "awake rest",
                  "awake_supine_hr": "lying", "awake_supine_hrv_ln": "lying", "awake_seated_hr": "seated",
                  "awake_seated_hrv_ln": "seated", "awake_upright_hr": "standing", "awake_upright_hrv_ln": "standing",
-                 "walking_hr": "steady walking"}
+                 "walking_hr": "steady walking", "exercise_session_hr": "exercise session",
+                 "exercise_recovery_hr": "after exercise"}
 
 # WatchdogLiveReferences.series(kind:posture:channel:)
 _HR_SERIES = {("asleep", None): ("sleep_hr",), ("walking", None): ("walking_hr",),
               ("awake_still", None): ("awake_rest_hr",),
               ("awake_still", "supine"): ("awake_supine_hr", "awake_rest_hr"),
               ("awake_still", "seated"): ("awake_seated_hr", "awake_rest_hr"),
-              ("awake_still", "upright"): ("awake_upright_hr", "awake_rest_hr")}
+              ("awake_still", "upright"): ("awake_upright_hr", "awake_rest_hr"),
+              ("exercise_session", None): ("exercise_session_hr",), ("recovery", None): ("exercise_recovery_hr",)}
 _HRV_SERIES = {("awake_still", None): ("awake_rest_hrv_ln",),
                ("awake_still", "supine"): ("awake_supine_hrv_ln", "awake_rest_hrv_ln"),
                ("awake_still", "seated"): ("awake_seated_hrv_ln", "awake_rest_hrv_ln"),
@@ -135,7 +143,7 @@ _HRV_SERIES = {("awake_still", None): ("awake_rest_hrv_ln",),
 
 def series_for(kind, posture, channel):
   table = _HR_SERIES if channel == "hr" else _HRV_SERIES
-  if kind == "walking" or kind == "asleep":
+  if kind != "awake_still":
     posture = None
   return table.get((kind, posture), ())
 
@@ -161,6 +169,8 @@ class IntervalRow:
   rr_beats: int
   rr_diff_sq_sum: float
   rr_diff_count: int
+  detail: str | None = None        # `in_vehicle` on a sitting row is never rest
+  arm_behavior: str | None = None  # `exercise_motion` is exercise evidence
 
   @property
   def duration(self):
@@ -169,20 +179,24 @@ class IntervalRow:
 
 ROW_COLUMNS = ("startTs", "endTs", "activityClass", "confidence", "evidenceQuality", "posture", "locomotion",
                "sleepState", "wearState", "intensity", "hrSamples", "hrMean", "rmssd", "rrBeats", "rrDiffSqSumMs2",
-               "rrDiffCount")
-_ROW_DEFAULTS = (None, None, "unknown", 0.0, 0.0, None, None, "unknown", "unknown", None, 0, None, None, 0, 0.0, 0)
+               "rrDiffCount", "detail", "armBehavior")
+_ROW_DEFAULTS = (None, None, "unknown", 0.0, 0.0, None, None, "unknown", "unknown", None, 0, None, None, 0, 0.0, 0,
+                 None, None)
 
 
 def rows_from_tuples(tuples) -> list:
-  """Rows in ROW_COLUMNS order (None where a column is absent: the store's defaults apply)."""
+  """Rows in ROW_COLUMNS order (None where a column is absent: the store's defaults apply). Rows of the first 16
+  columns only (no detail / arm behaviour) are accepted."""
   out = []
   for t in tuples:
+    t = tuple(t) + (None,) * (len(ROW_COLUMNS) - len(t))
     v = [d if x is None else x for x, d in zip(t, _ROW_DEFAULTS)]
     out.append(IntervalRow(int(v[0]), int(v[1]), str(v[2]), float(v[3]), float(v[4]),
                            None if t[5] is None else str(t[5]), None if t[6] is None else str(t[6]), str(v[7]),
                            str(v[8]), None if t[9] is None else float(t[9]), int(v[10]),
                            None if t[11] is None else float(t[11]), None if t[12] is None else float(t[12]),
-                           int(v[13]), float(v[14]), int(v[15])))
+                           int(v[13]), float(v[14]), int(v[15]),
+                           None if t[16] is None else str(t[16]), None if t[17] is None else str(t[17])))
   return out
 
 
@@ -195,6 +209,7 @@ MIN_HR_COVERAGE = 0.5
 SETTLE_AFTER_TRANSITION_S = 120
 SETTLE_AFTER_WALKING_S = 600
 SETTLE_AFTER_VIGOROUS_S = 1800
+SETTLE_AFTER_ACTIVE_PERIOD_S = 600
 WALKING_ON_TRANSIENT_S = 180
 MIN_HRV_PAIRS = 120
 _NEVER = -(1 << 40)
@@ -223,6 +238,8 @@ def _worn(r):
 
 
 def _still(r):
+  if r.detail == "in_vehicle":
+    return False
   if r.intensity is None or not r.intensity <= MAX_STILL_INTENSITY:
     return False
   return ((r.locomotion if r.locomotion is not None else "stationary") == "stationary"
@@ -308,19 +325,46 @@ def _gate(series: SeriesDef, value, status, coverage):
   return status
 
 
-def observations(rows, tz_offset_s=0, l1=None) -> dict:
+def still_awake_median_hr(rows):
+  """ContextMaterializer.stillAwakeMedianHR: sample-weighted median HR of the still, awake, worn intervals."""
+  return weighted_median([(r.hr_mean, float(r.hr_samples)) for r in rows
+                          if r.sleep_state == "awake" and _worn(r) and _still(r) and r.hr_mean is not None])
+
+
+def exercise_sessions(rows, rest_reference=None):
+  """ContextMaterializer.exerciseSessions: rule exercise-session-2 over the rows; the rest reference defaults to the
+  rows' still awake median HR, else 70 bpm."""
+  from .exercise_session import from_intervals
+  rest = rest_reference if rest_reference is not None else still_awake_median_hr(rows)
+  return from_intervals(rows, 70.0 if rest is None else rest)
+
+
+def observations(rows, tz_offset_s=0, l1=None, rest_reference=None) -> dict:
   """ContextMaterializer.observations: {series key: [DailyObs by day]}."""
   l1 = l1 or load_layer1()
   acc = {}
+  rows = sorted(rows, key=lambda x: x.start)
+  sessions = exercise_sessions(rows, rest_reference)
+
+  def phase(r):
+    mid = (r.start + r.end) // 2
+    minute = mid - mid % 60
+    for s in sessions:
+      if s.start <= minute <= s.end:
+        return "session" if s.confirmed else "active"
+      if s.confirmed and s.end < minute < s.recovery_end:
+        return "recovery"
+    return None
 
   def add(series, day, r, hr, hrv):
     acc.setdefault(series, {}).setdefault(day, _Acc()).add(r, hr, hrv)
 
-  bout_start = _NEVER; last_walking_end = _NEVER; last_vigorous_end = _NEVER
+  bout_start = _NEVER; last_walking_end = _NEVER; last_vigorous_end = _NEVER; last_active_end = _NEVER
   prev_still = _NOT_STILL
+  bout_posture = None   # the last known posture of the current still bout
   walking_bout_start = None
   prev_end = _NEVER
-  for r in sorted(rows, key=lambda x: x.start):
+  for r in rows:
     contiguous = r.start - prev_end <= 60
     is_asleep = r.sleep_state == "asleep"
     is_awake = r.sleep_state == "awake"
@@ -338,7 +382,18 @@ def observations(rows, tz_offset_s=0, l1=None) -> dict:
         prev_still = _NOT_STILL; walking_bout_start = None
         continue
       day = civil_day(r, tz_offset_s, False)
-      if is_walking and not is_vigorous and (r.intensity if r.intensity is not None else 0.0) > 0:
+      plain_walk = is_walking and not is_vigorous and (r.intensity if r.intensity is not None else 0.0) > 0
+      ph = None if plain_walk else phase(r)
+      if ph is not None:
+        if ph == "session":
+          add("exercise_session_hr", day, r, True, False)
+        elif ph == "recovery":
+          add("exercise_recovery_hr", day, r, True, False)
+        else:
+          last_active_end = r.end
+        prev_still = _NOT_STILL; walking_bout_start = None
+        continue
+      if plain_walk:
         if walking_bout_start is None or not contiguous:
           walking_bout_start = r.start
         if r.start - walking_bout_start >= WALKING_ON_TRANSIENT_S:
@@ -350,13 +405,19 @@ def observations(rows, tz_offset_s=0, l1=None) -> dict:
         prev_still = _NOT_STILL
         continue
       p = posture_of(r)
-      same_bout = contiguous and prev_still is not _NOT_STILL and prev_still == p
+      # Only a change between two known postures breaks a bout (an unknown-posture interval does not).
+      same_bout = (contiguous and prev_still is not _NOT_STILL
+                   and not (p is not None and bout_posture is not None and p != bout_posture))
       if not same_bout:
         bout_start = r.start
+        bout_posture = p
+      elif p is not None:
+        bout_posture = p
       prev_still = p
       settled = (r.start - bout_start >= SETTLE_AFTER_TRANSITION_S
                  and r.start - last_walking_end >= SETTLE_AFTER_WALKING_S
-                 and r.start - last_vigorous_end >= SETTLE_AFTER_VIGOROUS_S)
+                 and r.start - last_vigorous_end >= SETTLE_AFTER_VIGOROUS_S
+                 and r.start - last_active_end >= SETTLE_AFTER_ACTIVE_PERIOD_S)
       if not settled:
         continue
       add("awake_rest_hr", day, r, True, False)
@@ -487,12 +548,14 @@ def references(obs: dict, days, l1=None) -> dict:
 
 # --------------------------------------------------------------------------------------------- minute context
 
-RECOVERY_AFTER_EFFORT_S = 30 * 60
-RECOVERY_AFTER_WALKING_S = 10 * 60
+SETTLE_AFTER_BOUT_S = 10 * 60      # after a movement bout (>= 3 active minutes in 10) or walking
+SETTLE_AFTER_ISOLATED_S = 2 * 60   # after an isolated movement minute
+BOUT_WINDOW_S = 10 * 60
+BOUT_MINUTES = 3
 TRANSITION_WINDOW_S = 3 * 60
 HR_SCALE_FLOOR = 5.0     # WatchdogConfig.hrScale (bpm)
 HRV_SCALE_FLOOR_MS = 8.0  # WatchdogConfig.hrvScale (ms)
-KINDS = ("asleep", "awake_still", "walking", "active", "unknown")
+KINDS = ("asleep", "awake_still", "walking", "active", "exercise_session", "recovery", "unknown")
 
 
 @dataclasses.dataclass
@@ -504,22 +567,32 @@ class MinuteContext:
   since_effort: np.ndarray  # float seconds, NaN = none in view
   since_walking: np.ndarray
   transition: np.ndarray   # bool
+  settling: np.ndarray     # bool: the resolver's settle (not yet steady state for a resting reference)
 
 
 def resolve_transitions(minutes, kinds, postures, grid=60) -> MinuteContext:
-  """WatchdogContextResolver.resolve, lines 195-206, over the whole timeline (the phone runs it over its 30-minute
-  window): time since the end of the last effort / walking minute, and a kind change or an awake-still posture
-  change within the last 3 minutes."""
+  """WatchdogContextResolver.resolve (its bookkeeping after the kind), over the whole timeline (the phone runs it
+  over its 30-minute window): time since the end of the last effort / walking minute; the settle (a rest-like minute
+  within 10 minutes of a movement bout or walking, or 2 of any movement minute); and a kind change or an awake-still
+  posture change within the last 3 minutes."""
   n = len(minutes)
-  since_e = np.full(n, np.nan); since_w = np.full(n, np.nan); trans = np.zeros(n, bool)
-  last_effort = last_walk = last_trans = None
+  since_e = np.full(n, np.nan); since_w = np.full(n, np.nan); trans = np.zeros(n, bool); settle = np.zeros(n, bool)
+  last_effort = last_walk = last_trans = last_bout = None
+  active_minutes = []
   prev_kind = None; prev_posture = _NOT_STILL
   for i in range(n):
     m = int(minutes[i]); kind = kinds[i]; posture = postures[i] if kind == "awake_still" else None
-    if kind == "active":
+    if kind in ("active", "exercise_session"):
       last_effort = m + grid
+      active_minutes.append(m)
+      active_minutes = [a for a in active_minutes if m - a < BOUT_WINDOW_S]
+      if len(active_minutes) >= BOUT_MINUTES:
+        last_bout = m + grid
     if kind == "walking":
       last_walk = m + grid
+    if kind in ("awake_still", "asleep", "unknown"):
+      settle[i] = any(e is not None and 0 <= m - e < SETTLE_AFTER_BOUT_S for e in (last_bout, last_walk)) \
+        or (last_effort is not None and 0 <= m - last_effort < SETTLE_AFTER_ISOLATED_S)
     if prev_kind is not None and prev_kind != kind:
       last_trans = m
     if kind == "awake_still" and prev_posture is not _NOT_STILL and prev_posture != posture:
@@ -532,16 +605,13 @@ def resolve_transitions(minutes, kinds, postures, grid=60) -> MinuteContext:
     trans[i] = last_trans is not None and m - last_trans < TRANSITION_WINDOW_S
   return MinuteContext(np.asarray(minutes, np.int64), np.asarray(kinds, dtype=object),
                        np.asarray([p if k == "awake_still" else None for p, k in zip(postures, kinds)], dtype=object),
-                       since_e, since_w, trans)
+                       since_e, since_w, trans, settle)
 
 
 def settling(mc: MinuteContext) -> np.ndarray:
-  """WatchdogExpectation.settling."""
-  still = mc.kind == "awake_still"
-  with np.errstate(invalid="ignore"):
-    eff = np.isfinite(mc.since_effort) & (mc.since_effort < RECOVERY_AFTER_EFFORT_S)
-    walk = np.isfinite(mc.since_walking) & (mc.since_walking < RECOVERY_AFTER_WALKING_S)
-  return mc.transition | (still & (eff | walk))
+  """WatchdogExpectation.settling: a transition, or the resolver's settle on an awake-still minute (exercise sessions
+  and their recovery have their own references and need none)."""
+  return mc.transition | ((mc.kind == "awake_still") & mc.settling.astype(bool))
 
 
 @dataclasses.dataclass
@@ -597,8 +667,9 @@ def _pick(keys, day, refs, allow_provisional):
 
 # --------------------------------------------------------------------------------------------- timeline wiring
 
-# Engine context (context.CONTEXTS) -> Watchdog minute kind. Recovery is awake still; the Watchdog's own settling
-# rule (30 min after effort, 10 after walking) then decides whether it is drawn.
+# Engine context (context.CONTEXTS) -> Watchdog minute kind. The engine's recovery is awake still; the Watchdog's
+# settle then decides whether it is drawn, and the exercise phases from the rows (rule exercise-session-2) override
+# it below.
 _KIND_OF_CONTEXT = {"asleep": "asleep", "still_supine": "awake_still", "still_seated": "awake_still",
                     "still_upright": "awake_still", "still_unknown": "awake_still", "recovery": "awake_still",
                     "walking": "walking", "active": "active", "off": "unknown", "unknown": "unknown"}
@@ -659,6 +730,17 @@ def compute(tl, ctx) -> Layer1:
   day = np.asarray(tl.local_day, dtype=np.int64)
   refs = references(obs, np.unique(day), l1)
   kinds = [_KIND_OF_CONTEXT[CONTEXTS[int(c)]] for c in ctx.code]
+  # Exercise phases, as the resolver: session (not plain walking) -> exercise session; recovery (not walking, not
+  # moving) -> recovery; an ended unconfirmed period -> active.
+  for s in exercise_sessions(rows):
+    lo = np.searchsorted(tl.minutes, s.start); hi = np.searchsorted(tl.minutes, s.recovery_end)
+    for i in range(int(lo), int(hi)):
+      if kinds[i] in ("asleep", "walking"):
+        continue
+      if int(tl.minutes[i]) <= s.end:
+        kinds[i] = "exercise_session" if s.confirmed else "active"
+      elif s.confirmed and kinds[i] != "active":
+        kinds[i] = "recovery"
   # Posture: ContextMaterializer.posture(of:) on the stored interval at the minute's midpoint (latest start wins).
   if rows:
     k = interval_lookup(tl.minutes, [r.start for r in rows], [r.end for r in rows])
