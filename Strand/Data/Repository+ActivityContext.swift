@@ -199,6 +199,7 @@ enum ActivityPhoneEvidence {
         out.encoderVersion = encoder.encoderVersion
         out.transitionWindows = encoder.transitions
         out.gaitWindows = encoder.gaitWindows
+        out.verticalShifts = encoder.verticalShifts
         return out
     }
 

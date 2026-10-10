@@ -177,6 +177,9 @@ struct DecoderTracking: Codable, Equatable {
     var hrAverage: Double?
     var anchor: PostureAnchor?
     var priorLean: Double?
+    /// Recent seconds with a step signal (step ticks, the strap's walk class, or gait presence), last
+    /// `ActivityStillPosture.gaitWindowS` only: a foot shuffle is not walking away.
+    var gaitSeconds: [Int]?
 }
 
 /// The posture a measured change of height left (`ActivityVerticalShift`): log-odds of seated over upright, and the
@@ -619,6 +622,7 @@ public struct ActivityContextDecoder: Sendable {
 
     /// The current still stretch's start and the priors' lean this second (tests and replays inspect them).
     var stillPriorState: (since: Int?, lean: Double?) { (tracking.stillSinceTs, tracking.priorLean) }
+    var stillPriorAnchorTs: Int? { tracking.anchor?.ts }
 
     /// Track the current still stretch and set `tracking.priorLean`: the duration prior, a settled personal heart
     /// rate (`ActivityPostureHeartRateGate`) and a measured stand-up / sit-down's anchor, each bounded on its own and
@@ -652,23 +656,34 @@ public struct ActivityContextDecoder: Sendable {
         // adjusting in the chair) does not: on the owner's seated afternoon (2026-10-09) such bursts came every few
         // minutes, and Capture-24's still stretches, which the duration prior is measured on, end only at
         // locomotion, other activity or a change of posture.
-        let breaks = night || moving >= ActivityStillPosture.breakMovingMass
-            || transition >= ActivityStillPosture.breakTransitionMass
-            || (f.gaitPresence ?? 0) >= ActivityStillPosture.breakGaitPresence || (obs.strapClass ?? 0) >= 1
+        // Stepping counts as moving on only when sustained: one or two step ticks while seated (shifting the feet,
+        // reaching under the desk) came every half hour on the owner's seated afternoon.
+        var gait = (tracking.gaitSeconds ?? []).filter { ts - $0 < ActivityStillPosture.gaitWindowS }
+        if (f.gaitPresence ?? 0) >= ActivityStillPosture.breakGaitPresence || (obs.strapClass ?? 0) >= 1
+            || (obs.stepTicks ?? 0) > 0 { gait.append(ts) }
+        tracking.gaitSeconds = gait.isEmpty ? nil : gait
+        let locomotion = night || moving >= ActivityStillPosture.breakMovingMass
+            || gait.count >= ActivityStillPosture.breakGaitSeconds
+        let breaks = locomotion || transition >= ActivityStillPosture.breakTransitionMass
             || ActivityContextModel.shiftStrength(f) >= 0.5
+        // A measured stand-up / sit-down holds until the wearer moves on (steps, a moving mode, the night) or a new
+        // shift is measured: a seated person adjusting in the chair is still seated (the owner's measured sit-down at
+        // 16:52 on 2026-10-09 was followed by an arm shift every few minutes). The event's own seconds are allowed.
+        if locomotion, let a = tracking.anchor, ts - a.ts > ActivityStillPosture.anchorEventSlackS { tracking.anchor = nil }
         if measuredShift && !breaks {
             tracking.stillSinceTs = ts
         } else if breaks {
             tracking.stillSinceTs = nil
-            // An anchor outlives the transition that set it (the event's own seconds break the stretch), not
-            // anything after: moving on, or a later change of position, ends it.
-            if let a = tracking.anchor, ts - a.ts > ActivityStillPosture.anchorEventSlackS { tracking.anchor = nil }
         } else if tracking.stillSinceTs == nil, stationary >= ActivityStillPosture.startStationaryMass {
             tracking.stillSinceTs = ts
         }
-        let stillFor = tracking.stillSinceTs.map { max(0, ts - $0) } ?? 0
+        // While a measured shift's anchor holds, the posture bout is known to have lasted since it: the duration prior
+        // reads that age, so a stand-up's "standing" fades the way standing bouts do even if arm shifts restart the
+        // still stretch (and a sit-down's "sitting" only firms up).
+        let anchorAge = tracking.anchor.map { max(0, ts - $0.ts) }
+        let stillFor = max(tracking.stillSinceTs.map { max(0, ts - $0) } ?? 0, anchorAge ?? 0)
         var lean = 0.0
-        if tracking.stillSinceTs != nil {
+        if tracking.stillSinceTs != nil || anchorAge != nil {
             // Duration tells sitting from standing, not lying from either (Capture-24's stretches end at lying), so
             // it speaks only with a gravity direction this second, and steps back as far as the held orientation
             // already leans recumbent (a flat forearm, a raised hand): a long stillness on a sofa is not "sitting".
@@ -682,8 +697,8 @@ public struct ActivityContextDecoder: Sendable {
                     model: model, averageBpm: tracking.hrAverage, restingBpm: config.restingHeartRate,
                     stillForS: stillFor, sinceExertionS: tracking.lastExertionTs.map { ts - $0 }, slope: f.hrSlope)
             }
-            if let a = tracking.anchor { lean += a.lean }
         }
+        if let a = tracking.anchor, !night { lean += a.lean }
         lean = min(ActivityStillPosture.maxPriorLean, max(-ActivityStillPosture.maxPriorLean, lean))
         tracking.priorLean = lean == 0 ? nil : lean
     }

@@ -603,6 +603,7 @@ enum ActivityContextDays {
             // evidence the raw-IMU lane published for it.
             input.transitionWindows = encoder.transitions
             input.gaitWindows = encoder.gaitWindows
+            input.verticalShifts = encoder.verticalShifts
         }
         // A published document: only what the shared release policy lets shape the canonical decode. The stored
         // HART-embedded ElderNet windows record no release of their own, so they are shadow and left out.

@@ -121,6 +121,7 @@ extension Repository {
             input.encoderId = encoder.encoderId
             input.encoderVersion = encoder.encoderVersion
             input.transitionWindows = encoder.transitions
+            input.verticalShifts = encoder.verticalShifts
         }
         // No ElderNet windows: the base config carries no expert evidence (which stored expert rows may shape a
         // decode is decided per day by `ActivityPhoneEvidence`), so a fit replays HART and the strap streams alone.

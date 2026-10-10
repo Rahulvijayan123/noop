@@ -20,8 +20,12 @@ public enum ActivityStillPosture {
     public static let breakMovingMass = 0.5
     /// Postural-transition mass that ends one (a change of position starts a new stretch).
     public static let breakTransitionMass = 0.2
-    /// Gait presence (step counter or IMU rhythm) that ends one.
+    /// Gait presence (step counter or IMU rhythm) that counts a second as stepping, and how many stepping seconds in
+    /// the last `gaitWindowS` end a stretch (and a measured shift's anchor): walking away, not a foot shuffle or a
+    /// 3-second walk-class blip (the owner at 17:03 on 2026-10-09, seated, no height change in the raw IMU).
     public static let breakGaitPresence = 0.4
+    public static let breakGaitSeconds = 6
+    public static let gaitWindowS = 10
     /// Stationary mass at which a stretch may begin.
     public static let startStationaryMass = 0.6
     /// Seconds after a measured stand-up / sit-down during which a break is the event itself, not a new movement.
@@ -68,7 +72,7 @@ public enum ActivityStillPosture {
 
     // Measured change of height.
     /// |displacement| (m) at which a shift counts as a stand-up or sit-down, and the lean it then anchors.
-    public static let anchorMinDisplacementM = 0.15
+    public static let anchorMinDisplacementM = ActivityVerticalShift.minDisplacementM
     /// A rise anchors standing at ln 3: with the duration prior it commits "Standing" for about the first three still
     /// minutes and fades to unresolved by about ten, matching standing bouts (median 2.2 min, p90 7 min). A drop
     /// anchors sitting at ln 4 (sitting bouts are long, and the duration prior only adds to it).

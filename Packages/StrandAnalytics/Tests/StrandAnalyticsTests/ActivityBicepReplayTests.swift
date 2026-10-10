@@ -45,6 +45,15 @@ final class ActivityBicepReplayTests: XCTestCase {
                 input.transitionWindows = set.transitions.filter { $0.endTs >= range[0] && $0.endTs < range[1] }
             }
         }
+        // Optional measured shifts: lines "<ts> <startTs> <dh m> <quality>" (from the worker's raw replay).
+        if let text = try? String(contentsOf: base.appendingPathComponent("shifts.txt"), encoding: .utf8) {
+            for line in text.split(whereSeparator: \.isNewline) {
+                let p = line.split(separator: " ")
+                if p.count >= 4, let ts = Int(p[0]), let st = Int(p[1]), let dh = Double(p[2]), let q = Double(p[3]) {
+                    input.verticalShifts.append(ActivityVerticalShiftEvidence(ts: ts, startTs: st, displacementM: dh, quality: q))
+                }
+            }
+        }
         var truth: [(Int, Int, String)] = []
         if let text = try? String(contentsOf: base.appendingPathComponent("truth.txt"), encoding: .utf8) {
             for line in text.split(whereSeparator: \.isNewline) {
@@ -53,7 +62,7 @@ final class ActivityBicepReplayTests: XCTestCase {
             }
         }
         if truth.isEmpty { truth = [(range[0], range[1], "all")] }
-        print("REPLAY gravity \(gravity.count) hr \(hr.count) steps \(steps.count) hart \(input.encoderWindows.count)")
+        print("REPLAY gravity \(gravity.count) hr \(hr.count) steps \(steps.count) hart \(input.encoderWindows.count) shifts \(input.verticalShifts.count)")
 
         var bicep = ActivityDecoderConfig.personalized(restingHeartRate: 60, maxHeartRate: 190)
         bicep.placements = [ActivityPlacementSpan(start: 0, end: nil, placement: .bicep)]

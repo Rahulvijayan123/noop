@@ -239,6 +239,8 @@ struct ActivityLane {
         /// The shared release policy (ActivityExpertSelection) per raw-IMU job: jobs it decided for, and jobs whose
         /// published decode some expert channel shaped (only a production-released expert can; none is today).
         var expertSelections = 0
+        /// Measured stand-ups / sit-downs found in raw IMU (hsmm-2.0).
+        var verticalShifts = 0
         var expertCanonicalShaped = 0
         var lastSelectionDigest: String?
         /// The joint candidate rows (`activity_candidate_days`), written only while an expert runs in candidate mode.
@@ -952,17 +954,24 @@ struct ActivityLane {
 
         // 6b. ActivityContext v2: the same windows plus their IMU features and the day's stored
         //     streams through the shared probabilistic decoder. Best effort — see the type comment.
+        // 6a'. Measured stand-ups / sit-downs (hsmm-2.0): the strap's change of height over each still-bounded
+        //      movement, from the raw accelerometer and gyroscope (`ActivityVerticalShift`). Evidence for the
+        //      decode below and stored with the windows for the phone and the stream days.
+        let verticalShifts = Self.verticalShifts(timeline: timeline, runs: runs)
+            .filter { $0.ts >= dayBounds.start && $0.ts < dayBounds.end }
+        stats.verticalShifts += verticalShifts.count
         var context = try buildContextDayAndInput(
             job: job, dayBounds: dayBounds, windows: windows, versions: versions,
             asleep: asleep, inBed: inBed, exercise: exercise,
-            transitionVersion: transitionVersions, gaitWindows: expertGaitWindows, selection: selection)
+            transitionVersion: transitionVersions, gaitWindows: expertGaitWindows, selection: selection,
+            verticalShifts: verticalShifts)
         context.loggedWorkouts = try dayLoggedWorkouts(userId: job.userId, deviceId: job.deviceId,
                                                        from: dayBounds.start, to: dayBounds.end)
 
         // 6c. The windows themselves, for the phone's decoder and the stream days (best effort, like 6b).
         let windowsPayload = encoderWindowsPayload(job: job, dayBounds: dayBounds, windows: windows,
                                                    versions: versions, transitionVersion: transitionVersions,
-                                                   gaitWindows: expertGaitWindows)
+                                                   gaitWindows: expertGaitWindows, verticalShifts: verticalShifts)
 
         // 6d. Inertia shadow row (and candidate comparison): built from what 6b decoded, never changing it.
         let motionHeads = inertia.map {
@@ -1725,7 +1734,8 @@ struct ActivityLane {
         exercise: [(start: Int, end: Int, sport: String)],
         transitionVersion: String = "none",
         gaitWindows: [ActivityGaitWindow] = [],
-        selection: ActivityExpertSelection? = nil) throws -> ContextDayBuild {
+        selection: ActivityExpertSelection? = nil,
+        verticalShifts: [ActivityVerticalShiftEvidence] = []) throws -> ContextDayBuild {
         let started = Int(Date().timeIntervalSince1970)
         // The published decode reads only what the shared release policy lets shape it (no expert source here:
         // the HART-embedded gait windows alone, which are shadow).
@@ -1751,7 +1761,7 @@ struct ActivityLane {
             let now = Int(Date().timeIntervalSince1970)
             // A finished day's waking hours are awake, exactly as the stream day decodes them (audit D1-02).
             let known = ActivityContextDays.sleepKnown(now: now, dayEnd: dayBounds.end)
-            let input = ActivityContextDays.trackInput(
+            var input = ActivityContextDays.trackInput(
                 windows: windows, streams: streams, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, dayEnd: dayBounds.end, horizon: now,
                 sleepKnownOutsideSessions: known,
@@ -1759,6 +1769,7 @@ struct ActivityLane {
                 transitionVersion: transitionVersion,
                 transitionPreprocessingVersion: versions.preprocessing,
                 gaitWindows: gaitWindows)
+            input.verticalShifts = verticalShifts
             let lookback = ActivityContextDays.lookbackInput(
                 windows: windows, streams: before, sleep: asleep, inBed: inBed, exercise: exercise,
                 dayStart: dayBounds.start, sleepKnownOutsideSessions: known, encoderVersion: versions.model,
@@ -1796,12 +1807,14 @@ struct ActivityLane {
                                                 windows: [ActivityPythonService.WindowPrediction],
                                                 versions: (model: String, preprocessing: String),
                                                 transitionVersion: String = "none",
-                                                gaitWindows: [ActivityGaitWindow] = []) -> String? {
-        let set = ActivityEncoderWindowsStore.windowSet(windows: windows, dayStart: dayBounds.start,
+                                                gaitWindows: [ActivityGaitWindow] = [],
+                                                verticalShifts: [ActivityVerticalShiftEvidence] = []) -> String? {
+        var set = ActivityEncoderWindowsStore.windowSet(windows: windows, dayStart: dayBounds.start,
                                                         dayEnd: dayBounds.end, modelVersion: versions.model,
                                                         transitionVersion: transitionVersion,
                                                         preprocessingVersion: versions.preprocessing,
                                                         gaitWindows: gaitWindows)
+        set.verticalShifts = verticalShifts.filter { $0.ts >= dayBounds.start && $0.ts < dayBounds.end }
         do {
             return try ActivityEncoderWindowsStore.payload(set: set, day: job.day, dayStart: dayBounds.start,
                                                            preprocessingVersion: versions.preprocessing)
@@ -2437,6 +2450,33 @@ struct ActivityLane {
         }
         timeline.columns = flat
         return timeline
+    }
+
+    /// Measured stand-ups / sit-downs over every contiguous run of raw IMU (`ActivityVerticalShift.detect`), in time
+    /// order. Raw columns are the strap's i16 counts: accelerometer 1/4096 g, gyroscope 2000/32768 °/s per LSB.
+    static func verticalShifts(timeline: ImuTimeline, runs: [Run]) -> [ActivityVerticalShiftEvidence] {
+        guard !timeline.seconds.isEmpty else { return [] }
+        var indexOf: [Int64: Int] = [:]
+        for (i, s) in timeline.seconds.enumerated() { indexOf[s] = i }
+        let n = Npb1ImuDecoder.columnsPerRecord / 6
+        let aScale = Whoop5RawImu.accelScale, gScale = Whoop5RawImu.gyroScale
+        var out: [ActivityVerticalShiftEvidence] = []
+        for run in runs where run.end - run.start >= Int64(ActivityVerticalShift.minRunSeconds) {
+            var acc: [ActivityVerticalShift.Sample] = []
+            acc.reserveCapacity(Int(run.end - run.start) * n)
+            for s in run.start..<run.end {
+                guard let i = indexOf[s] else { continue }
+                let o = timeline.columnOffset(index: i)
+                for k in 0..<n {
+                    func col(_ axis: Int) -> Double { Double(timeline.columns[o + axis * n + k]) }
+                    acc.append(ActivityVerticalShift.Sample(
+                        ax: col(0) * aScale, ay: col(1) * aScale, az: col(2) * aScale,
+                        gx: col(3) * gScale, gy: col(4) * gScale, gz: col(5) * gScale))
+                }
+            }
+            out += ActivityVerticalShift.detect(acc, sampleRateHz: Double(n), startTs: Double(run.start))
+        }
+        return out
     }
 
     /// Split sorted unique seconds into contiguous runs [start, end). A run
