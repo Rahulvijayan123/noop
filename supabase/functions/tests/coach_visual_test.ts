@@ -14,6 +14,10 @@ const line = (over: Record<string, unknown> = {}) => ({
   type: 'line', title: 'HRV by week', yLabel: 'HRV (ms)', xLabel: 'Date', source: 'Apple Health',
   data: [{ label: 'Mar 3', value: 52 }, { label: 'Mar 10', value: 61 }, { label: 'Mar 17', value: 66 }], ...over,
 });
+const facts = () => ({
+  type: 'facts', title: 'HRV this month', source: 'Apple Health',
+  facts: [{ label: 'Mar 3', value: '52 ms' }, { label: 'Mar 17', value: '66 ms' }],
+});
 const toolReply = (args: unknown, name = 'visualize_data') => ({
   choices: [{ message: { content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name, arguments: JSON.stringify(args) } }] } }],
 });
@@ -97,9 +101,12 @@ Deno.test('visual pipeline: bad designs go back to the model, a failed fact-chec
   const third = await produceVisual(twice, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
   assertEquals([third.audit, third.stats.redesigns, third.stats.design_calls], ['passed', 2, 3]);
 
-  const refused = script(toolReply(line()), verdict(false, ['a']), toolReply(line()), verdict(false, ['b']), toolReply(line()), verdict(false, ['c']));
+  const refused = script(
+    toolReply(line()), verdict(false, ['a']), toolReply(line()), verdict(false, ['b']), toolReply(line()), verdict(false, ['c']),
+    toolReply(facts(), 'present_cards'), verdict(false, ['d']), toolReply(facts(), 'present_cards'), verdict(false, ['e']),
+  );
   const out = await produceVisual(refused, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
-  assertEquals([out.viz, out.audit, out.stats.redesigns], [null, 'rejected', 2]);
+  assertEquals([out.viz, out.audit, out.stats.redesigns, out.stats.fallback], [null, 'rejected', 3, 'line->facts']);
 
   const flaky = script(toolReply(line()), new Error('timeout'), verdict(true));
   const recovered = await produceVisual(flaky, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'trend_chart', types: ['line'] } });
@@ -119,7 +126,8 @@ const pacer = (over: Record<string, unknown> = {}) => ({
 });
 
 Deno.test('custom UI: an interactive tool routes to custom, parses, and refuses network, storage and script tags', () => {
-  assertEquals(planTypes('interactive_tool', { choice: 'line', probabilities: { line: 0.9 } }), ['custom']);
+  assertEquals(planTypes('interactive_tool', { choice: 'line', probabilities: { line: 0.9 } }), ['custom', 'line']);
+  assertEquals(planTypes('interactive_tool', null), ['custom']);
   assertEquals(sanitizeRoute({ kind: 'interactive_tool', types: ['custom'] }), { kind: 'interactive_tool', types: ['custom'] });
 
   const ok = parseCustomUi(pacer());
@@ -153,6 +161,27 @@ Deno.test('custom UI pipeline: designed, fixed after a lint issue, and fact-chec
   assert(model.calls[1].messages.some((m: any) => m.role === 'tool' && m.content.includes('network')));
   assert(model.calls[2].messages[0].content.includes('interactive tools'));
   assert(model.calls[2].messages[1].content.includes('TOOL\nTitle: Breathing pacer'));
+});
+
+Deno.test('custom UI fallback: a tool that fails the fact-check gives way to the ranked chart, never both', async () => {
+  const model = script(
+    toolReply(pacer(), 'render_custom_ui'), verdict(false, ['invented figure']),
+    toolReply(pacer(), 'render_custom_ui'), verdict(false, ['still invented']),
+    toolReply(line()), verdict(true),
+  );
+  const out = await produceVisual(model, { question: 'How is my HRV?', answer: ANSWER, evidence: DATA, route: { kind: 'interactive_tool', types: ['custom', 'line'] } });
+  assertEquals([out.audit, out.viz?.type, out.stats.fallback, out.stats.design_calls], ['passed', 'line', 'custom->line', 3]);
+  assertEquals(model.calls[4].tools.map((t: any) => t.function.name).includes('visualize_data'), true);
+
+  // Without a ranked chart the fallback is fact tiles; an answer with no figures gets no fallback at all.
+  const tiles = script(toolReply(pacer(), 'render_custom_ui'), verdict(false, ['x']), toolReply(pacer(), 'render_custom_ui'), verdict(false, ['y']),
+    toolReply(facts(), 'present_cards'), verdict(true));
+  const tiled = await produceVisual(tiles, { question: 'q', answer: ANSWER, evidence: DATA, route: { kind: 'interactive_tool', types: ['custom'] } });
+  assertEquals([tiled.viz?.type, tiled.stats.fallback], ['facts', 'custom->facts']);
+  const prose = 'Slow breathing with a longer exhale can help you settle before bed.';
+  const none = script(toolReply(pacer(), 'render_custom_ui'), verdict(false, ['x']), toolReply(pacer(), 'render_custom_ui'), verdict(false, ['y']));
+  const empty = await produceVisual(none, { question: 'q', answer: prose, evidence: '', route: { kind: 'interactive_tool', types: ['custom'] } });
+  assertEquals([empty.viz, empty.audit, none.calls.length], [null, 'rejected', 4]);
 });
 
 Deno.test('visual pipeline: pure text cards skip the fact-check call', async () => {

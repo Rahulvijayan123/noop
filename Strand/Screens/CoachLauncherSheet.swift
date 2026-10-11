@@ -63,7 +63,7 @@ struct CoachLauncherSheet: View {
 
     @ViewBuilder
     private var configured: some View {
-        Text("Ask about your charge, effort, rest and workouts, grounded in your own numbers.")
+        Text("Ask about your sleep, HRV, heart rate and activity, grounded in your own numbers.")
             .font(StrandFont.footnote)
             .foregroundStyle(StrandPalette.textTertiary)
 

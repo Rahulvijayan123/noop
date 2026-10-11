@@ -271,6 +271,7 @@ Deno.test('coach suggestions: personalised by the model, continue items mapped b
   assert(prompt.includes('- ferritin') && prompt.includes('hrv_down') && prompt.includes('Wednesday morning'));
   assert(prompt.indexOf('3:30 marathon') < prompt.indexOf('oat milk'), 'goals before preferences');
   assert(!prompt.includes('secret blocked words'));
+  assert(!prompt.includes('"charge"'), 'charge is not computed, so it never reaches the starters');
 
   const cached = await h.json('suggestions', { method: 'POST', body: { state, fallback } });
   assertEquals(cached.body, { ...first.body, source: 'cache' });
@@ -279,18 +280,18 @@ Deno.test('coach suggestions: personalised by the model, continue items mapped b
   // Anything in the fingerprint moves it: refresh, state, locale, a revising memory change, chat activity, the 12 h TTL.
   await h.json('suggestions', { method: 'POST', body: { state, fallback, refresh: true } });
   assertEquals(h.model.calls.length, 2);
-  await h.json('suggestions', { method: 'POST', body: { state: { ...state, charge: 'green' }, fallback } });
+  await h.json('suggestions', { method: 'POST', body: { state: { ...state, sleep: 'short' }, fallback } });
   assertEquals(h.model.calls.length, 3);
   await h.json('memories', { method: 'POST', body: { content: 'User tore an ACL in 2024', topic: 'injury', importance: 5 } });
-  await h.json('suggestions', { method: 'POST', body: { state: { ...state, charge: 'green' }, fallback } });
+  await h.json('suggestions', { method: 'POST', body: { state: { ...state, sleep: 'short' }, fallback } });
   assertEquals(h.model.calls.length, 4);
-  await h.json('suggestions', { method: 'POST', body: { state: { ...state, charge: 'green' }, fallback } });
+  await h.json('suggestions', { method: 'POST', body: { state: { ...state, sleep: 'short' }, fallback } });
   assertEquals(h.model.calls.length, 4, 'cached again');
   h.db.advance(13 * 3_600_000);
-  await h.json('suggestions', { method: 'POST', body: { state: { ...state, charge: 'green' }, fallback } });
+  await h.json('suggestions', { method: 'POST', body: { state: { ...state, sleep: 'short' }, fallback } });
   assertEquals(h.model.calls.length, 5, 'older than 12 h');
   h.db.message(USER, sleep.id, 'user', 'One more', { created_at: at(600) });
-  await h.json('suggestions', { method: 'POST', body: { state: { ...state, charge: 'green' }, fallback } });
+  await h.json('suggestions', { method: 'POST', body: { state: { ...state, sleep: 'short' }, fallback } });
   assertEquals(h.model.calls.length, 6);
   const stored = h.db.rows('coach_user_state').find((s) => s.user_id === USER);
   assertEquals(stored.suggestions.length, 4);

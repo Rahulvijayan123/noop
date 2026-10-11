@@ -78,6 +78,12 @@ export async function titleRoute(req: Request, userId: string, rawId: string, d:
 // Follow-ups
 // ------------------------------------------------------------------------------------------------
 
+/** Charge, effort or strain and the recovery or readiness scores behind them: the app does not compute these. */
+const UNCOMPUTED_SCORES = /\b(?:charge|strain|effort|readiness|recovery (?:score|trend\w*)|my recovery|training load)\b/i;
+export const mentionsUncomputedScore = (s: string) => UNCOMPUTED_SCORES.test(s);
+const UNCOMPUTED_RULE = 'Never mention charge, effort, strain, recovery or readiness scores, or training load: the app does not '
+  + 'compute them. Ask about sleep, HRV (RMSSD), resting heart rate, respiration, temperature, activity and how the user feels.';
+
 function followUpsSystem(language: string, minor: boolean, wantTitle: boolean): string {
   return [
     'You suggest what the user might ask Sana, a wellbeing assistant for people living with a rare disease, right after its answer. '
@@ -87,6 +93,7 @@ function followUpsSystem(language: string, minor: boolean, wantTitle: boolean): 
     'Each one is specific to what this answer covered (its metric, figures, plan or claim) and leads somewhere new: '
       + 'not a rephrase of the question, not a question already asked, not generic.',
     'Never ask for a diagnosis, a medication or a dosage, and never ask about AI models, vendors or Sana itself.',
+    UNCOMPUTED_RULE,
     minor ? 'The user is under 18: keep questions age-appropriate, with no weight-loss, dieting or supplement questions.' : '',
     wantTitle ? titleRule(language) : '',
   ].filter(Boolean).join('\n');
@@ -94,8 +101,7 @@ function followUpsSystem(language: string, minor: boolean, wantTitle: boolean): 
 
 const TOPIC_WORDS: [RegExp, string][] = [
   [/\bhrv\b|heart rate variability/i, 'HRV'], [/\bresting heart rate\b|\brhr\b/i, 'resting heart rate'],
-  [/\bsleep/i, 'sleep'], [/\brecovery\b|\bcharge\b/i, 'recovery'], [/\bstrain\b|\beffort\b|training load/i, 'training load'],
-  [/\bvo2/i, 'VO2 max'], [/\bsteps\b/i, 'step count'], [/\bstress\b/i, 'stress'], [/\bweight\b/i, 'weight'],
+  [/\bsleep/i, 'sleep'], [/\bvo2/i, 'VO2 max'], [/\bsteps\b/i, 'step count'], [/\bstress\b/i, 'stress'], [/\bweight\b/i, 'weight'],
   [/\b(?:workouts?|training|runs?|running|lifting|strength)\b/i, 'training'], [/\b(?:diet|nutrition|protein|calories)\b/i, 'nutrition'],
 ];
 
@@ -118,7 +124,7 @@ export function validFollowUps(raw: unknown, question: string, asked: string[]):
   const out: string[] = [];
   for (const item of Array.isArray(raw) ? raw.slice(0, 8) : []) {
     const s = sanitizeLine(item, 80);
-    if (!s || s.length < 8 || offLimits(s)) continue;
+    if (!s || s.length < 8 || offLimits(s) || mentionsUncomputedScore(s)) continue;
     const key = lineKey(s);
     const mine = tokenSet(s);
     if (!key || seen.has(key) || (mine.size >= 3 && priorTokens.some((t) => jaccard(mine, t) >= 0.8))) continue;
@@ -208,7 +214,7 @@ export async function followupsRoute(req: Request, userId: string, d: CoachDeps)
 // Starter suggestions
 // ------------------------------------------------------------------------------------------------
 
-const SUGGESTIONS_VERSION = 1;
+const SUGGESTIONS_VERSION = 2;
 const SUGGESTIONS_TTL_MS = 12 * 3_600_000;
 const KINDS = new Set(['continue', 'state', 'goal', 'explore']);
 const MEMORY_PRIORITY: Record<string, number> = { goal: 0, injury: 0, routine: 1, preference: 1 };
@@ -227,6 +233,9 @@ function cleanState(v: unknown): Record<string, unknown> | null {
     else if (typeof val === 'boolean') out[key] = val;
     else if (Array.isArray(val)) out[key] = val.filter((x) => typeof x === 'string').slice(0, 8).map((x) => collapse(x).slice(0, 40));
   }
+  // An older app still sends charge and effort bands; starters are never built on them.
+  for (const key of ['charge', 'chargeRounded', 'effort']) delete out[key];
+  if (Array.isArray(out.flags)) out.flags = (out.flags as string[]).filter((f) => f !== 'low_charge' && f !== 'high_load');
   return out;
 }
 
@@ -240,7 +249,7 @@ function cachedStarters(v: unknown): Starter[] {
   return v.filter(isObject).map((s) => ({
     text: sanitizeLine(s.text, 64) ?? '', kind: KINDS.has(s.kind) ? s.kind : 'explore',
     ...(s.kind === 'continue' && uuidOf(s.threadId) ? { threadId: uuidOf(s.threadId)! } : {}),
-  })).filter((s) => s.text && (s.kind !== 'continue' || s.threadId)).slice(0, 4);
+  })).filter((s) => s.text && !mentionsUncomputedScore(s.text) && (s.kind !== 'continue' || s.threadId)).slice(0, 4);
 }
 
 /** Model starters: at most 4, ≤ 64 characters, at most 2 `continue` items and only for chats it was shown. */
@@ -251,7 +260,7 @@ export function validStarters(raw: unknown, refs: Refs, avoid: string[]): Starte
   for (const item of Array.isArray(raw) ? raw.slice(0, 8) : []) {
     if (!isObject(item)) continue;
     const text = sanitizeLine(item.text, 64);
-    if (!text || offLimits(text) || seen.has(lineKey(text))) continue;
+    if (!text || offLimits(text) || mentionsUncomputedScore(text) || seen.has(lineKey(text))) continue;
     const kind = KINDS.has(item.kind) ? item.kind : 'explore';
     let threadId: string | undefined;
     if (kind === 'continue') {
@@ -278,6 +287,7 @@ function suggestionsSystem(language: string): string {
     'Make them specific to this user and different from each other and from the recent questions. '
       + 'No diagnosis, medication or dosage questions. Sana is not a fitness or strength coach: nothing about workouts, lifting, '
       + 'training plans or pushing harder. Prefer sleep, energy and pacing, symptoms and patterns, and preparing for appointments.',
+    UNCOMPUTED_RULE,
   ].join('\n');
 }
 
@@ -285,7 +295,8 @@ export async function suggestionsRoute(req: Request, userId: string, d: CoachDep
   const body = await readOptionalJson(req);
   const state = cleanState(body.state);
   const fallback: Starter[] = (Array.isArray(body.fallback) ? body.fallback : [])
-    .map((s: unknown) => sanitizeLine(s, 64)).filter((s: string | null): s is string => !!s && !offLimits(s))
+    .map((s: unknown) => sanitizeLine(s, 64))
+    .filter((s: string | null): s is string => !!s && !offLimits(s) && !mentionsUncomputedScore(s))
     .slice(0, 12).map((text: string) => ({ text, kind: 'explore' }));
   const locale = cleanLocale(body.locale);
   const owner = `user_id=eq.${userId}`;

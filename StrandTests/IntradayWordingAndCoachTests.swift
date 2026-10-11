@@ -1,3 +1,4 @@
+import StrandAnalytics
 import XCTest
 @testable import Strand
 
@@ -94,5 +95,24 @@ final class IntradayWordingAndCoachTests: XCTestCase {
                                           now: Date(timeIntervalSince1970: TimeInterval(dayStart + 3_600)))
         XCTAssertTrue(text.contains("no readings between"))
         XCTAssertTrue(text.contains("not that the device only records once a day"))
+    }
+
+    func testHrvReadingsAreLabelledWithTheSettledStateTheBaselinesUse() {
+        func iv(_ start: Int, _ end: Int, _ cls: ActivityClass, sleep: SleepContextState = .awake) -> ActivityContextInterval {
+            ActivityContextInterval(start: start, end: end, activityClass: cls, confidence: 0.9, sleep: sleep)
+        }
+        let day = [iv(0, 600, .walking), iv(600, 1_500, .sitting), iv(1_500, 2_400, .sitting)]
+
+        let seated = CoachIntraday.hrvState(bucketStart: 2_100, width: 300, intervals: day)
+        XCTAssertEqual(seated.group, .seated)
+        XCTAssertEqual(seated.stillForS, 1_500, "adjacent sitting intervals are one still run")
+        XCTAssertEqual(seated.sinceMovementS, 1_500)
+
+        let justSat = CoachIntraday.hrvState(bucketStart: 900, width: 300, intervals: day)
+        XCTAssertEqual(justSat.group, .unsettled, "five minutes after walking is under the ten-minute settle rule")
+
+        let night = [iv(0, 3_600, .sleeping, sleep: .asleep)]
+        XCTAssertEqual(CoachIntraday.hrvState(bucketStart: 1_200, width: 300, intervals: night).group, .asleep)
+        XCTAssertEqual(CoachIntraday.hrvState(bucketStart: 5_000, width: 300, intervals: night).group, .unknown)
     }
 }

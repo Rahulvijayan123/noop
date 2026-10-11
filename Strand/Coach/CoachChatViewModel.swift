@@ -1158,7 +1158,10 @@ final class CoachChatViewModel: ObservableObject {
                           knownOnServer: threadOnServer)
         persist([reply.id], afterSave: { [weak self] in self?.afterSave(threadId: turn.threadId) })
         if let answer {
-            startVisual(for: reply.id, threadId: turn.threadId, question: user.content, answer: answer, evidence: evidence)
+            // One visual per answer: an interactive card is it; otherwise the pipeline picks a tool or a chart.
+            if !(reply.ui.map { CoachGenUI.isInteractive($0.source) } ?? false) {
+                startVisual(for: reply.id, threadId: turn.threadId, question: user.content, answer: answer, evidence: evidence)
+            }
             startFollowUps(for: reply.id, threadId: turn.threadId, question: user.content, answer: answer,
                            wantTitle: firstAnswer && titleOpen)
         }

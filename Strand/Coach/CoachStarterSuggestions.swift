@@ -65,22 +65,17 @@ struct CoachWorkoutStamp: Equatable, Sendable {
 }
 
 /// The phone's coarse state, sent as `state` to `POST suggestions` (`docs/COACH_MEMORY.md` §7.5). Everything is
-/// a band, a rounded value or a flag, so the server's cache fingerprint stays stable through the day.
+/// a band, a rounded value or a flag, so the server's cache fingerprint stays stable through the day. Charge and
+/// effort are left out: the app does not compute them, so no starter may be built on them.
 struct CoachUserStateSnapshot: Codable, Equatable, Sendable {
     /// The newest day with data, `yyyy-MM-dd`.
     var day: String?
-    /// `red | yellow | green`.
-    var charge: String?
-    /// Charge rounded to the nearest 10.
-    var chargeRounded: Int?
-    /// HRV against the 30-day mean: `down | normal | up`.
+    /// Overnight HRV (RMSSD, asleep) against the 30-night mean: `down | normal | up`.
     var hrv: String?
     /// Last night: `short | ok | long`.
     var sleep: String?
     /// Last night's sleep rounded to the nearest half hour.
     var sleepHours: Double?
-    /// The 7-day effort load against the 28-day norm: `low | normal | high`.
-    var effort: String?
     /// The live Watchdog severity (`withinLimits`, `note`, `candidate`, `active`, `severe`), when it is scoring.
     var watchdog: String?
     /// The Watchdog headline, only when it carries no readings.
@@ -98,17 +93,9 @@ struct CoachUserStateSnapshot: Codable, Equatable, Sendable {
 
     static func make(days: [DailyMetric], workouts: [CoachWorkoutStamp] = [], watchdogSeverity: String? = nil,
                      watchdogHeadline: String? = nil, now: Date = Date(), calendar: Calendar = .current) -> CoachUserStateSnapshot {
-        let measured = days.filter { $0.recovery != nil || $0.avgHrv != nil || $0.totalSleepMin != nil || $0.strain != nil }
+        let measured = days.filter { $0.avgHrv != nil || $0.totalSleepMin != nil }
         let latest = measured.last
         var flags: [String] = []
-
-        var charge: String?
-        var chargeRounded: Int?
-        if let c = latest?.recovery {
-            charge = c < 34 ? "red" : c < 67 ? "yellow" : "green"
-            chargeRounded = Int((c / 10).rounded() * 10)
-            if charge == "red" { flags.append("low_charge") }
-        }
 
         var hrv: String?
         if let latest, let latestHrv = latest.avgHrv {
@@ -126,17 +113,6 @@ struct CoachUserStateSnapshot: Codable, Equatable, Sendable {
             sleep = minutes < 360 ? "short" : minutes > 540 ? "long" : "ok"
             sleepHours = (minutes / 30).rounded() / 2
             if sleep == "short" { flags.append("short_sleep") }
-        }
-
-        var effort: String?
-        let acute = measured.suffix(7).compactMap(\.strain), chronic = measured.suffix(28).compactMap(\.strain)
-        if acute.count >= 3, chronic.count >= 14 {
-            let a = acute.reduce(0, +) / Double(acute.count), c = chronic.reduce(0, +) / Double(chronic.count)
-            if c > 0 {
-                let ratio = a / c
-                effort = ratio > 1.3 ? "high" : ratio < 0.8 ? "low" : "normal"
-                if effort == "high" { flags.append("high_load") }
-            }
         }
 
         var watchdog: String?
@@ -161,8 +137,8 @@ struct CoachUserStateSnapshot: Codable, Equatable, Sendable {
         let dayPart = (5..<12).contains(hour) ? "morning" : (12..<17).contains(hour) ? "afternoon"
             : (17..<22).contains(hour) ? "evening" : "night"
 
-        return CoachUserStateSnapshot(day: latest?.day, charge: charge, chargeRounded: chargeRounded, hrv: hrv, sleep: sleep,
-                                      sleepHours: sleepHours, effort: effort, watchdog: watchdog, watchdogHeadline: headline,
+        return CoachUserStateSnapshot(day: latest?.day, hrv: hrv, sleep: sleep,
+                                      sleepHours: sleepHours, watchdog: watchdog, watchdogHeadline: headline,
                                       daysSinceWorkout: daysSinceWorkout, lastSport: lastSport, dataDays: measured.count,
                                       weekday: weekdays[max(0, min(6, weekdayIndex))], dayPart: dayPart, flags: flags)
     }
@@ -174,11 +150,18 @@ enum CoachStarterSuggestions {
     static let limit = 4
     static let maxContinue = 2
 
+    /// The shared banding's chips that stand on Charge or Effort, which the app does not compute.
+    static let scoreChips: Set<String> = [
+        "Low energy today — how should I pace myself?", "A steady day — how should I pace it?",
+        "I'm feeling good today — how can I make the most of it?", "Have I done enough today, or should I rest?",
+    ]
+
     /// The phone's own chips: the banded `CoachSuggestions` first (contextual when there is data), then the
     /// generic `CoachPrompts`.
     static func local(today: DailyMetric?, recent: [DailyMetric], userAge: Int? = nil) -> [CoachStarterSuggestion] {
-        let banded = CoachSuggestions.suggestions(for: today, recent: recent)
-        let contextual = banded != CoachSuggestions.fallback
+        let banded = CoachSuggestions.suggestions(for: today, recent: recent).filter { !scoreChips.contains($0) }
+        // Only the stable generic chip left means nothing contextual fired.
+        let contextual = banded.count > 1 && banded != CoachSuggestions.fallback
         let items = banded.map { CoachStarterSuggestion(text: $0, kind: contextual ? .state : .explore) }
             + CoachPrompts.suggestions.map { CoachStarterSuggestion(text: $0, kind: .explore) }
         return screened(items, userAge: userAge)
@@ -198,6 +181,7 @@ enum CoachStarterSuggestions {
         for item in items {
             let text = CoachModelText.collapsed(item.text)
             guard !text.isEmpty, text.count <= 80, !CoachModelText.isTrainingTalk(text),
+                  !CoachModelText.mentionsUncomputedScore(text),
                   CoachModelText.isSafe(text, userAge: userAge) else { continue }
             let key = CoachModelText.normalized(text)
             guard !key.isEmpty, seen.insert(key).inserted else { continue }
@@ -249,6 +233,13 @@ enum CoachModelText {
                    options: [.regularExpression, .caseInsensitive]) != nil
     }
 
+    /// Charge, effort or strain, and the recovery or readiness scores behind them: the app does not compute these,
+    /// so a suggested question about them is dropped, whoever wrote it.
+    static func mentionsUncomputedScore(_ text: String) -> Bool {
+        text.range(of: #"\b(charge|strain|effort|readiness|recovery (?:score|trend\w*)|my recovery|training load)\b"#,
+                   options: [.regularExpression, .caseInsensitive]) != nil
+    }
+
     static func collapsed(_ text: String) -> String {
         text.split(whereSeparator: { $0.isWhitespace || $0.isNewline }).joined(separator: " ")
     }
@@ -280,7 +271,7 @@ enum CoachModelText {
         var out: [String] = []
         for item in raw {
             let text = collapsed(item)
-            guard (8...80).contains(text.count), isSafe(text, userAge: userAge),
+            guard (8...80).contains(text.count), !mentionsUncomputedScore(text), isSafe(text, userAge: userAge),
                   seen.insert(normalized(text)).inserted else { continue }
             out.append(text)
             if out.count == 3 { break }

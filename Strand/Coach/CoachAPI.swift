@@ -1036,7 +1036,7 @@ final class CoachAPI: @unchecked Sendable {
     /// a request carrying that `route` designs and fact-checks it. A nil visual means "show nothing".
     func visual(_ request: CoachVisualRequest) async throws -> CoachVisualResponse {
         let body = try JSONSerialization.jsonObject(with: JSONEncoder().encode(request))
-        let data = try await send(try self.request("visual", method: "POST", body: body, timeout: request.routeOnly ? 25 : 120))
+        let data = try await send(try self.request("visual", method: "POST", body: body, timeout: request.routeOnly ? 25 : 150))
         return try JSONDecoder().decode(CoachVisualResponse.self, from: data)
     }
 

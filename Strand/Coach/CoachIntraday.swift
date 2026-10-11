@@ -1,4 +1,5 @@
 import Foundation
+import StrandAnalytics
 
 /// The coach's view of the server's dense intraday series: the same buckets the metric pages draw (one
 /// minute for respiratory rate, steps and calories, five for HRV and resting heart rate), turned into text a
@@ -64,8 +65,12 @@ enum CoachIntraday {
         seconds % 60 == 0 ? "\(seconds / 60)-minute" : "\(seconds)-second"
     }
 
+    /// - Parameter activity: the saved activity context over the window (and a few hours before it). For HRV each
+    ///   reading is then labelled with the wearer's state and the readings are summarised per state, so the model
+    ///   compares like with like instead of a morning reading with an evening one.
     static func describe(window: IntradaySeriesWindow, metric: IntradayMetric,
-                         timeZone: TimeZone = .current, now: Date = Date()) -> String {
+                         timeZone: TimeZone = .current, now: Date = Date(),
+                         activity: [ActivityContextInterval]? = nil) -> String {
         let points = window.points(metric)
         let name = title(metric)
         let width = window.bucketSeconds(for: metric)
@@ -103,19 +108,167 @@ enum CoachIntraday {
                 hours.append((hour, [point.value]))
             }
         }
+        let states: [HrvState]? = metric == .hrv ? activity.map { context in
+            let sorted = context.sorted { $0.start < $1.start }
+            return points.map { hrvState(bucketStart: $0.start, width: width, intervals: sorted) }
+        } : nil
+        if let states {
+            lines.append(contentsOf: stateSummary(points: points, states: states, metric: metric, timeZone: timeZone))
+        }
+
         lines.append(metric.isCumulative ? "By hour (total, readings in the hour):" : "By hour (mean, readings in the hour):")
         for hour in hours {
             let sum = hour.values.reduce(0, +)
             let shown = metric.isCumulative ? sum : sum / Double(hour.values.count)
             lines.append("  \(stamp(hour.start, timeZone)): \(metric.format(shown)) (\(hour.values.count))")
         }
+        if states != nil { lines.append("  (Hourly means mix states; compare within one state above, not hour against hour.)") }
 
-        let recent = points.suffix(12)
+        let recent = points.indices.suffix(12)
         lines.append("Most recent readings:")
-        for point in recent {
-            lines.append("  \(clock(point.date, timeZone)): \(metric.format(point.value))")
+        for i in recent {
+            let tag = states.map { " — " + $0[i].tag } ?? ""
+            lines.append("  \(clock(points[i].date, timeZone)): \(metric.format(points[i].value))\(tag)")
         }
         return lines.joined(separator: "\n")
+    }
+
+    // MARK: HRV by state
+
+    /// The wearer's state during one HRV bucket, read from the saved activity context under the steady-state rule
+    /// the awake-rest baselines use (`LongitudinalBaseline.ContextMaterializer`), so each group lines up with a
+    /// baseline row of `get_baseline_status`.
+    struct HrvState: Equatable {
+        enum Group: Int, CaseIterable, Comparable {
+            case asleep, lying, seated, standing, stillUnresolved, unsettled, moving, unknown
+            static func < (a: Group, b: Group) -> Bool { a.rawValue < b.rawValue }
+
+            var title: String {
+                switch self {
+                case .asleep: return "Asleep"
+                case .lying: return "Awake, lying still, settled"
+                case .seated: return "Awake, sitting still, settled"
+                case .standing: return "Awake, standing still, settled"
+                case .stillUnresolved: return "Awake and still (sitting or standing, unresolved), settled"
+                case .unsettled: return "Awake and still but not settled (just changed position or recently moved)"
+                case .moving: return "Moving"
+                case .unknown: return "No activity context for the reading"
+                }
+            }
+        }
+
+        let group: Group
+        /// Seconds the wearer had been still in one position when the reading began.
+        let stillForS: Int?
+        /// Seconds since the last walking, light or vigorous activity, when one was seen in the look-back.
+        let sinceMovementS: Int?
+
+        var tag: String {
+            var parts: [String]
+            switch group {
+            case .asleep: parts = ["asleep"]
+            case .lying: parts = ["lying still, settled"]
+            case .seated: parts = ["sitting still, settled"]
+            case .standing: parts = ["standing still, settled"]
+            case .stillUnresolved: parts = ["still (sitting or standing), settled"]
+            case .unsettled: parts = ["still, not settled"]
+            case .moving: parts = ["moving"]
+            case .unknown: parts = ["no activity context"]
+            }
+            if let s = stillForS { parts.append("still \(CoachActivityContext.duration(s))") }
+            if let m = sinceMovementS, group != .asleep, group != .moving {
+                parts.append("\(CoachActivityContext.duration(m)) after moving")
+            }
+            return parts.joined(separator: ", ")
+        }
+    }
+
+    /// How far back a still run and the last movement are looked for.
+    static let stateLookbackS = 3 * 3_600
+
+    static func hrvState(bucketStart s: Int, width: Int, intervals: [ActivityContextInterval]) -> HrvState {
+        typealias M = LongitudinalBaseline.ContextMaterializer
+        let end = s + width
+        var seconds: [ActivityClass: Int] = [:]
+        var asleepS = 0, covered = 0
+        for iv in intervals where iv.end > s && iv.start < end {
+            guard iv.wear != .offWrist, iv.activityClass != .offWrist, iv.activityClass != .unknown else { continue }
+            let overlap = min(iv.end, end) - max(iv.start, s)
+            covered += overlap
+            seconds[iv.activityClass, default: 0] += overlap
+            if iv.activityClass == .sleeping || iv.sleep == .asleep { asleepS += overlap }
+        }
+        guard covered * 2 >= width, let dominant = seconds.max(by: { $0.value < $1.value })?.key else {
+            return HrvState(group: .unknown, stillForS: nil, sinceMovementS: nil)
+        }
+        if asleepS * 2 >= covered { return HrvState(group: .asleep, stillForS: nil, sinceMovementS: nil) }
+        if dominant.isMovement { return HrvState(group: .moving, stillForS: nil, sinceMovementS: nil) }
+        guard dominant.isStationaryAwake || dominant == .lyingDown else {
+            return HrvState(group: .unknown, stillForS: nil, sinceMovementS: nil)
+        }
+
+        // Walk back from the reading: the still run in one position, then the last movement of each kind.
+        let lying = dominant == .lyingDown
+        let before = intervals.filter { $0.start < s && $0.end > s - stateLookbackS }.reversed()
+        var runStart = s
+        var runOpen = true
+        var lastWalk: Int?, lastVigorous: Int?
+        for iv in before {
+            let still = (iv.activityClass.isStationaryAwake || iv.activityClass == .lyingDown) && iv.sleep != .asleep
+                && iv.wear != .offWrist
+            if runOpen {
+                if still, (iv.activityClass == .lyingDown) == lying, runStart - iv.end <= 10 {
+                    runStart = min(runStart, iv.start)
+                    continue
+                }
+                runOpen = false
+            }
+            switch iv.activityClass {
+            case .running, .cycling, .vigorousActivity: lastVigorous = lastVigorous ?? iv.end
+            case .walking, .briskWalking, .lightActivity: lastWalk = lastWalk ?? iv.end
+            default: break
+            }
+            if lastWalk != nil, lastVigorous != nil { break }
+        }
+        let stillFor = s - runStart
+        let sinceWalk = lastWalk.map { s - $0 }, sinceVigorous = lastVigorous.map { s - $0 }
+        let settled = stillFor >= M.settleAfterTransitionS
+            && (sinceWalk ?? .max) >= M.settleAfterWalkingS
+            && (sinceVigorous ?? .max) >= M.settleAfterVigorousS
+        let sinceMovement = [sinceWalk, sinceVigorous].compactMap { $0 }.min()
+        let group: HrvState.Group
+        if !settled {
+            group = .unsettled
+        } else {
+            switch dominant {
+            case .lyingDown: group = .lying
+            case .sitting, .sittingDesk: group = .seated
+            case .standing: group = .standing
+            default: group = .stillUnresolved
+            }
+        }
+        return HrvState(group: group, stillForS: stillFor, sinceMovementS: sinceMovement)
+    }
+
+    /// One line per state: count, median and middle half, and when those readings were taken.
+    static func stateSummary(points: [IntradaySeriesPoint], states: [HrvState], metric: IntradayMetric,
+                             timeZone: TimeZone) -> [String] {
+        typealias M = LongitudinalBaseline.ContextMaterializer
+        var lines = ["HRV BY STATE: each 5-minute RMSSD reading matched to the saved activity context. 'Settled' is the "
+            + "steady-state rule the personal baselines use (still in one position for at least \(M.settleAfterTransitionS / 60) min, "
+            + "\(M.settleAfterWalkingS / 60) min after walking or light activity, \(M.settleAfterVigorousS / 60) min after vigorous "
+            + "activity). Compare readings only within one state, and a settled state only with its matching baseline row:"]
+        for group in HrvState.Group.allCases {
+            let idx = states.indices.filter { states[$0].group == group }
+            guard !idx.isEmpty else { continue }
+            let values = idx.map { points[$0].value }.sorted()
+            let q = { (p: Double) -> Double in values[min(values.count - 1, Int((Double(values.count - 1) * p).rounded()))] }
+            var line = "  • \(group.title): \(values.count) reading\(values.count == 1 ? "" : "s"), median \(metric.format(q(0.5))) \(metric.unit)"
+            if values.count >= 4 { line += " (middle half \(metric.format(q(0.25)))–\(metric.format(q(0.75))))" }
+            line += ", \(clock(points[idx.first!].date, timeZone))–\(clock(points[idx.last!].date, timeZone))"
+            lines.append(line)
+        }
+        return lines
     }
 
     private static func stamp(_ date: Date, _ zone: TimeZone) -> String { format(date, zone, "EEE MMM d HH:mm") }

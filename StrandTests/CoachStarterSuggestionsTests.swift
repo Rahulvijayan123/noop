@@ -60,13 +60,15 @@ final class CoachStarterSuggestionsTests: XCTestCase {
 
     func testLocalSetIsBandedWhenThereIsDataAndGenericOtherwise() {
         let generic = CoachStarterSuggestions.local(today: nil, recent: [], userAge: 30)
-        XCTAssertEqual(generic.map(\.text), Array(CoachSuggestions.fallback.prefix(4)))
+        XCTAssertEqual(generic.first?.text, "How should I pace my day today?")
+        XCTAssertFalse(generic.contains { CoachModelText.mentionsUncomputedScore($0.text) }, "no recovery-score chip")
         XCTAssertTrue(generic.allSatisfy { $0.kind == .explore })
         let today = DailyMetric(day: "2026-10-07", totalSleepMin: 300, efficiency: nil, deepMin: nil, remMin: nil, lightMin: nil,
                                 disturbances: nil, restingHr: 60, avgHrv: 40, recovery: 20, strain: 30, exerciseCount: nil)
         let banded = CoachStarterSuggestions.local(today: today, recent: [today], userAge: 30)
         XCTAssertEqual(banded.first?.kind, .state)
-        XCTAssertEqual(banded.first?.text, CoachSuggestions.suggestions(for: today, recent: [today]).first)
+        XCTAssertEqual(banded.first?.text, "I slept poorly — how do I recover today?", "the charge-band chip is left out")
+        XCTAssertTrue(banded.allSatisfy { !CoachStarterSuggestions.scoreChips.contains($0.text) })
     }
 
     func testUnknownKindDecodesAsExplore() throws {
@@ -95,12 +97,9 @@ final class CoachStarterSuggestionsTests: XCTestCase {
         let snap = CoachUserStateSnapshot.make(days: days, workouts: workouts, watchdogSeverity: "active",
                                                watchdogHeadline: "Resting heart rate is running high", now: now, calendar: cal)
         XCTAssertEqual(snap.day, "2026-10-07")
-        XCTAssertEqual(snap.charge, "red")
-        XCTAssertEqual(snap.chargeRounded, 20)
         XCTAssertEqual(snap.hrv, "down")
         XCTAssertEqual(snap.sleep, "short")
         XCTAssertEqual(snap.sleepHours, 5)
-        XCTAssertEqual(snap.effort, "high")
         XCTAssertEqual(snap.watchdog, "active")
         XCTAssertEqual(snap.watchdogHeadline, "Resting heart rate is running high")
         XCTAssertEqual(snap.daysSinceWorkout, 15)
@@ -108,7 +107,9 @@ final class CoachStarterSuggestionsTests: XCTestCase {
         XCTAssertEqual(snap.dataDays, 31)
         XCTAssertEqual(snap.weekday, "Wednesday")
         XCTAssertEqual(snap.dayPart, "afternoon")
-        XCTAssertEqual(Set(snap.flags), ["low_charge", "hrv_down", "short_sleep", "high_load", "watchdog_active", "no_recent_workout"])
+        XCTAssertEqual(Set(snap.flags), ["hrv_down", "short_sleep", "watchdog_active", "no_recent_workout"])
+        let wire = String(decoding: try JSONEncoder().encode(snap), as: UTF8.self)
+        XCTAssertFalse(wire.contains("charge") || wire.contains("effort"), "charge and effort are not computed, so never sent")
         let withReading = CoachUserStateSnapshot.make(days: days, watchdogHeadline: "Resting HR 64 bpm", now: now, calendar: cal)
         XCTAssertNil(withReading.watchdogHeadline, "a headline that carries a reading is left out")
         XCTAssertNil(withReading.daysSinceWorkout)

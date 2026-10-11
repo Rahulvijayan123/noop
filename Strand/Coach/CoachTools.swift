@@ -112,7 +112,7 @@ struct CoachToolExecutor {
              "A night's sleep details from the server: regularity, heart rate by sleep stage, falling asleep, breathing estimated from the heart-rate rhythm (not airflow), temperature and rest-activity rhythm, rebound after short nights and secondary HRV statistics. Use for questions about how a night went beyond the totals in get_daily_metrics.",
              ["day": ("string", "Optional: the day the night ended, YYYY-MM-DD (default today)")]),
         tool("get_baseline_status",
-             "The wearer's PERSONAL BASELINE: for each vital (resting HR, HRV, wrist temperature, respiration, SpO2, awake heart rate), their own 7-day usual and longer 60-day usual with the usual range and how last night compares, plus the live Watchdog check of the last 30 minutes against those usuals, today's daily log and whether a treatment course is logged. Use for 'is this normal for me?', 'am I getting sick?', 'is my HRV/RHR/temperature off?', 'what's my baseline?', or any question comparing now to their usual. Separate from Charge; never a diagnosis."),
+             "The wearer's PERSONAL BASELINE: for each vital (resting HR, HRV, wrist temperature, respiration, SpO2, awake heart rate), split by the state it was measured in (asleep; awake at steady-state rest; awake lying, seated or standing), their own 7-day usual and longer 60-day usual with the usual range and how last night compares, plus the live Watchdog check of the last 30 minutes against those usuals, today's daily log and whether a treatment course is logged. Use for 'is this normal for me?', 'am I getting sick?', 'is my HRV/RHR/temperature off?', 'what's my baseline?', or any question comparing now to their usual. Separate from Charge; never a diagnosis."),
         tool("save_memory",
              "Save a durable fact about the user (goal, injury, preference, routine), third person, e.g. 'User is training for a half marathon in March'. Not transient data.",
              ["content": ("string", "The fact, under 400 characters"),
@@ -276,7 +276,7 @@ struct CoachToolExecutor {
     private func dailyMetrics(days: Int) -> String {
         let window = Array(repo.days.suffix(days).reversed())
         guard !window.isEmpty else { return "No wearable data is available yet." }
-        let header = "Last \(window.count) days, newest first (charge 0-100, effort 0-100, rest in hours, stages in hours, efficiency %, HRV ms, RHR bpm; a dash means NOT MEASURED. HRV and RHR here are one summary per day; for readings through the day call get_intraday_series):"
+        let header = "Last \(window.count) days, newest first (charge 0-100, effort 0-100, rest in hours, stages in hours, efficiency %, HRV = that night's overnight RMSSD in ms measured asleep, RHR bpm; a dash means NOT MEASURED. HRV and RHR here are one summary per night, comparable only with other nights; for readings through the day call get_intraday_series):"
         return ([header] + window.map { "  " + engine.dayLine($0) }).joined(separator: "\n")
     }
 
@@ -312,7 +312,10 @@ struct CoachToolExecutor {
             lines.append("• Charge not measured for \(latest.day).")
         }
         let hrvUsual = PersonalUsual.usual(days: all, metric: .hrvRmssd, asOf: latest.day, context: context)
-        lines.append("• HRV \(fmt(latest.avgHrv)) ms vs \(PersonalUsual.phrase(hrvUsual, unit: " ms")) (\(delta(latest.avgHrv, hrvUsual)) ms); 7-day \(fmt(mean(last7) { $0.avgHrv })) ms")
+        lines.append("• Overnight HRV (RMSSD, asleep) \(fmt(latest.avgHrv)) ms vs the overnight RMSSD \(PersonalUsual.phrase(hrvUsual, unit: " ms")) (\(delta(latest.avgHrv, hrvUsual)) ms); 7-night mean \(fmt(mean(last7) { $0.avgHrv })) ms")
+        if let sdnn = latest.avgSdnn {
+            lines.append("• Overnight HRV (SDNN, asleep) \(fmt(sdnn)) ms; SDNN is a different statistic from RMSSD and is never compared with it")
+        }
         let rhrUsual = PersonalUsual.usual(days: all, metric: .restingHR, asOf: latest.day, context: context)
         lines.append("• Resting HR \(latest.restingHr.map(String.init) ?? "—") bpm vs \(PersonalUsual.phrase(rhrUsual, unit: " bpm")) (\(delta(latest.restingHr.map(Double.init), rhrUsual)) bpm); 7-day \(fmt(mean(last7) { $0.restingHr.map(Double.init) })) bpm")
 
@@ -336,6 +339,19 @@ struct CoachToolExecutor {
         return lines.joined(separator: "\n")
     }
 
+    /// How each baseline row is measured, so a reading is only ever set against the row taken in the same state.
+    static let baselineMethod: String = {
+        typealias M = LongitudinalBaseline.ContextMaterializer
+        return "HOW EACH ROW IS MEASURED: 'Sleep' rows use only readings taken asleep. 'Awake-rest' rows use awake readings "
+            + "with the wrist still, at least \(M.settleAfterTransitionS / 60) min after a change of position, "
+            + "\(M.settleAfterWalkingS / 60) min after walking and \(M.settleAfterVigorousS / 60) min after vigorous activity "
+            + "(the steady-state rule); 'Awake lying', 'Awake seated' and 'Awake standing' rows are the awake-rest readings in that "
+            + "position (sitting and standing come from a wrist estimate, so they are likelihoods). HRV rows are RMSSD in ms, pooled "
+            + "from clean beat-to-beat intervals (at least \(M.minHRVPairs) beat pairs a day), with the usual taken as the robust "
+            + "centre of ln(RMSSD) over the window. Compare a reading only with the row measured the same way: a seated reading "
+            + "with the seated row, a night with the sleep row; never one state with another."
+    }()
+
     /// Same evaluations Watchdog scores against and the Monitor tab draws, so a quoted usual matches the screen.
     private func baselineStatus() -> String {
         guard let baseline else { return "The personal baseline is not available in this context." }
@@ -343,13 +359,15 @@ struct CoachToolExecutor {
         func fmt(_ v: Double) -> String { abs(v) >= 100 ? String(format: "%.0f", v) : String(format: "%.1f", v) }
         func signed(_ v: Double) -> String { (v >= 0 ? "+" : "") + fmt(v) }
 
-        var lines = ["PERSONAL BASELINE (on-device day-and-night usuals; separate from Charge; not a diagnosis):"]
+        var lines = ["PERSONAL BASELINE (on-device day-and-night usuals; not a diagnosis):", Self.baselineMethod]
         for ev in baseline.watchdogPromptEvaluations(days: repo.days) {
             let unit = ev.series.planRow.unit
             var parts: [String] = []
             if ev.show7, let c = ev.copy7 {
-                var part = "7-day usual \(fmt(c.centerDisplay)) \(unit) (range \(fmt(c.bandLoDisplay))–\(fmt(c.bandHiDisplay)), trust \(ev.usualTrustPct7)%)"
-                if let d = c.deltaDisplay { part += ", last night \(signed(d)) vs usual" }
+                var part = "7-day usual \(fmt(c.centerDisplay)) \(unit) (range \(fmt(c.bandLoDisplay))–\(fmt(c.bandHiDisplay)), \(ev.n7) qualifying days, trust \(ev.usualTrustPct7)%)"
+                if let d = c.deltaDisplay {
+                    part += ev.series.planRow.context == .sleep ? ", last night \(signed(d)) vs usual" : ", latest day (\(ev.asOf)) \(signed(d)) vs usual"
+                }
                 parts.append(part)
             }
             if ev.showLong, let c = ev.copyLong {
@@ -412,16 +430,21 @@ struct CoachToolExecutor {
         } else {
             bounds = IntradayRange.bounds(for: metric, dayOffset: 0, now: now)
         }
+        // HRV readings are labelled with the wearer's state, which needs the still run and movement before each one.
+        let activity = metric == .hrv
+            ? await repo.storedActivityContextWithStatus(from: bounds.from - CoachIntraday.stateLookbackS, to: bounds.to,
+                                                         reading: .historical).intervals
+            : nil
         do {
             let window = try await repository.intradaySeries(
                 from: bounds.from, to: bounds.to, deviceId: IntradaySeriesStore.shared.readDeviceId,
                 metrics: [metric], cacheKey: bounds.key)
-            return CoachIntraday.describe(window: window, metric: metric, now: now)
+            return CoachIntraday.describe(window: window, metric: metric, now: now, activity: activity)
         } catch {
             if let cached = await repository.cachedIntradaySeries(cacheKey: bounds.key,
                                                                   deviceId: IntradaySeriesStore.shared.readDeviceId) {
                 return "(Could not reach the server; these are the last saved readings.)\n"
-                    + CoachIntraday.describe(window: cached, metric: metric, now: now)
+                    + CoachIntraday.describe(window: cached, metric: metric, now: now, activity: activity)
             }
             return "Could not load intraday readings right now. Tell the user the live curve is unavailable, "
                 + "and do not say the device records only one value per day."

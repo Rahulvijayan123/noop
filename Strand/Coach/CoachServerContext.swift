@@ -6,11 +6,12 @@ import StrandAnalytics
 /// the same view models as those screens, so the coach can only quote what the user can find there.
 enum CoachServerContext {
 
-    static let metricNames = "hrv|rhr|heart_rate|respiration|skin_temp|spo2"
+    static let metricNames = "hrv|hrv_sdnn|rhr|heart_rate|respiration|skin_temp|spo2"
 
     static func metric(named raw: String) -> PhysiologyContext.MetricKind? {
         switch raw.lowercased().trimmingCharacters(in: .whitespacesAndNewlines).replacingOccurrences(of: " ", with: "_") {
         case "hrv", "hrv_rmssd", "rmssd": return .hrvRmssd
+        case "hrv_sdnn", "sdnn": return .hrvSdnn
         case "rhr", "resting_hr", "resting_heart_rate": return .restingHeartRate
         case "hr", "heart_rate": return .heartRate
         case "respiration", "resp_rate", "respiratory_rate", "breathing": return .respiratoryRate

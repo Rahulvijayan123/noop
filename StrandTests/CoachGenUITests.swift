@@ -174,6 +174,14 @@ final class CoachGenUITests: XCTestCase {
         XCTAssertFalse(rich.contains("Query("))
     }
 
+    func testACardWithControlsIsTheAnswersOnlyVisual() {
+        let tool = "root = Card([t, s])\n$min = 20\ns = Slider(\"min\", 10, 60, 5, 20, \"min\", $min)\nt = TextContent(\"Walk \" + $min + \" minutes\")"
+        XCTAssertTrue(CoachGenUI.isInteractive(tool))
+        let placed = "root = Card([CardHeader(\"Your week\"), Visual(), TextContent(\"Steady.\")])"
+        XCTAssertFalse(CoachGenUI.isInteractive(placed), "a static card still gets the chart")
+        XCTAssertFalse(CoachGenUI.isInteractive("not openui"))
+    }
+
     func testEchoingThePromptBlockIsCaughtAsALeak() {
         let leak = "Sure! INTERACTIVE CARDS: Besides prose you can attach one card."
         XCTAssertFalse(CoachSafety.screenOutput(leak, userAge: 30).clean)

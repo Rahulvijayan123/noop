@@ -11,7 +11,7 @@ enum CoachPrompts {
     static let suggestions: [String] = [
         String(localized: "How did I sleep last night?"),
         String(localized: "Is my HRV normal for me?"),
-        String(localized: "What's affecting my recovery?"),
+        String(localized: "How was my HRV while sitting still today?"),
         String(localized: "How is my resting heart rate trending?"),
     ]
 }

@@ -11,9 +11,9 @@ enum CoachFollowUps {
         (["stress", "breath", "respiratory"],
          ["What can I do to lower my stress?", "Is this normal for me?"]),
         (["protein", "nutrition", "calorie", "hydrat", "water", "caffeine", "alcohol"],
-         ["Turn that into a simple daily habit", "How does this affect my recovery?"]),
+         ["Turn that into a simple daily habit", "How does this affect my sleep?"]),
         (["effort", "strain", "workout", "training", "steps"],
-         ["How should I balance effort and rest this week?", "How does that compare with my recent days?"]),
+         ["How should I balance activity and rest this week?", "How does that compare with my recent days?"]),
     ]
 
     private static let general = ["What should I focus on this week?", "How does that compare with my recent data?"]

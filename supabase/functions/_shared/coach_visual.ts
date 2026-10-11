@@ -636,8 +636,12 @@ const MIN_TYPE_PROBABILITY = 0.12;
 const EXACT_TYPE_PROBABILITY = 0.5;
 const MAX_DESIGN_STEPS = 2;
 const MAX_REDESIGNS = 2;
+// A custom tool costs a long design call, so it gets one correction and leaves time for the chart fallback.
+const MAX_CUSTOM_REDESIGNS = 1;
 const AUDIT_ATTEMPTS = 2;
 const MAX_VISUAL_WALL_MS = 60_000;
+// The app waits 150 s; a fallback that starts later than this could not finish inside that.
+const FALLBACK_START_MS = 75_000;
 const MAX_DISTILLED_EVIDENCE = 4_000;
 const JEV_TIMEOUT_MS = 5000;
 const DESIGN_TIMEOUT_MS = 30_000;
@@ -676,8 +680,10 @@ export function rankChartTypes(answer: any): string[] {
 
 export function planTypes(kind: string, chartAnswer: any): string[] {
   const family = KIND_TYPES[kind] ?? [];
-  if (family.every((type) => type in CARD_TYPES || type in CUSTOM_TYPES)) return family.slice(0, 1);
   const ranked = rankChartTypes(chartAnswer);
+  // The ranked charts ride behind a custom tool as its fallback, never beside it.
+  if (family.includes('custom')) return ['custom', ...ranked.slice(0, 2)];
+  if (family.every((type) => type in CARD_TYPES)) return family.slice(0, 1);
   const confident = (chartAnswer?.probabilities?.[ranked[0]] ?? 0) >= EXACT_TYPE_PROBABILITY;
   const inFamily = ranked.filter((type) => family.includes(type));
   const plan = confident ? ranked : inFamily;
@@ -770,6 +776,7 @@ const DESIGNER_INSTRUCTIONS = `You turn a finished wellbeing-assistant answer in
 Rules:
 - Use only figures, labels, and dates stated in the answer or in the DATA block (the user's own logged numbers). Never invent, estimate, smooth, or extrapolate. Never add derived values (differences, averages, totals) unless the answer or DATA states them.
 - One axis is one measure in one unit.
+- HRV: keep the statistic and the state the answer or DATA gives, in the title or yLabel (e.g. "Overnight HRV, RMSSD (ms)", "Seated HRV (RMSSD) vs your seated usual"). Never put readings from different states (asleep and awake, settled and just after moving) or RMSSD and SDNN in one series.
 - Axes are mandatory and checked: every chart except pie needs yLabel = the measure plus its unit in the form "Measure (unit)" (e.g. "HRV (ms)", "Body weight (lb)", "Weekly volume (sets)"), and xLabel = what the other axis shows ("Date", "Week", "Session", "Lift", "Muscle group"). Heatmaps need yLabel naming what the colour measures. Scatter and bubble charts need both labels with units.
 - Order and legibility: time always runs oldest to newest, left to right. Category labels must be short enough to sit under their bars (about 8 characters for 6 columns); use horizontal:true for more than 8 categories or longer names. Never let points or labels crowd each other: label at most 8 scatter or bubble points and keep them clearly apart, dropping the least important rather than overlapping. Never put unrelated magnitudes (e.g. pounds and reps) on one axis.
 - Draw the type you are given; only if the data cannot fill it, use the next listed type.
@@ -1109,6 +1116,7 @@ Check every plotted value, label, date, unit, and claim in VISUAL against SOURCE
 - Labels and units must match what SOURCE says they measure; no swapped series, wrong units, or reversed direction.
 - Nothing in the title, subtitle, or text may claim more than SOURCE supports (no invented trends, causes, or comparisons).
 - Time order must match SOURCE.
+- HRV must not mix statistics (RMSSD with SDNN) or measurement states (asleep with awake, settled with just after moving) in one series or comparison.
 
 Reply with JSON only: {"ok": true|false, "issues": ["short description of each unsupported item"]}. Set ok=false if any value or claim is unsupported.`;
 
@@ -1118,7 +1126,7 @@ Check:
 - Any figure the tool presents as the user's own (their measurements, history, workouts, sleep) is stated in SOURCE.
 - Formulas compute what their labels say, with correct units and direction.
 - Text makes no health or medical claim beyond what SOURCE says, and no diagnosis.
-Formula constants, unit conversions, slider ranges and clearly labelled example defaults are allowed.
+Formula constants, unit conversions, slider ranges and clearly labelled example defaults are allowed, and so are short labels that restate the answer or say what a control does.
 
 Reply with JSON only: {"ok": true|false, "issues": ["short description of each problem"]}. Set ok=false if any of the above fails.`;
 
@@ -1160,25 +1168,58 @@ export async function reviewVisual(deps: VisualDeps, a: { question: string; answ
 export interface VisualResult {
   viz: any | null;
   audit: string;
-  stats: { design_calls: number; redesigns: number; audit_status: string; distilled_evidence_chars: number };
+  stats: { design_calls: number; redesigns: number; audit_status: string; distilled_evidence_chars: number; fallback?: string };
+}
+
+/** The visual kind a chart or card type belongs to, for the designer's briefing. */
+function kindFor(type: string): string {
+  return Object.entries(KIND_TYPES).find(([, types]) => types.includes(type))?.[0] ?? 'kpi_facts';
+}
+
+/**
+ * One visual, then at most one other: an interactive tool that fails falls back to the chart the router ranked
+ * (or fact tiles), and a chart that fails falls back to fact tiles, so the "generating" placeholder the app shows
+ * rarely ends in nothing. Both stay fail-closed: every candidate passes the fact-check or nothing is shown. A fallback
+ * starts only while there is time for it, and only for an answer that states figures.
+ */
+export async function produceVisual(deps: VisualDeps, a: { question: string; answer: string; evidence: string; route: VisualRoute }): Promise<VisualResult> {
+  const startedAt = Date.now();
+  const distilled = distillEvidence(a.evidence);
+  const [primary, ...rest] = a.route.types;
+  const custom = primary === 'custom';
+  const first = await attemptVisual(deps, a, distilled, startedAt,
+    custom ? { kind: a.route.kind, types: ['custom'] } : a.route, custom ? MAX_CUSTOM_REDESIGNS : MAX_REDESIGNS);
+  if (first.viz || first.audit === 'unavailable') return first;
+  const fallbackTypes = custom ? (rest.length ? rest : ['facts']) : primary === 'facts' ? [] : ['facts'];
+  if (!fallbackTypes.length || !/\d/.test(a.answer) || Date.now() - startedAt > FALLBACK_START_MS) return first;
+  const second = await attemptVisual(deps, a, distilled, startedAt,
+    { kind: kindFor(fallbackTypes[0]), types: fallbackTypes }, 1);
+  return {
+    ...second,
+    stats: {
+      ...second.stats,
+      design_calls: first.stats.design_calls + second.stats.design_calls,
+      redesigns: first.stats.redesigns + second.stats.redesigns,
+      fallback: `${primary}->${fallbackTypes[0]}`,
+    },
+  };
 }
 
 /**
  * Design, then the fact-check, then corrective redesigns within the wall-clock budget. A fact-check that could not
  * run ends with `unavailable` rather than `rejected`, so the app may ask again.
  */
-export async function produceVisual(deps: VisualDeps, a: { question: string; answer: string; evidence: string; route: VisualRoute }): Promise<VisualResult> {
-  const startedAt = Date.now();
-  const distilled = distillEvidence(a.evidence);
+async function attemptVisual(deps: VisualDeps, a: { question: string; answer: string }, distilled: string, startedAt: number,
+  route: VisualRoute, maxRedesigns: number): Promise<VisualResult> {
   const budgetLeft = () => Date.now() - startedAt < MAX_VISUAL_WALL_MS;
-  const base = { question: a.question, answer: a.answer, evidence: distilled, kind: a.route.kind, types: a.route.types };
+  const base = { question: a.question, answer: a.answer, evidence: distilled, kind: route.kind, types: route.types };
   let designCalls = 1;
   let viz = await designVisual(deps, base);
   const stats = (status: string, redesigns: number) => ({ design_calls: designCalls, redesigns, audit_status: status, distilled_evidence_chars: distilled.length });
   if (!viz) return { viz: null, audit: 'no_design', stats: stats('no_design', 0) };
   let review = await reviewVisual(deps, { question: a.question, answer: a.answer, evidence: distilled, viz });
   let redesigns = 0;
-  while (review.status === 'rejected' && redesigns < MAX_REDESIGNS && budgetLeft()) {
+  while (review.status === 'rejected' && redesigns < maxRedesigns && budgetLeft()) {
     const rejection = review.issues.join('; ') || 'unsupported values or unclear axes';
     viz = await designVisual(deps, { ...base, previous: viz, rejection });
     designCalls += 1;

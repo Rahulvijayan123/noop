@@ -24,7 +24,7 @@ enum CoachChartMetric: String, CaseIterable, Sendable {
         case .charge: return "Charge"
         case .effort: return "Effort"
         case .sleepHours: return "Sleep duration"
-        case .hrv: return "HRV"
+        case .hrv: return "Overnight HRV (RMSSD, asleep)"
         case .rhr: return "Resting heart rate"
         case .spo2: return "Blood oxygen"
         case .respiration: return "Respiration"

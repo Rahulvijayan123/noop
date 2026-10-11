@@ -209,7 +209,7 @@ enum CoachGenUI {
 
     private static let rulesForSana = [
         "Never repeat the prose in the card: the card holds what is easier to use than to read (steps, options, inputs, targets to track).",
-        "Never chart or tabulate the user's logged data (sleep, charge, effort, HRV, heart rate, workouts): the app draws a fact-checked chart for that beneath your answer. To place that chart inside the card, add Visual(); otherwise leave charts out entirely.",
+        "An answer gets ONE visual: either an interactive card (inputs, buttons, a form or a timer) or the fact-checked chart the app draws for the user's logged data (sleep, HRV, heart rate, activity, workouts). Never chart or tabulate logged data yourself. When the answer is about logged figures, write no controls: the app charts them, and a card without controls may place that chart with Visual(). A card with controls gets no chart, so never put Visual() in it.",
         "Only use numbers from tool results or the conversation. Never invent the user's data.",
         "No follow-up question buttons: the app already suggests follow-ups under every answer. Buttons act on the card (\"Make it 20 minutes\", \"Swap the run\").",
         "A Form's submit button sends the user's answers to you as their next message; reply to that with the tailored result.",
@@ -368,6 +368,24 @@ enum CoachGenUI {
         default:
             break
         }
+    }
+
+    /// Components the user acts on. A card with any of them is the answer's interactive visual, so the chart
+    /// pipeline does not run beside it.
+    static let interactiveComponents: Set<String> = Set(inputComponents + ["Form", "Button", "Buttons", "Timer"])
+
+    static func isInteractive(_ source: String) -> Bool {
+        func walk(_ value: Value) -> Bool {
+            switch value {
+            case .element(let el):
+                if interactiveComponents.contains(el.typeName) { return true }
+                if el.typeName == "ListItem", case .action = el["action"] { return true }
+                return el.props.values.contains(where: walk)
+            case .array(let items): return items.contains(where: walk)
+            default: return false
+            }
+        }
+        return parse(source).root.map { walk(.element($0)) } ?? false
     }
 
     /// The card's name for history and previews: its header, else its first line.
